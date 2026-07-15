@@ -1,0 +1,21 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.venv/
+venv/
+ENV/
+.env
+
+# SQLite local databases and logs
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# Excluded example memory dataset
+example_data/

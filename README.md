@@ -1,131 +1,145 @@
-# SALTMDB
-An Sqlite backed memory system for AI agents
+# SALTMDB: Local-First MCP Memory Server
 
-SALTMDB is a perfect choice. It sounds exactly like a robust, low-level infrastructure tool built for developers, fitting right in alongside names like SQLite and MongoDB. It clearly communicates exactly what it does: Short And Long-Term Memory DataBase.
+**SALTMDB** (Short And Long-Term Memory DataBase) is a centralized, local-first memory framework designed for AI CLI tools and agents (such as Antigravity, Copilot, and Claude Code). It acts as a shared memory layer, allowing multiple concurrent agents to read, write, and consolidate contextual facts without heavy ML dependencies, vector databases, or high API overhead.
 
-Here is the final, updated implementation plan with the SALTMDB branding incorporated. You can copy this exactly, save it as `saltmdb_architecture.md`, and feed it straight to Antigravity CLI.
-
----
-
-# SALTMDB: Local-First MCP Memory Server Implementation Plan
-
-## 1. Project Overview & Constraints
-
-You are tasked with building **SALTMDB** (Short And Long-Term Memory DataBase), a robust, centralized memory framework for AI CLI tools.
-
-**Hard Constraints:**
-
-* **No Vector Embeddings / ML Models:** The target machine has low compute and zero budget for API costs. Do not use external vector databases (Pinecone, etc.) or local ML models.
-* **Standard Library Only:** The implementation must be in Python using only the standard library (specifically `sqlite3`) and the official MCP SDK. No massive frameworks like LangChain or LlamaIndex.
-* **Concurrency:** The system must safely support multiple AI agents (e.g., Antigravity CLI, Copilot) reading and writing simultaneously.
-* **Zero Secret Leakage:** Strict redaction middleware must prevent credentials from entering the permanent database.
-
-**Core Architectural Inspirations:**
-
-* *PROJECTMEM Architecture:* Append-only event-sourcing and deterministic pre-action gating.
-* *SQLite-backed MCP Memory Patterns:* SQLite WAL mode for concurrency, FTS5 for 1,100x faster keyword search.
-* *MemX / CortexaDB Principles:* Local-first deployment, strict metadata filtering, and structural retrieval over fuzzy semantic search.
+> [!TIP]
+> * **Installation:** To install and register the MCP server, see the **[Installation Guide](INSTALL.md)**.
+> * **Developer Guide:** To learn how to configure your AI agents to utilize this memory system, read the **[Agent Integration & Design Guide](AGENT_GUIDE.md)**.
 
 ---
 
-## 2. Database Design (SQLite)
+## 🏛️ System Architecture
 
-The database must be initialized with **Write-Ahead Logging (WAL)** enabled (`PRAGMA journal_mode=WAL;`).
+SALTMDB is built using standard Python libraries and SQLite, prioritizing concurrency safety, security, and low memory overhead.
 
-### Table 1: `events` (Short-Term / Append-Only Ledger)
+```mermaid
+graph TD
+    subgraph Active Agents
+        A[Antigravity CLI]
+        B[Copilot / Claude Code]
+    end
 
-An immutable log of all actions. No `UPDATE` or `DELETE` allowed.
+    subgraph MCP Server Layer
+        A -->|Stdio / MCP| Server[saltmdb_server.py]
+        B -->|Stdio / MCP| Server
+        Server -->|timeout=10.0 / WAL| MainDB[(sqlite3: saltmdb.db)]
+        Server -->|check_same_thread=False| EphemDB[(sqlite3: :memory:)]
+    end
 
-* `id`: TEXT (UUID) PRIMARY KEY
-* `timestamp`: DATETIME DEFAULT CURRENT_TIMESTAMP
-* `agent_id`: TEXT (Which agent created it)
-* `type`: TEXT (e.g., 'issue', 'attempt', 'fix', 'decision')
-* `content`: TEXT (What happened)
-* `error_code`: TEXT (Optional)
+    subgraph Background Process
+        Server -->|Asynchronous detached spawn| Lib[Librarian gc worker]
+        Lib -->|Atomic Leader Election Lock| Lock[_system_locks]
+        Lib -->|Consolidate & Archive| MainDB
+    end
+```
 
-### Table 2: `entities` (Long-Term Knowledge Base)
-
-Stores consolidated Markdown facts. Uses Soft-Deletes.
-
-* `id`: TEXT PRIMARY KEY
-* `created_at`: DATETIME
-* `updated_at`: DATETIME
-* `owner_id`: TEXT
-* `scope`: TEXT ('private' or 'shared')
-* `is_core`: BOOLEAN (If TRUE, bypassed search and injected into system prompt)
-* `weight`: INTEGER (Priority multiplier for search ranking, default 1)
-* `status`: TEXT ('raw', 'consolidated', 'archived')
-* `parent_ids`: TEXT (JSON array of original IDs this chunk was merged from)
-* `full_content`: TEXT (Markdown text)
-
-### Table 3: `entities_fts` (Virtual Table for Search)
-
-Must use SQLite FTS5 for fast full-text search.
-
-* Uses the `MATCH` operator.
-* *CRITICAL TRIGGER:* Create an SQLite trigger named `archive_memory_fts`. `AFTER UPDATE ON entities WHEN NEW.status = 'archived'`, it must automatically delete the corresponding row from `entities_fts` so agents don't search stale data.
-
-### Table 4: `tags` (Folksonomy)
-
-* `id`: TEXT PRIMARY KEY
-* `name`: TEXT UNIQUE (e.g., '#auth-error')
-* `canonical_id`: TEXT (Self-referential foreign key. If an alias, points to the master tag).
+### 1. Database Schema
+The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe concurrent readers. It includes the following tables:
+* **`events`**: An immutable, append-only ledger tracking agent operations (issues, attempts, decisions, fixes).
+* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, and status fields (`raw`, `consolidated`, `archived`).
+* **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects.
+* **`entity_tags`**: A mapping table linking knowledge entities to folksonomy tags.
+* **`entities_fts`**: A virtual table using **SQLite FTS5** to index entity titles and full contents for fast, weighted keyword searches.
+* **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent processes.
 
 ---
 
-## 3. The Security & Ephemeral State Layer
+## 🚀 Core Features
 
-* **The Filter Middleware:** Before executing any `INSERT` into `events` or `entities`, run a regex scrubber. Replace strings matching standard token formats (e.g., `ghp_...`, `sk-ant-...`) with `[REDACTED_SECRET]`.
-* **The Ephemeral Database:** On startup, the MCP server must spin up a secondary SQLite connection using the `:memory:` path. Expose a tool for the agent to save temporary variables (like short-lived OTPs or session tokens) here. This data is purposely destroyed when the server stops.
+### 1. Weighted Keyword FTS5 Search
+SALTMDB bypasses expensive vector embedding models in favor of standard keyword search. It leverages SQLite FTS5's built-in `bm25` auxiliary function configured with a **10:1 title-to-content weight ratio**:
+* Matches found in the entity's **Title** are prioritized 10x higher than matches in the **Body Content**.
+* The final rank score merges BM25 ranking and the entity's priority `weight` multiplier.
 
----
+### 2. Hybrid Title Extraction
+When storing new knowledge, agents can optionally specify a custom `title`. If omitted, the server automatically extracts the first markdown heading (`# Heading`) as the title, falling back to a snippet of the first line if no heading is present.
 
-## 4. MCP Server Implementation (`saltmdb_server.py`)
+### 3. Security & Redaction Middleware
+Before any database writes occur, the text is evaluated by a regex-based scrubbing pipeline:
+* **Core Redactions:** Automatically censors standard credentials (GitHub tokens, Anthropic API keys, OpenAI API keys, AWS credentials, and Discord tokens).
+* **Custom Developer Rules:** On startup, the server reads `.saltmdb_redact` from the current working directory. You can add one custom regex pattern per line (e.g. internal staging domains, proprietary IDs) to strip out company-specific secrets.
 
-Implement an MCP server exposing the following tools to the LLM:
+### 4. Ephemeral State Layer
+For temporary data (like short-lived session tokens, OTPs, or process variables), the server maintains an isolated `:memory:` SQLite database. These variables are never written to disk and disappear completely when the server stops.
 
-1. `log_event(agent_id, type, content, error_code=None)`: Appends to the `events` table.
-2. `get_canonical_tags(domain)`: Queries the `tags` table to suggest existing tags to prevent tag fragmentation.
-3. `store_knowledge(content, tags, scope, weight=1, is_core=False)`: Redacts secrets, stores the Markdown chunk in `entities` (status = 'raw'), and updates FTS5.
-4. `search_memory(query_keywords, tags_filter)`:
-* Executes an FTS5 `MATCH` query.
-* Ranks results using a combined score of BM25 + the `weight` column.
-* Limits output to top 5 results to save context tokens.
-* Returns a JSON object of `id`, `title/snippet`.
-
-
-5. `fetch_memory_chunk(entity_id)`: Fetches the exact full markdown of a specific ID identified via search.
-6. `store_ephemeral_memory(key, value)`: Stores a short-lived string in the `:memory:` database.
+### 5. Atomic Leader Election Mutex
+To prevent multiple parent processes from launching redundant garbage collection tasks simultaneously, the server uses an **Atomic SQLite lock** in the `_system_locks` table.
+* The lock uses a **10-minute expiry safety net**. If a terminal session crashes mid-run, the lock automatically expires, preventing permanent deadlocks.
 
 ---
 
-## 5. The Librarian Process (Garbage Collection)
+## 🧹 The Librarian Process (Garbage Collection)
 
-Include a separate script or CLI flag (e.g., `python saltmdb_server.py --librarian`) designed to run as a background CRON job.
+Whenever the database is modified, the server asynchronously spawns a detached background instance of the server in Librarian mode (`python saltmdb_server.py --librarian`):
+* **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
+* **Unix Detachment:** Spawns with `start_new_session=True` so it survives parent process termination.
 
-* **Tag Merging:** Queries for recently created tags and merges semantic duplicates into canonical tags via LLM prompt.
-* **Consolidation:** Selects rows where `status = 'raw'`, asks the LLM to resolve conflicts and merge them into a single clean Markdown chunk.
-* **Lineage Updates:** Inserts the newly consolidated chunk, updates original rows to `status = 'archived'` (which triggers FTS5 cleanup), and tracks the merged IDs in `parent_ids`.
-
----
-
-## 6. Execution Tasks for the AI Agent
-
-**Agent Instructions: Read this entire document and execute the following steps in order:**
-
-1. **Step 1: Setup:** Create the project directory and initialize `saltmdb_server.py`. Import `sqlite3` and set up the MCP Python standard SDK.
-2. **Step 2: Database Initialization:** Write a `init_db(db_path)` function that configures `PRAGMA journal_mode=WAL;` and creates the standard tables (`events`, `entities`, `tags`) and the virtual FTS5 table (`entities_fts`).
-3. **Step 3: Triggers:** Write the specific SQL execution commands to attach the `archive_memory_fts` trigger.
-4. **Step 4: Security:** Implement a `redact_secrets(text)` helper function using Python's `re` module with common credential patterns.
-5. **Step 5: MCP Tools:** Decorate and implement the core MCP functions defined in Section 4 using standard SQL executions. Ensure `redact_secrets()` wraps all inserts.
-6. **Step 6: Ephemeral DB:** Implement the `:memory:` database connection and the `store_ephemeral_memory` logic.
-7. **Step 7 (Optional/Phase 2):** Draft the structural skeleton for the `--librarian` background script.
+Once the background Librarian acquires the atomic lock, it runs the following tasks:
+1. **Tag Merging:** Merges case-insensitive tag aliases (e.g. `#Auth-Error` and `#auth_error`) into a canonical tag to prevent folksonomy fragmentation.
+2. **Access Decay (LRU):** Tracks `last_accessed_at` timestamps. Non-core memories unaccessed for 90 days have their ranking `weight` decremented. If weight drops to 0, they are automatically soft-deleted (`status = 'archived'`).
+3. **Clutter Tag Consolidation:** Identifies tags accumulating $\ge 5$ raw entries and consolidates them into a single markdown summary.
+4. **General Consolidation:** Combines raw fragments into unified consolidated documents. If LLM keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) are present, it uses cheap API calls to summarize and resolve contradictions. If no keys exist, it defaults to a clean structural markdown concatenation.
 
 ---
 
-*Sources & Architectural References embedded in this design:*
+## 🛠️ API & MCP Tools Reference
 
-* *PROJECTMEM (arXiv:2602.20478)*: Event-Sourced Memory and Judgment Layer.
-* *MemX (arXiv:2410.10813)*: Local-First Long-Term Memory System (BM25, FTS5 latency reduction, structural keyword matching).
-* *SQLite as MCP Context Saver (DEV Community)*: Guarding LLM context size via localized SQL execution.
-* *SQLite-backed MCP Memory Server (GitHub)*: WAL concurrent safety and session tracking patterns.
+The server exposes 8 tools over standard I/O:
+
+| Tool Name | Parameters | Description |
+| :--- | :--- | :--- |
+| `log_event` | `agent_id`, `type`, `content`, `error_code` | Appends a scrubbed entry to the immutable short-term ledger. |
+| `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter to prevent duplicate tag names. |
+| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title` | Scrubs secrets and stores long-term facts in raw markdown. |
+| `search_memory` | `query_keywords`, `tags_filter` | Searches matching knowledge using FTS5 (10:1 title weights) and tag filters. |
+| `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
+| `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
+| `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
+
+---
+
+## ⚙️ Configuration & Installation
+
+### 1. Configuration Path
+By default, the server initializes the database under `~/.saltmdb/saltmdb.db`. You can override this behavior by setting the `SALTMDB_DB_PATH` environment variable:
+```bash
+$env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
+```
+
+### 2. Registering with MCP Clients
+To connect SALTMDB to Claude Desktop or Claude Code, add the following to your configuration file:
+```json
+"mcpServers": {
+  "saltmdb": {
+    "command": "python",
+    "args": ["/path/to/SALTMDB/saltmdb_server.py"],
+    "env": {
+      "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY"
+    }
+  }
+}
+```
+
+### 3. Database Dashboard Viewer
+SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, and system lock states:
+1. Run the viewer script locally:
+   ```bash
+   python saltmdb_viewer.py
+   ```
+2. Open your web browser and navigate to:
+   [http://localhost:8080](http://localhost:8080)
+
+### 4. Running Unit Tests
+You can run the test suite to verify database schemas, triggers, and lock rules:
+   ```bash
+$env:PYTHONPATH="C:\path\to\SALTMDB"
+python scratch/test_db.py
+```
+
+---
+
+## 📄 License & Community
+
+* **License:** Distributed under the **[GNU Affero General Public License v3 (AGPLv3)](LICENSE)**.
+* **Contributing:** Read the **[Contributing Guidelines](CONTRIBUTING.md)** for details on testing and branch setups.
+* **Conduct:** We adhere to the **[Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md)**.
