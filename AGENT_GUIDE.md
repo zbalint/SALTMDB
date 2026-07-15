@@ -121,3 +121,12 @@ To cooperate with the background Librarian process, agents must assign correct w
 | **5** | Core rules, identity guidelines, and persona behaviors (`is_core = 1`) | **Immune** (never decayed or archived) |
 | **3** | Critical safeguards, architecture constraints, and regression prevention rules | **270 days** of total inactivity before archiving |
 | **1** | Default facts, initiative progress, and project updates | **90 days** of total inactivity before archiving |
+
+### Promoting Memories to Core
+If a previously stored raw or consolidated project memory (`is_core = 0`) matures into a permanent rule or baseline constraint, it should be promoted to core status:
+1. **Programmatic Update:** The agent calls `store_knowledge` with the same identifier or title, setting `is_core = 1` and `weight = 5`.
+2. **Manual Database Override:** Run a direct SQL update:
+   ```sql
+   UPDATE entities SET is_core = 1, weight = 5, updated_at = CURRENT_TIMESTAMP WHERE id = 'ENTITY_UUID';
+   ```
+This updates the status, protects it from LRU decay, and inserts it into the bootstrap loading context.
