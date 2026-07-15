@@ -189,27 +189,26 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Content 4", row[4])
 
     def test_general_consolidation(self):
-        # Insert two raw entities with tags
+        # Insert 5 raw entities with tags (matching new threshold)
         now = datetime.now(UTC).isoformat()
         with self.conn:
-            self.conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content)
-                VALUES ('e1', ?, ?, ?, 'agent1', 'shared', 'raw', 'Fact 1', '# Fact 1\nFact number one')
-            """, (now, now, now))
-            self.conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content)
-                VALUES ('e2', ?, ?, ?, 'agent1', 'shared', 'raw', 'Fact 2', '# Fact 2\nFact number two')
-            """, (now, now, now))
+            words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+            for i in range(1, 6):
+                word = words[i]
+                self.conn.execute(f"""
+                    INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content)
+                    VALUES ('e{i}', ?, ?, ?, 'agent1', 'shared', 'raw', 'Fact {i}', '# Fact {i}\nFact number {word}')
+                """, (now, now, now))
             
             self.conn.execute("INSERT INTO tags (id, name) VALUES ('t1', '#test')")
-            self.conn.execute("INSERT INTO entity_tags (entity_id, tag_id) VALUES ('e1', 't1')")
-            self.conn.execute("INSERT INTO entity_tags (entity_id, tag_id) VALUES ('e2', 't1')")
+            for i in range(1, 6):
+                self.conn.execute(f"INSERT INTO entity_tags (entity_id, tag_id) VALUES ('e{i}', 't1')")
 
         # Run consolidation (uses fallback since no LLM keys are set)
         consolidate_memories(self.conn)
 
         # Verify parent status is 'archived'
-        cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN ('e1', 'e2')")
+        cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN ('e1', 'e2', 'e3', 'e4', 'e5')")
         for _, status in cursor.fetchall():
             self.assertEqual(status, 'archived')
 

@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.3"
+__version__ = "0.1.0-alpha.4"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -733,11 +733,11 @@ def decay_lru_memories(conn):
         # Decrement weight for stale unaccessed items
         conn.execute("""
             UPDATE entities 
-            SET weight = weight - 1, updated_at = ? 
+            SET weight = weight - 1, last_accessed_at = ?, updated_at = ? 
             WHERE is_core = 0 
               AND status != 'archived'
               AND datetime(last_accessed_at) < datetime('now', '-90 days')
-        """, (now,))
+        """, (now, now))
         
         # Archive any whose weight decays to 0 or below
         cursor = conn.execute("""
@@ -850,7 +850,7 @@ def consolidate_memories(conn):
         groups.setdefault(key, []).append((eid, content, title))
         
     for (owner_id, scope), entities in groups.items():
-        if len(entities) < 2:
+        if len(entities) < 5:
             continue
             
         parent_ids = [e[0] for e in entities]
