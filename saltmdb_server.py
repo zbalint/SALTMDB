@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.4"
+__version__ = "0.1.0-alpha.5"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -598,79 +598,7 @@ def start_db_viewer() -> str:
 # Librarian / Garbage Collection Process
 # =====================================================================
 
-def call_llm(system_prompt: str, user_prompt: str) -> str:
-    """Utilizes direct HTTP requests to call available API keys in environment."""
-    import urllib.request
-    import urllib.error
-    
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    
-    if gemini_key:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": f"System Instruction: {system_prompt}"},
-                    {"text": user_prompt}
-                ]
-            }]
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req) as res:
-                response_data = json.loads(res.read().decode("utf-8"))
-                return response_data["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception as e:
-            print(f"Gemini API call failed: {e}")
-            
-    elif openai_key:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {openai_key}"
-        }
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req) as res:
-                response_data = json.loads(res.read().decode("utf-8"))
-                return response_data["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"OpenAI API call failed: {e}")
-            
-    elif anthropic_key:
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": anthropic_key,
-            "anthropic-version": "2023-06-01"
-        }
-        payload = {
-            "model": "claude-3-5-haiku-latest",
-            "system": system_prompt,
-            "messages": [
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 4096
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req) as res:
-                response_data = json.loads(res.read().decode("utf-8"))
-                return response_data["content"][0]["text"]
-        except Exception as e:
-            print(f"Anthropic API call failed: {e}")
-            
-    return None
+# Semantic consolidation LLM calls are offloaded directly to the client agent
 
 def acquire_librarian_lock(conn) -> bool:
     """Attempts to acquire the atomic leader lock for the librarian process.
@@ -755,7 +683,7 @@ def decay_lru_memories(conn):
             print(f"Archived {len(to_archive)} stale memories due to access decay.")
 
 def consolidate_cluttered_tags(conn):
-    """Identifies tags with 5 or more raw entries and consolidates them."""
+    """Scans for tags with 5 or more raw entries and logs a consolidation request event for the agent."""
     print("Checking for high tag density clutter...")
     cursor = conn.execute("""
         SELECT et.tag_id, t.name, COUNT(*) 
@@ -763,76 +691,38 @@ def consolidate_cluttered_tags(conn):
         JOIN entities e ON et.entity_id = e.id
         JOIN tags t ON et.tag_id = t.id
         WHERE e.status = 'raw'
-        GROUP BY et.tag_id
+        GROUP BY et.tag_id, t.name
         HAVING COUNT(*) >= 5
     """)
     cluttered = cursor.fetchall()
-    if not cluttered:
-        print("No cluttered tag clusters found.")
-        return
-        
+    
     for tag_id, tag_name, count in cluttered:
-        print(f"Tag '{tag_name}' has {count} raw memories. Initiating consolidation...")
         cursor = conn.execute("""
-            SELECT e.id, e.full_content, e.owner_id, e.scope
-            FROM entities e
+            SELECT e.id FROM entities e
             JOIN entity_tags et ON e.id = et.entity_id
             WHERE et.tag_id = ? AND e.status = 'raw'
         """, (tag_id,))
-        raw_entities = cursor.fetchall()
-        if len(raw_entities) < 2:
-            continue
-            
-        parent_ids = [e[0] for e in raw_entities]
-        contents = [e[1] for e in raw_entities]
-        owner_id = raw_entities[0][2]
-        scope = raw_entities[0][3]
+        raw_ids = [r[0] for r in cursor.fetchall()]
         
-        system_prompt = (
-            "You are a memory consolidation assistant. Your task is to merge multiple short-term raw markdown facts "
-            "into a single, cohesive, consolidated markdown document. Remove duplicates and resolve contradictions, "
-            "preferring newer or more detailed information. Keep the structure clean and maintain all crucial facts."
-        )
-        user_prompt = f"Here are the raw memory chunks under tag {tag_name} to consolidate:\n\n"
-        for idx, content in enumerate(contents, 1):
-            user_prompt += f"--- Chunk {idx} ---\n{content}\n\n"
-            
-        consolidated_content = call_llm(system_prompt, user_prompt)
-        if not consolidated_content:
-            print("Using fallback concatenation for consolidation.")
-            consolidated_content = f"# Consolidated Memory for {tag_name}\n\n" + "\n\n---\n\n".join(contents)
-            
-        new_id = str(uuid.uuid4())
+        event_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
-        title = f"Consolidated Memory for {tag_name}"
-        
+        content = json.dumps({
+            "target": "tag",
+            "tag_name": tag_name,
+            "entity_ids": raw_ids
+        })
         with conn:
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 1, 'consolidated', ?, ?, ?)
-            """, (new_id, now, now, now, owner_id, scope, json.dumps(parent_ids), title, consolidated_content))
-            
-            # Map tags from parents to the new entity
-            placeholders = ",".join("?" for _ in parent_ids)
-            tag_cursor = conn.execute(f"""
-                SELECT DISTINCT tag_id FROM entity_tags WHERE entity_id IN ({placeholders})
-            """, parent_ids)
-            parent_tags = [row[0] for row in tag_cursor.fetchall()]
-            for p_tag_id in parent_tags:
-                conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (new_id, p_tag_id))
-                
-            # Archive original entities
-            conn.execute(f"""
-                UPDATE entities SET status = 'archived', updated_at = ? WHERE id IN ({placeholders})
-            """, [now] + parent_ids)
-            
-        print(f"Successfully consolidated cluttered tag '{tag_name}' into new entity {new_id}")
+                INSERT INTO events (id, timestamp, agent_id, type, content)
+                VALUES (?, ?, 'librarian', 'consolidation_request', ?)
+            """, (event_id, now, content))
+        print(f"Logged consolidation request for tag '{tag_name}' (Entity IDs: {raw_ids})")
 
 def consolidate_memories(conn):
-    """General consolidator that consolidates short-term 'raw' facts sharing matching properties."""
+    """General consolidator that groups raw memories by owner/scope and logs general consolidation request events."""
     print("Running General Memory Consolidation...")
     cursor = conn.execute("""
-        SELECT e.id, e.full_content, e.owner_id, e.scope, e.title
+        SELECT e.id, e.owner_id, e.scope
         FROM entities e
         WHERE e.status = 'raw'
     """)
@@ -845,61 +735,96 @@ def consolidate_memories(conn):
     
     # Group raw memories by scope and owner_id
     groups = {}
-    for eid, content, owner_id, scope, title in raw_entities:
+    for eid, owner_id, scope in raw_entities:
         key = (owner_id, scope)
-        groups.setdefault(key, []).append((eid, content, title))
+        groups.setdefault(key, []).append(eid)
         
-    for (owner_id, scope), entities in groups.items():
-        if len(entities) < 5:
+    for (owner_id, scope), entity_ids in groups.items():
+        if len(entity_ids) < 5:
             continue
             
-        parent_ids = [e[0] for e in entities]
-        contents = [e[1] for e in entities]
-        titles = [e[2] for e in entities]
-        
-        system_prompt = (
-            "You are a memory consolidation assistant. Your task is to merge multiple short-term raw markdown facts "
-            "into a single, cohesive, consolidated markdown document. Remove duplicates and resolve contradictions, "
-            "preferring newer or more detailed information. Keep the structure clean and maintain all crucial facts."
-        )
-        user_prompt = "Here are the raw memory chunks to consolidate:\n\n"
-        for idx, content in enumerate(contents, 1):
-            user_prompt += f"--- Chunk {idx} ---\n{content}\n\n"
-            
-        consolidated_content = call_llm(system_prompt, user_prompt)
-        
-        if not consolidated_content:
-            print("Using fallback concatenation for consolidation.")
-            consolidated_content = "# Consolidated Memory\n\n" + "\n\n---\n\n".join(contents)
-            
-        new_id = str(uuid.uuid4())
+        event_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
-        title = f"Consolidated Memory ({', '.join(titles[:2])})"
-        if len(titles) > 2:
-            title += " and others"
-            
+        content = json.dumps({
+            "target": "general",
+            "owner_id": owner_id,
+            "scope": scope,
+            "entity_ids": entity_ids
+        })
         with conn:
             conn.execute("""
+                INSERT INTO events (id, timestamp, agent_id, type, content)
+                VALUES (?, ?, 'librarian', 'consolidation_request', ?)
+            """, (event_id, now, content))
+        print(f"Logged general consolidation request for {owner_id}/{scope} (Entity IDs: {entity_ids})")
+
+@mcp.tool()
+def commit_consolidation(
+    parent_ids: list[str],
+    title: str,
+    content: str,
+    tags: list[str],
+    scope: str = "shared",
+    weight: int = 1,
+    **kwargs
+) -> str:
+    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents.
+    
+    Args:
+        parent_ids: List of UUIDs of the raw source memories being consolidated.
+        title: Custom title for the consolidated summary.
+        content: Clean, consolidated Markdown representation of the synthesized knowledge.
+        tags: List of tags associated with this consolidated memory.
+        scope: Scope level ('private' or 'shared').
+        weight: Priority weight multiplier (default 1).
+    """
+    if scope not in ('private', 'shared'):
+        return "Error: scope must be either 'private' or 'shared'"
+        
+    db_connection = kwargs.get("db_connection")
+    if db_connection:
+        conn = db_connection
+    else:
+        db_path = get_db_path()
+        conn = init_db(db_path)
+    entity_id = str(uuid.uuid4())
+    redacted_content = redact_secrets(content)
+    now = datetime.now(UTC).isoformat()
+    
+    try:
+        with conn:
+            # 1. Insert the new consolidated entity
+            conn.execute("""
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 1, 'consolidated', ?, ?, ?)
-            """, (new_id, now, now, now, owner_id, scope, json.dumps(parent_ids), title, consolidated_content))
+                VALUES (?, ?, ?, ?, 'system', ?, 0, ?, 'consolidated', ?, ?, ?)
+            """, (entity_id, now, now, now, scope, weight, json.dumps(parent_ids), title, redacted_content))
             
-            # Map tags from parents to the new entity
-            placeholders = ",".join("?" for _ in parent_ids)
-            tag_cursor = conn.execute(f"""
-                SELECT DISTINCT tag_id FROM entity_tags WHERE entity_id IN ({placeholders})
-            """, parent_ids)
-            tag_ids = [row[0] for row in tag_cursor.fetchall()]
-            for tag_id in tag_ids:
-                conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (new_id, tag_id))
+            # 2. Link tags
+            for tag_name in tags:
+                tag_name = tag_name.strip()
+                if not tag_name:
+                    continue
+                cursor = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,))
+                row = cursor.fetchone()
+                if row:
+                    tag_id = row[1] if row[1] else row[0]
+                else:
+                    tag_id = str(uuid.uuid4())
+                    conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
+                conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
-            # Archive original entities
-            archive_placeholders = ",".join("?" for _ in parent_ids)
-            conn.execute(f"""
-                UPDATE entities SET status = 'archived', updated_at = ? WHERE id IN ({archive_placeholders})
-            """, [now] + parent_ids)
-            
-        print(f"Successfully consolidated {len(parent_ids)} memories into new memory {new_id}")
+            # 3. Archive parent entities
+            if parent_ids:
+                placeholders = ",".join("?" for _ in parent_ids)
+                conn.execute(f"""
+                    UPDATE entities 
+                    SET status = 'archived', updated_at = ? 
+                    WHERE id IN ({placeholders})
+                """, [now] + parent_ids)
+                
+        return f"Successfully committed consolidated memory with ID: {entity_id} and archived {len(parent_ids)} raw source nodes."
+    except Exception as e:
+        return f"Error committing consolidation: {e}"
 
 # =====================================================================
 # Main Execution

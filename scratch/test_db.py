@@ -15,7 +15,8 @@ from saltmdb_server import (
     extract_title_and_snippet,
     CUSTOM_REDACT_PATTERNS,
     acquire_librarian_lock,
-    release_librarian_lock
+    release_librarian_lock,
+    commit_consolidation
 )
 
 TEST_DB_PATH = "test_saltmdb.db"
@@ -173,12 +174,32 @@ class TestSALTMDB(unittest.TestCase):
         # Run tag cluster consolidation
         consolidate_cluttered_tags(self.conn)
         
+        # Verify a consolidation_request event was logged
+        cursor = self.conn.execute("SELECT content FROM events WHERE type = 'consolidation_request'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        data = json.loads(row[0])
+        self.assertEqual(data["target"], "tag")
+        self.assertEqual(data["tag_name"], "#cluttered")
+        self.assertEqual(len(data["entity_ids"]), 5)
+        
+        # Simulate agent reading raw entities and calling commit_consolidation
+        result = commit_consolidation(
+            parent_ids=data["entity_ids"],
+            title="Consolidated Memory for #cluttered",
+            content="# Consolidated Memory for #cluttered\n\nContent 0 and Content 4 merged",
+            tags=["#cluttered"],
+            scope="shared",
+            db_connection=self.conn
+        )
+        self.assertIn("Successfully committed", result)
+        
         # Verify the 5 raw entities are archived
         cursor = self.conn.execute("SELECT status FROM entities WHERE id LIKE 'e-clutter-%'")
         rows = cursor.fetchall()
         self.assertEqual(len(rows), 5)
-        for row in rows:
-            self.assertEqual(row[0], 'archived')
+        for r in rows:
+            self.assertEqual(r[0], 'archived')
             
         # Verify a new consolidated memory is created
         cursor = self.conn.execute("SELECT id, status, parent_ids, title, full_content FROM entities WHERE status = 'consolidated'")
@@ -206,6 +227,25 @@ class TestSALTMDB(unittest.TestCase):
 
         # Run consolidation (uses fallback since no LLM keys are set)
         consolidate_memories(self.conn)
+
+        # Verify a consolidation_request event was logged
+        cursor = self.conn.execute("SELECT content FROM events WHERE type = 'consolidation_request'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        data = json.loads(row[0])
+        self.assertEqual(data["target"], "general")
+        self.assertEqual(len(data["entity_ids"]), 5)
+
+        # Simulate agent committing the consolidation
+        result = commit_consolidation(
+            parent_ids=data["entity_ids"],
+            title="Consolidated Memory (general)",
+            content="# Consolidated Memory\n\nFact number one and Fact number two merged",
+            tags=["#test"],
+            scope="shared",
+            db_connection=self.conn
+        )
+        self.assertIn("Successfully committed", result)
 
         # Verify parent status is 'archived'
         cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN ('e1', 'e2', 'e3', 'e4', 'e5')")

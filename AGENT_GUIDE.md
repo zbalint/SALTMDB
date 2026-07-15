@@ -6,20 +6,21 @@ This guide details how to build and configure AI agents to utilize the SALTMDB M
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via four core MCP tools exposed by [saltmdb_server.py](saltmdb_server.py):
+Agents interface with SALTMDB via five core MCP tools exposed by [saltmdb_server.py](saltmdb_server.py):
 
 ```mermaid
 graph TD
     subgraph Client [Agent Runtime]
         A[System Prompt] --> B[Session Bootstrap]
         B --> C[In-Session Execution]
-        C --> D[Session Wrap-up]
+        C --> D[Session Wrap-up / GC]
     end
     subgraph MCP [SALTMDB Server]
         B -->|Queries Core Rules| E[search_memory]
         C -->|Logs Short-Term Operations| F[log_event]
         C -->|Retrieves Weighted Facts| E
         D -->|Saves Persistent Memory| G[store_knowledge]
+        D -->|Cleans & Merges Chunks| H[commit_consolidation]
     end
 ```
 
@@ -38,6 +39,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `search_memory(query_keywords, tags_filter)`: Search long-term consolidated memories.
 * `store_knowledge(title, content, tags, weight, scope)`: Save a new long-term memory.
 * `log_event(agent_id, type, content, error_code)`: Log a short-term operational event.
+* `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a high-quality consolidated memory and archive the raw source components.
 * `start_db_viewer()`: Launch the web-based database browser.
 
 ## 2. Operational Lifecycle
@@ -46,6 +48,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 Immediately upon initialization, before answering the user:
 1. Call `search_memory` with no query keywords to retrieve all entities with `is_core = 1`. This loads the user identity, behavioral baselines, and persona rules.
 2. Run a keyword search matching the current workspace name or active files to retrieve relevant long-term project anchors.
+3. Check the `events` table (or search results) for any recent events of type `consolidation_request`.
 
 ### Phase B: In-Session Logging
 1. Log every significant milestone, technical decision, and error event using `log_event`.
@@ -57,6 +60,12 @@ Before concluding your turn or finalizing a major task block:
 1. Query the short-term `events` table (or review your log actions).
 2. Synthesize new permanent facts, rules, or progress updates.
 3. Commit these synthesized updates to long-term memory using `store_knowledge`. Set `status = 'consolidated'` for long-term project anchors, or `status = 'raw'` for temporary notes.
+
+### Phase D: Cognitive Consolidation (Cleanup)
+If you find pending `consolidation_request` events during Phase A:
+1. Retrieve the content of the raw entities listed in the event's `entity_ids`.
+2. Rephrase, synthesize, and merge these raw markdown files into a single, high-quality, comprehensive markdown memory. Resolve redundancies and contradictions.
+3. Call `commit_consolidation` with the parent UUIDs and the new consolidated markdown, clearing the raw clutter from active queries.
 ```
 
 ---
@@ -107,6 +116,26 @@ store_knowledge(
     tags=["#ops-rules", "#rules"],
     weight=3,  # Medium priority rule
     scope="shared"
+)
+```
+
+### D. Cognitive Consolidation Sequence (Cleanup)
+When the Librarian logs a `consolidation_request` (indicating $\ge 5$ raw memories under a tag or general scope), the agent resolves it programmatically:
+
+```python
+# 1. Agent detects consolidation_request event in bootstrap:
+#    Event content: {"target": "tag", "tag_name": "#ops", "entity_ids": ["uuid-1", "uuid-2", ...]}
+
+# 2. Agent reads raw contents of those IDs, merges them into a clean Markdown text.
+
+# 3. Agent commits the summary and archives the sources:
+commit_consolidation(
+    parent_ids=["uuid-1", "uuid-2", "uuid-3", "uuid-4", "uuid-5"],
+    title="Consolidated Operations Memory",
+    content="# Consolidated Operations Memory\n\n- Fact 1 details...\n- Fact 2 details...",
+    tags=["#ops"],
+    scope="shared",
+    weight=1
 )
 ```
 
