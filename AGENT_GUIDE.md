@@ -124,9 +124,12 @@ To cooperate with the background Librarian process, agents must assign correct w
 
 ### Promoting Memories to Core
 If a previously stored raw or consolidated project memory (`is_core = 0`) matures into a permanent rule or baseline constraint, it should be promoted to core status:
-1. **Programmatic Update:** The agent calls `store_knowledge` with the same identifier or title, setting `is_core = 1` and `weight = 5`.
-2. **Manual Database Override:** Run a direct SQL update:
+1. **Programmatic Update (Agent-driven):** The agent calls the `store_knowledge` MCP tool with the target title, passing `is_core = true` and `weight = 5`.
+2. **Manual Developer Override:** The user runs a direct SQL update manually on the database file:
    ```sql
    UPDATE entities SET is_core = 1, weight = 5, updated_at = CURRENT_TIMESTAMP WHERE id = 'ENTITY_UUID';
    ```
-This updates the status, protects it from LRU decay, and inserts it into the bootstrap loading context.
+This updates the entity status, protecting it from LRU decay, and placing it in the bootstrap loading context.
+
+> [!IMPORTANT]
+> **SQL Access Security:** Agents do not have raw SQL execution permissions. All actions must be performed using the predefined parameterized MCP tools. Do not expose a SQL client tool to agents, as this creates a major database integrity and credentials leak vulnerability.
