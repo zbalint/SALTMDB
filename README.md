@@ -76,15 +76,15 @@ Whenever the database is modified, the server asynchronously spawns a detached b
 
 Once the background Librarian acquires the atomic lock, it runs the following tasks:
 1. **Tag Merging:** Merges case-insensitive tag aliases (e.g. `#Auth-Error` and `#auth_error`) into a canonical tag to prevent folksonomy fragmentation.
-2. **Access Decay (LRU):** Tracks `last_accessed_at` timestamps. Non-core memories unaccessed for 90 days have their ranking `weight` decremented. If weight drops to 0, they are automatically soft-deleted (`status = 'archived'`).
-3. **Clutter Tag Consolidation:** Identifies tags accumulating $\ge 5$ raw entries and consolidates them into a single markdown summary.
-4. **General Consolidation:** Combines raw fragments into unified consolidated documents. If LLM keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY`) are present, it uses cheap API calls to summarize and resolve contradictions. If no keys exist, it defaults to a clean structural markdown concatenation.
+2. **Access Decay (LRU):** Tracks `last_accessed_at` timestamps. Non-core memories unaccessed for 90 days have their ranking `weight` decremented. If weight drops to 0, they are automatically soft-deleted (`status = 'archived'`). Resets the 90-day timer upon decrement to prevent instant weight collapse.
+3. **Clutter Tag Consolidation (Request-based):** Identifies tags accumulating $\ge 5$ raw entries and logs a JSON-formatted `consolidation_request` event to the short-term `events` ledger.
+4. **General Consolidation (Request-based):** Identifies overall raw accumulation ($\ge 5$ items sharing owner/scope) and logs a `consolidation_request` event. The cognitive task of merging and rephrasing markdown is offloaded to the active client agent, ensuring the server runs fully offline without independent API requirements.
 
 ---
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 8 tools over standard I/O:
+The server exposes 9 tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -95,6 +95,8 @@ The server exposes 8 tools over standard I/O:
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
+| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a synthesized consolidated memory and archives the raw parents. |
+| `start_db_viewer` | None | Launches the zero-dependency database dashboard viewer locally on port 8080. |
 
 ---
 
