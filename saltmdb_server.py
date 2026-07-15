@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.1"
+__version__ = "0.1.0-alpha.2"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -157,13 +157,20 @@ def init_db(db_path: str):
         CREATE TABLE IF NOT EXISTS _system_locks (
             task_name TEXT PRIMARY KEY,
             locked_at DATETIME,
-            locked_by_pid INTEGER
+            locked_by_pid INTEGER,
+            last_run_at DATETIME
         );
         """)
         
+        # Schema migration: attempt to add last_run_at column if updating an existing database
+        try:
+            conn.execute("ALTER TABLE _system_locks ADD COLUMN last_run_at DATETIME;")
+        except sqlite3.OperationalError:
+            pass # Column already exists
+            
         conn.execute("""
-        INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid) 
-        VALUES ('librarian_consolidation', NULL, NULL);
+        INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at) 
+        VALUES ('librarian_consolidation', NULL, NULL, NULL);
         """)
         
         # Triggers to keep FTS5 and Entities in sync
@@ -242,7 +249,37 @@ def extract_title_and_snippet(markdown_text: str):
     return title, snippet
 
 def trigger_librarian():
-    """Asynchronously spawns the librarian consolidation process in a detached background worker."""
+    """Asynchronously spawns the librarian consolidation process if threshold is met and cooldown has expired."""
+    db_path = get_db_path()
+    try:
+        # Check raw count and cooldown before spawning process
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        try:
+            # 1. Check raw count
+            cursor = conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'raw'")
+            raw_count = cursor.fetchone()[0]
+            if raw_count < 2:
+                conn.close()
+                return
+                
+            # 2. Check cooldown (5 minutes / 300 seconds)
+            cursor = conn.execute("SELECT last_run_at FROM _system_locks WHERE task_name = 'librarian_consolidation'")
+            row = cursor.fetchone()
+            if row and row[0]:
+                last_run_str = row[0].replace("Z", "")
+                if "+" in last_run_str:
+                    last_run_str = last_run_str.split("+")[0]
+                last_run = datetime.fromisoformat(last_run_str)
+                elapsed = (datetime.now(UTC).replace(tzinfo=None) - last_run).total_seconds()
+                if elapsed < 300:
+                    conn.close()
+                    return
+        finally:
+            conn.close()
+    except Exception:
+        # Fallback to spawn if check fails (e.g. database lock)
+        pass
+
     try:
         import subprocess
         creationflags = 0
@@ -651,13 +688,14 @@ def acquire_librarian_lock(conn) -> bool:
         return cursor.rowcount == 1
 
 def release_librarian_lock(conn):
-    """Releases the librarian leader lock, allowing future consolidation runs to execute."""
+    """Releases the librarian leader lock and records the execution timestamp."""
+    now = datetime.now(UTC).isoformat()
     with conn:
         conn.execute("""
             UPDATE _system_locks 
-            SET locked_at = NULL, locked_by_pid = NULL 
+            SET locked_at = NULL, locked_by_pid = NULL, last_run_at = ? 
             WHERE task_name = 'librarian_consolidation'
-        """)
+        """, (now,))
 
 def merge_tags_heuristics(conn):
     """Scans tags to merge duplicate and near-identical names to prevent folksonomy fragmentation."""

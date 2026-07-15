@@ -10,7 +10,7 @@ from datetime import datetime
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
-__version__ = "0.1.0-alpha.1"
+__version__ = "0.1.0-alpha.2"
 
 PORT = 8080
 
@@ -153,14 +153,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def get_locks(self):
         try:
             conn = self.get_db_connection()
-            cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid FROM _system_locks")
+            cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks")
             rows = cursor.fetchall()
             conn.close()
             
             locks = [{
                 "task_name": r[0],
                 "locked_at": r[1],
-                "locked_by_pid": r[2]
+                "locked_by_pid": r[2],
+                "last_run_at": r[3]
             } for r in rows]
             self.send_json(locks)
         except Exception as e:
@@ -916,6 +917,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     <div class="card-meta">
                         <div class="meta-item"><span class="meta-label">Locked At:</span><span>${l.locked_at ? formatDate(l.locked_at) : 'N/A'}</span></div>
                         <div class="meta-item"><span class="meta-label">PID:</span><span>${l.locked_by_pid ? l.locked_by_pid : 'N/A'}</span></div>
+                        <div class="meta-item"><span class="meta-label">Last Run:</span><span>${l.last_run_at ? formatDate(l.last_run_at) : 'Never'}</span></div>
                     </div>
                 `;
                 list.appendChild(card);
