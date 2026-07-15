@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import sys
 import uuid
 import re
 import json
@@ -290,6 +291,26 @@ def parse_and_import_sessions(conn):
 
 def main():
     print(f"Connecting to database: {DB_PATH}")
+    
+    # Check if database has data and --force flag is missing
+    if os.path.exists(DB_PATH) and "--force" not in sys.argv:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.execute("SELECT COUNT(*) FROM entities")
+            entity_count = cursor.fetchone()[0]
+            cursor = conn.execute("SELECT COUNT(*) FROM events")
+            event_count = cursor.fetchone()[0]
+            if entity_count > 0 or event_count > 0:
+                print("Warning: Database already contains data. Running this script will wipe all data!")
+                print("Run with '--force' to proceed (e.g. python scratch/import_example_data.py --force).")
+                conn.close()
+                sys.exit(1)
+        except sqlite3.OperationalError:
+            # Table might not exist yet, safe to proceed
+            pass
+        finally:
+            conn.close()
+
     conn = init_db(DB_PATH)
     
     # Clean previous data to allow fresh import
