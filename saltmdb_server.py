@@ -306,6 +306,15 @@ def trigger_librarian():
                 if elapsed < 300:
                     conn.close()
                     return
+                    
+            # 3. Optimize: Check and acquire librarian lock before spawning subprocess
+            # If lock is currently held, exit immediately to prevent redundant processes.
+            if not acquire_librarian_lock(conn):
+                conn.close()
+                return
+                
+            # Release lock immediately so the child process can acquire it and run
+            release_librarian_lock(conn)
         finally:
             conn.close()
     except Exception:

@@ -1051,5 +1051,52 @@ class TestSALTMDB(unittest.TestCase):
         xyz_events = [e for e in recent if e.get("session_id") == "SESSION-XYZ"]
         self.assertEqual(len(xyz_events), 2)
 
+    def test_concurrent_lock_race(self):
+        """Spawn N real processes racing to acquire the librarian lock; exactly one must win."""
+        import subprocess
+        import sys
+        
+        worker_script = os.path.join(os.path.dirname(__file__), "_lock_race_worker.py")
+        db_path = os.path.abspath(self.db_name)
+        
+        # Spawn 10 concurrent processes
+        procs = [
+            subprocess.Popen([sys.executable, worker_script, db_path],
+                             stdout=subprocess.PIPE, text=True)
+            for _ in range(10)
+        ]
+        
+        # Gather outputs
+        results = [p.communicate()[0].strip() for p in procs]
+        
+        # Exactly one must successfully acquire the lock, and the other 9 must fail
+        self.assertEqual(results.count("ACQUIRED"), 1)
+        self.assertEqual(results.count("FAILED"), 9)
+
+    def test_concurrent_write_race(self):
+        """Spawn N real processes each storing a distinct memory; all must persist without lock deadlocks."""
+        import subprocess
+        import sys
+        
+        worker_script = os.path.join(os.path.dirname(__file__), "_write_race_worker.py")
+        db_path = os.path.abspath(self.db_name)
+        
+        # Spawn 10 concurrent writes
+        procs = [
+            subprocess.Popen([sys.executable, worker_script, db_path, str(i), "agent1"],
+                             stdout=subprocess.PIPE, text=True)
+            for i in range(10)
+        ]
+        
+        # Wait for all to finish and check outcomes
+        results = [p.communicate()[0].strip() for p in procs]
+        for idx, res in enumerate(results):
+            self.assertEqual(res, "SUCCESS", f"Process {idx} failed with output: {res}")
+            
+        # Assert all 10 records are actually stored in the database
+        cursor = self.conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'raw'")
+        count = cursor.fetchone()[0]
+        self.assertEqual(count, 10)
+
 if __name__ == "__main__":
     unittest.main()
