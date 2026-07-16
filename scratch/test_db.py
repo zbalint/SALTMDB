@@ -311,6 +311,7 @@ class TestSALTMDB(unittest.TestCase):
             content="# Upsert Test\nInitial content here.",
             tags=["#test"],
             scope="shared",
+            owner_id="test_agent",
             weight=1,
             entity_id="test-upsert-uuid"
         )
@@ -319,6 +320,7 @@ class TestSALTMDB(unittest.TestCase):
         # Verify insertion
         cursor = self.conn.execute("SELECT full_content, weight FROM entities WHERE id = 'test-upsert-uuid'")
         row = cursor.fetchone()
+        self.assertIsNotNone(row)
         self.assertEqual(row[0], "# Upsert Test\nInitial content here.")
         self.assertEqual(row[1], 1)
         
@@ -327,6 +329,7 @@ class TestSALTMDB(unittest.TestCase):
             content="# Upsert Test (Updated)\nNew content here.",
             tags=["#new-tag"],
             scope="shared",
+            owner_id="test_agent",
             weight=5,
             entity_id="test-upsert-uuid"
         )
@@ -371,11 +374,11 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Agent2 Fact", titles2)
         self.assertNotIn("Agent1 Fact", titles2)
         
-        # Search globally (no owner_id)
-        results_global = search_memory(query_keywords="Fact")
-        titles_global = [r["title"] for r in results_global]
-        self.assertIn("Agent1 Fact", titles_global)
-        self.assertIn("Agent2 Fact", titles_global)
+        # Search without owner_id (should return error payload)
+        results_err = search_memory(query_keywords="Fact")
+        self.assertEqual(len(results_err), 1)
+        self.assertIn("error", results_err[0])
+        self.assertIn("owner_id is mandatory", results_err[0]["error"])
 
     def test_create_snapshot(self):
         # Test snapshot backup utility
@@ -400,6 +403,7 @@ class TestSALTMDB(unittest.TestCase):
             content="# Original Fact\nVersion 1 content.",
             tags=["#ver1"],
             scope="shared",
+            owner_id="test_agent",
             entity_id="temp-ver-uuid"
         )
         
@@ -415,6 +419,7 @@ class TestSALTMDB(unittest.TestCase):
             content="# Updated Fact\nVersion 2 content.",
             tags=["#ver2"],
             scope="shared",
+            owner_id="test_agent",
             entity_id="temp-ver-uuid"
         )
         
@@ -451,9 +456,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_relations_and_cte_traversal(self):
         # 1. Insert memory nodes
-        store_knowledge(content="# Core Component\nDescription.", tags=["#sys"], scope="shared", entity_id="node-core")
-        store_knowledge(content="# Dependency A\nDescription.", tags=["#sys"], scope="shared", entity_id="node-dep-a")
-        store_knowledge(content="# Dependency B\nDescription.", tags=["#sys"], scope="shared", entity_id="node-dep-b")
+        store_knowledge(content="# Core Component\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-core")
+        store_knowledge(content="# Dependency A\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-a")
+        store_knowledge(content="# Dependency B\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-b")
         
         # 2. Store relationships (relations)
         res1 = store_relation(source_id="node-core", target_id="node-dep-a", predicate="depends_on")
@@ -469,6 +474,89 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Core Component", paths)
         self.assertIn("Core Component -> Dependency A", paths)
         self.assertIn("Core Component -> Dependency A -> Dependency B", paths)
+
+    def test_store_knowledge_title_deduplication(self):
+        # 1. Insert first memory
+        store_knowledge(
+            content="# Same Title\nContent version 1.",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Deduplication Fact"
+        )
+        
+        # 2. Insert second memory with same title and owner, but without passing entity_id
+        store_knowledge(
+            content="# Same Title\nContent version 2.",
+            tags=["#test-updated"],
+            scope="shared",
+            owner_id="agent1",
+            title="Deduplication Fact"
+        )
+        
+        # Verify that only ONE active entity exists (the second one, with temporal history cloned)
+        cursor = self.conn.execute("SELECT id, full_content FROM entities WHERE title = 'Deduplication Fact' AND status = 'raw'")
+        active_rows = cursor.fetchall()
+        self.assertEqual(len(active_rows), 1)
+        self.assertIn("Content version 2", active_rows[0][1])
+        
+        # Verify history copy exists (cloned due to title match)
+        cursor = self.conn.execute("SELECT id, full_content FROM entities WHERE title = 'Deduplication Fact' AND status = 'archived'")
+        hist_rows = cursor.fetchall()
+        self.assertEqual(len(hist_rows), 1)
+        self.assertIn("Content version 1", hist_rows[0][1])
+
+    def test_pre_write_tag_normalization(self):
+        # 1. Store memory with canonical tag
+        store_knowledge(
+            content="# Normalization Fact\nContent.",
+            tags=["#Auth-Error"],
+            scope="shared",
+            owner_id="agent1",
+            title="Norm Fact"
+        )
+        
+        # 2. Store another memory with case/hyphen drifted tag name
+        store_knowledge(
+            content="# Normalization Fact 2\nContent.",
+            tags=["#auth_error"],
+            scope="shared",
+            owner_id="agent1",
+            title="Norm Fact 2"
+        )
+        
+        # Verify that both memories point to the EXACT same tag ID (drift prevention)
+        cursor = self.conn.execute("SELECT name FROM tags")
+        all_tags = [r[0] for r in cursor.fetchall()]
+        # Tag table should only have '#Auth-Error', not duplicate alias rows
+        self.assertIn("#Auth-Error", all_tags)
+        self.assertNotIn("#auth_error", all_tags)
+
+    def test_consolidation_hygiene_runbooks(self):
+        # Insert 3 raw entities with '#ops-runbook' tag (meets the high hygiene threshold of 3)
+        now = datetime.now(UTC).isoformat()
+        with self.conn:
+            for i in range(3):
+                self.conn.execute(f"""
+                    INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content)
+                    VALUES ('runbook-{i}', ?, ?, ?, 'agent1', 'shared', 'raw', 'Runbook {i}', 'Runbook content {i}')
+                """, (now, now, now))
+                
+            self.conn.execute("INSERT OR IGNORE INTO tags (id, name) VALUES ('t-runbook', '#ops-runbook')")
+            for i in range(3):
+                self.conn.execute(f"INSERT INTO entity_tags (entity_id, tag_id) VALUES ('runbook-{i}', 't-runbook')")
+                
+        # Run tag consolidation
+        consolidate_cluttered_tags(self.conn)
+        
+        # Verify a consolidation_request event was logged (due to threshold of 3 for runbook tag)
+        cursor = self.conn.execute("SELECT content FROM events WHERE type = 'consolidation_request' AND agent_id = 'agent1'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        data = json.loads(row[0])
+        self.assertEqual(data["target"], "tag")
+        self.assertEqual(data["tag_name"], "#ops-runbook")
+        self.assertEqual(len(data["entity_ids"]), 3)
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,14 +84,15 @@ Once the background Librarian acquires the atomic lock, it runs the following ta
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 11 tools over standard I/O:
+The server exposes 12 tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `log_event` | `agent_id`, `type`, `content`, `error_code` | Appends a scrubbed entry to the immutable short-term ledger. |
+| `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
 | `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter to prevent duplicate tag names. |
-| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts long-term facts in raw markdown. Supports SCD temporal versioning. |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id` | Searches matching knowledge using FTS5 (10:1 title weights) with multi-agent target isolation. |
+| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. **`owner_id` is mandatory**. Supports automatic title-based deduplication and SCD. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id` | Searches knowledge using FTS5 (10:1 title weights). **`owner_id` is mandatory** to isolate memory lanes. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |

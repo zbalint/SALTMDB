@@ -38,10 +38,11 @@ Every agent configured to use SALTMDB must include memory management instruction
 You are connected to SALTMDB, a local-first memory database. You must actively interact with the database to maintain context across sessions.
 
 ## 1. Available Tools
-* `search_memory(query_keywords, tags_filter, owner_id)`: Search long-term memories. Pass your assigned `owner_id` to isolate results.
-* `store_knowledge(content, tags, scope, weight, is_core, owner_id, title, entity_id, relevance, impact, novelty, actionability)`: Save/upsert long-term knowledge.
-* `log_event(agent_id, type, content, error_code)`: Log a short-term operational event.
-* `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a high-quality consolidated memory and prune the raw source components.
+* `search_memory(owner_id, query_keywords, tags_filter)`: **[MANDATORY `owner_id`]** Search long-term memories isolated to your lane.
+* `store_knowledge(owner_id, content, tags, scope, ...)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge.
+* `log_event(agent_id, type, content, error_code)`: Log a short-term operational event to the ledger.
+* `get_recent_events(agent_id, type_filter, limit)`: Retrieve event logs to check for background signals (e.g. consolidation requests).
+* `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a consolidated memory and prune the raw source components.
 * `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories.
 * `analyze_dependencies(root_entity_id)`: Recursively trace downstream relational paths using recursive SQL CTEs.
 * `start_db_viewer()`: Launch the web-based database browser.
@@ -52,7 +53,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 Immediately upon initialization, before answering the user:
 1. Call `search_memory` with no query keywords, filtering by `#core` tag, and passing your assigned `owner_id` (e.g. `owner_id = 'agent1'`). This loads your persona, behavioral constraints, and user rules.
 2. Run a keyword search matching the workspace or active component path, passing your `owner_id` to isolate workspace initiative memory anchors.
-3. Check the `events` table for events of type `consolidation_request` where `agent_id` matches your assigned `owner_id`.
+3. Call `get_recent_events` with your `agent_id` set to your `owner_id` and `type_filter = 'consolidation_request'` to check for pending Librarian merge requests.
 
 ### Phase B: In-Session Logging
 1. Log every significant milestone, technical decision, and error event using `log_event`.
@@ -60,9 +61,9 @@ Immediately upon initialization, before answering the user:
 
 ### Phase C: Session Wrap-up (Commit & Link)
 Before concluding your turn or finalizing a major task block:
-1. Query the short-term `events` table (or review your log actions).
+1. Query short-term events using `get_recent_events` (or review your log actions).
 2. Synthesize new permanent facts, rules, or progress updates.
-3. Commit or upsert these synthesized updates using `store_knowledge`. Always pass your `owner_id`. To update an existing fact instead of duplicating it, pass its original UUID to the `entity_id` parameter to trigger temporal versioning (SCD).
+3. Commit or upsert these synthesized updates using `store_knowledge`. Always pass your `owner_id`. If you save a memory with an identical title under the same owner, the server automatically routes it to an update, preserving history via SCD versioning.
 4. If a component depends on or resolves another component, store the relationship edge using `store_relation(source_id, target_id, predicate)`.
 
 ### Phase D: Cognitive Consolidation (Cleanup)

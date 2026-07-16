@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.7"
+__version__ = "0.1.0-alpha.8"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -409,6 +409,9 @@ def store_knowledge(
         novelty: Optional score (1-5) representing info novelty.
         actionability: Optional score (1-5) representing action priority.
     """
+    if not owner_id:
+        return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
+        
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
         
@@ -421,14 +424,30 @@ def store_knowledge(
         
     db_path = get_db_path()
     conn = init_db(db_path)
-    if not entity_id:
-        entity_id = str(uuid.uuid4())
+    
     redacted_content = redact_secrets(content)
     now = datetime.now(UTC).isoformat()
     
     # Hybrid title extraction
     if not title:
         title, _ = extract_title_and_snippet(redacted_content)
+        
+    # Lightweight title-based deduplication per owner/scope (upsert replacement policy)
+    if not entity_id:
+        try:
+            cursor = conn.execute("""
+                SELECT id FROM entities 
+                WHERE title = ? AND owner_id = ? AND scope = ? AND status != 'archived'
+            """, (title, owner_id, scope))
+            row = cursor.fetchone()
+            if row:
+                entity_id = row[0]
+                print(f"Deduplication: Matched existing memory '{title}' (ID: {entity_id}). Routing to temporal upsert.")
+        except Exception:
+            pass # Keep going if tables aren't fully set up yet
+            
+    if not entity_id:
+        entity_id = str(uuid.uuid4())
         
     try:
         with conn:
@@ -472,18 +491,36 @@ def store_knowledge(
                     valid_to = NULL
             """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now))
             
+            # Fetch all existing tags to do pre-write tag normalization (prevent drift)
+            cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
+            db_tags = cursor.fetchall()
+            tag_lookup = {}
+            for tid, tname, tcanon in db_tags:
+                norm = tname.strip().lower().lstrip('#')
+                norm = re.sub(r'[-_\s]+', '', norm)
+                tag_lookup[norm] = tcanon if tcanon else tid
+
             for tag_name in tags:
                 tag_name = tag_name.strip()
                 if not tag_name:
                     continue
-                # Check if tag already exists or is an alias
-                cursor = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,))
-                row = cursor.fetchone()
-                if row:
-                    tag_id = row[1] if row[1] else row[0]
+                if not tag_name.startswith('#'):
+                    tag_name = '#' + tag_name
+                    
+                norm_input = tag_name.lower().lstrip('#')
+                norm_input = re.sub(r'[-_\s]+', '', norm_input)
+                
+                if norm_input in tag_lookup:
+                    tag_id = tag_lookup[norm_input]
                 else:
-                    tag_id = str(uuid.uuid4())
-                    conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
+                    cursor = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,))
+                    row = cursor.fetchone()
+                    if row:
+                        tag_id = row[1] if row[1] else row[0]
+                    else:
+                        tag_id = str(uuid.uuid4())
+                        conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
+                        tag_lookup[norm_input] = tag_id
                 
                 # Link tag to entity
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
@@ -504,8 +541,8 @@ def search_memory(query_keywords: str = None, tags_filter: list = None, owner_id
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
         owner_id: Optional agent ID to isolate memory access.
     """
-    if not query_keywords and not tags_filter:
-        return []
+    if not owner_id:
+        return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
         
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -775,7 +812,7 @@ def decay_lru_memories(conn):
             print(f"Archived {len(to_archive)} stale memories due to access decay.")
 
 def consolidate_cluttered_tags(conn):
-    """Scans for tags with 5 or more raw entries per owner and logs a consolidation request event for that agent."""
+    """Scans for tags with 5 or more raw entries per owner (or 3 or more for runbooks/decisions) and logs a consolidation request event for that agent."""
     print("Checking for high tag density clutter...")
     cursor = conn.execute("""
         SELECT et.tag_id, t.name, e.owner_id, COUNT(*) 
@@ -784,11 +821,16 @@ def consolidate_cluttered_tags(conn):
         JOIN tags t ON et.tag_id = t.id
         WHERE e.status = 'raw'
         GROUP BY et.tag_id, t.name, e.owner_id
-        HAVING COUNT(*) >= 5
     """)
-    cluttered = cursor.fetchall()
+    candidates = cursor.fetchall()
     
-    for tag_id, tag_name, owner_id, count in cluttered:
+    for tag_id, tag_name, owner_id, count in candidates:
+        is_high_hygiene = any(word in tag_name.lower() for word in ["runbook", "decision"])
+        threshold = 3 if is_high_hygiene else 5
+        
+        if count < threshold:
+            continue
+            
         cursor = conn.execute("""
             SELECT e.id FROM entities e
             JOIN entity_tags et ON e.id = et.entity_id
@@ -810,7 +852,7 @@ def consolidate_cluttered_tags(conn):
                 INSERT INTO events (id, timestamp, agent_id, type, content)
                 VALUES (?, ?, ?, 'consolidation_request', ?)
             """, (event_id, now, target_agent, content))
-        print(f"Logged consolidation request for tag '{tag_name}' (Owner: {target_agent}, Entity IDs: {raw_ids})")
+        print(f"Logged consolidation request for tag '{tag_name}' (Owner: {target_agent}, Threshold: {threshold}, Entity IDs: {raw_ids})")
 
 def consolidate_memories(conn):
     """General consolidator that groups raw memories by owner/scope and logs general consolidation request events."""
@@ -1016,6 +1058,54 @@ def analyze_dependencies(root_entity_id: str) -> list:
                 "status": r[2],
                 "depth": r[3],
                 "path": r[4]
+            } for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+    finally:
+        conn.close()
+
+@mcp.tool()
+def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int = 50) -> list:
+    """Retrieves recent events from the short-term ledger.
+    
+    Args:
+        agent_id: Optional filter for a specific agent ID.
+        type_filter: Optional filter for a specific event type (e.g. 'consolidation_request').
+        limit: Maximum number of events to return (default 50).
+    """
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        params = []
+        clauses = []
+        if agent_id:
+            clauses.append("agent_id = ?")
+            params.append(agent_id)
+        if type_filter:
+            clauses.append("type = ?")
+            params.append(type_filter)
+            
+        where_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
+        
+        sql = f"""
+            SELECT id, timestamp, agent_id, type, content, error_code
+            FROM events
+            {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        cursor = conn.execute(sql, params)
+        rows = cursor.fetchall()
+        return [
+            {
+                "id": r[0],
+                "timestamp": r[1],
+                "agent_id": r[2],
+                "type": r[3],
+                "content": r[4],
+                "error_code": r[5]
             } for r in rows
         ]
     except Exception as e:
