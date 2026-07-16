@@ -125,9 +125,16 @@ def init_db(db_path: str):
         """)
         
         # Schema migration: attempt to add new columns to entities table if they don't exist
-        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT"]:
+        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT"]:
             try:
                 conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
+            except sqlite3.OperationalError:
+                pass
+                
+        # Schema migration: attempt to add new columns to events table if they don't exist
+        for col in ["session_id TEXT"]:
+            try:
+                conn.execute(f"ALTER TABLE events ADD COLUMN {col};")
             except sqlite3.OperationalError:
                 pass
         
@@ -325,7 +332,7 @@ def trigger_librarian():
 # =====================================================================
 
 @mcp.tool()
-def log_event(agent_id: str, type: str, content: str, error_code: str = None) -> str:
+def log_event(agent_id: str, type: str, content: str, error_code: str = None, session_id: str = None) -> str:
     """Appends an event to the append-only events ledger.
     
     Args:
@@ -333,6 +340,7 @@ def log_event(agent_id: str, type: str, content: str, error_code: str = None) ->
         type: Category of the event (e.g. 'issue', 'attempt', 'fix', 'decision').
         content: Description of the action or event.
         error_code: Optional system error code if applicable.
+        session_id: Optional unique session identifier to track related events.
     """
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -342,9 +350,9 @@ def log_event(agent_id: str, type: str, content: str, error_code: str = None) ->
     try:
         with conn:
             conn.execute("""
-                INSERT INTO events (id, timestamp, agent_id, type, content, error_code)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (event_id, now, agent_id, type, redacted_content, error_code))
+                INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (event_id, now, agent_id, type, redacted_content, error_code, session_id))
         trigger_librarian()
         return f"Event logged successfully with ID: {event_id}"
     except Exception as e:
@@ -421,7 +429,8 @@ def store_knowledge(
     novelty: int = None,
     actionability: int = None,
     metadata: dict = None,
-    skip_duplicate_check: bool = False
+    skip_duplicate_check: bool = False,
+    project_id: str = None
 ) -> str:
     """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
     
@@ -440,6 +449,7 @@ def store_knowledge(
         actionability: Optional score (1-5) representing action priority.
         metadata: Optional dictionary of structured attributes to match. You MUST include a relative repository path in metadata['source_path'].
         skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
+        project_id: Optional first-class project identifier to associate with the memory.
     """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
@@ -506,6 +516,9 @@ def store_knowledge(
     if not entity_id:
         entity_id = str(uuid.uuid4())
         
+    if not project_id and metadata and isinstance(metadata, dict):
+        project_id = metadata.get("project") or metadata.get("project_id")
+        
     try:
         with conn:
             # Check if this entity already exists to do temporal versioning
@@ -517,8 +530,8 @@ def store_knowledge(
                  
                  # Copy current active row to history as 'archived' with closed valid_to
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  
@@ -533,8 +546,8 @@ def store_knowledge(
             
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -547,8 +560,9 @@ def store_knowledge(
                     full_content = excluded.full_content,
                     valid_from = excluded.valid_from,
                     valid_to = NULL,
-                    metadata = excluded.metadata
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str))
+                    metadata = excluded.metadata,
+                    project_id = COALESCE(excluded.project_id, entities.project_id)
+            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id))
             
             # Fetch all existing tags to do pre-write tag normalization (prevent drift)
             cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
@@ -609,7 +623,8 @@ def search_memory(
     tags_filter: list = None,
     metadata_filter: dict = None,
     explain_mode: bool = False,
-    limit: int = 5
+    limit: int = 5,
+    project_id: str = None
 ) -> list | dict:
     """Performs full-text keyword search, metadata filtering, and tag filtering in the long-term knowledge base.
     
@@ -620,6 +635,7 @@ def search_memory(
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
         explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
         limit: Optional maximum number of memories to return (default 5, max 25).
+        project_id: Optional first-class project identifier to filter queries.
     """
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
@@ -653,6 +669,13 @@ def search_memory(
             owner_filter_clause = " AND (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system')"
             owner_params.append(owner_id)
             
+        # Build dynamic project filter
+        project_filter_clause = ""
+        project_params = []
+        if project_id:
+            project_filter_clause = " AND e.project_id = ?"
+            project_params.append(project_id)
+            
         # Build dynamic metadata filters
         metadata_clauses = ""
         metadata_params = []
@@ -677,11 +700,11 @@ def search_memory(
                 SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0) as score, e.title
                 FROM entities_fts f
                 JOIN entities e ON e.id = f.id
-                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
+                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY (bm25(entities_fts, 0.0, 10.0, 1.0) * e.weight) ASC
                 LIMIT ?
             """
-            exec_params = [sanitized_keywords] + owner_params + params + metadata_params + [safe_limit]
+            exec_params = [sanitized_keywords] + owner_params + project_params + params + metadata_params + [safe_limit]
             
             try:
                 cursor = conn.execute(sql, exec_params)
@@ -692,7 +715,7 @@ def search_memory(
                 words = re.findall(r'\b\w+\b', sanitized_keywords)
                 if words:
                     fallback_query = " OR ".join(f'"{w}*"' for w in words)
-                    exec_params_fallback = [fallback_query] + owner_params + params + metadata_params + [safe_limit]
+                    exec_params_fallback = [fallback_query] + owner_params + project_params + params + metadata_params + [safe_limit]
                     try:
                         cursor = conn.execute(sql, exec_params_fallback)
                         rows = cursor.fetchall()
@@ -704,11 +727,11 @@ def search_memory(
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title
                 FROM entities e
-                WHERE e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
+                WHERE e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY e.weight DESC, e.updated_at DESC
                 LIMIT ?
             """
-            exec_params = owner_params + params + metadata_params + [safe_limit]
+            exec_params = owner_params + project_params + params + metadata_params + [safe_limit]
             cursor = conn.execute(sql, exec_params)
             rows = cursor.fetchall()
             
@@ -1559,7 +1582,7 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
         where_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
         
         sql = f"""
-            SELECT id, timestamp, agent_id, type, content, error_code
+            SELECT id, timestamp, agent_id, type, content, error_code, session_id
             FROM events
             {where_clause}
             ORDER BY timestamp DESC
@@ -1571,7 +1594,7 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
         
         events = []
         for r in rows:
-            ev_id, timestamp, agent, ev_type, content, error_code = r
+            ev_id, timestamp, agent, ev_type, content, error_code, session_id = r
             status = "pending"
             
             # Truncate content to 1000 chars if massive, preserving it for consolidation requests
@@ -1607,7 +1630,8 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
                 "type": ev_type,
                 "content": display_content,
                 "error_code": error_code,
-                "status": status
+                "status": status,
+                "session_id": session_id
             })
         return events
     except Exception as e:
@@ -1690,6 +1714,41 @@ def scan_memories(
                 "content": full_content
             })
         return memories
+    except Exception as e:
+        return [{"error": str(e)}]
+    finally:
+        conn.close()
+
+@mcp.tool()
+def get_session_summary(session_id: str) -> list:
+    """Retrieves a chronological log summary of all operational events for a specific session ID.
+    
+    Args:
+        session_id: The unique identifier of the session to retrieve logs for.
+    """
+    if not session_id:
+        return [{"error": "session_id is required."}]
+        
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        cursor = conn.execute("""
+            SELECT id, timestamp, agent_id, type, content, error_code
+            FROM events
+            WHERE session_id = ?
+            ORDER BY timestamp ASC
+        """, (session_id,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "id": r[0],
+                "timestamp": r[1],
+                "agent_id": r[2],
+                "type": r[3],
+                "content": r[4],
+                "error_code": r[5]
+            } for r in rows
+        ]
     except Exception as e:
         return [{"error": str(e)}]
     finally:

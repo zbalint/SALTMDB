@@ -25,6 +25,8 @@ from saltmdb_server import (
     analyze_dependencies,
     archive_memory,
     get_recent_events,
+    log_event,
+    get_session_summary,
     detect_orphaned_memories,
     check_duplicate_memories,
     scan_memories
@@ -977,6 +979,77 @@ class TestSALTMDB(unittest.TestCase):
             skip_duplicate_check=True
         )
         self.assertIn("Knowledge stored successfully", res_forced)
+
+    def test_schema_migration_columns(self):
+        # Verify schema tables have the new columns
+        cursor = self.conn.execute("PRAGMA table_info(entities)")
+        cols = [r[1] for r in cursor.fetchall()]
+        self.assertIn("project_id", cols)
+        
+        cursor = self.conn.execute("PRAGMA table_info(events)")
+        cols = [r[1] for r in cursor.fetchall()]
+        self.assertIn("session_id", cols)
+
+    def test_project_id_first_class_recall(self):
+        # 1. Store with first-class project_id
+        store_knowledge(
+            content="Project specific memory.",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="First-class Project memory",
+            project_id="PROJ-A"
+        )
+        
+        # 2. Store with metadata.project fallback
+        store_knowledge(
+            content="Metadata fallback memory.",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Metadata Fallback memory",
+            metadata={"project": "PROJ-A"}
+        )
+        
+        # 3. Store another memory for different project
+        store_knowledge(
+            content="Other project memory.",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Other Project memory",
+            project_id="PROJ-B"
+        )
+        
+        # 4. Search and filter by project_id
+        results_a = search_memory(owner_id="agent1", project_id="PROJ-A", tags_filter=["#test"])
+        # Should return both PROJ-A memories (first-class and metadata fallback)
+        self.assertEqual(len(results_a), 2)
+        titles = [r["title"] for r in results_a]
+        self.assertIn("First-class Project memory", titles)
+        self.assertIn("Metadata Fallback memory", titles)
+        
+        # 5. Search and filter by PROJ-B
+        results_b = search_memory(owner_id="agent1", project_id="PROJ-B", tags_filter=["#test"])
+        self.assertEqual(len(results_b), 1)
+        self.assertEqual(results_b[0]["title"], "Other Project memory")
+
+    def test_session_id_logging_and_summary(self):
+        # Log events with a specific session ID
+        log_event(agent_id="agent1", type="attempt", content="First attempt", session_id="SESSION-XYZ")
+        log_event(agent_id="agent1", type="fix", content="Resolution fix", session_id="SESSION-XYZ")
+        log_event(agent_id="agent1", type="decision", content="Other session decision", session_id="SESSION-123")
+        
+        # Chronological retrieval via get_session_summary
+        events = get_session_summary("SESSION-XYZ")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["content"], "First attempt")
+        self.assertEqual(events[1]["content"], "Resolution fix")
+        
+        # Verify in get_recent_events as well
+        recent = get_recent_events(limit=5)
+        xyz_events = [e for e in recent if e.get("session_id") == "SESSION-XYZ"]
+        self.assertEqual(len(xyz_events), 2)
 
 if __name__ == "__main__":
     unittest.main()
