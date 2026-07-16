@@ -7,7 +7,9 @@ def main():
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     
-    report_path = r"C:\Users\zbalint\.gemini\antigravity-cli\brain\a4a383c5-c4fe-4ecb-a1db-03205bf776f9\database_review.md"
+    # Resolve path dynamically using expansion and env overrides to avoid hardcoded absolute usernames
+    brain_dir = os.environ.get("GEMINI_BRAIN_DIR", os.path.expanduser(r"~/.gemini/antigravity-cli/brain/a4a383c5-c4fe-4ecb-a1db-03205bf776f9"))
+    report_path = os.path.join(brain_dir, "database_review.md")
     
     try:
         # Fetch entities

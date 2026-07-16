@@ -14,6 +14,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.9` | 2 | No schema changes. Added Relations Topology graph visualizer and modal click-through links to database viewer | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.10` | 2 | No schema changes. Fixed string escaping syntax error on Outfit font-family definition in server JS block | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.11` | 2 | No schema changes. Added stop_db_viewer MCP tool for programmatic viewer lifecycle control | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.12` | 2 | No schema changes. Fixed path leak in MIGRATION.md and build_review_report.py by resolving paths dynamically | **No Action Required** (fully backward-compatible) |
 
 ---
 
@@ -47,10 +48,10 @@ CREATE INDEX IF NOT EXISTS idx_relations_source_target ON relations (source_id, 
 
 ## Upgrade Verification
 
-To verify your database schema compatibility, execute **[examples/query_db.py](file:///C:/Users/zbalint/Workspace/SALTMDB/examples/query_db.py)** or run unit tests:
+To verify your database schema compatibility, execute **[examples/query_db.py](examples/query_db.py)** or run unit tests:
 
 ```bash
-$env:PYTHONPATH="C:\Users\zbalint\Workspace\SALTMDB"
+$env:PYTHONPATH="C:\path\to\SALTMDB"
 python scratch/test_db.py
 ```
 If all unit tests execute and pass cleanly, your database schema is correctly aligned.
