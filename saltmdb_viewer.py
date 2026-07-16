@@ -10,7 +10,7 @@ from datetime import datetime
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
-__version__ = "0.1.0-alpha.9"
+__version__ = "0.1.0-alpha.10"
 
 PORT = 8080
 
@@ -1191,7 +1191,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 let relationsHtml = '';
                 if (data.relations && (data.relations.outgoing.length > 0 || data.relations.incoming.length > 0)) {
                     relationsHtml += '<div class="relations-modal-section" style="margin-top:2rem; border-top:1px solid #334155; padding-top:1.5rem;">';
-                    relationsHtml += '<h3 style="color:#f3f4f6; margin-bottom:1rem; font-family:\'Outfit\',sans-serif;">Connected Relationships</h3>';
+                    relationsHtml += '<h3 style="color:#f3f4f6; margin-bottom:1rem; font-family:Outfit,sans-serif;">Connected Relationships</h3>';
                     
                     if (data.relations.outgoing.length > 0) {
                         relationsHtml += '<div style="margin-bottom:1rem;">';
