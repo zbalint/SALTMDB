@@ -7,11 +7,19 @@ description: "Instructions and heuristics for losslessly parsing files, capturin
 
 This skill instructs the agent on how to ingest documentation, codebase guides, rule sheets, and logs without losing technical detail or creating monolithic database entries.
 
+> [!CAUTION]
+> **NO DIRECT DATABASE ACCESS:** Do not run raw SQL or `sqlite3` CLI commands directly on `saltmdb.db`. Bypassing the MCP server tools breaks secrets scrubbing and FTS5 triggers. To scan or audit memories for contradictions, use the `scan_memories` tool.
+
 ## 1. The "No-Loss" Detail Retention Rule
 
 When capturing knowledge from a file, chat history, or environment state:
 * **Verbatim Code & Parameters:** Never summarize, truncate, or omit exact code blocks, version numbers, configuration values, platform requirements, port numbers, or exact error tracebacks.
 * **Granular Extraction:** Do not rephrase specialized terminology or replace specific configuration variables with generic summaries. For example, do not replace `journal_mode=WAL` with "WAL enabled".
+
+### The "Look-Before-Leap" Protocol
+Before editing any file, running a shell command, or debugging a compiler error:
+- **Search first:** Run `search_memory` with keywords related to the target file name, terminal command, or error stack.
+- **Acknowledge constraints:** Confirm if a past resolution, configuration limit, or bug fix is already recorded to prevent repeating mistakes.
 
 ## 2. The Granularity Rule (Semantic Splitting)
 
@@ -34,7 +42,17 @@ Before saving any memory to long-term storage:
   * If `duplicate_found` is `True`, do **not** write a new memory. Instead, retrieve the existing ID and perform an update (SCD Type 2).
 * **Metadata Schema:** Populate the `metadata` dictionary parameter on `store_knowledge` with indexable attributes:
   * `project`: The name of the codebase/project.
-  * `source_path`: The relative repository path of the source file.
+  * `source_path`: The relative repository path of the source file. (e.g. `CORE.md` instead of absolute paths like `C:/Users/...`).
   * `topic`: The technical category (e.g., `ops`, `auth`, `database`, `build`).
   * `date`: The ISO timestamp of the capture.
+* **Clean Titles:** Do not prefix memory titles with filenames or tags (e.g. use `Language Rules` instead of `CORE.md — Language Rules`).
 * **Tag normalization:** Ensure tags are lowercase, alphanumeric, prefixed with `#`, and do not contain special characters (e.g., use `#auth-error` instead of `#auth_error`). Verify against `get_canonical_tags`.
+
+## 5. Stateful Fact Block (SFB) Layout Guideline
+
+When writing the markdown `content` parameter for `store_knowledge`, structure it as:
+1. **Title Heading (`#`)**: A concise, tag-free, filename-free title.
+2. **Summary**: A brief overview of the memory.
+3. **Claims list**: Tagged bullet points using `[FACT]`, `[DECISION]`, `[INFERENCE]`, `[STATUS]`, `[OPEN]`, or `[RESOLUTION]`.
+4. **Technical Code/Config blocks**: Verbatim CLI commands, parameter limits, or config details.
+5. **Chronological Trace**: A record of actions, attempts, or historical context.

@@ -37,8 +37,13 @@ Every agent configured to use SALTMDB must include memory management instruction
 
 You are connected to SALTMDB, a local-first memory database. You must actively interact with the database to maintain context across sessions.
 
+> [!CAUTION]
+> **FORBIDDEN ACTION: NO DIRECT SQL ACCESS**
+> You are strictly forbidden from running shell commands like `sqlite3` or using scripts to connect directly to the `saltmdb.db` file. Bypassing the MCP server skips the secrets redaction middleware and FTS5 search indexing triggers, corrupting the database state. All queries and updates must occur via MCP tool calls.
+
 ## 1. Available Tools
-* `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode)`: **[MANDATORY `owner_id`]** Search long-term memories. Safe FTS5 parser handles syntax errors automatically. Supports `metadata_filter` (exact lookups by project, source_path, etc.) and `explain_mode` (diagnostics on zero-match).
+* `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode, limit)`: **[MANDATORY `owner_id`]** Search long-term memories. Safe FTS5 parser handles syntax errors automatically. Supports `metadata_filter` (exact lookups by project, source_path, etc.), `explain_mode` (diagnostics on zero-match), and `limit` (default 5, max 25).
+* `scan_memories(owner_id, status_filter, limit, offset)`: **[MANDATORY `owner_id`]** Retrieve and scan lists/contents of memories for audits, consistency reviews, or contradiction checks.
 * `store_knowledge(owner_id, content, tags, scope, ..., metadata)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge. Supports optional `metadata` dict for structured search.
 * `detect_orphaned_memories(owner_id)`: **[MANDATORY `owner_id`]** Returns a list of active memories with zero connections, suggesting link candidates based on shared tags.
 * `check_duplicate_memories(title, content, owner_id, tags)`: **[MANDATORY `owner_id`]** Run before storing to verify if a proposed memory overlaps with existing ones (returns duplicate warning if similarity >= 70%).
@@ -58,6 +63,7 @@ Immediately upon initialization, before answering the user:
 1. Call `search_memory` with no query keywords, filtering by `#core` tag, and passing your assigned `owner_id` (e.g. `owner_id = 'agent1'`). This loads your persona, behavioral constraints, and user rules.
 2. Run a keyword search matching the workspace or active component path, passing your `owner_id` to isolate workspace initiative memory anchors.
 3. Call `get_recent_events` with your `agent_id` set to your `owner_id` and `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. **Filter out events that return with `"status": "resolved"`** (as their target raw entities have already been consolidated).
+4. **Look-Before-Leap Protocol:** Before executing any sub-task, modifying a file, or running commands, call `search_memory` with keywords matching the target component, command, error string, or library. You must actively search for past constraints, bug fixes, or design parameters before writing code.
 
 ### Phase B: In-Session Logging
 1. Log every significant milestone, technical decision, and error event using `log_event`.

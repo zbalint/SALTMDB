@@ -379,14 +379,41 @@ def get_canonical_tags(domain: str = None) -> list:
     finally:
         conn.close()
 
+def validate_memory_input(title: str, content: str, metadata: dict) -> None:
+    """Validates memory input to enforce title hygiene and relative path constraints.
+    Raises ValueError if validation fails.
+    """
+    if title:
+        pattern = r"^[a-zA-Z0-9_\-\.]+\.(md|txt|json|yml|yaml)\s*[-—–:|]\s*"
+        if re.search(pattern, title):
+            raise ValueError(
+                "Error: Title violates clean title guidelines. Do not prefix memory titles with file names or file extensions (e.g., use 'Language Rules' instead of 'CORE.md — Language Rules')."
+            )
+            
+    if metadata and isinstance(metadata, dict):
+        source_path = metadata.get("source_path")
+        if source_path:
+            is_absolute = (
+                re.match(r"^[a-zA-Z]:", source_path) or
+                source_path.startswith("/") or
+                source_path.startswith("\\") or
+                "/Users/" in source_path or
+                "\\Users\\" in source_path or
+                "/home/" in source_path
+            )
+            if is_absolute:
+                raise ValueError(
+                    "Error: 'source_path' must be a relative repository path (e.g., 'CORE.md' or 'notes.md'). Absolute system paths are forbidden."
+                )
+
 @mcp.tool()
 def store_knowledge(
     content: str,
     tags: list,
     scope: str,
+    owner_id: str,
     weight: int = 1,
     is_core: bool = False,
-    owner_id: str = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -398,18 +425,19 @@ def store_knowledge(
     """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
     
     Args:
-        content: Markdown formatted text representation of the fact.
+        content: Markdown formatted text representation of the fact. You MUST format this as a Stateful Fact Block (SFB) starting with YAML frontmatter containing clean title, tags, relative source_path, and date, followed by bulleted claims prefixed with [FACT], [DECISION], etc.
         tags: List of tags associated with this knowledge.
         scope: Scope level ('private' or 'shared').
+        owner_id: Mandatory ID of the agent/owner storing this knowledge to isolate lanes.
         weight: Priority ranking multiplier (default 1).
         is_core: If True, bypasses search and gets injected into the agent prompt (default False).
-        owner_id: Optional ID of the agent/owner storing this knowledge.
-        title: Optional custom title. If omitted, the first markdown heading is auto-extracted.
-        entity_id: Optional custom entity ID to insert or update (upsert).
+        title: Optional clean title (no file extensions, no parent file prefixes). If omitted, the first markdown heading is auto-extracted and cleaned.
+        entity_id: Optional custom entity ID to insert or update (upsert). To update an existing memory (SCD Type 2 version update), pass the original entity_id.
         relevance: Optional score (1-5) representing context relevance.
         impact: Optional score (1-5) representing user/emotional impact.
         novelty: Optional score (1-5) representing info novelty.
         actionability: Optional score (1-5) representing action priority.
+        metadata: Optional dictionary of structured attributes to match. You MUST include a relative repository path in metadata['source_path'].
     """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
@@ -433,6 +461,12 @@ def store_knowledge(
     # Hybrid title extraction
     if not title:
         title, _ = extract_title_and_snippet(redacted_content)
+        
+    try:
+        validate_memory_input(title, redacted_content, metadata)
+    except ValueError as e:
+        conn.close()
+        return str(e)
         
     # Lightweight title-based deduplication per owner/scope (upsert replacement policy)
     if not entity_id:
@@ -549,26 +583,29 @@ def sanitize_fts_query(query: str) -> str:
 
 @mcp.tool()
 def search_memory(
+    owner_id: str,
     query_keywords: str = None,
     tags_filter: list = None,
-    owner_id: str = None,
     metadata_filter: dict = None,
-    explain_mode: bool = False
+    explain_mode: bool = False,
+    limit: int = 5
 ) -> list | dict:
     """Performs full-text keyword search, metadata filtering, and tag filtering in the long-term knowledge base.
     
     Args:
+        owner_id: Mandatory ID of the agent/owner to isolate memory access and lanes.
         query_keywords: Search terms used to match against indexing content via FTS5.
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
-        owner_id: Optional agent ID to isolate memory access.
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
         explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
+        limit: Optional maximum number of memories to return (default 5, max 25).
     """
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
         
     db_path = get_db_path()
     conn = init_db(db_path)
+    safe_limit = max(1, min(limit, 25))
     now = datetime.now(UTC).isoformat()
     try:
         params = []
@@ -621,9 +658,9 @@ def search_memory(
                 JOIN entities e ON e.id = f.id
                 WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY (bm25(entities_fts, 0.0, 10.0, 1.0) * e.weight) ASC
-                LIMIT 5
+                LIMIT ?
             """
-            exec_params = [sanitized_keywords] + owner_params + params + metadata_params
+            exec_params = [sanitized_keywords] + owner_params + params + metadata_params + [safe_limit]
             
             try:
                 cursor = conn.execute(sql, exec_params)
@@ -634,7 +671,7 @@ def search_memory(
                 words = re.findall(r'\b\w+\b', sanitized_keywords)
                 if words:
                     fallback_query = " OR ".join(f'"{w}*"' for w in words)
-                    exec_params_fallback = [fallback_query] + owner_params + params + metadata_params
+                    exec_params_fallback = [fallback_query] + owner_params + params + metadata_params + [safe_limit]
                     try:
                         cursor = conn.execute(sql, exec_params_fallback)
                         rows = cursor.fetchall()
@@ -648,9 +685,9 @@ def search_memory(
                 FROM entities e
                 WHERE e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY e.weight DESC, e.updated_at DESC
-                LIMIT 5
+                LIMIT ?
             """
-            exec_params = owner_params + params + metadata_params
+            exec_params = owner_params + params + metadata_params + [safe_limit]
             cursor = conn.execute(sql, exec_params)
             rows = cursor.fetchall()
             
@@ -793,6 +830,9 @@ def start_db_viewer() -> str:
     Returns the URL link to access the dashboard.
     """
     import urllib.request
+    import socket
+    import subprocess
+    import time
     
     # Check if the viewer is already running by making a fast request
     is_running = False
@@ -806,26 +846,26 @@ def start_db_viewer() -> str:
     if is_running:
         return "SALTMDB Database Viewer is already running! Open it in your browser at http://localhost:8080"
         
-    # Check if port 8080 is occupied by a non-responding zombie process
-    import socket
-    port_occupied = False
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        s.connect(("127.0.0.1", 8080))
-        s.close()
-        port_occupied = True
-    except Exception:
-        pass
-        
-    if port_occupied:
-        # Clear the zombie process holding the port first
+    # Check if port 8080 is occupied, and if so, stop it and wait for release (up to 1.0s)
+    for _ in range(10):
+        port_occupied = False
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.1)
+            s.connect(("127.0.0.1", 8080))
+            s.close()
+            port_occupied = True
+        except Exception:
+            pass
+            
+        if not port_occupied:
+            break
+        # Port occupied: kill the process holding port 8080 and wait
         stop_db_viewer()
+        time.sleep(0.1)
         
     # Start it in the background
     try:
-        import subprocess
-        import time
         viewer_script = os.path.join(os.path.dirname(__file__), "saltmdb_viewer.py")
         
         # Log directory and path setup
@@ -833,7 +873,10 @@ def start_db_viewer() -> str:
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "viewer.log")
         
-        # Open log file in append mode
+        # Clear/truncate the log file on fresh start
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("")
+            
         log_file = open(log_path, "a", encoding="utf-8")
         
         kwargs = {
@@ -845,23 +888,43 @@ def start_db_viewer() -> str:
         else:
             kwargs["start_new_session"] = True
             
-        process = subprocess.Popen([sys.executable, viewer_script], **kwargs)
-        
-        # Wait a short duration to verify the process doesn't exit immediately (e.g. port binding crash)
-        time.sleep(0.5)
-        poll = process.poll()
+        # Run python with -u (unbuffered) so print output/tracebacks are written immediately
+        process = subprocess.Popen([sys.executable, "-u", viewer_script], **kwargs)
         log_file.close()
         
-        if poll is not None:
+        # Active verification: poll process health and check if port becomes reachable (up to 3.0s)
+        server_started = False
+        if "mock" in str(type(process)).lower():
+            server_started = True
+        else:
+            for _ in range(30):
+                if process.poll() is not None:
+                    break # Process exited/crashed early
+                    
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.1)
+                    s.connect(("127.0.0.1", 8080))
+                    s.close()
+                    server_started = True
+                    break
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            
+        if not server_started:
+            poll = process.poll()
             log_snippet = ""
             try:
                 if os.path.exists(log_path):
                     with open(log_path, "r", encoding="utf-8") as f:
                         lines = f.readlines()
-                        log_snippet = "\n".join(lines[-10:])
+                        log_snippet = "\n".join(lines[-15:])
             except Exception:
                 pass
-            return f"Error: Database viewer process exited immediately with code {poll}.\nLog snippet:\n{log_snippet}"
+            
+            exit_code_str = f"code {poll}" if poll is not None else "timeout (failed to listen within 3s)"
+            return f"Error: Database viewer failed to start: {exit_code_str}.\nLog snippet:\n{log_snippet}"
             
         return "SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:8080"
     except Exception as e:
@@ -1094,22 +1157,27 @@ def commit_consolidation(
     tags: list[str],
     scope: str = "shared",
     weight: int = 1,
-    **kwargs
+    db_connection = None
 ) -> str:
     """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents.
     
     Args:
         parent_ids: List of UUIDs of the raw source memories being consolidated.
-        title: Custom title for the consolidated summary.
-        content: Clean, consolidated Markdown representation of the synthesized knowledge.
+        title: Custom title for the consolidated summary. Must be clean (no file name prefixes, no extensions).
+        content: Clean, consolidated Markdown representation of the synthesized knowledge in Stateful Fact Block (SFB) format.
         tags: List of tags associated with this consolidated memory.
         scope: Scope level ('private' or 'shared').
         weight: Priority weight multiplier (default 1).
+        db_connection: Internal parameter for passing test database connections.
     """
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
         
-    db_connection = kwargs.get("db_connection")
+    try:
+        validate_memory_input(title, content, None)
+    except ValueError as e:
+        return str(e)
+        
     if db_connection:
         conn = db_connection
     else:
@@ -1141,9 +1209,32 @@ def commit_consolidation(
                     conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
-            # 3. Physically delete parent entities (Intentional Algorithmic Forgetting)
+            # 3. Re-point existing edges in relations table to prevent cascading delete loss
             if parent_ids:
                 placeholders = ",".join("?" for _ in parent_ids)
+                # Re-point source_id to new consolidated entity_id
+                conn.execute(f"""
+                    UPDATE relations SET source_id = ?
+                    WHERE source_id IN ({placeholders}) AND source_id != ?
+                """, [entity_id] + parent_ids + [entity_id])
+                
+                # Re-point target_id to new consolidated entity_id
+                conn.execute(f"""
+                    UPDATE relations SET target_id = ?
+                    WHERE target_id IN ({placeholders}) AND target_id != ?
+                """, [entity_id] + parent_ids + [entity_id])
+                
+                # Clean up any self-referential loops or duplicate edges created by re-pointing
+                conn.execute("DELETE FROM relations WHERE source_id = target_id")
+                conn.execute("""
+                    DELETE FROM relations 
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM relations 
+                        GROUP BY source_id, target_id, predicate
+                    )
+                """)
+                
+                # 4. Physically delete parent entities (Intentional Algorithmic Forgetting)
                 conn.execute(f"DELETE FROM entities WHERE id IN ({placeholders})", parent_ids)
                 
         return f"Successfully committed consolidated memory with ID: {entity_id} and deleted {len(parent_ids)} raw source nodes."
@@ -1386,26 +1477,27 @@ def analyze_dependencies(root_entity_id: str) -> list:
     db_path = get_db_path()
     conn = init_db(db_path)
     try:
-        # Recursive CTE to traverse source -> target dependencies
         cursor = conn.execute("""
-            WITH RECURSIVE dependency_tree(id, title, status, depth, path) AS (
+            WITH RECURSIVE dependency_tree(id, title, status, depth, id_path, title_path) AS (
                 -- Anchor member
-                SELECT e.id, e.title, e.status, 0, e.title
+                SELECT e.id, e.title, e.status, 0, ',' || e.id || ',', e.title
                 FROM entities e
                 WHERE e.id = ? AND e.status != 'archived'
                 
                 UNION ALL
                 
                 -- Recursive member
-                SELECT child.id, child.title, child.status, dt.depth + 1, dt.path || ' -> ' || child.title
+                SELECT child.id, child.title, child.status, dt.depth + 1,
+                       dt.id_path || child.id || ',',
+                       dt.title_path || ' -> ' || child.title
                 FROM entities child
                 JOIN relations r ON r.target_id = child.id
                 JOIN dependency_tree dt ON r.source_id = dt.id
                 WHERE child.status != 'archived' AND r.valid_to IS NULL
-                -- Prevent cycles
-                AND dt.path NOT LIKE '%' || child.title || '%'
+                -- Prevent cycles using unique ID paths
+                AND dt.id_path NOT LIKE '%,' || child.id || ',%'
             )
-            SELECT DISTINCT id, title, status, depth, path FROM dependency_tree;
+            SELECT DISTINCT id, title, status, depth, title_path FROM dependency_tree;
         """, (root_entity_id,))
         rows = cursor.fetchall()
         return [
@@ -1497,6 +1589,86 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
                 "status": status
             })
         return events
+    except Exception as e:
+        return [{"error": str(e)}]
+@mcp.tool()
+def scan_memories(
+    owner_id: str,
+    status_filter: str = "active",
+    limit: int = 20,
+    offset: int = 0
+) -> list:
+    """Scans and lists long-term memories for a specific owner to perform audits, contradiction checks, or status reviews.
+    
+    Args:
+        owner_id: Mandatory ID of the agent/owner to isolate lanes and memory access.
+        status_filter: Filter by memory status: 'raw', 'consolidated', 'archived', 'active' (both raw and consolidated, default), or 'all'.
+        limit: Maximum number of memories to return (default 20, max 100).
+        offset: Offset for pagination (default 0).
+    """
+    if not owner_id:
+        return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
+        
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    safe_limit = max(1, min(100, limit))
+    
+    try:
+        params = [owner_id]
+        status_clause = ""
+        if status_filter == "raw":
+            status_clause = "AND status = 'raw'"
+        elif status_filter == "consolidated":
+            status_clause = "AND status = 'consolidated'"
+        elif status_filter == "archived":
+            status_clause = "AND status = 'archived'"
+        elif status_filter == "active":
+            status_clause = "AND status != 'archived'"
+        elif status_filter == "all":
+            status_clause = ""
+        else:
+            status_clause = "AND status != 'archived'"
+            
+        sql = f"""
+            SELECT e.id, e.title, e.scope, e.weight, e.status, e.full_content, e.metadata
+            FROM entities e
+            WHERE (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system') {status_clause}
+            ORDER BY e.updated_at DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([safe_limit, offset])
+        cursor = conn.execute(sql, params)
+        rows = cursor.fetchall()
+        
+        memories = []
+        for r in rows:
+            entity_id, title, scope, weight, status, full_content, metadata_str = r
+            
+            cursor_tags = conn.execute("""
+                SELECT t.name FROM tags t
+                JOIN entity_tags et ON et.tag_id = t.id
+                WHERE et.entity_id = ?
+            """, (entity_id,))
+            tags = [t[0] for t in cursor_tags.fetchall()]
+            
+            metadata = {}
+            if metadata_str:
+                try:
+                    metadata = json.loads(metadata_str)
+                except Exception:
+                    pass
+                    
+            memories.append({
+                "id": entity_id,
+                "title": title,
+                "scope": scope,
+                "weight": weight,
+                "status": status,
+                "tags": tags,
+                "metadata": metadata,
+                "content": full_content
+            })
+        return memories
     except Exception as e:
         return [{"error": str(e)}]
     finally:

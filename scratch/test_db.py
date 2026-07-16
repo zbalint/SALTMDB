@@ -26,30 +26,51 @@ from saltmdb_server import (
     archive_memory,
     get_recent_events,
     detect_orphaned_memories,
-    check_duplicate_memories
+    check_duplicate_memories,
+    scan_memories
 )
 
-TEST_DB_PATH = "test_saltmdb.db"
+TEST_DB_PATH = "test_saltmdb_run.db"
 
 class TestSALTMDB(unittest.TestCase):
     def setUp(self):
+        import saltmdb_server
+        self.old_trigger = saltmdb_server.trigger_librarian
+        saltmdb_server.trigger_librarian = lambda: None
         self.old_db_path = os.environ.get("SALTMDB_DB_PATH")
-        os.environ["SALTMDB_DB_PATH"] = os.path.abspath(TEST_DB_PATH)
-        if os.path.exists(TEST_DB_PATH):
-            os.remove(TEST_DB_PATH)
+        
+        # Unique database path per test method to completely avoid locks and pollution
+        self.db_name = f"test_saltmdb_{self._testMethodName}.db"
+        os.environ["SALTMDB_DB_PATH"] = os.path.abspath(self.db_name)
+        if os.path.exists(self.db_name):
+            try:
+                os.remove(self.db_name)
+            except PermissionError:
+                pass
         # Ensure WAL journal files are also deleted
         for ext in ["-wal", "-shm"]:
-            if os.path.exists(TEST_DB_PATH + ext):
-                os.remove(TEST_DB_PATH + ext)
-        self.conn = init_db(TEST_DB_PATH)
+            if os.path.exists(self.db_name + ext):
+                try:
+                    os.remove(self.db_name + ext)
+                except PermissionError:
+                    pass
+        self.conn = init_db(self.db_name)
 
     def tearDown(self):
         self.conn.close()
-        if os.path.exists(TEST_DB_PATH):
-            os.remove(TEST_DB_PATH)
+        import saltmdb_server
+        saltmdb_server.trigger_librarian = self.old_trigger
+        if os.path.exists(self.db_name):
+            try:
+                os.remove(self.db_name)
+            except PermissionError:
+                pass
         for ext in ["-wal", "-shm"]:
-            if os.path.exists(TEST_DB_PATH + ext):
-                os.remove(TEST_DB_PATH + ext)
+            if os.path.exists(self.db_name + ext):
+                try:
+                    os.remove(self.db_name + ext)
+                except PermissionError:
+                    pass
         # Restore environment variable
         if self.old_db_path is not None:
             os.environ["SALTMDB_DB_PATH"] = self.old_db_path
@@ -58,7 +79,6 @@ class TestSALTMDB(unittest.TestCase):
         # Clean up custom redactions
         if os.path.exists(".saltmdb_redact"):
             os.remove(".saltmdb_redact")
-        import saltmdb_server
         saltmdb_server.CUSTOM_REDACT_PATTERNS = []
 
     def test_redact_secrets(self):
@@ -380,7 +400,7 @@ class TestSALTMDB(unittest.TestCase):
         self.assertNotIn("Agent1 Fact", titles2)
         
         # Search without owner_id (should return error payload)
-        results_err = search_memory(query_keywords="Fact")
+        results_err = search_memory(query_keywords="Fact", owner_id=None)
         self.assertEqual(len(results_err), 1)
         self.assertIn("error", results_err[0])
         self.assertIn("owner_id is mandatory", results_err[0]["error"])
@@ -665,7 +685,7 @@ class TestSALTMDB(unittest.TestCase):
             tags=["#ops"],
             scope="shared",
             entity_id="uuid-meta-1",
-            metadata={"project": "SALTMDB", "source_path": "/etc/saltmdb.conf"}
+            metadata={"project": "SALTMDB", "source_path": "etc/saltmdb.conf"}
         )
         store_knowledge(
             owner_id="agent1",
@@ -673,7 +693,7 @@ class TestSALTMDB(unittest.TestCase):
             tags=["#build"],
             scope="shared",
             entity_id="uuid-meta-2",
-            metadata={"project": "BuildPipeline", "source_path": "/bin/build.sh"}
+            metadata={"project": "BuildPipeline", "source_path": "bin/build.sh"}
         )
         
         # 2. Query with metadata filters
@@ -792,6 +812,137 @@ class TestSALTMDB(unittest.TestCase):
         con_ev = next(e for e in events if e["id"] == "event-huge-2")
         self.assertEqual(len(con_ev["content"]), len(event_content))
         self.assertNotIn("[TRUNCATED", con_ev["content"])
+
+    def test_input_validation(self):
+        # 1. Test clean title validation
+        res_bad_title = store_knowledge(
+            content="# Bad Title\nContent",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="CORE.md — Bad Title"
+        )
+        self.assertIn("Error: Title violates clean title guidelines", res_bad_title)
+        
+        # 2. Test metadata absolute path validation
+        res_bad_path = store_knowledge(
+            content="# Good Title\nContent",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Good Title",
+            metadata={"source_path": "C:\\Users\\workspace\\CORE.md"}
+        )
+        self.assertIn("Error: 'source_path' must be a relative repository path", res_bad_path)
+        
+        # 3. Test valid store passes
+        res_good = store_knowledge(
+            content="# Good Title\nContent",
+            tags=["#test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Good Title",
+            metadata={"source_path": "CORE.md"}
+        )
+        self.assertNotIn("Error", res_good)
+
+    def test_scan_memories(self):
+        # Insert 3 memories for agent1
+        store_knowledge(content="Content 1", tags=["#t1"], scope="shared", owner_id="agent1", title="Memory 1")
+        store_knowledge(content="Content 2", tags=["#t2"], scope="shared", owner_id="agent1", title="Memory 2")
+        store_knowledge(content="Content 3", tags=["#t3"], scope="shared", owner_id="agent1", title="Memory 3")
+        
+        # Scan active memories
+        mems = scan_memories(owner_id="agent1", status_filter="active", limit=2, offset=0)
+        self.assertEqual(len(mems), 2)
+        self.assertEqual(mems[0]["title"], "Memory 3") # Order by updated_at desc
+        self.assertEqual(mems[1]["title"], "Memory 2")
+        
+        # Scan with offset
+        mems_offset = scan_memories(owner_id="agent1", status_filter="active", limit=2, offset=2)
+        self.assertEqual(len(mems_offset), 1)
+        self.assertEqual(mems_offset[0]["title"], "Memory 1")
+
+    def test_dependency_cycle_detection_by_id(self):
+        # 1. Create entities with DUPLICATE titles but different IDs
+        id1 = store_knowledge(content="Content 1", tags=["#tag"], scope="shared", owner_id="agent1", title="Duplicate Title").split(": ")[-1]
+        id2 = store_knowledge(content="Content 2", tags=["#tag"], scope="shared", owner_id="agent2", title="Duplicate Title").split(": ")[-1]
+        id3 = store_knowledge(content="Content 3", tags=["#tag"], scope="shared", owner_id="agent1", title="Third Node").split(": ")[-1]
+        
+        # Build path: id1 -> id2 -> id3
+        store_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        store_relation(source_id=id2, target_id=id3, predicate="depends_on")
+        
+        # Traversal from id1 should return all 3 nodes (depth 0, 1, 2)
+        tree = analyze_dependencies(id1)
+        self.assertEqual(len(tree), 3)
+        self.assertEqual(tree[0]["id"], id1)
+        self.assertEqual(tree[1]["id"], id2)
+        self.assertEqual(tree[2]["id"], id3)
+        
+        # 2. Introduce a REAL cycle: id3 -> id1
+        store_relation(source_id=id3, target_id=id1, predicate="depends_on")
+        
+        # Traversal should not crash or run indefinitely, FTS/CTE should halt at cycle
+        tree_cycle = analyze_dependencies(id1)
+        # It should still only return 3 unique nodes in the distinct set
+        self.assertEqual(len(tree_cycle), 3)
+
+    def test_commit_consolidation_repoints_relations(self):
+        # Create raw entities
+        p1 = store_knowledge(content="Parent 1 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 1").split(": ")[-1]
+        p2 = store_knowledge(content="Parent 2 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 2").split(": ")[-1]
+        other = store_knowledge(content="Other content", tags=["#tag"], scope="shared", owner_id="agent1", title="Other Node").split(": ")[-1]
+        
+        # Relation: p1 depends on other
+        store_relation(source_id=p1, target_id=other, predicate="depends_on")
+        
+        # Perform consolidation on p1 and p2
+        res = commit_consolidation(
+            parent_ids=[p1, p2],
+            title="Consolidated Node",
+            content="# Consolidated Node\nSynthesized content.",
+            tags=["#consolidated"],
+            scope="shared",
+            db_connection=self.conn
+        )
+        self.assertNotIn("Error", res)
+        # Extract new entity ID
+        new_id = res.split("ID: ")[-1].split(" ")[0].strip()
+        
+        # Verify p1 and p2 are deleted
+        cursor = self.conn.execute("SELECT id FROM entities WHERE id IN (?, ?)", (p1, p2))
+        self.assertEqual(len(cursor.fetchall()), 0)
+        
+        # Verify relation has been re-pointed to new_id -> other
+        cursor = self.conn.execute("SELECT source_id, target_id FROM relations WHERE target_id = ?", (other,))
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], new_id)
+        self.assertEqual(row[1], other)
+
+    def test_search_memory_custom_limit(self):
+        # Store 10 distinct entities
+        for i in range(10):
+            store_knowledge(
+                content=f"Distinct search content {i}",
+                tags=["#limit-test"],
+                scope="shared",
+                owner_id="agent1",
+                title=f"Search Limit Title {i}"
+            )
+            
+        # 1. Test default limit (5)
+        res_default = search_memory(owner_id="agent1", tags_filter=["#limit-test"])
+        self.assertEqual(len(res_default), 5)
+        
+        # 2. Test custom limit (3)
+        res_custom = search_memory(owner_id="agent1", tags_filter=["#limit-test"], limit=3)
+        self.assertEqual(len(res_custom), 3)
+        
+        # 3. Test capped limit (30 -> 25)
+        res_capped = search_memory(owner_id="agent1", tags_filter=["#limit-test"], limit=30)
+        self.assertEqual(len(res_capped), 10)
 
 if __name__ == "__main__":
     unittest.main()
