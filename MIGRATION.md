@@ -13,6 +13,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.8` | 2 | No schema changes. Updated Python tool signatures, deduplication logic, tag normalization, and event-read tools | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.9` | 2 | No schema changes. Added Relations Topology graph visualizer and modal click-through links to database viewer | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.10` | 2 | No schema changes. Fixed string escaping syntax error on Outfit font-family definition in server JS block | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.11` | 2 | No schema changes. Added stop_db_viewer MCP tool for programmatic viewer lifecycle control | **No Action Required** (fully backward-compatible) |
 
 ---
 

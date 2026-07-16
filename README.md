@@ -101,6 +101,7 @@ The server exposes 12 tools over standard I/O:
 | `analyze_dependencies` | `root_entity_id` | Traverses relationship trees using recursive SQL CTEs to map downstream components. |
 | `create_snapshot` | None | Safely creates a timestamped database backup in `backups/` using SQLite's backup API. |
 | `start_db_viewer` | None | Launches the zero-dependency database dashboard viewer locally on port 8080. |
+| `stop_db_viewer` | None | Terminates the database dashboard viewer running on port 8080. |
 
 ---
 

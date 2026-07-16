@@ -558,5 +558,23 @@ class TestSALTMDB(unittest.TestCase):
         self.assertEqual(data["tag_name"], "#ops-runbook")
         self.assertEqual(len(data["entity_ids"]), 3)
 
+    def test_db_viewer_start_stop(self):
+        from saltmdb_server import start_db_viewer, stop_db_viewer
+        # 1. Start (or detect already running)
+        res_start = start_db_viewer()
+        self.assertTrue("running" in res_start.lower() or "started" in res_start.lower())
+        
+        # 2. Stop the viewer
+        res_stop = stop_db_viewer()
+        self.assertTrue("stopped" in res_stop.lower())
+        
+        # 3. Stop again (should report not running)
+        res_stop2 = stop_db_viewer()
+        self.assertTrue("not running" in res_stop2.lower() or "closed" in res_stop2.lower())
+        
+        # 4. Start it back up
+        res_start2 = start_db_viewer()
+        self.assertTrue("started" in res_start2.lower())
+
 if __name__ == "__main__":
     unittest.main()

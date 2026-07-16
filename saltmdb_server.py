@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.10"
+__version__ = "0.1.0-alpha.11"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -722,6 +722,53 @@ def start_db_viewer() -> str:
         return "SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:8080"
     except Exception as e:
         return f"Error starting database viewer: {e}"
+
+@mcp.tool()
+def stop_db_viewer() -> str:
+    """Stops the running local SALTMDB web dashboard/viewer if it is running on port 8080."""
+    import subprocess
+    import socket
+    
+    # Check if port 8080 is actually open
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(("127.0.0.1", 8080))
+        s.close()
+    except Exception:
+        return "SALTMDB Database Viewer is not running (port 8080 is closed)."
+        
+    # Attempt to kill process holding port 8080
+    try:
+        if sys.platform == "win32":
+            # Find PID using netstat
+            cmd = "netstat -ano"
+            out = subprocess.check_output(cmd, shell=True, text=True)
+            for line in out.splitlines():
+                if ":8080" in line and "LISTENING" in line:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        pid = parts[-1]
+                        # Kill the PID
+                        subprocess.run(f"taskkill /F /PID {pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return f"SALTMDB Database Viewer (PID {pid}) stopped successfully."
+        else:
+            # Unix-like: lsof -t -i:8080
+            try:
+                pid = subprocess.check_output(["lsof", "-t", "-i:8080"], text=True).strip()
+                if pid:
+                    subprocess.run(["kill", "-9", pid])
+                    return f"SALTMDB Database Viewer (PID {pid}) stopped successfully."
+            except Exception:
+                # Try fuser
+                try:
+                    subprocess.run(["fuser", "-k", "8080/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return "SALTMDB Database Viewer stopped successfully (using fuser)."
+                except Exception:
+                    pass
+        return "Failed to determine the PID of the viewer on port 8080."
+    except Exception as e:
+        return f"Error stopping database viewer: {e}"
 
 # =====================================================================
 # Librarian / Garbage Collection Process

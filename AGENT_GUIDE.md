@@ -46,6 +46,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories.
 * `analyze_dependencies(root_entity_id)`: Recursively trace downstream relational paths using recursive SQL CTEs.
 * `start_db_viewer()`: Launch the web-based database browser.
+* `stop_db_viewer()`: Close/terminate the database browser process.
 
 ## 2. Operational Lifecycle
 
