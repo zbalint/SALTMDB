@@ -848,9 +848,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_scan_memories(self):
         # Insert 3 memories for agent1
-        store_knowledge(content="Content 1", tags=["#t1"], scope="shared", owner_id="agent1", title="Memory 1")
-        store_knowledge(content="Content 2", tags=["#t2"], scope="shared", owner_id="agent1", title="Memory 2")
-        store_knowledge(content="Content 3", tags=["#t3"], scope="shared", owner_id="agent1", title="Memory 3")
+        store_knowledge(content="Content 1", tags=["#t1"], scope="shared", owner_id="agent1", title="Memory 1", skip_duplicate_check=True)
+        store_knowledge(content="Content 2", tags=["#t2"], scope="shared", owner_id="agent1", title="Memory 2", skip_duplicate_check=True)
+        store_knowledge(content="Content 3", tags=["#t3"], scope="shared", owner_id="agent1", title="Memory 3", skip_duplicate_check=True)
         
         # Scan active memories
         mems = scan_memories(owner_id="agent1", status_filter="active", limit=2, offset=0)
@@ -929,7 +929,8 @@ class TestSALTMDB(unittest.TestCase):
                 tags=["#limit-test"],
                 scope="shared",
                 owner_id="agent1",
-                title=f"Search Limit Title {i}"
+                title=f"Search Limit Title {i}",
+                skip_duplicate_check=True
             )
             
         # 1. Test default limit (5)
@@ -943,6 +944,39 @@ class TestSALTMDB(unittest.TestCase):
         # 3. Test capped limit (30 -> 25)
         res_capped = search_memory(owner_id="agent1", tags_filter=["#limit-test"], limit=30)
         self.assertEqual(len(res_capped), 10)
+
+    def test_store_knowledge_fuzzy_duplicate_guard(self):
+        # 1. Store initial baseline memory
+        store_knowledge(
+            content="Always configure SQLite Write-Ahead Logging WAL mode for SALTMDB database.",
+            tags=["#database"],
+            scope="shared",
+            owner_id="agent1",
+            title="Database setup rule"
+        )
+        
+        # 2. Attempt to store a fuzzy duplicate memory (slight title & content variation)
+        res_dup = store_knowledge(
+            content="Ensure you always enable Write-Ahead Logging WAL mode for SALTMDB.",
+            tags=["#database"],
+            scope="shared",
+            owner_id="agent1",
+            title="Database setup guidelines"
+        )
+        
+        # Verify it was blocked and returned a duplicate warning message
+        self.assertIn("Warning: Potential duplicate of existing memory", res_dup)
+        
+        # 3. Repeat insertion with skip_duplicate_check=True
+        res_forced = store_knowledge(
+            content="Ensure you always enable Write-Ahead Logging WAL mode for SALTMDB.",
+            tags=["#database"],
+            scope="shared",
+            owner_id="agent1",
+            title="Database setup guidelines",
+            skip_duplicate_check=True
+        )
+        self.assertIn("Knowledge stored successfully", res_forced)
 
 if __name__ == "__main__":
     unittest.main()

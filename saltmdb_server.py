@@ -420,7 +420,8 @@ def store_knowledge(
     impact: int = None,
     novelty: int = None,
     actionability: int = None,
-    metadata: dict = None
+    metadata: dict = None,
+    skip_duplicate_check: bool = False
 ) -> str:
     """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
     
@@ -438,6 +439,7 @@ def store_knowledge(
         novelty: Optional score (1-5) representing info novelty.
         actionability: Optional score (1-5) representing action priority.
         metadata: Optional dictionary of structured attributes to match. You MUST include a relative repository path in metadata['source_path'].
+        skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
     """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
@@ -481,6 +483,25 @@ def store_knowledge(
                 print(f"Deduplication: Matched existing memory '{title}' (ID: {entity_id}). Routing to temporal upsert.")
         except Exception:
             pass # Keep going if tables aren't fully set up yet
+            
+    # Fuzzy duplicate check safety net
+    if not entity_id and not skip_duplicate_check:
+        try:
+            dup_check = check_duplicate_memories(
+                title=title,
+                content=redacted_content,
+                owner_id=owner_id,
+                tags=tags
+            )
+            if dup_check.get("duplicate_found") and "error" not in dup_check:
+                top = dup_check["potential_duplicates"][0]
+                conn.close()
+                return (f"Warning: Potential duplicate of existing memory '{top['title']}' "
+                        f"(ID: {top['id']}, similarity {top['similarity_score']}). "
+                        f"Call store_knowledge with entity_id='{top['id']}' to update it instead, "
+                        f"or set skip_duplicate_check=True to force a new entry.")
+        except Exception:
+            pass # Continue if check fails (e.g. database uninitialized)
             
     if not entity_id:
         entity_id = str(uuid.uuid4())
