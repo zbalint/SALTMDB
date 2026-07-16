@@ -806,6 +806,22 @@ def start_db_viewer() -> str:
     if is_running:
         return "SALTMDB Database Viewer is already running! Open it in your browser at http://localhost:8080"
         
+    # Check if port 8080 is occupied by a non-responding zombie process
+    import socket
+    port_occupied = False
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect(("127.0.0.1", 8080))
+        s.close()
+        port_occupied = True
+    except Exception:
+        pass
+        
+    if port_occupied:
+        # Clear the zombie process holding the port first
+        stop_db_viewer()
+        
     # Start it in the background
     try:
         import subprocess
