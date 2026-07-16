@@ -1407,13 +1407,13 @@ def analyze_dependencies(root_entity_id: str) -> list:
         conn.close()
 
 @mcp.tool()
-def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int = 50) -> list:
+def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int = 20) -> list:
     """Retrieves recent events from the short-term ledger.
     
     Args:
         agent_id: Optional filter for a specific agent ID.
         type_filter: Optional filter for a specific event type (e.g. 'consolidation_request').
-        limit: Maximum number of events to return (default 50).
+        limit: Maximum number of events to return (default 20).
     """
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -1445,6 +1445,14 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
             ev_id, timestamp, agent, ev_type, content, error_code = r
             status = "pending"
             
+            # Truncate content to 1000 chars if massive, preserving it for consolidation requests
+            display_content = content
+            if content and len(content) > 1000:
+                if ev_type == "consolidation_request":
+                    pass
+                else:
+                    display_content = content[:1000] + " ... [TRUNCATED FOR CONTEXT CONSERVATION]"
+            
             if ev_type == "consolidation_request" and content:
                 try:
                     data = json.loads(content)
@@ -1468,7 +1476,7 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
                 "timestamp": timestamp,
                 "agent_id": agent,
                 "type": ev_type,
-                "content": content,
+                "content": display_content,
                 "error_code": error_code,
                 "status": status
             })

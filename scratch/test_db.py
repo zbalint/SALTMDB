@@ -761,5 +761,36 @@ class TestSALTMDB(unittest.TestCase):
         self.assertTrue(len(res["potential_duplicates"]) >= 1)
         self.assertEqual(res["potential_duplicates"][0]["id"], "uuid-dup-base")
 
+    def test_get_recent_events_truncation(self):
+        # 1. Log a massive event (e.g. 1500 characters)
+        massive_text = "A" * 1500
+        now = datetime.now(UTC).isoformat()
+        with self.conn:
+            self.conn.execute("""
+                INSERT INTO events (id, timestamp, agent_id, type, content)
+                VALUES ('event-huge-1', ?, 'agent1', 'attempt', ?)
+            """, (now, massive_text))
+            
+        # 2. Log a massive consolidation request
+        event_content = json.dumps({"target": "general", "entity_ids": ["e-dyn-1"] * 50, "extra": "B" * 1200})
+        with self.conn:
+            self.conn.execute("""
+                INSERT INTO events (id, timestamp, agent_id, type, content)
+                VALUES ('event-huge-2', ?, 'agent1', 'consolidation_request', ?)
+            """, (now, event_content))
+            
+        # 3. Retrieve events
+        events = get_recent_events(agent_id="agent1", limit=10)
+        
+        # Find attempt event
+        att_ev = next(e for e in events if e["id"] == "event-huge-1")
+        self.assertTrue(len(att_ev["content"]) < 1100)
+        self.assertIn("[TRUNCATED", att_ev["content"])
+        
+        # Find consolidation event (must NOT be truncated!)
+        con_ev = next(e for e in events if e["id"] == "event-huge-2")
+        self.assertEqual(len(con_ev["content"]), len(event_content))
+        self.assertNotIn("[TRUNCATED", con_ev["content"])
+
 if __name__ == "__main__":
     unittest.main()
