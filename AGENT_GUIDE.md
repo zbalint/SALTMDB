@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the SALTMDB M
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via five core MCP tools exposed by [saltmdb_server.py](saltmdb_server.py):
+Agents interface with SALTMDB via seven core MCP tools exposed by [saltmdb_server.py](saltmdb_server.py):
 
 ```mermaid
 graph TD
@@ -21,6 +21,8 @@ graph TD
         C -->|Retrieves Weighted Facts| E
         D -->|Saves Persistent Memory| G[store_knowledge]
         D -->|Cleans & Merges Chunks| H[commit_consolidation]
+        C -->|Maps Topology Edges| I[store_relation]
+        C -->|Recursive Tree Tracing| J[analyze_dependencies]
     end
 ```
 
@@ -36,36 +38,38 @@ Every agent configured to use SALTMDB must include memory management instruction
 You are connected to SALTMDB, a local-first memory database. You must actively interact with the database to maintain context across sessions.
 
 ## 1. Available Tools
-* `search_memory(query_keywords, tags_filter)`: Search long-term consolidated memories.
-* `store_knowledge(title, content, tags, weight, scope)`: Save a new long-term memory.
+* `search_memory(query_keywords, tags_filter, owner_id)`: Search long-term memories. Pass your assigned `owner_id` to isolate results.
+* `store_knowledge(content, tags, scope, weight, is_core, owner_id, title, entity_id, relevance, impact, novelty, actionability)`: Save/upsert long-term knowledge.
 * `log_event(agent_id, type, content, error_code)`: Log a short-term operational event.
-* `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a high-quality consolidated memory and archive the raw source components.
+* `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a high-quality consolidated memory and prune the raw source components.
+* `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories.
+* `analyze_dependencies(root_entity_id)`: Recursively trace downstream relational paths using recursive SQL CTEs.
 * `start_db_viewer()`: Launch the web-based database browser.
 
 ## 2. Operational Lifecycle
 
 ### Phase A: Bootstrap (Session Start)
 Immediately upon initialization, before answering the user:
-1. Call `search_memory` with no query keywords to retrieve all entities with `is_core = 1`. This loads the user identity, behavioral baselines, and persona rules.
-2. Run a keyword search matching the current workspace name or active files to retrieve relevant long-term project anchors.
-3. Check the `events` table (or search results) for any recent events of type `consolidation_request`.
+1. Call `search_memory` with no query keywords, filtering by `#core` tag, and passing your assigned `owner_id` (e.g. `owner_id = 'agent1'`). This loads your persona, behavioral constraints, and user rules.
+2. Run a keyword search matching the workspace or active component path, passing your `owner_id` to isolate workspace initiative memory anchors.
+3. Check the `events` table for events of type `consolidation_request` where `agent_id` matches your assigned `owner_id`.
 
 ### Phase B: In-Session Logging
 1. Log every significant milestone, technical decision, and error event using `log_event`.
-2. Do not let errors or resolution details pass without logging them; this builds your short-term debugging ledger.
-3. Categorize logs using types: `decision` (design outcomes), `issue` (failures), `fix` (resolutions), and `attempt` (general facts/milestones).
+2. Categorize logs using types: `decision` (design outcomes), `issue` (failures), `fix` (resolutions), and `attempt` (general facts/milestones).
 
-### Phase C: Session Wrap-up (Commit)
+### Phase C: Session Wrap-up (Commit & Link)
 Before concluding your turn or finalizing a major task block:
 1. Query the short-term `events` table (or review your log actions).
 2. Synthesize new permanent facts, rules, or progress updates.
-3. Commit these synthesized updates to long-term memory using `store_knowledge`. Set `status = 'consolidated'` for long-term project anchors, or `status = 'raw'` for temporary notes.
+3. Commit or upsert these synthesized updates using `store_knowledge`. Always pass your `owner_id`. To update an existing fact instead of duplicating it, pass its original UUID to the `entity_id` parameter to trigger temporal versioning (SCD).
+4. If a component depends on or resolves another component, store the relationship edge using `store_relation(source_id, target_id, predicate)`.
 
 ### Phase D: Cognitive Consolidation (Cleanup)
-If you find pending `consolidation_request` events during Phase A:
+If you find pending `consolidation_request` events targeting your `owner_id` during Phase A:
 1. Retrieve the content of the raw entities listed in the event's `entity_ids`.
-2. Rephrase, synthesize, and merge these raw markdown files into a single, high-quality, comprehensive markdown memory. Resolve redundancies and contradictions.
-3. Call `commit_consolidation` with the parent UUIDs and the new consolidated markdown, clearing the raw clutter from active queries.
+2. Rephrase, synthesize, and merge these raw markdown files into a single, high-quality consolidated memory.
+3. Call `commit_consolidation` with the parent UUIDs and the new consolidated markdown, which physically prunes the source raw logs from the database.
 ```
 
 ---
@@ -139,26 +143,47 @@ commit_consolidation(
 )
 ```
 
+### E. Temporal Relational Topology mapping (Recursive CTE Tracing)
+Agents can natively link component dependencies to perform recursive dependency impact analysis:
+
+```python
+# 1. Agent maps dependency between component 'A' and component 'B':
+store_relation(
+    source_id="uuid-component-a",
+    target_id="uuid-component-b",
+    predicate="depends_on"
+)
+
+# 2. Agent checks downstream impact graph before refactoring Component A:
+affected_components = analyze_dependencies(root_entity_id="uuid-component-a")
+# Returns a recursive dependency tree path: e.g. "Component A -> Component B -> Component C"
+```
+
 ---
 
 ## 4. Setting Weights & Expiry Boundaries
 
-To cooperate with the background Librarian process, agents must assign correct weights when calling `store_knowledge`:
+To cooperate with the background Librarian process, agents can assign importance weights when calling `store_knowledge`. Alternatively, agents should supply **Multi-Dimensional Importance Scores** (`relevance`, `impact`, `novelty`, `actionability` rated 1-5) to let the server calculate weights:
 
-| Weight | Target Memory Type | Decay Lifespan (LRU) |
+| Computed Weight | Target Memory Type | Decay Lifespan (LRU) |
 | :---: | :--- | :--- |
-| **5** | Core rules, identity guidelines, and persona behaviors (`is_core = 1`) | **Immune** (never decayed or archived) |
-| **3** | Critical safeguards, architecture constraints, and regression prevention rules | **270 days** of total inactivity before archiving |
-| **1** | Default facts, initiative progress, and project updates | **90 days** of total inactivity before archiving |
+| **5** | Core rules, identity guidelines, and persona behaviors (`is_core = 1`) | **Immune** (never decayed or deleted) |
+| **3** | Critical safeguards, architecture constraints, and regression prevention rules | **270 days** of inactivity before decay |
+| **1-2**| Default facts, initiative progress, and project updates | **90 days** of inactivity before decay |
+
+### Temporal Slowly Changing Dimensions (SCD Type 2)
+When an agent updates an existing memory using `store_knowledge` with an explicit `entity_id`:
+1. The server closes the active window of the old version: it writes the historical snapshot with `status = 'archived'` and sets `valid_to = now`.
+2. The server creates the new active fact under the original `entity_id` with `valid_from = now` and `valid_to = NULL`.
+3. This allows the system to audit the lineage of how factoids, user instructions, or system architecture rules evolved.
 
 ### Promoting Memories to Core
-If a previously stored raw or consolidated project memory (`is_core = 0`) matures into a permanent rule or baseline constraint, it should be promoted to core status:
-1. **Programmatic Update (Agent-driven):** The agent calls the `store_knowledge` MCP tool with the target title, passing `is_core = true` and `weight = 5`.
+If a previously stored raw or consolidated project memory matures into a permanent rule or baseline constraint, it should be promoted to core status:
+1. **Programmatic Update (Agent-driven):** The agent calls the `store_knowledge` MCP tool with the target `entity_id`, passing `is_core = true` and `weight = 5`.
 2. **Manual Developer Override:** The user runs a direct SQL update manually on the database file:
    ```sql
    UPDATE entities SET is_core = 1, weight = 5, updated_at = CURRENT_TIMESTAMP WHERE id = 'ENTITY_UUID';
    ```
-This updates the entity status, protecting it from LRU decay, and placing it in the bootstrap loading context.
 
 > [!IMPORTANT]
 > **SQL Access Security:** Agents do not have raw SQL execution permissions. All actions must be performed using the predefined parameterized MCP tools. Do not expose a SQL client tool to agents, as this creates a major database integrity and credentials leak vulnerability.

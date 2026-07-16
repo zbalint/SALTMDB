@@ -16,13 +16,20 @@ from saltmdb_server import (
     CUSTOM_REDACT_PATTERNS,
     acquire_librarian_lock,
     release_librarian_lock,
-    commit_consolidation
+    commit_consolidation,
+    store_knowledge,
+    search_memory,
+    create_snapshot,
+    store_relation,
+    analyze_dependencies
 )
 
 TEST_DB_PATH = "test_saltmdb.db"
 
 class TestSALTMDB(unittest.TestCase):
     def setUp(self):
+        self.old_db_path = os.environ.get("SALTMDB_DB_PATH")
+        os.environ["SALTMDB_DB_PATH"] = os.path.abspath(TEST_DB_PATH)
         if os.path.exists(TEST_DB_PATH):
             os.remove(TEST_DB_PATH)
         # Ensure WAL journal files are also deleted
@@ -38,6 +45,11 @@ class TestSALTMDB(unittest.TestCase):
         for ext in ["-wal", "-shm"]:
             if os.path.exists(TEST_DB_PATH + ext):
                 os.remove(TEST_DB_PATH + ext)
+        # Restore environment variable
+        if self.old_db_path is not None:
+            os.environ["SALTMDB_DB_PATH"] = self.old_db_path
+        else:
+            os.environ.pop("SALTMDB_DB_PATH", None)
         # Clean up custom redactions
         if os.path.exists(".saltmdb_redact"):
             os.remove(".saltmdb_redact")
@@ -194,12 +206,10 @@ class TestSALTMDB(unittest.TestCase):
         )
         self.assertIn("Successfully committed", result)
         
-        # Verify the 5 raw entities are archived
+        # Verify the 5 raw entities are physically deleted (algorithmic forgetting)
         cursor = self.conn.execute("SELECT status FROM entities WHERE id LIKE 'e-clutter-%'")
         rows = cursor.fetchall()
-        self.assertEqual(len(rows), 5)
-        for r in rows:
-            self.assertEqual(r[0], 'archived')
+        self.assertEqual(len(rows), 0)
             
         # Verify a new consolidated memory is created
         cursor = self.conn.execute("SELECT id, status, parent_ids, title, full_content FROM entities WHERE status = 'consolidated'")
@@ -247,10 +257,9 @@ class TestSALTMDB(unittest.TestCase):
         )
         self.assertIn("Successfully committed", result)
 
-        # Verify parent status is 'archived'
+        # Verify parent entities are physically deleted (algorithmic forgetting)
         cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN ('e1', 'e2', 'e3', 'e4', 'e5')")
-        for _, status in cursor.fetchall():
-            self.assertEqual(status, 'archived')
+        self.assertEqual(len(cursor.fetchall()), 0)
 
         # Verify a new consolidated entity exists
         cursor = self.conn.execute("SELECT id, status, parent_ids, full_content FROM entities WHERE status = 'consolidated'")
@@ -295,6 +304,171 @@ class TestSALTMDB(unittest.TestCase):
         # Should be able to acquire/hijack expired lock
         fourth_attempt = acquire_librarian_lock(self.conn)
         self.assertTrue(fourth_attempt)
+
+    def test_store_knowledge_upsert(self):
+        # Store new memory
+        res = store_knowledge(
+            content="# Upsert Test\nInitial content here.",
+            tags=["#test"],
+            scope="shared",
+            weight=1,
+            entity_id="test-upsert-uuid"
+        )
+        self.assertIn("stored successfully", res)
+        
+        # Verify insertion
+        cursor = self.conn.execute("SELECT full_content, weight FROM entities WHERE id = 'test-upsert-uuid'")
+        row = cursor.fetchone()
+        self.assertEqual(row[0], "# Upsert Test\nInitial content here.")
+        self.assertEqual(row[1], 1)
+        
+        # Upsert (update) same memory
+        res2 = store_knowledge(
+            content="# Upsert Test (Updated)\nNew content here.",
+            tags=["#new-tag"],
+            scope="shared",
+            weight=5,
+            entity_id="test-upsert-uuid"
+        )
+        self.assertIn("stored successfully", res2)
+        
+        # Verify update
+        cursor = self.conn.execute("SELECT full_content, weight FROM entities WHERE id = 'test-upsert-uuid'")
+        row = cursor.fetchone()
+        self.assertEqual(row[0], "# Upsert Test (Updated)\nNew content here.")
+        self.assertEqual(row[1], 5)
+        
+        # Verify tag update (old tag cleared, new tag linked)
+        cursor = self.conn.execute("SELECT t.name FROM tags t JOIN entity_tags et ON t.id = et.tag_id WHERE et.entity_id = 'test-upsert-uuid'")
+        tags = [r[0] for r in cursor.fetchall()]
+        self.assertEqual(tags, ["#new-tag"])
+
+    def test_multi_agent_isolation(self):
+        # Store memory for agent1
+        store_knowledge(
+            content="# Agent1 Fact\nAgent1 content.",
+            tags=["#isolated"],
+            scope="shared",
+            owner_id="agent1"
+        )
+        # Store memory for agent2
+        store_knowledge(
+            content="# Agent2 Fact\nAgent2 content.",
+            tags=["#isolated"],
+            scope="shared",
+            owner_id="agent2"
+        )
+        
+        # Search as agent1
+        results1 = search_memory(query_keywords="Fact", owner_id="agent1")
+        titles1 = [r["title"] for r in results1]
+        self.assertIn("Agent1 Fact", titles1)
+        self.assertNotIn("Agent2 Fact", titles1)
+        
+        # Search as agent2
+        results2 = search_memory(query_keywords="Fact", owner_id="agent2")
+        titles2 = [r["title"] for r in results2]
+        self.assertIn("Agent2 Fact", titles2)
+        self.assertNotIn("Agent1 Fact", titles2)
+        
+        # Search globally (no owner_id)
+        results_global = search_memory(query_keywords="Fact")
+        titles_global = [r["title"] for r in results_global]
+        self.assertIn("Agent1 Fact", titles_global)
+        self.assertIn("Agent2 Fact", titles_global)
+
+    def test_create_snapshot(self):
+        # Test snapshot backup utility
+        res = create_snapshot()
+        self.assertIn("snapshot successfully created", res)
+        
+        # Find created file path from output
+        backup_path = res.split(": ")[-1].strip()
+        self.assertTrue(os.path.exists(backup_path))
+        
+        # Cleanup backup file
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        # Cleanup WAL backup files if any
+        for ext in ["-wal", "-shm"]:
+            if os.path.exists(backup_path + ext):
+                os.remove(backup_path + ext)
+
+    def test_temporal_versioning_scd(self):
+        # 1. Insert original memory
+        store_knowledge(
+            content="# Original Fact\nVersion 1 content.",
+            tags=["#ver1"],
+            scope="shared",
+            entity_id="temp-ver-uuid"
+        )
+        
+        # Verify it has valid_from set and valid_to is NULL
+        cursor = self.conn.execute("SELECT valid_from, valid_to FROM entities WHERE id = 'temp-ver-uuid'")
+        row = cursor.fetchone()
+        self.assertIsNotNone(row[0])
+        self.assertIsNone(row[1])
+        original_valid_from = row[0]
+        
+        # 2. Update memory to trigger temporal history copy (SCD Type 2)
+        store_knowledge(
+            content="# Updated Fact\nVersion 2 content.",
+            tags=["#ver2"],
+            scope="shared",
+            entity_id="temp-ver-uuid"
+        )
+        
+        # Verify active row was updated
+        cursor = self.conn.execute("SELECT full_content, valid_from, valid_to FROM entities WHERE id = 'temp-ver-uuid'")
+        row = cursor.fetchone()
+        self.assertEqual(row[0], "# Updated Fact\nVersion 2 content.")
+        self.assertIsNotNone(row[1])
+        self.assertIsNone(row[2])
+        self.assertNotEqual(row[1], original_valid_from)
+        
+        # Verify a historical row was created with status = 'archived' and valid_to set to current time
+        cursor = self.conn.execute("""
+            SELECT id, full_content, valid_from, valid_to, status 
+            FROM entities 
+            WHERE id LIKE 'temp-ver-uuid_h_%'
+        """)
+        hist_rows = cursor.fetchall()
+        self.assertEqual(len(hist_rows), 1)
+        hist_id, hist_content, hist_from, hist_to, hist_status = hist_rows[0]
+        self.assertEqual(hist_content, "# Original Fact\nVersion 1 content.")
+        self.assertEqual(hist_status, 'archived')
+        self.assertEqual(hist_from, original_valid_from)
+        self.assertIsNotNone(hist_to)
+        
+        # Verify tags for both the active and historical entities
+        cursor = self.conn.execute("SELECT t.name FROM tags t JOIN entity_tags et ON t.id = et.tag_id WHERE et.entity_id = ?", (hist_id,))
+        hist_tags = [r[0] for r in cursor.fetchall()]
+        self.assertEqual(hist_tags, ["#ver1"])
+        
+        cursor = self.conn.execute("SELECT t.name FROM tags t JOIN entity_tags et ON t.id = et.tag_id WHERE et.entity_id = 'temp-ver-uuid'")
+        active_tags = [r[0] for r in cursor.fetchall()]
+        self.assertEqual(active_tags, ["#ver2"])
+
+    def test_relations_and_cte_traversal(self):
+        # 1. Insert memory nodes
+        store_knowledge(content="# Core Component\nDescription.", tags=["#sys"], scope="shared", entity_id="node-core")
+        store_knowledge(content="# Dependency A\nDescription.", tags=["#sys"], scope="shared", entity_id="node-dep-a")
+        store_knowledge(content="# Dependency B\nDescription.", tags=["#sys"], scope="shared", entity_id="node-dep-b")
+        
+        # 2. Store relationships (relations)
+        res1 = store_relation(source_id="node-core", target_id="node-dep-a", predicate="depends_on")
+        res2 = store_relation(source_id="node-dep-a", target_id="node-dep-b", predicate="depends_on")
+        self.assertIn("Relation successfully stored", res1)
+        self.assertIn("Relation successfully stored", res2)
+        
+        # 3. Analyze dependencies recursively
+        deps = analyze_dependencies(root_entity_id="node-core")
+        self.assertEqual(len(deps), 3)
+        
+        paths = [d["path"] for d in deps]
+        self.assertIn("Core Component", paths)
+        self.assertIn("Core Component -> Dependency A", paths)
+        self.assertIn("Core Component -> Dependency A -> Dependency B", paths)
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.6"
+__version__ = "0.1.0-alpha.7"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -117,9 +117,18 @@ def init_db(db_path: str):
             status TEXT CHECK(status IN ('raw', 'consolidated', 'archived')) DEFAULT 'raw',
             parent_ids TEXT, -- JSON array of ancestor IDs
             title TEXT NOT NULL,
-            full_content TEXT NOT NULL
+            full_content TEXT NOT NULL,
+            valid_from DATETIME,
+            valid_to DATETIME
         );
         """)
+        
+        # Schema migration: attempt to add valid_from and valid_to columns to entities table if they don't exist
+        for col in ["valid_from DATETIME", "valid_to DATETIME"]:
+            try:
+                conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
+            except sqlite3.OperationalError:
+                pass
         
         # 3. Tags Table (Folksonomy with support for canonical aliases)
         conn.execute("""
@@ -140,6 +149,21 @@ def init_db(db_path: str):
             PRIMARY KEY (entity_id, tag_id),
             FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
             FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        );
+        """)
+
+        # 4b. Relations Table (Temporal knowledge graph edges)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS relations (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            valid_from DATETIME,
+            valid_to DATETIME,
+            FOREIGN KEY (source_id) REFERENCES entities(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
         );
         """)
         
@@ -355,7 +379,20 @@ def get_canonical_tags(domain: str = None) -> list:
         conn.close()
 
 @mcp.tool()
-def store_knowledge(content: str, tags: list, scope: str, weight: int = 1, is_core: bool = False, owner_id: str = None, title: str = None) -> str:
+def store_knowledge(
+    content: str,
+    tags: list,
+    scope: str,
+    weight: int = 1,
+    is_core: bool = False,
+    owner_id: str = None,
+    title: str = None,
+    entity_id: str = None,
+    relevance: int = None,
+    impact: int = None,
+    novelty: int = None,
+    actionability: int = None
+) -> str:
     """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
     
     Args:
@@ -366,13 +403,26 @@ def store_knowledge(content: str, tags: list, scope: str, weight: int = 1, is_co
         is_core: If True, bypasses search and gets injected into the agent prompt (default False).
         owner_id: Optional ID of the agent/owner storing this knowledge.
         title: Optional custom title. If omitted, the first markdown heading is auto-extracted.
+        entity_id: Optional custom entity ID to insert or update (upsert).
+        relevance: Optional score (1-5) representing context relevance.
+        impact: Optional score (1-5) representing user/emotional impact.
+        novelty: Optional score (1-5) representing info novelty.
+        actionability: Optional score (1-5) representing action priority.
     """
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
         
+    if relevance is not None or impact is not None or novelty is not None or actionability is not None:
+        r = relevance if relevance is not None else 3
+        im = impact if impact is not None else 3
+        n = novelty if novelty is not None else 3
+        a = actionability if actionability is not None else 3
+        weight = max(1, min(5, (r + im + n + a) // 4))
+        
     db_path = get_db_path()
     conn = init_db(db_path)
-    entity_id = str(uuid.uuid4())
+    if not entity_id:
+        entity_id = str(uuid.uuid4())
     redacted_content = redact_secrets(content)
     now = datetime.now(UTC).isoformat()
     
@@ -382,10 +432,45 @@ def store_knowledge(content: str, tags: list, scope: str, weight: int = 1, is_co
         
     try:
         with conn:
+            # Check if this entity already exists to do temporal versioning
+            cursor = conn.execute("SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,))
+            existing = cursor.fetchone()
+            if existing:
+                created_at, owner, valid_from = existing
+                hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
+                
+                # Copy current active row to history as 'archived' with closed valid_to
+                conn.execute("""
+                    INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to)
+                    SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?
+                    FROM entities WHERE id = ?
+                """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
+                
+                # Also copy tags to history entity so tag history is preserved
+                conn.execute("""
+                    INSERT INTO entity_tags (entity_id, tag_id)
+                    SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
+                """, (hist_id, entity_id))
+                
+            # Clean up existing tags if doing an update to prevent tag accumulation
+            conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
+            
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?)
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL)
+                ON CONFLICT(id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    last_accessed_at = excluded.last_accessed_at,
+                    owner_id = COALESCE(excluded.owner_id, entities.owner_id),
+                    scope = excluded.scope,
+                    is_core = excluded.is_core,
+                    weight = excluded.weight,
+                    status = excluded.status,
+                    title = excluded.title,
+                    full_content = excluded.full_content,
+                    valid_from = excluded.valid_from,
+                    valid_to = NULL
+            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now))
             
             for tag_name in tags:
                 tag_name = tag_name.strip()
@@ -411,12 +496,13 @@ def store_knowledge(content: str, tags: list, scope: str, weight: int = 1, is_co
         conn.close()
 
 @mcp.tool()
-def search_memory(query_keywords: str = None, tags_filter: list = None) -> list:
+def search_memory(query_keywords: str = None, tags_filter: list = None, owner_id: str = None) -> list:
     """Performs full-text keyword search and tag filtering in the long-term knowledge base.
     
     Args:
         query_keywords: Search terms used to match against indexing content via FTS5.
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
+        owner_id: Optional agent ID to isolate memory access.
     """
     if not query_keywords and not tags_filter:
         return []
@@ -443,26 +529,32 @@ def search_memory(query_keywords: str = None, tags_filter: list = None) -> list:
             params.extend(tags_filter)
             params.append(len(tags_filter))
             
+        owner_filter_clause = ""
+        owner_params = []
+        if owner_id:
+            owner_filter_clause = " AND (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system')"
+            owner_params.append(owner_id)
+            
         if query_keywords:
             # 10:1 title-to-content search weighting using sqlite FTS5 bm25 column weights
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0) as score, e.title
                 FROM entities_fts f
                 JOIN entities e ON e.id = f.id
-                WHERE entities_fts MATCH ? AND e.status != 'archived' {tag_filter_clause}
+                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {tag_filter_clause}
                 ORDER BY (bm25(entities_fts, 0.0, 10.0, 1.0) * e.weight) ASC
                 LIMIT 5
             """
-            exec_params = [query_keywords] + params
+            exec_params = [query_keywords] + owner_params + params
         else:
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title
                 FROM entities e
-                WHERE e.status != 'archived' {tag_filter_clause}
+                WHERE e.status != 'archived' {owner_filter_clause} {tag_filter_clause}
                 ORDER BY e.weight DESC, e.updated_at DESC
                 LIMIT 5
             """
-            exec_params = params
+            exec_params = owner_params + params
             
         cursor = conn.execute(sql, exec_params)
         rows = cursor.fetchall()
@@ -683,25 +775,25 @@ def decay_lru_memories(conn):
             print(f"Archived {len(to_archive)} stale memories due to access decay.")
 
 def consolidate_cluttered_tags(conn):
-    """Scans for tags with 5 or more raw entries and logs a consolidation request event for the agent."""
+    """Scans for tags with 5 or more raw entries per owner and logs a consolidation request event for that agent."""
     print("Checking for high tag density clutter...")
     cursor = conn.execute("""
-        SELECT et.tag_id, t.name, COUNT(*) 
+        SELECT et.tag_id, t.name, e.owner_id, COUNT(*) 
         FROM entity_tags et
         JOIN entities e ON et.entity_id = e.id
         JOIN tags t ON et.tag_id = t.id
         WHERE e.status = 'raw'
-        GROUP BY et.tag_id, t.name
+        GROUP BY et.tag_id, t.name, e.owner_id
         HAVING COUNT(*) >= 5
     """)
     cluttered = cursor.fetchall()
     
-    for tag_id, tag_name, count in cluttered:
+    for tag_id, tag_name, owner_id, count in cluttered:
         cursor = conn.execute("""
             SELECT e.id FROM entities e
             JOIN entity_tags et ON e.id = et.entity_id
-            WHERE et.tag_id = ? AND e.status = 'raw'
-        """, (tag_id,))
+            WHERE et.tag_id = ? AND e.status = 'raw' AND e.owner_id IS ?
+        """, (tag_id, owner_id))
         raw_ids = [r[0] for r in cursor.fetchall()]
         
         event_id = str(uuid.uuid4())
@@ -711,12 +803,14 @@ def consolidate_cluttered_tags(conn):
             "tag_name": tag_name,
             "entity_ids": raw_ids
         })
+        
+        target_agent = owner_id if owner_id else "librarian"
         with conn:
             conn.execute("""
                 INSERT INTO events (id, timestamp, agent_id, type, content)
-                VALUES (?, ?, 'librarian', 'consolidation_request', ?)
-            """, (event_id, now, content))
-        print(f"Logged consolidation request for tag '{tag_name}' (Entity IDs: {raw_ids})")
+                VALUES (?, ?, ?, 'consolidation_request', ?)
+            """, (event_id, now, target_agent, content))
+        print(f"Logged consolidation request for tag '{tag_name}' (Owner: {target_agent}, Entity IDs: {raw_ids})")
 
 def consolidate_memories(conn):
     """General consolidator that groups raw memories by owner/scope and logs general consolidation request events."""
@@ -751,11 +845,12 @@ def consolidate_memories(conn):
             "scope": scope,
             "entity_ids": entity_ids
         })
+        target_agent = owner_id if owner_id else "librarian"
         with conn:
             conn.execute("""
                 INSERT INTO events (id, timestamp, agent_id, type, content)
-                VALUES (?, ?, 'librarian', 'consolidation_request', ?)
-            """, (event_id, now, content))
+                VALUES (?, ?, ?, 'consolidation_request', ?)
+            """, (event_id, now, target_agent, content))
         print(f"Logged general consolidation request for {owner_id}/{scope} (Entity IDs: {entity_ids})")
 
 @mcp.tool()
@@ -813,18 +908,120 @@ def commit_consolidation(
                     conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
-            # 3. Archive parent entities
+            # 3. Physically delete parent entities (Intentional Algorithmic Forgetting)
             if parent_ids:
                 placeholders = ",".join("?" for _ in parent_ids)
-                conn.execute(f"""
-                    UPDATE entities 
-                    SET status = 'archived', updated_at = ? 
-                    WHERE id IN ({placeholders})
-                """, [now] + parent_ids)
+                conn.execute(f"DELETE FROM entities WHERE id IN ({placeholders})", parent_ids)
                 
-        return f"Successfully committed consolidated memory with ID: {entity_id} and archived {len(parent_ids)} raw source nodes."
+        return f"Successfully committed consolidated memory with ID: {entity_id} and deleted {len(parent_ids)} raw source nodes."
     except Exception as e:
         return f"Error committing consolidation: {e}"
+
+@mcp.tool()
+def create_snapshot() -> str:
+    """Creates a backup snapshot of the current database file in a backups/ directory.
+    
+    Returns:
+        Status message indicating success or failure.
+    """
+    db_path = get_db_path()
+    db_dir = os.path.dirname(db_path)
+    backups_dir = os.path.join(db_dir, "backups")
+    os.makedirs(backups_dir, exist_ok=True)
+    
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    backup_file = os.path.join(backups_dir, f"saltmdb_backup_{timestamp}.db")
+    
+    try:
+        source_conn = sqlite3.connect(db_path)
+        dest_conn = sqlite3.connect(backup_file)
+        try:
+            source_conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+            source_conn.close()
+        return f"Database snapshot successfully created: {backup_file}"
+    except Exception as e:
+        return f"Error creating database snapshot: {str(e)}"
+
+@mcp.tool()
+def store_relation(source_id: str, target_id: str, predicate: str) -> str:
+    """Stores a typed directional relationship (edge) between two long-term memory entities.
+    
+    Args:
+        source_id: UUID of the source entity (subject).
+        target_id: UUID of the target entity (object).
+        predicate: Description of the relationship (e.g., 'depends_on', 'part_of', 'resolved_by').
+    """
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    relation_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    try:
+        with conn:
+            # Verify both entities exist
+            cursor = conn.execute("SELECT id FROM entities WHERE id = ?", (source_id,))
+            if not cursor.fetchone():
+                return f"Error: Source entity {source_id} does not exist."
+            cursor = conn.execute("SELECT id FROM entities WHERE id = ?", (target_id,))
+            if not cursor.fetchone():
+                return f"Error: Target entity {target_id} does not exist."
+                
+            conn.execute("""
+                INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (relation_id, source_id, target_id, predicate, now, now))
+        return f"Relation successfully stored with ID: {relation_id}"
+    except Exception as e:
+        return f"Error storing relation: {e}"
+    finally:
+        conn.close()
+
+@mcp.tool()
+def analyze_dependencies(root_entity_id: str) -> list:
+    """Traverses the temporal knowledge graph using recursive CTE queries to map downstream components.
+    
+    Args:
+        root_entity_id: The UUID of the memory node to begin traversal from.
+    """
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        # Recursive CTE to traverse source -> target dependencies
+        cursor = conn.execute("""
+            WITH RECURSIVE dependency_tree(id, title, status, depth, path) AS (
+                -- Anchor member
+                SELECT e.id, e.title, e.status, 0, e.title
+                FROM entities e
+                WHERE e.id = ? AND e.status != 'archived'
+                
+                UNION ALL
+                
+                -- Recursive member
+                SELECT child.id, child.title, child.status, dt.depth + 1, dt.path || ' -> ' || child.title
+                FROM entities child
+                JOIN relations r ON r.target_id = child.id
+                JOIN dependency_tree dt ON r.source_id = dt.id
+                WHERE child.status != 'archived' AND r.valid_to IS NULL
+                -- Prevent cycles
+                AND dt.path NOT LIKE '%' || child.title || '%'
+            )
+            SELECT DISTINCT id, title, status, depth, path FROM dependency_tree;
+        """, (root_entity_id,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "id": r[0],
+                "title": r[1],
+                "status": r[2],
+                "depth": r[3],
+                "path": r[4]
+            } for r in rows
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+    finally:
+        conn.close()
 
 # =====================================================================
 # Main Execution

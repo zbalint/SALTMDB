@@ -112,3 +112,15 @@ python scratch/test_db.py
 # On Unix:
 PYTHONPATH="." python scratch/test_db.py
 ```
+
+---
+
+## 7. Troubleshooting & Logs
+
+Since MCP servers run over standard I/O, error output is consumed by the client host. Check the client log files directly to debug connection and python runtime issues:
+
+* **Claude Desktop Log Paths:**
+  * **Windows:** `%APPDATA%\Claude\logs\mcp.log` and `%APPDATA%\Claude\logs\mcp-server-saltmdb.log`
+  * **macOS/Linux:** `~/Library/Logs/Claude/mcp.log` and `~/Library/Logs/Claude/mcp-server-saltmdb.log`
+* **Google Antigravity CLI Logs:**
+  * View task logs inside the conversation folder: `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/tasks/`

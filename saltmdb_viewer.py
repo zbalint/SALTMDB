@@ -10,7 +10,7 @@ from datetime import datetime
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
-__version__ = "0.1.0-alpha.6"
+__version__ = "0.1.0-alpha.7"
 
 PORT = 8080
 
@@ -35,12 +35,13 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
+        query = urllib.parse.parse_qs(parsed_url.query)
         
         # API Endpoints
         if path == "/api/entities":
-            self.get_entities()
+            self.get_entities(query)
         elif path == "/api/events":
-            self.get_events()
+            self.get_events(query)
         elif path == "/api/tags":
             self.get_tags()
         elif path == "/api/locks":
@@ -58,19 +59,32 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def get_db_connection(self):
         return sqlite3.connect(DB_PATH, timeout=5.0)
 
-    def get_entities(self):
+    def get_entities(self, query):
         try:
+            page = 1
+            if "page" in query:
+                try:
+                    page = int(query["page"][0])
+                except ValueError:
+                    pass
+            limit = 100
+            offset = (page - 1) * limit
+            
             conn = self.get_db_connection()
             cursor = conn.execute("""
                 SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title
                 FROM entities
                 ORDER BY updated_at DESC
-            """)
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
             rows = cursor.fetchall()
+            
+            # Fetch total count for pagination
+            count_cursor = conn.execute("SELECT COUNT(*) FROM entities")
+            total_count = count_cursor.fetchone()[0]
             
             entities = []
             for r in rows:
-                # Fetch tags for this entity
                 tag_cursor = conn.execute("""
                     SELECT t.name FROM tags t
                     JOIN entity_tags et ON t.id = et.tag_id
@@ -93,20 +107,45 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "tags": tags
                 })
             conn.close()
-            self.send_json(entities)
+            self.send_json({
+                "entities": entities,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total_count,
+                    "pages": (total_count + limit - 1) // limit
+                }
+            })
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "no such table" in msg:
+                msg = "Database not initialized. Please run the MCP server first to create tables."
+            self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
-    def get_events(self):
+    def get_events(self, query):
         try:
+            page = 1
+            if "page" in query:
+                try:
+                    page = int(query["page"][0])
+                except ValueError:
+                    pass
+            limit = 100
+            offset = (page - 1) * limit
+            
             conn = self.get_db_connection()
             cursor = conn.execute("""
                 SELECT id, timestamp, agent_id, type, content, error_code
                 FROM events
                 ORDER BY timestamp DESC
-                LIMIT 200
-            """)
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
             rows = cursor.fetchall()
+            
+            count_cursor = conn.execute("SELECT COUNT(*) FROM events")
+            total_count = count_cursor.fetchone()[0]
             conn.close()
             
             events = [{
@@ -117,14 +156,26 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "content": r[4],
                 "error_code": r[5]
             } for r in rows]
-            self.send_json(events)
+            self.send_json({
+                "events": events,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total_count,
+                    "pages": (total_count + limit - 1) // limit
+                }
+            })
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "no such table" in msg:
+                msg = "Database not initialized. Please run the MCP server first to create tables."
+            self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
     def get_tags(self):
         try:
             conn = self.get_db_connection()
-            # Fetch tags and alias details
             cursor = conn.execute("""
                 SELECT t.id, t.name, t.canonical_id, p.name as canonical_name
                 FROM tags t
@@ -134,7 +185,6 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             
             tags = []
             for r in rows:
-                # Count associated memories
                 count_cursor = conn.execute("SELECT COUNT(*) FROM entity_tags WHERE tag_id = ?", (r[0],))
                 count = count_cursor.fetchone()[0]
                 
@@ -147,6 +197,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 })
             conn.close()
             self.send_json(tags)
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "no such table" in msg:
+                msg = "Database not initialized. Please run the MCP server first to create tables."
+            self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
@@ -164,6 +219,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "last_run_at": r[3]
             } for r in rows]
             self.send_json(locks)
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "no such table" in msg:
+                msg = "Database not initialized. Please run the MCP server first to create tables."
+            self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
@@ -177,6 +237,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"id": entity_id, "full_content": row[0]})
             else:
                 self.send_json({"error": "Entity not found"}, 404)
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if "no such table" in msg:
+                msg = "Database not initialized. Please run the MCP server first to create tables."
+            self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
 
@@ -701,6 +766,42 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             color: var(--text-muted);
             font-style: italic;
         }
+
+        /* Pagination styles */
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1.5rem;
+            margin-top: 2rem;
+            padding: 1rem 0;
+        }
+        .pagination-btn {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 0.5rem 1.25rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.875rem;
+            font-weight: 600;
+            transition: var(--transition-smooth);
+        }
+        .pagination-btn:hover:not(:disabled) {
+            background-color: var(--bg-surface-elevated);
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 10px var(--accent-primary-glow);
+        }
+        .pagination-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+        .pagination-info {
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
     </style>
 </head>
 <body>
@@ -727,6 +828,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         <div class="entities-grid" id="entities-list">
             <!-- Loaded dynamically -->
         </div>
+        <div class="pagination-controls" id="entities-pagination"></div>
     </div>
 
     <!-- Events Tab -->
@@ -750,6 +852,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 </tbody>
             </table>
         </div>
+        <div class="pagination-controls" id="events-pagination"></div>
     </div>
 
     <!-- Tags Tab -->
@@ -764,6 +867,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         <div class="locks-row" id="locks-list">
             <!-- Loaded dynamically -->
         </div>
+        <p style="margin-top: 2.5rem; color: var(--text-muted); font-size: 0.875rem; text-align: center; font-style: italic;">
+            Note: Ephemeral memories are stored in RAM by the active MCP process and are not visible in this dashboard.
+        </p>
     </div>
 
     <!-- Markdown Modal -->
@@ -782,6 +888,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     <script>
         let allEntities = [];
         let allEvents = [];
+        let currentEntitiesPage = 1;
+        let currentEventsPage = 1;
 
         function switchTab(tabId) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -796,24 +904,45 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         async function loadTabData(tabId) {
             try {
                 if (tabId === 'entities') {
-                    const res = await fetch('/api/entities');
-                    allEntities = await res.json();
+                    const res = await fetch(`/api/entities?page=${currentEntitiesPage}`);
+                    const data = await res.json();
+                    if (data.error) {
+                        renderError('entities', data.error);
+                        return;
+                    }
+                    allEntities = data.entities;
                     renderEntities(allEntities);
+                    renderPagination('entities', data.pagination);
                 } else if (tabId === 'events') {
-                    const res = await fetch('/api/events');
-                    allEvents = await res.json();
+                    const res = await fetch(`/api/events?page=${currentEventsPage}`);
+                    const data = await res.json();
+                    if (data.error) {
+                        renderError('events', data.error);
+                        return;
+                    }
+                    allEvents = data.events;
                     renderEvents(allEvents);
+                    renderPagination('events', data.pagination);
                 } else if (tabId === 'tags') {
                     const res = await fetch('/api/tags');
                     const tags = await res.json();
+                    if (tags.error) {
+                        renderError('tags', tags.error);
+                        return;
+                    }
                     renderTags(tags);
                 } else if (tabId === 'locks') {
                     const res = await fetch('/api/locks');
                     const locks = await res.json();
+                    if (locks.error) {
+                        renderError('locks', locks.error);
+                        return;
+                    }
                     renderLocks(locks);
                 }
             } catch (err) {
                 console.error(`Failed to load ${tabId} data:`, err);
+                renderError(tabId, err.message || err);
             }
         }
 
@@ -1009,6 +1138,50 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             }
         }
 
+        function renderPagination(type, pagination) {
+            const container = document.getElementById(`${type}-pagination`);
+            if (!container) return;
+            
+            const { page, pages, total } = pagination;
+            if (pages <= 1) {
+                container.innerHTML = '';
+                return;
+            }
+            
+            container.innerHTML = `
+                <button class="pagination-btn" id="${type}-prev" ${page <= 1 ? 'disabled' : ''} onclick="changePage('${type}', ${page - 1})">Prev</button>
+                <span class="pagination-info">Page ${page} of ${pages} (${total} total)</span>
+                <button class="pagination-btn" id="${type}-next" ${page >= pages ? 'disabled' : ''} onclick="changePage('${type}', ${page + 1})">Next</button>
+            `;
+        }
+
+        function changePage(type, targetPage) {
+            if (type === 'entities') {
+                currentEntitiesPage = targetPage;
+            } else {
+                currentEventsPage = targetPage;
+            }
+            loadTabData(type);
+        }
+
+        function renderError(tabId, errorMsg) {
+            const listId = tabId === 'entities' ? 'entities-list' : (tabId === 'events' ? 'events-list' : (tabId === 'tags' ? 'tags-list' : 'locks-list'));
+            const element = document.getElementById(listId);
+            if (!element) return;
+            
+            const errorHtml = `
+                <div style="grid-column: 1/-1; text-align: center; padding: 3rem; background-color: rgba(239, 68, 68, 0.05); border: 1px dashed var(--accent-error); border-radius: 8px; margin: 1rem 0; width: 100%;">
+                    <p style="color: var(--accent-error); font-weight: 600; margin-bottom: 0.5rem; font-size: 1.1rem;">Operational Error</p>
+                    <p style="color: var(--text-secondary); font-size: 0.95rem;">${escapeHtml(errorMsg)}</p>
+                </div>
+            `;
+            if (tabId === 'events') {
+                element.innerHTML = `<tr><td colspan="5">${errorHtml}</td></tr>`;
+            } else {
+                element.innerHTML = errorHtml;
+            }
+        }
+
         // Init
         loadTabData('entities');
     </script>
@@ -1031,7 +1204,7 @@ if __name__ == "__main__":
     
     # Simple standard library socketserver
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), SALTMDBHandler) as httpd:
+    with socketserver.TCPServer(("127.0.0.1", PORT), SALTMDBHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

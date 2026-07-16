@@ -84,18 +84,21 @@ Once the background Librarian acquires the atomic lock, it runs the following ta
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 9 tools over standard I/O:
+The server exposes 11 tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `log_event` | `agent_id`, `type`, `content`, `error_code` | Appends a scrubbed entry to the immutable short-term ledger. |
 | `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter to prevent duplicate tag names. |
-| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title` | Scrubs secrets and stores long-term facts in raw markdown. |
-| `search_memory` | `query_keywords`, `tags_filter` | Searches matching knowledge using FTS5 (10:1 title weights) and tag filters. |
+| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts long-term facts in raw markdown. Supports SCD temporal versioning. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id` | Searches matching knowledge using FTS5 (10:1 title weights) with multi-agent target isolation. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
-| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a synthesized consolidated memory and archives the raw parents. |
+| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a consolidated memory and physically deletes parent raw nodes. |
+| `store_relation` | `source_id`, `target_id`, `predicate` | Stores a directional semantic relationship edge between two entity nodes. |
+| `analyze_dependencies` | `root_entity_id` | Traverses relationship trees using recursive SQL CTEs to map downstream components. |
+| `create_snapshot` | None | Safely creates a timestamped database backup in `backups/` using SQLite's backup API. |
 | `start_db_viewer` | None | Launches the zero-dependency database dashboard viewer locally on port 8080. |
 
 ---
