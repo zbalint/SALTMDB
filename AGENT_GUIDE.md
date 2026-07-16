@@ -42,6 +42,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `store_knowledge(owner_id, content, tags, scope, ...)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge.
 * `log_event(agent_id, type, content, error_code)`: Log a short-term operational event to the ledger.
 * `get_recent_events(agent_id, type_filter, limit)`: Retrieve event logs to check for background signals (e.g. consolidation requests).
+* `archive_memory(entity_id, owner_id)`: **[MANDATORY `owner_id`]** Explicitly archives (retires) a long-term memory, marking it as inactive.
 * `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a consolidated memory and prune the raw source components.
 * `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories.
 * `analyze_dependencies(root_entity_id)`: Recursively trace downstream relational paths using recursive SQL CTEs.
@@ -54,7 +55,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 Immediately upon initialization, before answering the user:
 1. Call `search_memory` with no query keywords, filtering by `#core` tag, and passing your assigned `owner_id` (e.g. `owner_id = 'agent1'`). This loads your persona, behavioral constraints, and user rules.
 2. Run a keyword search matching the workspace or active component path, passing your `owner_id` to isolate workspace initiative memory anchors.
-3. Call `get_recent_events` with your `agent_id` set to your `owner_id` and `type_filter = 'consolidation_request'` to check for pending Librarian merge requests.
+3. Call `get_recent_events` with your `agent_id` set to your `owner_id` and `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. **Filter out events that return with `"status": "resolved"`** (as their target raw entities have already been consolidated).
 
 ### Phase B: In-Session Logging
 1. Log every significant milestone, technical decision, and error event using `log_event`.

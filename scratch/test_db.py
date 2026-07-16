@@ -22,7 +22,9 @@ from saltmdb_server import (
     search_memory,
     create_snapshot,
     store_relation,
-    analyze_dependencies
+    analyze_dependencies,
+    archive_memory,
+    get_recent_events
 )
 
 TEST_DB_PATH = "test_saltmdb.db"
@@ -590,6 +592,66 @@ class TestSALTMDB(unittest.TestCase):
                 res4 = stop_db_viewer()
                 self.assertIn("stopped successfully", res4.lower())
                 mock_run.assert_called()
+
+    def test_archive_memory(self):
+        # 1. Store a memory
+        store_knowledge(
+            owner_id="agent1",
+            content="# Archivable Fact\nThis is an archivable fact.",
+            tags=["#test"],
+            scope="shared",
+            entity_id="uuid-archivable"
+        )
+        
+        # 2. Assert it is raw/active
+        cursor = self.conn.execute("SELECT status FROM entities WHERE id = 'uuid-archivable'")
+        self.assertEqual(cursor.fetchone()[0], "raw")
+        
+        # 3. Archive it
+        res = archive_memory(entity_id="uuid-archivable", owner_id="agent1")
+        self.assertIn("successfully archived", res)
+        
+        # 4. Assert it is archived
+        cursor = self.conn.execute("SELECT status, valid_to FROM entities WHERE id = 'uuid-archivable'")
+        row = cursor.fetchone()
+        self.assertEqual(row[0], "archived")
+        self.assertIsNotNone(row[1])
+        
+        # 5. Assert error if archiving non-existent or wrong owner
+        res_err = archive_memory(entity_id="uuid-archivable", owner_id="wrong_owner")
+        self.assertIn("error", res_err.lower())
+
+    def test_get_recent_events_dynamic_status(self):
+        # 1. Insert raw entities
+        now = datetime.now(UTC).isoformat()
+        with self.conn:
+            self.conn.execute("INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content) VALUES ('e-dyn-1', ?, ?, ?, 'agent1', 'shared', 'raw', 'Title 1', 'Content 1')", (now, now, now))
+            self.conn.execute("INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, status, title, full_content) VALUES ('e-dyn-2', ?, ?, ?, 'agent1', 'shared', 'raw', 'Title 2', 'Content 2')", (now, now, now))
+            
+        # 2. Log consolidation event manually
+        event_content = json.dumps({"target": "general", "entity_ids": ["e-dyn-1", "e-dyn-2"]})
+        with self.conn:
+            self.conn.execute("""
+                INSERT INTO events (id, timestamp, agent_id, type, content)
+                VALUES ('event-dyn-1', ?, 'agent1', 'consolidation_request', ?)
+            """, (now, event_content))
+            
+        # 3. Fetch events, assert status is pending
+        events = get_recent_events(agent_id="agent1", type_filter="consolidation_request")
+        self.assertEqual(events[0]["status"], "pending")
+        
+        # 4. Consolidate them
+        commit_consolidation(
+            parent_ids=["e-dyn-1", "e-dyn-2"],
+            title="Consolidated Dyn",
+            content="# Consolidated Title\nMerged content.",
+            tags=["#dyn"],
+            db_connection=self.conn
+        )
+        
+        # 5. Fetch events again, assert status has dynamically changed to resolved!
+        events_after = get_recent_events(agent_id="agent1", type_filter="consolidation_request")
+        self.assertEqual(events_after[0]["status"], "resolved")
 
 if __name__ == "__main__":
     unittest.main()

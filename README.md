@@ -94,6 +94,7 @@ The server exposes 12 tools over standard I/O:
 | `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. **`owner_id` is mandatory**. Supports automatic title-based deduplication and SCD. |
 | `search_memory` | `query_keywords`, `tags_filter`, `owner_id` | Searches knowledge using FTS5 (10:1 title weights). **`owner_id` is mandatory** to isolate memory lanes. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
+| `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. **`owner_id` is mandatory**. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
 | `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a consolidated memory and physically deletes parent raw nodes. |

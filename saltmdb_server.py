@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.13"
+__version__ = "0.1.0-alpha.14"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -1034,6 +1034,41 @@ def create_snapshot() -> str:
         return f"Error creating database snapshot: {str(e)}"
 
 @mcp.tool()
+def archive_memory(entity_id: str, owner_id: str) -> str:
+    """Explicitly archives (retires) a long-term memory, marking it as inactive.
+    
+    Args:
+        entity_id: The UUID of the memory to archive.
+        owner_id: Mandatory ID of the agent/owner to isolate memory lanes.
+    """
+    if not owner_id:
+        return "Error: owner_id is mandatory to prevent cross-lane signal contamination."
+        
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        now = datetime.now(UTC).isoformat()
+        with conn:
+            # Check existence and ownership of active memory
+            cursor = conn.execute("SELECT id FROM entities WHERE id = ? AND owner_id = ? AND status != 'archived'", (entity_id, owner_id))
+            row = cursor.fetchone()
+            if not row:
+                return f"Error: Active memory with ID '{entity_id}' not found for owner '{owner_id}'."
+                
+            # Perform temporal archiving
+            conn.execute("""
+                UPDATE entities 
+                SET status = 'archived', updated_at = ?, valid_to = ?
+                WHERE id = ? AND owner_id = ?
+            """, (now, now, entity_id, owner_id))
+            
+        return f"Memory '{entity_id}' successfully archived (retired)."
+    except Exception as e:
+        return f"Error archiving memory: {e}"
+    finally:
+        conn.close()
+
+@mcp.tool()
 def store_relation(source_id: str, target_id: str, predicate: str) -> str:
     """Stores a typed directional relationship (edge) between two long-term memory entities.
     
@@ -1145,16 +1180,40 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
         params.append(limit)
         cursor = conn.execute(sql, params)
         rows = cursor.fetchall()
-        return [
-            {
-                "id": r[0],
-                "timestamp": r[1],
-                "agent_id": r[2],
-                "type": r[3],
-                "content": r[4],
-                "error_code": r[5]
-            } for r in rows
-        ]
+        
+        events = []
+        for r in rows:
+            ev_id, timestamp, agent, ev_type, content, error_code = r
+            status = "pending"
+            
+            if ev_type == "consolidation_request" and content:
+                try:
+                    data = json.loads(content)
+                    entity_ids = data.get("entity_ids", [])
+                    if entity_ids:
+                        # Check how many of the requested raw entities are still active/raw
+                        placeholders = ",".join("?" for _ in entity_ids)
+                        cursor_status = conn.execute(f"""
+                            SELECT COUNT(*) FROM entities
+                            WHERE id IN ({placeholders}) AND status = 'raw'
+                        """, entity_ids)
+                        raw_count = cursor_status.fetchone()[0]
+                        # If all have been consolidated/retired, it is resolved
+                        if raw_count == 0:
+                            status = "resolved"
+                except Exception:
+                    pass
+            
+            events.append({
+                "id": ev_id,
+                "timestamp": timestamp,
+                "agent_id": agent,
+                "type": ev_type,
+                "content": content,
+                "error_code": error_code,
+                "status": status
+            })
+        return events
     except Exception as e:
         return [{"error": str(e)}]
     finally:

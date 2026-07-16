@@ -16,6 +16,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.11` | 2 | No schema changes. Added stop_db_viewer MCP tool for programmatic viewer lifecycle control | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.12` | 2 | No schema changes. Fixed path leak in MIGRATION.md and build_review_report.py by resolving paths dynamically | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.13` | 2 | No schema changes. Mocked viewer subprocess inside unit tests to prevent test environment variable pollution | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.14` | 2 | No schema changes. Added archive_memory MCP tool and implemented dynamic pending/resolved event status mapping | **No Action Required** (fully backward-compatible) |
 
 ---
 
