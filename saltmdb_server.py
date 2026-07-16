@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.8"
+__version__ = "0.1.0-alpha.9"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")

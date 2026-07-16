@@ -11,6 +11,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.6` | 1 | Initial FTS5 virtual tables and events schema | Baseline schema creation |
 | `v0.1.0-alpha.7` | 2 | Added temporal SCD columns (`valid_from`, `valid_to`) to `entities`; added `relations` edge table | Column migrations on `entities`; DDL creation of `relations` |
 | `v0.1.0-alpha.8` | 2 | No schema changes. Updated Python tool signatures, deduplication logic, tag normalization, and event-read tools | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.9` | 2 | No schema changes. Added Relations Topology graph visualizer and modal click-through links to database viewer | **No Action Required** (fully backward-compatible) |
 
 ---
 
