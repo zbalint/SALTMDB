@@ -5,6 +5,7 @@ import uuid
 import re
 import sys
 from datetime import datetime, UTC
+from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 __version__ = "0.1.0-alpha.20"
@@ -455,8 +456,8 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
 def store_memory(
     content: str,
     tags: list,
-    scope: str,
     owner_id: str,
+    scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
     is_core: bool = False,
     title: str = None,
@@ -480,8 +481,8 @@ def store_memory(
     Args:
         content: Markdown formatted text representation of the fact. Must be in Stateful Fact Block (SFB) format.
         tags: List of tags associated with this memory.
-        scope: Scope level ('private' or 'shared').
-        owner_id: Mandatory ID of the agent/owner storing this memory to isolate lanes.
+        owner_id: Mandatory ID of the agent/owner storing this memory to isolate lanes. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
+        scope: Scope level ('private' or 'shared', defaults to 'shared').
         weight: Priority ranking multiplier (default 1).
         is_core: If True, bypasses search and gets injected into the agent prompt (default False).
         title: Optional clean title. If omitted, the first markdown heading is auto-extracted.
@@ -490,7 +491,7 @@ def store_memory(
         impact: Optional score (1-5) representing user/emotional impact.
         novelty: Optional score (1-5) representing info novelty.
         actionability: Optional score (1-5) representing action priority.
-        metadata: Optional dictionary of structured attributes. Always include metadata['source_path'] with relative repo path.
+        metadata: Optional dictionary of structured attributes. If provided, you MUST include metadata['source_path'] specifying the relative repository path.
         skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
         project_id: Optional first-class project identifier to associate with the memory.
     """
@@ -671,12 +672,14 @@ def search_memory(
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
     
-    Look-Before-Leap Rule:
-    - Run this tool before starting any coding task, command, or design decision to check for past mistakes, rules, project conventions, or lessons learned.
+    CRITICAL USAGE RULES:
+    - PARAMETER ALIGNMENT: You MUST pass the search string to the 'query_keywords' parameter. Do NOT use a parameter named 'query'.
+    - BYPASS BAN: Do not attempt to query the 'saltmdb.db' file directly using sqlite3 or shell commands, even if the search returns zero results.
+    - LOOK-BEFORE-LEAP: Always call this tool at the start of a session or task to check for past mistakes, lessons learned, or conventions.
     
     Args:
-        owner_id: Mandatory ID of the agent/owner to isolate memory access and lanes.
-        query_keywords: Search terms used to match against indexing content via FTS5 (matches title, content, or search aliases).
+        owner_id: Mandatory ID of the agent/owner to isolate memory access and lanes. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
+        query_keywords: Search terms used to match against indexing content via FTS5 (matches title, content, or search aliases). MUST be passed here, NOT in 'query'.
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
         explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
@@ -1253,20 +1256,23 @@ def commit_consolidation(
     title: str,
     content: str,
     tags: list[str],
-    scope: str = "shared",
+    scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
     db_connection = None
 ) -> str:
     """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents.
+    
+    CRITICAL USAGE RULES:
+    - OWNERSHIP: Consolidated memories are automatically assigned owner_id='system', making them globally searchable across all agent lanes.
     
     Args:
         parent_ids: List of UUIDs of the raw source memories being consolidated.
         title: Custom title for the consolidated summary. Must be clean (no file name prefixes, no extensions).
         content: Clean, consolidated Markdown representation of the synthesized knowledge in Stateful Fact Block (SFB) format.
         tags: List of tags associated with this consolidated memory.
-        scope: Scope level ('private' or 'shared').
+        scope: Scope level ('private' or 'shared', defaults to 'shared').
         weight: Priority weight multiplier (default 1).
-        db_connection: Internal parameter for passing test database connections.
+        db_connection: [INTERNAL TEST ONLY - DO NOT USE]. Leave empty.
     """
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
@@ -1478,13 +1484,13 @@ def check_duplicate_memories(
     
     Mandatory Pre-Write Check:
     - ALWAYS call this tool before calling `store_memory` to prevent duplicate clutter.
-    - Returns a list of potential duplicates with similarity scores. If a high-similarity duplicate is found, update the existing memory instead of storing a new one.
+    - Returns a list of potential duplicates with similarity scores. If a high-similarity duplicate is found (score >= 0.7), update the existing memory instead of storing a new one.
     
     Args:
         title: Proposed title of the memory.
         content: Proposed markdown content of the memory.
-        owner_id: Mandatory ID of the agent/owner to isolate lanes.
-        tags: List of tags associated with the proposed memory.
+        owner_id: Mandatory ID of the agent/owner to isolate lanes. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
+        tags: Optional list of tags associated with the proposed memory (highly recommended to improve tag-based duplicate filtering).
     """
     if not owner_id:
         return {"error": "owner_id is mandatory."}
@@ -1546,7 +1552,7 @@ def store_relation(source_id: str, target_id: str, predicate: str) -> str:
     Args:
         source_id: UUID of the source entity (subject).
         target_id: UUID of the target entity (object).
-        predicate: Description of the relationship (e.g., 'depends_on', 'part_of', 'resolved_by').
+        predicate: Description of the relationship. Canonical values: 'depends_on' (dependency link), 'part_of' (logical containment), 'resolved_by' (issue resolution path), 'links_to' (general association), 'duplicate_of' (identifies identical/redundant entries).
     """
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -1624,8 +1630,8 @@ def get_recent_events(agent_id: str = None, type_filter: str = None, limit: int 
     """Retrieves recent events from the short-term ledger.
     
     Args:
-        agent_id: Optional filter for a specific agent ID.
-        type_filter: Optional filter for a specific event type (e.g. 'consolidation_request').
+        agent_id: Optional filter for a specific agent ID. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
+        type_filter: Optional filter for a specific event type. Canonical types: 'consolidation_request' (system merge request), 'decision' (design/outcome log), 'attempt' (trial action/command run), 'fix' (bug/error resolution path), 'issue' (error/failure log).
         limit: Maximum number of events to return (default 20).
     """
     db_path = get_db_path()
@@ -1706,8 +1712,12 @@ def scan_memories(
 ) -> list:
     """Scans and lists long-term memories for a specific owner to perform audits, contradiction checks, or status reviews.
     
+    CRITICAL USAGE RULES:
+    - MANDATORY OWNER: You MUST supply a valid 'owner_id' parameter.
+    - BYPASS BAN: Do not attempt to run direct sqlite3 or file commands to inspect memories. All reads must proceed through this tool or search_memory.
+    
     Args:
-        owner_id: Mandatory ID of the agent/owner to isolate lanes and memory access.
+        owner_id: Mandatory ID of the agent/owner to isolate lanes and memory access. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
         status_filter: Filter by memory status: 'raw', 'consolidated', 'archived', 'active' (both raw and consolidated, default), or 'all'.
         limit: Maximum number of memories to return (default 20, max 100).
         offset: Offset for pagination (default 0).
