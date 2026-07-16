@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.14"
+__version__ = "0.1.0-alpha.15"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -707,18 +707,44 @@ def start_db_viewer() -> str:
     # Start it in the background
     try:
         import subprocess
+        import time
         viewer_script = os.path.join(os.path.dirname(__file__), "saltmdb_viewer.py")
         
+        # Log directory and path setup
+        log_dir = os.path.expanduser("~/.saltmdb")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "viewer.log")
+        
+        # Open log file in append mode
+        log_file = open(log_path, "a", encoding="utf-8")
+        
         kwargs = {
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stdout": log_file,
+            "stderr": log_file,
         }
         if sys.platform == "win32":
             kwargs["creationflags"] = 0x08000000 # CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
             
-        subprocess.Popen([sys.executable, viewer_script], **kwargs)
+        process = subprocess.Popen([sys.executable, viewer_script], **kwargs)
+        
+        # Wait a short duration to verify the process doesn't exit immediately (e.g. port binding crash)
+        time.sleep(0.5)
+        poll = process.poll()
+        log_file.close()
+        
+        if poll is not None:
+            log_snippet = ""
+            try:
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                        log_snippet = "\n".join(lines[-10:])
+            except Exception:
+                pass
+            return f"Error: Database viewer process exited immediately with code {poll}.\nLog snippet:\n{log_snippet}"
+            
         return "SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:8080"
     except Exception as e:
         return f"Error starting database viewer: {e}"

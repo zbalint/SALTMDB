@@ -575,6 +575,7 @@ class TestSALTMDB(unittest.TestCase):
         
         # Mock not running case (start starts it)
         mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+        mock_popen.return_value.poll.return_value = None
         res2 = start_db_viewer()
         self.assertIn("started successfully", res2.lower())
         mock_popen.assert_called_once()
