@@ -91,10 +91,12 @@ The server exposes 12 tools over standard I/O:
 | `log_event` | `agent_id`, `type`, `content`, `error_code` | Appends a scrubbed entry to the immutable short-term ledger. |
 | `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
 | `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter to prevent duplicate tag names. |
-| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. **`owner_id` is mandatory**. Supports automatic title-based deduplication and SCD. |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id` | Searches knowledge using FTS5 (10:1 title weights). **`owner_id` is mandatory** to isolate memory lanes. |
+| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability`, `metadata` | Stores/upserts facts in raw markdown. Supports structured metadata storage. **`owner_id` is mandatory**. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode` | Searches knowledge using FTS5 (with query sanitization/fallback), tag filtering, and metadata filters. Supports `explain_mode`. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
 | `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. **`owner_id` is mandatory**. |
+| `detect_orphaned_memories`| `owner_id` | Identifies active memories with no relationship links and suggests candidate links based on tag overlap. |
+| `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags` | Checks the database for potential near-duplicates of a proposed memory using title, tag, and text similarity. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
 | `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a consolidated memory and physically deletes parent raw nodes. |

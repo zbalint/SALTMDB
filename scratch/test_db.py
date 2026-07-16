@@ -24,7 +24,9 @@ from saltmdb_server import (
     store_relation,
     analyze_dependencies,
     archive_memory,
-    get_recent_events
+    get_recent_events,
+    detect_orphaned_memories,
+    check_duplicate_memories
 )
 
 TEST_DB_PATH = "test_saltmdb.db"
@@ -653,6 +655,111 @@ class TestSALTMDB(unittest.TestCase):
         # 5. Fetch events again, assert status has dynamically changed to resolved!
         events_after = get_recent_events(agent_id="agent1", type_filter="consolidation_request")
         self.assertEqual(events_after[0]["status"], "resolved")
+
+    def test_metadata_filtering(self):
+        # 1. Store with metadata
+        store_knowledge(
+            owner_id="agent1",
+            content="# Config file\nThis is a configuration file.",
+            tags=["#ops"],
+            scope="shared",
+            entity_id="uuid-meta-1",
+            metadata={"project": "SALTMDB", "source_path": "/etc/saltmdb.conf"}
+        )
+        store_knowledge(
+            owner_id="agent1",
+            content="# Build file\nThis is a build script.",
+            tags=["#build"],
+            scope="shared",
+            entity_id="uuid-meta-2",
+            metadata={"project": "BuildPipeline", "source_path": "/bin/build.sh"}
+        )
+        
+        # 2. Query with metadata filters
+        res = search_memory(
+            owner_id="agent1",
+            metadata_filter={"project": "SALTMDB"}
+        )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["id"], "uuid-meta-1")
+        
+        res2 = search_memory(
+            owner_id="agent1",
+            metadata_filter={"project": "BuildPipeline"}
+        )
+        self.assertEqual(len(res2), 1)
+        self.assertEqual(res2[0]["id"], "uuid-meta-2")
+
+    def test_fts_sanitization_and_fallback(self):
+        # 1. Store knowledge
+        store_knowledge(
+            owner_id="agent1",
+            content="# Auth Error\nDatabase validation failed with code 403.",
+            tags=["#auth"],
+            scope="shared",
+            entity_id="uuid-fts-test"
+        )
+        
+        # 2. Search with mismatched quotes and wildcards (FTS5 syntax crashers)
+        query = 'auth error "AND code 403 -'
+        res = search_memory(
+            query_keywords=query,
+            owner_id="agent1"
+        )
+        # Should not crash and successfully return matching node via sanitization/fallback!
+        self.assertTrue(len(res) >= 1)
+        self.assertEqual(res[0]["id"], "uuid-fts-test")
+
+    def test_search_explain_mode(self):
+        # 1. Query non-existent content in explain mode
+        res = search_memory(
+            query_keywords="nonexistenttoken",
+            tags_filter=["#invalid-tag"],
+            owner_id="agent1",
+            explain_mode=True
+        )
+        self.assertIn("explain", res)
+        explain = res["explain"]
+        self.assertIn("searched_terms_found", explain)
+        self.assertEqual(explain["searched_terms_found"]["nonexistenttoken"], False)
+        self.assertIn("invalid_tags_suggestions", explain)
+        self.assertIn("#invalid-tag", explain["invalid_tags_suggestions"])
+
+    def test_detect_orphaned_memories(self):
+        # 1. Add an active memory with NO relations
+        store_knowledge(
+            owner_id="agent1",
+            content="# Orphan Memory\nThis memory stands alone.",
+            tags=["#standalone"],
+            scope="shared",
+            entity_id="uuid-orphan"
+        )
+        
+        # 2. Run orphan detection
+        res = detect_orphaned_memories(owner_id="agent1")
+        self.assertTrue(res["orphans_detected"] >= 1)
+        orphan_ids = [o["orphan"]["id"] for o in res["details"]]
+        self.assertIn("uuid-orphan", orphan_ids)
+
+    def test_check_duplicate_memories(self):
+        # 1. Insert base memory
+        store_knowledge(
+            owner_id="agent1",
+            content="# Database setup rule\nAlways configure SQLite WAL mode.",
+            tags=["#database"],
+            scope="shared",
+            entity_id="uuid-dup-base"
+        )
+        
+        res = check_duplicate_memories(
+            title="Database setup rule",
+            content="Always configure SQLite Write-Ahead Logging WAL mode.",
+            owner_id="agent1",
+            tags=["#database"]
+        )
+        self.assertEqual(res["duplicate_found"], True)
+        self.assertTrue(len(res["potential_duplicates"]) >= 1)
+        self.assertEqual(res["potential_duplicates"][0]["id"], "uuid-dup-base")
 
 if __name__ == "__main__":
     unittest.main()

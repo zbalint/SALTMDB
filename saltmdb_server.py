@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, UTC
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.15"
+__version__ = "0.1.0-alpha.16"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -119,12 +119,13 @@ def init_db(db_path: str):
             title TEXT NOT NULL,
             full_content TEXT NOT NULL,
             valid_from DATETIME,
-            valid_to DATETIME
+            valid_to DATETIME,
+            metadata TEXT
         );
         """)
         
-        # Schema migration: attempt to add valid_from and valid_to columns to entities table if they don't exist
-        for col in ["valid_from DATETIME", "valid_to DATETIME"]:
+        # Schema migration: attempt to add new columns to entities table if they don't exist
+        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT"]:
             try:
                 conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
             except sqlite3.OperationalError:
@@ -391,7 +392,8 @@ def store_knowledge(
     relevance: int = None,
     impact: int = None,
     novelty: int = None,
-    actionability: int = None
+    actionability: int = None,
+    metadata: dict = None
 ) -> str:
     """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
     
@@ -455,28 +457,29 @@ def store_knowledge(
             cursor = conn.execute("SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,))
             existing = cursor.fetchone()
             if existing:
-                created_at, owner, valid_from = existing
-                hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
-                
-                # Copy current active row to history as 'archived' with closed valid_to
-                conn.execute("""
-                    INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to)
-                    SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?
-                    FROM entities WHERE id = ?
-                """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
-                
-                # Also copy tags to history entity so tag history is preserved
-                conn.execute("""
-                    INSERT INTO entity_tags (entity_id, tag_id)
-                    SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
-                """, (hist_id, entity_id))
-                
+                 created_at, owner, valid_from = existing
+                 hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
+                 
+                 # Copy current active row to history as 'archived' with closed valid_to
+                 conn.execute("""
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata
+                     FROM entities WHERE id = ?
+                 """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
+                 
+                 # Also copy tags to history entity so tag history is preserved
+                 conn.execute("""
+                     INSERT INTO entity_tags (entity_id, tag_id)
+                     SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
+                 """, (hist_id, entity_id))
+                 
             # Clean up existing tags if doing an update to prevent tag accumulation
             conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
             
+            metadata_str = json.dumps(metadata) if metadata else None
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -488,8 +491,9 @@ def store_knowledge(
                     title = excluded.title,
                     full_content = excluded.full_content,
                     valid_from = excluded.valid_from,
-                    valid_to = NULL
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now))
+                    valid_to = NULL,
+                    metadata = excluded.metadata
+            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str))
             
             # Fetch all existing tags to do pre-write tag normalization (prevent drift)
             cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
@@ -532,14 +536,33 @@ def store_knowledge(
     finally:
         conn.close()
 
+def sanitize_fts_query(query: str) -> str:
+    """Sanitizes raw query string for FTS5, escaping special characters and balancing quotes."""
+    if not query:
+        return ""
+    # Balance quotes: if odd count, remove them
+    if query.count('"') % 2 != 0:
+        query = query.replace('"', ' ')
+    # Replace FTS5 syntax characters with spaces to be completely safe
+    cleaned = re.sub(r'[\-+<>:/*\\?^$|#@`~!%&(){}[\]]', ' ', query)
+    return " ".join(cleaned.split())
+
 @mcp.tool()
-def search_memory(query_keywords: str = None, tags_filter: list = None, owner_id: str = None) -> list:
-    """Performs full-text keyword search and tag filtering in the long-term knowledge base.
+def search_memory(
+    query_keywords: str = None,
+    tags_filter: list = None,
+    owner_id: str = None,
+    metadata_filter: dict = None,
+    explain_mode: bool = False
+) -> list | dict:
+    """Performs full-text keyword search, metadata filtering, and tag filtering in the long-term knowledge base.
     
     Args:
         query_keywords: Search terms used to match against indexing content via FTS5.
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
         owner_id: Optional agent ID to isolate memory access.
+        metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
+        explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
     """
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
@@ -572,30 +595,65 @@ def search_memory(query_keywords: str = None, tags_filter: list = None, owner_id
             owner_filter_clause = " AND (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system')"
             owner_params.append(owner_id)
             
+        # Build dynamic metadata filters
+        metadata_clauses = ""
+        metadata_params = []
+        if metadata_filter:
+            for key, val in metadata_filter.items():
+                metadata_clauses += " AND json_extract(e.metadata, ?) = ?"
+                metadata_params.append(f"$.{key}")
+                metadata_params.append(val)
+                
+        rows = []
+        sanitization_applied = False
+        fallback_applied = False
+        
         if query_keywords:
+            # 1. Sanitize the query keywords
+            sanitized_keywords = sanitize_fts_query(query_keywords)
+            if sanitized_keywords != query_keywords:
+                sanitization_applied = True
+                
             # 10:1 title-to-content search weighting using sqlite FTS5 bm25 column weights
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0) as score, e.title
                 FROM entities_fts f
                 JOIN entities e ON e.id = f.id
-                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {tag_filter_clause}
+                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY (bm25(entities_fts, 0.0, 10.0, 1.0) * e.weight) ASC
                 LIMIT 5
             """
-            exec_params = [query_keywords] + owner_params + params
+            exec_params = [sanitized_keywords] + owner_params + params + metadata_params
+            
+            try:
+                cursor = conn.execute(sql, exec_params)
+                rows = cursor.fetchall()
+            except sqlite3.OperationalError:
+                # FTS parser failed. Fallback to broad wildcard keyword match
+                fallback_applied = True
+                words = re.findall(r'\b\w+\b', sanitized_keywords)
+                if words:
+                    fallback_query = " OR ".join(f'"{w}*"' for w in words)
+                    exec_params_fallback = [fallback_query] + owner_params + params + metadata_params
+                    try:
+                        cursor = conn.execute(sql, exec_params_fallback)
+                        rows = cursor.fetchall()
+                    except Exception:
+                        rows = []
+                else:
+                    rows = []
         else:
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title
                 FROM entities e
-                WHERE e.status != 'archived' {owner_filter_clause} {tag_filter_clause}
+                WHERE e.status != 'archived' {owner_filter_clause} {tag_filter_clause} {metadata_clauses}
                 ORDER BY e.weight DESC, e.updated_at DESC
                 LIMIT 5
             """
-            exec_params = owner_params + params
+            exec_params = owner_params + params + metadata_params
+            cursor = conn.execute(sql, exec_params)
+            rows = cursor.fetchall()
             
-        cursor = conn.execute(sql, exec_params)
-        rows = cursor.fetchall()
-        
         results = []
         entity_ids = []
         for entity_id, full_content, weight, score, title in rows:
@@ -619,6 +677,50 @@ def search_memory(query_keywords: str = None, tags_filter: list = None, owner_id
                     WHERE id IN ({placeholders})
                 """, [now] + entity_ids)
                 
+        # Generate diagnostic explanation package if explain_mode is requested
+        explain_info = {}
+        if explain_mode:
+            term_presence = {}
+            tag_suggestions = {}
+            rewrites = []
+            
+            if query_keywords:
+                # 1. Term existence check
+                words = re.findall(r'\b\w+\b', query_keywords)
+                for w in words:
+                    cursor_w = conn.execute("SELECT COUNT(*) FROM entities WHERE full_content LIKE ? OR title LIKE ?", (f"%{w}%", f"%{w}%"))
+                    term_presence[w] = cursor_w.fetchone()[0] > 0
+                    
+                # 2. Relaxed query suggestions
+                if not results:
+                    if len(words) > 1:
+                        rewrites.append(" OR ".join(words))
+                    rewrites.append(" ".join(f"{w}*" for w in words))
+                    
+            if tags_filter:
+                # 3. Check invalid tags and suggest close matches
+                for tag in tags_filter:
+                    cursor_t = conn.execute("SELECT id FROM tags WHERE name = ?", (tag,))
+                    if not cursor_t.fetchone():
+                        cursor_all = conn.execute("SELECT name FROM tags WHERE canonical_id IS NULL")
+                        all_db_tags = [r[0] for r in cursor_all.fetchall()]
+                        import difflib
+                        closest = difflib.get_close_matches(tag, all_db_tags, n=2, cutoff=0.4)
+                        tag_suggestions[tag] = closest
+                        
+            explain_info = {
+                "sanitization_applied": sanitization_applied,
+                "fallback_applied": fallback_applied,
+                "searched_terms_found": term_presence,
+                "invalid_tags_suggestions": tag_suggestions,
+                "suggested_rewritten_queries": rewrites
+            }
+            
+            return {
+                "results": results,
+                "explain": explain_info
+            }
+            
         return results
     except Exception as e:
         return [{"error": str(e)}]
@@ -1091,6 +1193,137 @@ def archive_memory(entity_id: str, owner_id: str) -> str:
         return f"Memory '{entity_id}' successfully archived (retired)."
     except Exception as e:
         return f"Error archiving memory: {e}"
+    finally:
+        conn.close()
+
+@mcp.tool()
+def detect_orphaned_memories(owner_id: str) -> dict:
+    """Identifies active long-term memories that have no incoming or outgoing relationship links,
+    and suggests potential connection candidates based on shared tags.
+    
+    Args:
+        owner_id: Mandatory ID of the agent/owner to isolate memory lanes.
+    """
+    if not owner_id:
+        return {"error": "owner_id is mandatory to prevent cross-lane signal contamination."}
+        
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        # Find all active entities for this owner that are not archived and have 0 relations
+        cursor = conn.execute("""
+            SELECT e.id, e.title, e.scope
+            FROM entities e
+            WHERE e.status != 'archived' 
+              AND (e.owner_id = ? OR e.owner_id = 'shared')
+              AND e.id NOT IN (SELECT DISTINCT source_id FROM relations WHERE valid_to IS NULL)
+              AND e.id NOT IN (SELECT DISTINCT target_id FROM relations WHERE valid_to IS NULL)
+        """, (owner_id,))
+        orphans = [{"id": r[0], "title": r[1], "scope": r[2]} for r in cursor.fetchall()]
+        
+        results = []
+        for orphan in orphans:
+            oid = orphan["id"]
+            # Fetch tags of this orphan
+            cursor_tags = conn.execute("""
+                SELECT t.name FROM tags t
+                JOIN entity_tags et ON et.tag_id = t.id
+                WHERE et.entity_id = ?
+            """, (oid,))
+            tags = [r[0] for r in cursor_tags.fetchall()]
+            
+            candidates = []
+            if tags:
+                # Find other active entities with matching tags (limited to 5)
+                placeholders = ",".join("?" for _ in tags)
+                cursor_cand = conn.execute(f"""
+                    SELECT DISTINCT e.id, e.title, COUNT(et.tag_id) as matching_tags_count
+                    FROM entities e
+                    JOIN entity_tags et ON et.entity_id = e.id
+                    JOIN tags t ON et.tag_id = t.id
+                    WHERE e.id != ? AND e.status != 'archived'
+                      AND (e.owner_id = ? OR e.owner_id = 'shared')
+                      AND t.name IN ({placeholders})
+                    GROUP BY e.id
+                    ORDER BY matching_tags_count DESC, e.updated_at DESC
+                    LIMIT 5
+                """, [oid, owner_id] + tags)
+                candidates = [{"id": r[0], "title": r[1], "matching_tags": r[2]} for r in cursor_cand.fetchall()]
+                
+            results.append({
+                "orphan": orphan,
+                "orphan_tags": tags,
+                "suggested_connection_candidates": candidates
+            })
+            
+        return {"orphans_detected": len(results), "details": results}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+@mcp.tool()
+def check_duplicate_memories(
+    title: str,
+    content: str,
+    owner_id: str,
+    tags: list = None
+) -> dict:
+    """Checks the database for existing memories that might be duplicates of the proposed memory,
+    using title matching, tag overlap, and text similarity.
+    
+    Args:
+        title: Proposed title of the memory.
+        content: Proposed markdown content of the memory.
+        owner_id: Mandatory ID of the agent/owner to isolate lanes.
+        tags: List of tags associated with the proposed memory.
+    """
+    if not owner_id:
+        return {"error": "owner_id is mandatory."}
+        
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        # Find active candidate entities with the same owner/scope
+        cursor = conn.execute("""
+            SELECT id, title, full_content FROM entities
+            WHERE status != 'archived' AND (owner_id = ? OR owner_id = 'shared')
+        """, (owner_id,))
+        candidates = cursor.fetchall()
+        
+        import difflib
+        matches = []
+        
+        # Calculate similarity scores
+        for cid, ctitle, ccontent in candidates:
+            # Title similarity (Levenshtein/SequenceMatcher based)
+            title_sim = difflib.SequenceMatcher(None, title.lower(), ctitle.lower()).ratio()
+            
+            # Content similarity (on first 500 chars to be fast)
+            snippet1 = content[:500].lower()
+            snippet2 = ccontent[:500].lower()
+            content_sim = difflib.SequenceMatcher(None, snippet1, snippet2).ratio()
+            
+            # Weighted overall similarity
+            overall_sim = (title_sim * 0.4) + (content_sim * 0.6)
+            
+            if overall_sim > 0.6:  # Return anything with over 60% similarity
+                matches.append({
+                    "id": cid,
+                    "title": ctitle,
+                    "similarity_score": round(overall_sim, 2),
+                    "title_similarity": round(title_sim, 2),
+                    "content_similarity": round(content_sim, 2)
+                })
+                
+        # Sort by similarity score descending
+        matches.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return {
+            "duplicate_found": len(matches) > 0 and matches[0]["similarity_score"] >= 0.7,
+            "potential_duplicates": matches[:5]
+        }
+    except Exception as e:
+        return {"error": str(e)}
     finally:
         conn.close()
 

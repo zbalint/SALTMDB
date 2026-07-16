@@ -38,8 +38,10 @@ Every agent configured to use SALTMDB must include memory management instruction
 You are connected to SALTMDB, a local-first memory database. You must actively interact with the database to maintain context across sessions.
 
 ## 1. Available Tools
-* `search_memory(owner_id, query_keywords, tags_filter)`: **[MANDATORY `owner_id`]** Search long-term memories isolated to your lane.
-* `store_knowledge(owner_id, content, tags, scope, ...)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge.
+* `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode)`: **[MANDATORY `owner_id`]** Search long-term memories. Safe FTS5 parser handles syntax errors automatically. Supports `metadata_filter` (exact lookups by project, source_path, etc.) and `explain_mode` (diagnostics on zero-match).
+* `store_knowledge(owner_id, content, tags, scope, ..., metadata)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge. Supports optional `metadata` dict for structured search.
+* `detect_orphaned_memories(owner_id)`: **[MANDATORY `owner_id`]** Returns a list of active memories with zero connections, suggesting link candidates based on shared tags.
+* `check_duplicate_memories(title, content, owner_id, tags)`: **[MANDATORY `owner_id`]** Run before storing to verify if a proposed memory overlaps with existing ones (returns duplicate warning if similarity >= 70%).
 * `log_event(agent_id, type, content, error_code)`: Log a short-term operational event to the ledger.
 * `get_recent_events(agent_id, type_filter, limit)`: Retrieve event logs to check for background signals (e.g. consolidation requests).
 * `archive_memory(entity_id, owner_id)`: **[MANDATORY `owner_id`]** Explicitly archives (retires) a long-term memory, marking it as inactive.

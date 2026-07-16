@@ -18,6 +18,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.13` | 2 | No schema changes. Mocked viewer subprocess inside unit tests to prevent test environment variable pollution | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.14` | 2 | No schema changes. Added archive_memory MCP tool and implemented dynamic pending/resolved event status mapping | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.15` | 2 | No schema changes. Redirected database viewer background startup logs to viewer.log and added startup integrity check | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.16` | 3 | Added `metadata` TEXT column to `entities` for JSON structured filtering; added safe FTS5 query parser fallback, search explain mode, orphan detection, and duplicate checking | **Column Migration on `entities`** (handled automatically or manually via ALTER TABLE) |
 
 ---
 
@@ -45,6 +46,17 @@ CREATE TABLE IF NOT EXISTS relations (
 
 -- 3. Create index for relation lookups to accelerate CTE recursive traversals
 CREATE INDEX IF NOT EXISTS idx_relations_source_target ON relations (source_id, target_id);
+```
+
+---
+
+## DDL Migrations (v0.1.0-alpha.15 ➔ v0.1.0-alpha.16)
+
+If you are upgrading an existing production `saltmdb.db` database from `v0.1.0-alpha.15` manually, run the following SQL statement:
+
+```sql
+-- Add metadata JSON column to entities
+ALTER TABLE entities ADD COLUMN metadata TEXT;
 ```
 
 ---
