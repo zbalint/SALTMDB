@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 import os
 import sqlite3
 import json
@@ -558,23 +559,37 @@ class TestSALTMDB(unittest.TestCase):
         self.assertEqual(data["tag_name"], "#ops-runbook")
         self.assertEqual(len(data["entity_ids"]), 3)
 
-    def test_db_viewer_start_stop(self):
+    @unittest.mock.patch("subprocess.Popen")
+    @unittest.mock.patch("socket.socket")
+    @unittest.mock.patch("urllib.request.urlopen")
+    def test_db_viewer_start_stop(self, mock_urlopen, mock_socket, mock_popen):
         from saltmdb_server import start_db_viewer, stop_db_viewer
-        # 1. Start (or detect already running)
-        res_start = start_db_viewer()
-        self.assertTrue("running" in res_start.lower() or "started" in res_start.lower())
+        import urllib.error
         
-        # 2. Stop the viewer
-        res_stop = stop_db_viewer()
-        self.assertTrue("stopped" in res_stop.lower())
+        # Mock already running case
+        mock_urlopen.return_value.__enter__.return_value.status = 200
+        res = start_db_viewer()
+        self.assertIn("already running", res.lower())
         
-        # 3. Stop again (should report not running)
-        res_stop2 = stop_db_viewer()
-        self.assertTrue("not running" in res_stop2.lower() or "closed" in res_stop2.lower())
+        # Mock not running case (start starts it)
+        mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+        res2 = start_db_viewer()
+        self.assertIn("started successfully", res2.lower())
+        mock_popen.assert_called_once()
         
-        # 4. Start it back up
-        res_start2 = start_db_viewer()
-        self.assertTrue("started" in res_start2.lower())
+        # Mock stop - connection refused (not running)
+        mock_socket.return_value.connect.side_effect = Exception("conn failed")
+        res3 = stop_db_viewer()
+        self.assertIn("not running", res3.lower())
+        
+        # Mock stop - connection success (running)
+        mock_socket.return_value.connect.side_effect = None
+        with unittest.mock.patch("subprocess.check_output") as mock_check_output:
+            mock_check_output.return_value = "  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       9999"
+            with unittest.mock.patch("subprocess.run") as mock_run:
+                res4 = stop_db_viewer()
+                self.assertIn("stopped successfully", res4.lower())
+                mock_run.assert_called()
 
 if __name__ == "__main__":
     unittest.main()
