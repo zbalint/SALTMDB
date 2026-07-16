@@ -40,7 +40,7 @@ When a document is split into multiple granular chunks, you must establish their
 Before saving any memory to long-term storage:
 * **Duplicate Check:** Run `check_duplicate_memories(title, content, owner_id, tags)` to verify if a near-identical memory exists.
   * If `duplicate_found` is `True`, do **not** write a new memory. Instead, retrieve the existing ID and perform an update (SCD Type 2).
-* **Metadata Schema:** Populate the `metadata` dictionary parameter on `store_knowledge` with indexable attributes:
+* **Metadata Schema:** Populate the `metadata` dictionary parameter on `store_memory` with indexable attributes:
   * `project`: The name of the codebase/project.
   * `source_path`: The relative repository path of the source file. (e.g. `CORE.md` instead of absolute paths like `C:/Users/...`).
   * `topic`: The technical category (e.g., `ops`, `auth`, `database`, `build`).
@@ -50,7 +50,7 @@ Before saving any memory to long-term storage:
 
 ## 5. Stateful Fact Block (SFB) Layout Guideline
 
-When writing the markdown `content` parameter for `store_knowledge`, structure it as:
+When writing the markdown `content` parameter for `store_memory`, structure it as:
 1. **Title Heading (`#`)**: A concise, tag-free, filename-free title.
 2. **Summary**: A brief overview of the memory.
 3. **Claims list**: Tagged bullet points using `[FACT]`, `[DECISION]`, `[INFERENCE]`, `[STATUS]`, `[OPEN]`, or `[RESOLUTION]`.

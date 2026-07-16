@@ -19,7 +19,7 @@ graph TD
         B -->|Queries Core Rules| E[search_memory]
         C -->|Logs Short-Term Operations| F[log_event]
         C -->|Retrieves Weighted Facts| E
-        D -->|Saves Persistent Memory| G[store_knowledge]
+        D -->|Saves Persistent Memory| G[store_memory]
         D -->|Cleans & Merges Chunks| H[commit_consolidation]
         C -->|Maps Topology Edges| I[store_relation]
         C -->|Recursive Tree Tracing| J[analyze_dependencies]
@@ -44,7 +44,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 ## 1. Available Tools
 * `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode, limit)`: **[MANDATORY `owner_id`]** Search long-term memories. Safe FTS5 parser handles syntax errors automatically. Supports `metadata_filter` (exact lookups by project, source_path, etc.), `explain_mode` (diagnostics on zero-match), and `limit` (default 5, max 25).
 * `scan_memories(owner_id, status_filter, limit, offset)`: **[MANDATORY `owner_id`]** Retrieve and scan lists/contents of memories for audits, consistency reviews, or contradiction checks.
-* `store_knowledge(owner_id, content, tags, scope, ..., metadata)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge. Supports optional `metadata` dict for structured search.
+* `store_memory(owner_id, content, tags, scope, ..., metadata)`: **[MANDATORY `owner_id`]** Save/upsert long-term knowledge. Supports optional `metadata` dict for structured search.
 * `detect_orphaned_memories(owner_id)`: **[MANDATORY `owner_id`]** Returns a list of active memories with zero connections, suggesting link candidates based on shared tags.
 * `check_duplicate_memories(title, content, owner_id, tags)`: **[MANDATORY `owner_id`]** Run before storing to verify if a proposed memory overlaps with existing ones (returns duplicate warning if similarity >= 70%).
 * `log_event(agent_id, type, content, error_code)`: Log a short-term operational event to the ledger.
@@ -73,7 +73,7 @@ Immediately upon initialization, before answering the user:
 Before concluding your turn or finalizing a major task block:
 1. Query short-term events using `get_recent_events` (or review your log actions).
 2. Synthesize new permanent facts, rules, or progress updates.
-3. Commit or upsert these synthesized updates using `store_knowledge`. Always pass your `owner_id`. If you save a memory with an identical title under the same owner, the server automatically routes it to an update, preserving history via SCD versioning.
+3. Commit or upsert these synthesized updates using `store_memory`. Always pass your `owner_id`. If you save a memory with an identical title under the same owner, the server automatically routes it to an update, preserving history via SCD versioning.
 4. If a component depends on or resolves another component, store the relationship edge using `store_relation(source_id, target_id, predicate)`.
 
 ### Phase D: Cognitive Consolidation (Cleanup)
@@ -125,7 +125,7 @@ When closing a thread or wrapping up a goal, the agent converts transient logs i
 ```python
 # 1. Agent reviews session log events
 # 2. Synthesizes a new permanent safeguard rule
-store_knowledge(
+store_memory(
     title="Container DHCP Asymmetric Rule",
     content="Always account for DHCP directional asymmetry in default-drop netfilter profiles (client port 68 -> server port 67 outbound).",
     tags=["#ops-rules", "#rules"],
@@ -174,7 +174,7 @@ affected_components = analyze_dependencies(root_entity_id="uuid-component-a")
 
 ## 4. Setting Weights & Expiry Boundaries
 
-To cooperate with the background Librarian process, agents can assign importance weights when calling `store_knowledge`. Alternatively, agents should supply **Multi-Dimensional Importance Scores** (`relevance`, `impact`, `novelty`, `actionability` rated 1-5) to let the server calculate weights:
+To cooperate with the background Librarian process, agents can assign importance weights when calling `store_memory`. Alternatively, agents should supply **Multi-Dimensional Importance Scores** (`relevance`, `impact`, `novelty`, `actionability` rated 1-5) to let the server calculate weights:
 
 | Computed Weight | Target Memory Type | Decay Lifespan (LRU) |
 | :---: | :--- | :--- |
@@ -183,14 +183,14 @@ To cooperate with the background Librarian process, agents can assign importance
 | **1-2**| Default facts, initiative progress, and project updates | **90 days** of inactivity before decay |
 
 ### Temporal Slowly Changing Dimensions (SCD Type 2)
-When an agent updates an existing memory using `store_knowledge` with an explicit `entity_id`:
+When an agent updates an existing memory using `store_memory` with an explicit `entity_id`:
 1. The server closes the active window of the old version: it writes the historical snapshot with `status = 'archived'` and sets `valid_to = now`.
 2. The server creates the new active fact under the original `entity_id` with `valid_from = now` and `valid_to = NULL`.
 3. This allows the system to audit the lineage of how factoids, user instructions, or system architecture rules evolved.
 
 ### Promoting Memories to Core
 If a previously stored raw or consolidated project memory matures into a permanent rule or baseline constraint, it should be promoted to core status:
-1. **Programmatic Update (Agent-driven):** The agent calls the `store_knowledge` MCP tool with the target `entity_id`, passing `is_core = true` and `weight = 5`.
+1. **Programmatic Update (Agent-driven):** The agent calls the `store_memory` MCP tool with the target `entity_id`, passing `is_core = true` and `weight = 5`.
 2. **Manual Developer Override:** The user runs a direct SQL update manually on the database file:
    ```sql
    UPDATE entities SET is_core = 1, weight = 5, updated_at = CURRENT_TIMESTAMP WHERE id = 'ENTITY_UUID';

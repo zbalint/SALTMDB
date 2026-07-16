@@ -5,7 +5,7 @@ import os
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
 
-from saltmdb_server import store_knowledge
+from saltmdb_server import store_memory
 
 def main():
     if len(sys.argv) < 4:
@@ -20,7 +20,7 @@ def main():
     os.environ["SALTMDB_DB_PATH"] = db_path
     
     try:
-        res = store_knowledge(
+        res = store_memory(
             content=f"Concurrent content {idx}",
             tags=["#concurrent"],
             scope="shared",

@@ -18,7 +18,7 @@ from saltmdb_server import (
     acquire_librarian_lock,
     release_librarian_lock,
     commit_consolidation,
-    store_knowledge,
+    store_memory,
     search_memory,
     create_snapshot,
     store_relation,
@@ -332,9 +332,9 @@ class TestSALTMDB(unittest.TestCase):
         fourth_attempt = acquire_librarian_lock(self.conn)
         self.assertTrue(fourth_attempt)
 
-    def test_store_knowledge_upsert(self):
+    def test_store_memory_upsert(self):
         # Store new memory
-        res = store_knowledge(
+        res = store_memory(
             content="# Upsert Test\nInitial content here.",
             tags=["#test"],
             scope="shared",
@@ -352,7 +352,7 @@ class TestSALTMDB(unittest.TestCase):
         self.assertEqual(row[1], 1)
         
         # Upsert (update) same memory
-        res2 = store_knowledge(
+        res2 = store_memory(
             content="# Upsert Test (Updated)\nNew content here.",
             tags=["#new-tag"],
             scope="shared",
@@ -375,14 +375,14 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_multi_agent_isolation(self):
         # Store memory for agent1
-        store_knowledge(
+        store_memory(
             content="# Agent1 Fact\nAgent1 content.",
             tags=["#isolated"],
             scope="shared",
             owner_id="agent1"
         )
         # Store memory for agent2
-        store_knowledge(
+        store_memory(
             content="# Agent2 Fact\nAgent2 content.",
             tags=["#isolated"],
             scope="shared",
@@ -426,7 +426,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_temporal_versioning_scd(self):
         # 1. Insert original memory
-        store_knowledge(
+        store_memory(
             content="# Original Fact\nVersion 1 content.",
             tags=["#ver1"],
             scope="shared",
@@ -442,7 +442,7 @@ class TestSALTMDB(unittest.TestCase):
         original_valid_from = row[0]
         
         # 2. Update memory to trigger temporal history copy (SCD Type 2)
-        store_knowledge(
+        store_memory(
             content="# Updated Fact\nVersion 2 content.",
             tags=["#ver2"],
             scope="shared",
@@ -483,9 +483,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_relations_and_cte_traversal(self):
         # 1. Insert memory nodes
-        store_knowledge(content="# Core Component\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-core")
-        store_knowledge(content="# Dependency A\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-a")
-        store_knowledge(content="# Dependency B\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-b")
+        store_memory(content="# Core Component\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-core")
+        store_memory(content="# Dependency A\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-a")
+        store_memory(content="# Dependency B\nDescription.", tags=["#sys"], scope="shared", owner_id="ops", entity_id="node-dep-b")
         
         # 2. Store relationships (relations)
         res1 = store_relation(source_id="node-core", target_id="node-dep-a", predicate="depends_on")
@@ -502,9 +502,9 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Core Component -> Dependency A", paths)
         self.assertIn("Core Component -> Dependency A -> Dependency B", paths)
 
-    def test_store_knowledge_title_deduplication(self):
+    def test_store_memory_title_deduplication(self):
         # 1. Insert first memory
-        store_knowledge(
+        store_memory(
             content="# Same Title\nContent version 1.",
             tags=["#test"],
             scope="shared",
@@ -513,7 +513,7 @@ class TestSALTMDB(unittest.TestCase):
         )
         
         # 2. Insert second memory with same title and owner, but without passing entity_id
-        store_knowledge(
+        store_memory(
             content="# Same Title\nContent version 2.",
             tags=["#test-updated"],
             scope="shared",
@@ -535,7 +535,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_pre_write_tag_normalization(self):
         # 1. Store memory with canonical tag
-        store_knowledge(
+        store_memory(
             content="# Normalization Fact\nContent.",
             tags=["#Auth-Error"],
             scope="shared",
@@ -544,7 +544,7 @@ class TestSALTMDB(unittest.TestCase):
         )
         
         # 2. Store another memory with case/hyphen drifted tag name
-        store_knowledge(
+        store_memory(
             content="# Normalization Fact 2\nContent.",
             tags=["#auth_error"],
             scope="shared",
@@ -621,7 +621,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_archive_memory(self):
         # 1. Store a memory
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Archivable Fact\nThis is an archivable fact.",
             tags=["#test"],
@@ -681,7 +681,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_metadata_filtering(self):
         # 1. Store with metadata
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Config file\nThis is a configuration file.",
             tags=["#ops"],
@@ -689,7 +689,7 @@ class TestSALTMDB(unittest.TestCase):
             entity_id="uuid-meta-1",
             metadata={"project": "SALTMDB", "source_path": "etc/saltmdb.conf"}
         )
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Build file\nThis is a build script.",
             tags=["#build"],
@@ -715,7 +715,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_fts_sanitization_and_fallback(self):
         # 1. Store knowledge
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Auth Error\nDatabase validation failed with code 403.",
             tags=["#auth"],
@@ -750,7 +750,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_detect_orphaned_memories(self):
         # 1. Add an active memory with NO relations
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Orphan Memory\nThis memory stands alone.",
             tags=["#standalone"],
@@ -766,7 +766,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_check_duplicate_memories(self):
         # 1. Insert base memory
-        store_knowledge(
+        store_memory(
             owner_id="agent1",
             content="# Database setup rule\nAlways configure SQLite WAL mode.",
             tags=["#database"],
@@ -817,7 +817,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_input_validation(self):
         # 1. Test clean title validation
-        res_bad_title = store_knowledge(
+        res_bad_title = store_memory(
             content="# Bad Title\nContent",
             tags=["#test"],
             scope="shared",
@@ -827,7 +827,7 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Error: Title violates clean title guidelines", res_bad_title)
         
         # 2. Test metadata absolute path validation
-        res_bad_path = store_knowledge(
+        res_bad_path = store_memory(
             content="# Good Title\nContent",
             tags=["#test"],
             scope="shared",
@@ -838,7 +838,7 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Error: 'source_path' must be a relative repository path", res_bad_path)
         
         # 3. Test valid store passes
-        res_good = store_knowledge(
+        res_good = store_memory(
             content="# Good Title\nContent",
             tags=["#test"],
             scope="shared",
@@ -850,9 +850,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_scan_memories(self):
         # Insert 3 memories for agent1
-        store_knowledge(content="Content 1", tags=["#t1"], scope="shared", owner_id="agent1", title="Memory 1", skip_duplicate_check=True)
-        store_knowledge(content="Content 2", tags=["#t2"], scope="shared", owner_id="agent1", title="Memory 2", skip_duplicate_check=True)
-        store_knowledge(content="Content 3", tags=["#t3"], scope="shared", owner_id="agent1", title="Memory 3", skip_duplicate_check=True)
+        store_memory(content="Content 1", tags=["#t1"], scope="shared", owner_id="agent1", title="Memory 1", skip_duplicate_check=True)
+        store_memory(content="Content 2", tags=["#t2"], scope="shared", owner_id="agent1", title="Memory 2", skip_duplicate_check=True)
+        store_memory(content="Content 3", tags=["#t3"], scope="shared", owner_id="agent1", title="Memory 3", skip_duplicate_check=True)
         
         # Scan active memories
         mems = scan_memories(owner_id="agent1", status_filter="active", limit=2, offset=0)
@@ -867,9 +867,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_dependency_cycle_detection_by_id(self):
         # 1. Create entities with DUPLICATE titles but different IDs
-        id1 = store_knowledge(content="Content 1", tags=["#tag"], scope="shared", owner_id="agent1", title="Duplicate Title").split(": ")[-1]
-        id2 = store_knowledge(content="Content 2", tags=["#tag"], scope="shared", owner_id="agent2", title="Duplicate Title").split(": ")[-1]
-        id3 = store_knowledge(content="Content 3", tags=["#tag"], scope="shared", owner_id="agent1", title="Third Node").split(": ")[-1]
+        id1 = store_memory(content="Content 1", tags=["#tag"], scope="shared", owner_id="agent1", title="Duplicate Title").split(": ")[-1]
+        id2 = store_memory(content="Content 2", tags=["#tag"], scope="shared", owner_id="agent2", title="Duplicate Title").split(": ")[-1]
+        id3 = store_memory(content="Content 3", tags=["#tag"], scope="shared", owner_id="agent1", title="Third Node").split(": ")[-1]
         
         # Build path: id1 -> id2 -> id3
         store_relation(source_id=id1, target_id=id2, predicate="depends_on")
@@ -892,9 +892,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_commit_consolidation_repoints_relations(self):
         # Create raw entities
-        p1 = store_knowledge(content="Parent 1 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 1").split(": ")[-1]
-        p2 = store_knowledge(content="Parent 2 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 2").split(": ")[-1]
-        other = store_knowledge(content="Other content", tags=["#tag"], scope="shared", owner_id="agent1", title="Other Node").split(": ")[-1]
+        p1 = store_memory(content="Parent 1 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 1").split(": ")[-1]
+        p2 = store_memory(content="Parent 2 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 2").split(": ")[-1]
+        other = store_memory(content="Other content", tags=["#tag"], scope="shared", owner_id="agent1", title="Other Node").split(": ")[-1]
         
         # Relation: p1 depends on other
         store_relation(source_id=p1, target_id=other, predicate="depends_on")
@@ -926,7 +926,7 @@ class TestSALTMDB(unittest.TestCase):
     def test_search_memory_custom_limit(self):
         # Store 10 distinct entities
         for i in range(10):
-            store_knowledge(
+            store_memory(
                 content=f"Distinct search content {i}",
                 tags=["#limit-test"],
                 scope="shared",
@@ -947,9 +947,9 @@ class TestSALTMDB(unittest.TestCase):
         res_capped = search_memory(owner_id="agent1", tags_filter=["#limit-test"], limit=30)
         self.assertEqual(len(res_capped), 10)
 
-    def test_store_knowledge_fuzzy_duplicate_guard(self):
+    def test_store_memory_fuzzy_duplicate_guard(self):
         # 1. Store initial baseline memory
-        store_knowledge(
+        store_memory(
             content="Always configure SQLite Write-Ahead Logging WAL mode for SALTMDB database.",
             tags=["#database"],
             scope="shared",
@@ -958,7 +958,7 @@ class TestSALTMDB(unittest.TestCase):
         )
         
         # 2. Attempt to store a fuzzy duplicate memory (slight title & content variation)
-        res_dup = store_knowledge(
+        res_dup = store_memory(
             content="Ensure you always enable Write-Ahead Logging WAL mode for SALTMDB.",
             tags=["#database"],
             scope="shared",
@@ -970,7 +970,7 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Warning: Potential duplicate of existing memory", res_dup)
         
         # 3. Repeat insertion with skip_duplicate_check=True
-        res_forced = store_knowledge(
+        res_forced = store_memory(
             content="Ensure you always enable Write-Ahead Logging WAL mode for SALTMDB.",
             tags=["#database"],
             scope="shared",
@@ -992,7 +992,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_project_id_first_class_recall(self):
         # 1. Store with first-class project_id
-        store_knowledge(
+        store_memory(
             content="Project specific memory.",
             tags=["#test"],
             scope="shared",
@@ -1002,7 +1002,7 @@ class TestSALTMDB(unittest.TestCase):
         )
         
         # 2. Store with metadata.project fallback
-        store_knowledge(
+        store_memory(
             content="Metadata fallback memory.",
             tags=["#test"],
             scope="shared",
@@ -1012,7 +1012,7 @@ class TestSALTMDB(unittest.TestCase):
         )
         
         # 3. Store another memory for different project
-        store_knowledge(
+        store_memory(
             content="Other project memory.",
             tags=["#test"],
             scope="shared",
@@ -1100,7 +1100,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_fts_porter_stemmer(self):
         # Store a memory with singular/root keywords
-        store_knowledge(
+        store_memory(
             content="This rule governs sqlite connections and connected database sockets.",
             tags=["#database"],
             scope="shared",
@@ -1118,7 +1118,7 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_search_aliases_indexing(self):
         # Store a memory with hidden search aliases in metadata
-        store_knowledge(
+        store_memory(
             content="We use poetry as our primary packaging python framework.",
             tags=["#packaging"],
             scope="shared",
@@ -1134,9 +1134,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_relational_pagerank_boosting(self):
         # Store three identical content memories (with skip_duplicate_check to bypass fuzzy matches)
-        id1 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory One", skip_duplicate_check=True).split(": ")[-1]
-        id2 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Two", skip_duplicate_check=True).split(": ")[-1]
-        id3 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Three", skip_duplicate_check=True).split(": ")[-1]
+        id1 = store_memory(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory One", skip_duplicate_check=True).split(": ")[-1]
+        id2 = store_memory(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Two", skip_duplicate_check=True).split(": ")[-1]
+        id3 = store_memory(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Three", skip_duplicate_check=True).split(": ")[-1]
         
         # Create incoming relations for Memory Two (has 2 incoming edges)
         store_relation(source_id=id1, target_id=id2, predicate="links_to")

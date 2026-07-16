@@ -452,7 +452,7 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
                 )
 
 @mcp.tool()
-def store_knowledge(
+def store_memory(
     content: str,
     tags: list,
     scope: str,
@@ -469,22 +469,28 @@ def store_knowledge(
     skip_duplicate_check: bool = False,
     project_id: str = None
 ) -> str:
-    """Stores a consolidated Markdown fact chunk in the long-term knowledge base.
+    """Stores a consolidated Markdown fact chunk as a long-term memory.
+    
+    Memory SEO Guidelines:
+    - MANDATORY: Call `check_duplicate_memories` before writing to prevent duplicate clutter.
+    - Title: Front-load with specific technical nouns (e.g., 'Docker Nginx 502 Bad Gateway' instead of 'Server Error'). Do not include file extensions.
+    - Content: Format as a Stateful Fact Block starting with YAML frontmatter (containing title, tags, relative source_path, and date), followed by bulleted claims prefixed with [FACT], [DECISION], etc. Use explicit nouns; avoid pronouns ('it', 'they').
+    - Metadata: Include search_aliases list in metadata['search_aliases'] to index alternative keywords/synonyms invisibly.
     
     Args:
-        content: Markdown formatted text representation of the fact. You MUST format this as a Stateful Fact Block (SFB) starting with YAML frontmatter containing clean title, tags, relative source_path, and date, followed by bulleted claims prefixed with [FACT], [DECISION], etc.
-        tags: List of tags associated with this knowledge.
+        content: Markdown formatted text representation of the fact. Must be in Stateful Fact Block (SFB) format.
+        tags: List of tags associated with this memory.
         scope: Scope level ('private' or 'shared').
-        owner_id: Mandatory ID of the agent/owner storing this knowledge to isolate lanes.
+        owner_id: Mandatory ID of the agent/owner storing this memory to isolate lanes.
         weight: Priority ranking multiplier (default 1).
         is_core: If True, bypasses search and gets injected into the agent prompt (default False).
-        title: Optional clean title (no file extensions, no parent file prefixes). If omitted, the first markdown heading is auto-extracted and cleaned.
-        entity_id: Optional custom entity ID to insert or update (upsert). To update an existing memory (SCD Type 2 version update), pass the original entity_id.
+        title: Optional clean title. If omitted, the first markdown heading is auto-extracted.
+        entity_id: Optional custom entity ID to update (upsert). To update an existing memory (SCD Type 2 version update), pass the original entity_id.
         relevance: Optional score (1-5) representing context relevance.
         impact: Optional score (1-5) representing user/emotional impact.
         novelty: Optional score (1-5) representing info novelty.
         actionability: Optional score (1-5) representing action priority.
-        metadata: Optional dictionary of structured attributes to match. You MUST include a relative repository path in metadata['source_path'].
+        metadata: Optional dictionary of structured attributes. Always include metadata['source_path'] with relative repo path.
         skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
         project_id: Optional first-class project identifier to associate with the memory.
     """
@@ -545,7 +551,7 @@ def store_knowledge(
                 conn.close()
                 return (f"Warning: Potential duplicate of existing memory '{top['title']}' "
                         f"(ID: {top['id']}, similarity {top['similarity_score']}). "
-                        f"Call store_knowledge with entity_id='{top['id']}' to update it instead, "
+                        f"Call store_memory with entity_id='{top['id']}' to update it instead, "
                         f"or set skip_duplicate_check=True to force a new entry.")
         except Exception:
             pass # Continue if check fails (e.g. database uninitialized)
@@ -663,11 +669,14 @@ def search_memory(
     limit: int = 5,
     project_id: str = None
 ) -> list | dict:
-    """Performs full-text keyword search, metadata filtering, and tag filtering in the long-term knowledge base.
+    """Performs full-text keyword search and filtering in long-term memory.
+    
+    Look-Before-Leap Rule:
+    - Run this tool before starting any coding task, command, or design decision to check for past mistakes, rules, project conventions, or lessons learned.
     
     Args:
         owner_id: Mandatory ID of the agent/owner to isolate memory access and lanes.
-        query_keywords: Search terms used to match against indexing content via FTS5.
+        query_keywords: Search terms used to match against indexing content via FTS5 (matches title, content, or search aliases).
         tags_filter: List of tag names; if provided, matched items must have all specified tags.
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
         explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
@@ -1465,8 +1474,11 @@ def check_duplicate_memories(
     owner_id: str,
     tags: list = None
 ) -> dict:
-    """Checks the database for existing memories that might be duplicates of the proposed memory,
-    using title matching, tag overlap, and text similarity.
+    """Checks if a proposed memory overlaps with existing ones before writing.
+    
+    Mandatory Pre-Write Check:
+    - ALWAYS call this tool before calling `store_memory` to prevent duplicate clutter.
+    - Returns a list of potential duplicates with similarity scores. If a high-similarity duplicate is found, update the existing memory instead of storing a new one.
     
     Args:
         title: Proposed title of the memory.
@@ -1525,7 +1537,11 @@ def check_duplicate_memories(
 
 @mcp.tool()
 def store_relation(source_id: str, target_id: str, predicate: str) -> str:
-    """Stores a typed directional relationship (edge) between two long-term memory entities.
+    """Stores a typed directional link (edge) between two long-term memory entities.
+    
+    Backlink Boosting Rule:
+    - Link related memories (e.g. linking a fix memory back to its root issue memory).
+    - Memories with incoming active relations gain 'PageRank authority', boosting their search ranking and visibility inside search results.
     
     Args:
         source_id: UUID of the source entity (subject).
