@@ -175,14 +175,31 @@ def init_db(db_path: str):
         );
         """)
         
-        # 5. Virtual FTS5 Table for weighted keyword search
-        conn.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
-            id UNINDEXED,
-            title,
-            full_content
-        );
-        """)
+        # 5. Virtual FTS5 Table with Porter Tokenizer & Search Aliases
+        # If it exists with the old schema (e.g. missing search_aliases column), we drop and recreate it.
+        try:
+            cursor = conn.execute("PRAGMA table_info(entities_fts)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if not cols or "search_aliases" not in cols:
+                conn.execute("DROP TABLE IF EXISTS entities_fts")
+                conn.execute("""
+                CREATE VIRTUAL TABLE entities_fts USING fts5(
+                    id UNINDEXED,
+                    title,
+                    full_content,
+                    search_aliases,
+                    tokenize='porter'
+                );
+                """)
+                # Backfill FTS index from existing entities
+                conn.execute("""
+                INSERT INTO entities_fts (id, title, full_content, search_aliases)
+                SELECT id, title, full_content, 
+                       coalesce(json_extract(metadata, '$.search_aliases'), '')
+                FROM entities;
+                """)
+        except sqlite3.OperationalError:
+            pass
         
         # 6. Mutex Lock Table for Leader Election
         conn.execute("""
@@ -205,13 +222,19 @@ def init_db(db_path: str):
         VALUES ('librarian_consolidation', NULL, NULL, NULL);
         """)
         
+        # Drop old triggers to recreate with search_aliases support
+        conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
+        conn.execute("DROP TRIGGER IF EXISTS update_entity_fts")
+        conn.execute("DROP TRIGGER IF EXISTS update_entity_fts_unarchived")
+        
         # Triggers to keep FTS5 and Entities in sync
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS insert_entity_fts
         AFTER INSERT ON entities
         WHEN NEW.status != 'archived'
         BEGIN
-            INSERT INTO entities_fts(id, title, full_content) VALUES (NEW.id, NEW.title, NEW.full_content);
+            INSERT INTO entities_fts(id, title, full_content, search_aliases)
+            VALUES (NEW.id, NEW.title, NEW.full_content, coalesce(json_extract(NEW.metadata, '$.search_aliases'), ''));
         END;
         """)
         
@@ -220,7 +243,11 @@ def init_db(db_path: str):
         AFTER UPDATE ON entities
         WHEN NEW.status != 'archived' AND OLD.status != 'archived'
         BEGIN
-            UPDATE entities_fts SET title = NEW.title, full_content = NEW.full_content WHERE id = OLD.id;
+            UPDATE entities_fts 
+            SET title = NEW.title, 
+                full_content = NEW.full_content,
+                search_aliases = coalesce(json_extract(NEW.metadata, '$.search_aliases'), '')
+            WHERE id = OLD.id;
         END;
         """)
         
@@ -229,7 +256,8 @@ def init_db(db_path: str):
         AFTER UPDATE ON entities
         WHEN NEW.status != 'archived' AND OLD.status = 'archived'
         BEGIN
-            INSERT INTO entities_fts(id, title, full_content) VALUES (NEW.id, NEW.title, NEW.full_content);
+            INSERT INTO entities_fts(id, title, full_content, search_aliases)
+            VALUES (NEW.id, NEW.title, NEW.full_content, coalesce(json_extract(NEW.metadata, '$.search_aliases'), ''));
         END;
         """)
         
@@ -704,13 +732,17 @@ def search_memory(
             if sanitized_keywords != query_keywords:
                 sanitization_applied = True
                 
-            # 10:1 title-to-content search weighting using sqlite FTS5 bm25 column weights
+            # 10:1:5 title-to-content-to-aliases search weighting, boosted by incoming relations
             sql = f"""
-                SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0) as score, e.title
+                SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) as score, e.title
                 FROM entities_fts f
                 JOIN entities e ON e.id = f.id
                 WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
-                ORDER BY (bm25(entities_fts, 0.0, 10.0, 1.0) * e.weight) ASC
+                ORDER BY (
+                    bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) * e.weight * (
+                        1.0 + 0.05 * (SELECT COUNT(*) FROM relations WHERE target_id = e.id AND valid_to IS NULL)
+                    )
+                ) ASC
                 LIMIT ?
             """
             exec_params = [sanitized_keywords] + owner_params + project_params + params + metadata_params + [safe_limit]
@@ -737,7 +769,11 @@ def search_memory(
                 SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title
                 FROM entities e
                 WHERE e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
-                ORDER BY e.weight DESC, e.updated_at DESC
+                ORDER BY (
+                    e.weight * (
+                        1.0 + 0.05 * (SELECT COUNT(*) FROM relations WHERE target_id = e.id AND valid_to IS NULL)
+                    )
+                ) DESC, e.updated_at DESC
                 LIMIT ?
             """
             exec_params = owner_params + project_params + params + metadata_params + [safe_limit]

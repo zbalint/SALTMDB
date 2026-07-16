@@ -1098,5 +1098,62 @@ class TestSALTMDB(unittest.TestCase):
         count = cursor.fetchone()[0]
         self.assertEqual(count, 10)
 
+    def test_fts_porter_stemmer(self):
+        # Store a memory with singular/root keywords
+        store_knowledge(
+            content="This rule governs sqlite connections and connected database sockets.",
+            tags=["#database"],
+            scope="shared",
+            owner_id="agent1",
+            title="Database connections rule"
+        )
+        
+        # Search for pluralization/tense inflected forms
+        res_plural = search_memory(owner_id="agent1", query_keywords="connecting")
+        self.assertEqual(len(res_plural), 1)
+        self.assertEqual(res_plural[0]["title"], "Database connections rule")
+        
+        res_singular = search_memory(owner_id="agent1", query_keywords="connection")
+        self.assertEqual(len(res_singular), 1)
+
+    def test_search_aliases_indexing(self):
+        # Store a memory with hidden search aliases in metadata
+        store_knowledge(
+            content="We use poetry as our primary packaging python framework.",
+            tags=["#packaging"],
+            scope="shared",
+            owner_id="agent1",
+            title="Python Package Manager Config",
+            metadata={"search_aliases": ["pip", "dependency_resolution", "pyproject.toml"]}
+        )
+        
+        # Search for an alias word not present in title or content
+        res = search_memory(owner_id="agent1", query_keywords="dependency_resolution")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["title"], "Python Package Manager Config")
+
+    def test_relational_pagerank_boosting(self):
+        # Store three identical content memories (with skip_duplicate_check to bypass fuzzy matches)
+        id1 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory One", skip_duplicate_check=True).split(": ")[-1]
+        id2 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Two", skip_duplicate_check=True).split(": ")[-1]
+        id3 = store_knowledge(content="Common baseline knowledge.", tags=["#rank"], scope="shared", owner_id="agent1", title="Memory Three", skip_duplicate_check=True).split(": ")[-1]
+        
+        # Create incoming relations for Memory Two (has 2 incoming edges)
+        store_relation(source_id=id1, target_id=id2, predicate="links_to")
+        store_relation(source_id=id3, target_id=id2, predicate="links_to")
+        
+        # Create incoming relations for Memory Three (has 1 incoming edge)
+        store_relation(source_id=id1, target_id=id3, predicate="links_to")
+        
+        # Search for the term "Common baseline knowledge"
+        res = search_memory(owner_id="agent1", query_keywords="Common baseline knowledge", limit=3)
+        self.assertEqual(len(res), 3)
+        # Memory Two should be ranked first because it has the most incoming active edges (2)
+        self.assertEqual(res[0]["id"], id2)
+        # Memory Three should be ranked second (1 incoming edge)
+        self.assertEqual(res[1]["id"], id3)
+        # Memory One should be ranked third (0 incoming edges)
+        self.assertEqual(res[2]["id"], id1)
+
 if __name__ == "__main__":
     unittest.main()
