@@ -19,6 +19,9 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.14` | 2 | No schema changes. Added archive_memory MCP tool and implemented dynamic pending/resolved event status mapping | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.15` | 2 | No schema changes. Redirected database viewer background startup logs to viewer.log and added startup integrity check | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.16` | 3 | Added `metadata` TEXT column to `entities` for JSON structured filtering; added safe FTS5 query parser fallback, search explain mode, orphan detection, and duplicate checking | **Column Migration on `entities`** (handled automatically or manually via ALTER TABLE) |
+| `v0.1.0-alpha.17` | 3 | No schema changes. Capped default get_recent_events limit to 20 and truncated large operational log payloads | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.18` | 3 | No schema changes. Added self-healing zombie port clearance check to start_db_viewer | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.19` | 3 | No schema changes. Shipped specialized Google Antigravity Skills for memory ingestion, consolidation, lifecycle, and relations | **No Action Required** (fully backward-compatible) |
 
 ---
 
