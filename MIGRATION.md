@@ -22,6 +22,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.17` | 3 | No schema changes. Capped default get_recent_events limit to 20 and truncated large operational log payloads | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.18` | 3 | No schema changes. Added self-healing zombie port clearance check to start_db_viewer | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.19` | 3 | No schema changes. Shipped specialized Google Antigravity Skills for memory ingestion, consolidation, lifecycle, and relations | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.20` | 3 | No schema changes. Renamed skills folders to include prefix to prevent name collisions in global CLI skills paths | **No Action Required** (fully backward-compatible) |
 
 ---
 

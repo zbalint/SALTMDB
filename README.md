@@ -152,13 +152,13 @@ python scratch/test_db.py
 
 SALTMDB ships with four specialized **Google Antigravity Skills** to guide agents in executing high-quality memory management tasks:
 
-* **`saltmdb_ingestion_and_write`** (`skills/ingestion_and_write`): Rules for semantic document splitting (granularity rule), parent-child graph linking, and metadata tagging to prevent monolithic content blocks.
-* **`saltmdb_consolidation`** (`skills/consolidation`): Guidelines for lossless cognitive consolidation, ensuring code blocks, parameter listings, and version histories are fully preserved during memory merges.
-* **`saltmdb_lifecycle`** (`skills/lifecycle`): Best practices for SCD Type 2 updates, archiving obsolete records, and promoting system rules and constraints to core memories.
-* **`saltmdb_relations`** (`skills/relations`): Graph topology management, standard relationship predicates, recursive CTE impact tracing, and resolving orphaned memory nodes.
+* **`saltmdb_ingestion_and_write`** (`skills/saltmdb_ingestion_and_write`): Rules for semantic document splitting (granularity rule), parent-child graph linking, and metadata tagging to prevent monolithic content blocks.
+* **`saltmdb_consolidation`** (`skills/saltmdb_consolidation`): Guidelines for lossless cognitive consolidation, ensuring code blocks, parameter listings, and version histories are fully preserved during memory merges.
+* **`saltmdb_lifecycle`** (`skills/saltmdb_lifecycle`): Best practices for SCD Type 2 updates, archiving obsolete records, and promoting system rules and constraints to core memories.
+* **`saltmdb_relations`** (`skills/saltmdb_relations`): Graph topology management, standard relationship predicates, recursive CTE impact tracing, and resolving orphaned memory nodes.
 
 ### Skill Installation
-To make these skills available to your active `agy` CLI or Antigravity agents, copy the folders from `skills/` directly to your local skills directory:
+To make these skills available to your active `copilot-cli` or `agy` CLI/Antigravity agents, copy the folders from `skills/` directly to your local skills directory:
 ```bash
 Copy-Item -Path "skills/*" -Destination "$HOME/.gemini/antigravity-cli/builtin/skills/" -Recurse -Force
 ```
