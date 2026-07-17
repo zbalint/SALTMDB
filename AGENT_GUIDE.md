@@ -80,7 +80,7 @@ Before concluding your turn or finalizing a major task block:
 If you find pending `consolidation_request` events targeting your `owner_id` during Phase A:
 1. Retrieve the content of the raw entities listed in the event's `entity_ids`.
 2. Rephrase, synthesize, and merge these raw markdown files into a single, high-quality consolidated memory.
-3. Call `commit_consolidation` with the parent UUIDs and the new consolidated markdown, which physically prunes the source raw logs from the database.
+3. Call `commit_consolidation` with the parent UUIDs and the new consolidated markdown, which soft-archives the source raw logs (`status = 'archived'`). They are removed from active searches to prevent context clutter, but remain directly retrievable via `fetch_memory_chunk(parent_id)` if you ever need to reconstruct the narrative timeline or audit why a decision was made.
 ```
 
 ---
