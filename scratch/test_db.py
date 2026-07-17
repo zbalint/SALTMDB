@@ -29,7 +29,8 @@ from saltmdb_server import (
     get_session_summary,
     detect_orphaned_memories,
     check_duplicate_memories,
-    scan_memories
+    scan_memories,
+    fetch_memory_chunk
 )
 
 TEST_DB_PATH = "test_saltmdb_run.db"
@@ -233,10 +234,12 @@ class TestSALTMDB(unittest.TestCase):
         )
         self.assertIn("Successfully committed", result)
         
-        # Verify the 5 raw entities are physically deleted (algorithmic forgetting)
+        # Verify the 5 raw entities are archived (algorithmic forgetting)
         cursor = self.conn.execute("SELECT status FROM entities WHERE id LIKE 'e-clutter-%'")
         rows = cursor.fetchall()
-        self.assertEqual(len(rows), 0)
+        self.assertEqual(len(rows), 5)
+        for r in rows:
+            self.assertEqual(r[0], 'archived')
             
         # Verify a new consolidated memory is created
         cursor = self.conn.execute("SELECT id, status, parent_ids, title, full_content FROM entities WHERE status = 'consolidated'")
@@ -284,9 +287,12 @@ class TestSALTMDB(unittest.TestCase):
         )
         self.assertIn("Successfully committed", result)
 
-        # Verify parent entities are physically deleted (algorithmic forgetting)
+        # Verify parent entities are archived (algorithmic forgetting)
         cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN ('e1', 'e2', 'e3', 'e4', 'e5')")
-        self.assertEqual(len(cursor.fetchall()), 0)
+        rows = cursor.fetchall()
+        self.assertEqual(len(rows), 5)
+        for r in rows:
+            self.assertEqual(r[1], 'archived')
 
         # Verify a new consolidated entity exists
         cursor = self.conn.execute("SELECT id, status, parent_ids, full_content FROM entities WHERE status = 'consolidated'")
@@ -892,9 +898,9 @@ class TestSALTMDB(unittest.TestCase):
 
     def test_commit_consolidation_repoints_relations(self):
         # Create raw entities
-        p1 = store_memory(content="Parent 1 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 1").split(": ")[-1]
-        p2 = store_memory(content="Parent 2 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 2").split(": ")[-1]
-        other = store_memory(content="Other content", tags=["#tag"], scope="shared", owner_id="agent1", title="Other Node").split(": ")[-1]
+        p1 = store_memory(content="Parent 1 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 1", skip_duplicate_check=True).split(": ")[-1]
+        p2 = store_memory(content="Parent 2 content", tags=["#raw"], scope="shared", owner_id="agent1", title="Parent 2", skip_duplicate_check=True).split(": ")[-1]
+        other = store_memory(content="Other content", tags=["#tag"], scope="shared", owner_id="agent1", title="Other Node", skip_duplicate_check=True).split(": ")[-1]
         
         # Relation: p1 depends on other
         store_relation(source_id=p1, target_id=other, predicate="depends_on")
@@ -912,9 +918,12 @@ class TestSALTMDB(unittest.TestCase):
         # Extract new entity ID
         new_id = res.split("ID: ")[-1].split(" ")[0].strip()
         
-        # Verify p1 and p2 are deleted
-        cursor = self.conn.execute("SELECT id FROM entities WHERE id IN (?, ?)", (p1, p2))
-        self.assertEqual(len(cursor.fetchall()), 0)
+        # Verify p1 and p2 are archived
+        cursor = self.conn.execute("SELECT id, status FROM entities WHERE id IN (?, ?)", (p1, p2))
+        rows = cursor.fetchall()
+        self.assertEqual(len(rows), 2)
+        for r in rows:
+            self.assertEqual(r[1], 'archived')
         
         # Verify relation has been re-pointed to new_id -> other
         cursor = self.conn.execute("SELECT source_id, target_id FROM relations WHERE target_id = ?", (other,))
@@ -1154,6 +1163,41 @@ class TestSALTMDB(unittest.TestCase):
         self.assertEqual(res[1]["id"], id3)
         # Memory One should be ranked third (0 incoming edges)
         self.assertEqual(res[2]["id"], id1)
+
+    def test_consolidation_narrative_preservation(self):
+        # 1. Create raw source log memories
+        id1 = store_memory(content="Session 1: Tried model A, got timeout.", tags=["#session"], scope="shared", owner_id="agent1", title="Session 1 log", skip_duplicate_check=True).split(": ")[-1]
+        id2 = store_memory(content="Session 2: Tried model B, succeeded with 1300W limit.", tags=["#session"], scope="shared", owner_id="agent1", title="Session 2 log", skip_duplicate_check=True).split(": ")[-1]
+        
+        # 2. Consolidate them
+        res = commit_consolidation(
+            parent_ids=[id1, id2],
+            title="Consolidated Hardware Limits",
+            content="# Consolidated Hardware Limits\nUse model B with 1300W limit.",
+            tags=["#hardware"],
+            scope="shared",
+            db_connection=self.conn
+        )
+        new_id = res.split("ID: ")[-1].split(" ")[0].strip()
+        
+        # 3. Verify general search does NOT return the archived parents
+        res_search = search_memory(owner_id="agent1", query_keywords="Timeout")
+        self.assertEqual(len(res_search), 0)
+        
+        # 4. Verify we can fetch the consolidated memory by ID, read its parent_ids list
+        cursor = self.conn.execute("SELECT parent_ids FROM entities WHERE id = ?", (new_id,))
+        row = cursor.fetchone()
+        self.assertIsNotNone(row)
+        parent_ids = json.loads(row[0])
+        self.assertIn(id1, parent_ids)
+        self.assertIn(id2, parent_ids)
+        
+        # 5. Fetch archived raw parent contents by ID using fetch_memory_chunk (reconstructing narrative)
+        p1_content = fetch_memory_chunk(id1)
+        self.assertIn("Tried model A", p1_content)
+        
+        p2_content = fetch_memory_chunk(id2)
+        self.assertIn("Tried model B", p2_content)
 
 if __name__ == "__main__":
     unittest.main()

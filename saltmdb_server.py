@@ -1338,10 +1338,10 @@ def commit_consolidation(
                     )
                 """)
                 
-                # 4. Physically delete parent entities (Intentional Algorithmic Forgetting)
-                conn.execute(f"DELETE FROM entities WHERE id IN ({placeholders})", parent_ids)
+                # 4. Archive parent entities (Soft Algorithmic Forgetting - keeps history but hides from active index)
+                conn.execute(f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", parent_ids)
                 
-        return f"Successfully committed consolidated memory with ID: {entity_id} and deleted {len(parent_ids)} raw source nodes."
+        return f"Successfully committed consolidated memory with ID: {entity_id} and archived {len(parent_ids)} raw source nodes."
     except Exception as e:
         return f"Error committing consolidation: {e}"
 
