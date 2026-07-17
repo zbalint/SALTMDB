@@ -10,7 +10,7 @@ from datetime import datetime
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
-__version__ = "0.1.0-alpha.20"
+__version__ = "0.1.0-alpha.21"
 
 PORT = 8080
 
