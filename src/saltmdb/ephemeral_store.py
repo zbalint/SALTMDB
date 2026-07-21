@@ -4,9 +4,9 @@ from typing import Optional
 class EphemeralStore:
     def __init__(self) -> None:
         self._conn=sqlite3.connect(":memory:", check_same_thread=False, timeout=10.0)
-        self.__init_schema()
+        self._init_schema()
 
-    def __init_schema(self) -> None:
+    def _init_schema(self) -> None:
         with self._conn:
             self._conn.execute("""
             CREATE TABLE IF NOT EXISTS ephemeral_memories (
