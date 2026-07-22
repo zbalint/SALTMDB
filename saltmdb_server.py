@@ -4,11 +4,12 @@ import json
 import uuid
 import re
 import sys
+import base64
 from datetime import datetime, UTC
 from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.21"
+__version__ = "0.1.0-alpha.22"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -517,12 +518,18 @@ def store_memory(
     # Hybrid title extraction
     if not title:
         title, _ = extract_title_and_snippet(redacted_content)
+    else:
+        title = redact_secrets(title)
         
     try:
         validate_memory_input(title, redacted_content, metadata)
     except ValueError as e:
         conn.close()
         return str(e)
+        
+    # Resolve project_id early from metadata if not explicitly provided
+    if not project_id and metadata and isinstance(metadata, dict):
+        project_id = metadata.get("project") or metadata.get("project_id")
         
     # Lightweight title-based deduplication per owner/scope (upsert replacement policy)
     if not entity_id:
@@ -545,7 +552,8 @@ def store_memory(
                 title=title,
                 content=redacted_content,
                 owner_id=owner_id,
-                tags=tags
+                tags=tags,
+                project_id=project_id
             )
             if dup_check.get("duplicate_found") and "error" not in dup_check:
                 top = dup_check["potential_duplicates"][0]
@@ -559,9 +567,6 @@ def store_memory(
             
     if not entity_id:
         entity_id = str(uuid.uuid4())
-        
-    if not project_id and metadata and isinstance(metadata, dict):
-        project_id = metadata.get("project") or metadata.get("project_id")
         
     try:
         with conn:
@@ -668,9 +673,28 @@ def search_memory(
     metadata_filter: dict = None,
     explain_mode: bool = False,
     limit: int = 5,
-    project_id: str = None
+    project_id: str = None,
+    is_core: bool = None,
+    tag_operator: Literal['AND', 'OR'] = "AND",
+    cursor: str = None
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
+    
+    SEARCH GUIDANCE:
+    - Use high-signal keywords (rare-terms) rather than common/generic verbs.
+    - Avoid generic words (e.g. 'error', 'setup', 'memory', 'code').
+    - Combine query keywords with domain/component identifiers (e.g., 'WAL mode sqlite' instead of 'setup db').
+    
+    EXPLAIN MODE:
+    - Set explain_mode=True to debug queries returning zero results. It will analyze term presence and suggest relaxed query rewrites.
+    
+    SEARCH EXAMPLES:
+    - Search for sqlite performance fixes:
+      search_memory(owner_id='ops', query_keywords='sqlite WAL logging', tags_filter=['#performance'])
+    - Recall project-specific deployment steps:
+      search_memory(owner_id='ops', query_keywords='deployment deploy docker', project_id='PROJ-XYZ')
+    - Broad search for either of the tags:
+      search_memory(owner_id='tea', tags_filter=['#auth', '#login'], tag_operator='OR')
     
     CRITICAL USAGE RULES:
     - PARAMETER ALIGNMENT: You MUST pass the search string to the 'query_keywords' parameter. Do NOT use a parameter named 'query'.
@@ -680,11 +704,14 @@ def search_memory(
     Args:
         owner_id: Mandatory ID of the agent/owner to isolate memory access and lanes. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
         query_keywords: Search terms used to match against indexing content via FTS5 (matches title, content, or search aliases). MUST be passed here, NOT in 'query'.
-        tags_filter: List of tag names; if provided, matched items must have all specified tags.
+        tags_filter: List of tag names; if provided, filters matches by tags according to 'tag_operator'.
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
         explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
         limit: Optional maximum number of memories to return (default 5, max 25).
         project_id: Optional first-class project identifier to filter queries.
+        is_core: Optional boolean to filter only core rules/memories (True) or only non-core rules (False).
+        tag_operator: Optional operator for multiple tags. Use 'AND' (default, matches all tags) or 'OR' (matches any of the tags).
+        cursor: Optional base64 encoded cursor for pagination.
     """
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
@@ -693,24 +720,60 @@ def search_memory(
     conn = init_db(db_path)
     safe_limit = max(1, min(limit, 25))
     now = datetime.now(UTC).isoformat()
+    
+    offset_val = 0
+    if cursor:
+        try:
+            decoded = base64.b64decode(cursor.encode()).decode()
+            if decoded.startswith("offset:"):
+                offset_val = int(decoded.split(":", 1)[1])
+            else:
+                offset_val = int(decoded)
+        except Exception:
+            pass
+            
     try:
         params = []
         tag_filter_clause = ""
         
         if tags_filter:
-            placeholders = ",".join("?" for _ in tags_filter)
-            tag_filter_clause = f"""
-                AND e.id IN (
-                    SELECT et.entity_id 
-                    FROM entity_tags et 
-                    JOIN tags t ON et.tag_id = t.id 
-                    WHERE t.name IN ({placeholders})
-                    GROUP BY et.entity_id
-                    HAVING COUNT(DISTINCT t.name) = ?
-                )
-            """
-            params.extend(tags_filter)
-            params.append(len(tags_filter))
+            norm_tags = [t.strip() if t.strip().startswith('#') else '#' + t.strip() for t in tags_filter if t.strip()]
+            lower_tags = [t.lower() for t in norm_tags]
+            
+            # Resolve tags including canonical aliases and case-insensitivity
+            t_placeholders = ",".join("?" for _ in lower_tags)
+            cursor_res_tags = conn.execute(f"""
+                SELECT DISTINCT COALESCE(t.canonical_id, t.id)
+                FROM tags t
+                WHERE LOWER(t.name) IN ({t_placeholders})
+            """, lower_tags)
+            resolved_tag_ids = [r[0] for r in cursor_res_tags.fetchall()]
+            
+            if not resolved_tag_ids:
+                tag_filter_clause = " AND 1=0 "
+            else:
+                tag_placeholders = ",".join("?" for _ in resolved_tag_ids)
+                if tag_operator.upper() == "OR":
+                    tag_filter_clause = f"""
+                        AND e.id IN (
+                            SELECT et.entity_id 
+                            FROM entity_tags et 
+                            WHERE et.tag_id IN ({tag_placeholders})
+                        )
+                    """
+                    params.extend(resolved_tag_ids)
+                else:
+                    tag_filter_clause = f"""
+                        AND e.id IN (
+                            SELECT et.entity_id 
+                            FROM entity_tags et 
+                            WHERE et.tag_id IN ({tag_placeholders})
+                            GROUP BY et.entity_id
+                            HAVING COUNT(DISTINCT et.tag_id) = ?
+                        )
+                    """
+                    params.extend(resolved_tag_ids)
+                    params.append(len(resolved_tag_ids))
             
         owner_filter_clause = ""
         owner_params = []
@@ -734,6 +797,13 @@ def search_memory(
                 metadata_params.append(f"$.{key}")
                 metadata_params.append(val)
                 
+        # Build dynamic is_core filter
+        is_core_clause = ""
+        is_core_params = []
+        if is_core is not None:
+            is_core_clause = " AND e.is_core = ?"
+            is_core_params.append(1 if is_core else 0)
+            
         rows = []
         sanitization_applied = False
         fallback_applied = False
@@ -746,62 +816,65 @@ def search_memory(
                 
             # 10:1:5 title-to-content-to-aliases search weighting, boosted by incoming relations
             sql = f"""
-                SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) as score, e.title
+                SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) as score, e.title, e.is_core
                 FROM entities_fts f
                 JOIN entities e ON e.id = f.id
-                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
+                WHERE entities_fts MATCH ? AND e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses} {is_core_clause}
                 ORDER BY (
                     bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) * e.weight * (
                         1.0 + 0.05 * (SELECT COUNT(*) FROM relations WHERE target_id = e.id AND valid_to IS NULL)
                     )
                 ) ASC
-                LIMIT ?
+                LIMIT ? OFFSET ?
             """
-            exec_params = [sanitized_keywords] + owner_params + project_params + params + metadata_params + [safe_limit]
+            exec_params = [sanitized_keywords] + owner_params + project_params + params + metadata_params + is_core_params + [safe_limit, offset_val]
             
             try:
-                cursor = conn.execute(sql, exec_params)
-                rows = cursor.fetchall()
+                cursor_db = conn.execute(sql, exec_params)
+                rows = cursor_db.fetchall()
             except sqlite3.OperationalError:
                 # FTS parser failed. Fallback to broad wildcard keyword match
                 fallback_applied = True
                 words = re.findall(r'\b\w+\b', sanitized_keywords)
                 if words:
                     fallback_query = " OR ".join(f'"{w}*"' for w in words)
-                    exec_params_fallback = [fallback_query] + owner_params + project_params + params + metadata_params + [safe_limit]
+                    exec_params_fallback = [fallback_query] + owner_params + project_params + params + metadata_params + is_core_params + [safe_limit, offset_val]
                     try:
-                        cursor = conn.execute(sql, exec_params_fallback)
-                        rows = cursor.fetchall()
+                        cursor_db = conn.execute(sql, exec_params_fallback)
+                        rows = cursor_db.fetchall()
                     except Exception:
                         rows = []
                 else:
                     rows = []
         else:
             sql = f"""
-                SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title
+                SELECT e.id, e.full_content, e.weight, 0.0 as score, e.title, e.is_core
                 FROM entities e
-                WHERE e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses}
+                WHERE e.status != 'archived' {owner_filter_clause} {project_filter_clause} {tag_filter_clause} {metadata_clauses} {is_core_clause}
                 ORDER BY (
                     e.weight * (
                         1.0 + 0.05 * (SELECT COUNT(*) FROM relations WHERE target_id = e.id AND valid_to IS NULL)
                     )
                 ) DESC, e.updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
             """
-            exec_params = owner_params + project_params + params + metadata_params + [safe_limit]
-            cursor = conn.execute(sql, exec_params)
-            rows = cursor.fetchall()
+            exec_params = owner_params + project_params + params + metadata_params + is_core_params + [safe_limit, offset_val]
+            cursor_db = conn.execute(sql, exec_params)
+            rows = cursor_db.fetchall()
             
         results = []
         entity_ids = []
-        for entity_id, full_content, weight, score, title in rows:
+        for idx, (entity_id, full_content, weight, score, title, db_is_core) in enumerate(rows):
             _, snippet = extract_title_and_snippet(full_content)
+            next_c = base64.b64encode(f"offset:{offset_val + idx + 1}".encode()).decode()
             results.append({
                 "id": entity_id,
                 "title": title,
                 "snippet": snippet,
                 "score": score,
-                "weight": weight
+                "weight": weight,
+                "is_core": bool(db_is_core),
+                "cursor": next_c
             })
             entity_ids.append(entity_id)
             
@@ -1473,12 +1546,55 @@ def detect_orphaned_memories(owner_id: str) -> dict:
     finally:
         conn.close()
 
+STOP_WORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "in", "for", "of", "and", "or", "on", "with", "at", "by", "from", "that", "this", "it", "its", "as", "be", "been", "have", "has", "had", "do", "does", "did", "but", "not", "we", "you", "they", "he", "she", "i"}
+
+SYNONYMS = {
+    "wal": "write ahead logging",
+    "db": "database",
+    "sql": "sqlite",
+    "config": "configure"
+}
+
+def stem(word: str) -> str:
+    w = word.lower()
+    if len(w) > 3 and w.endswith('s'):
+        if w.endswith('es') and not w.endswith('aes') and not w.endswith('ees') and not w.endswith('oes'):
+            w = w[:-2]
+        else:
+            w = w[:-1]
+    for suffix in ['ation', 'ing', 'ment', 'ness', 'ed', 'ly', 'ive', 'al', 'ic']:
+        if len(w) > 4 and w.endswith(suffix):
+            w = w[:-len(suffix)]
+            break
+    if len(w) > 3 and w.endswith('e'):
+        w = w[:-1]
+    if len(w) > 3 and w[-1] == w[-2]:
+        w = w[:-1]
+    return w
+
+def tokenize(text: str) -> set:
+    text_lower = text.lower()
+    for k, v in SYNONYMS.items():
+        text_lower = re.sub(r'\b' + k + r'\b', v, text_lower)
+    words = re.findall(r'\b\w+\b', text_lower)
+    return {stem(w) for w in words if w not in STOP_WORDS}
+
+def word_sim(text1: str, text2: str) -> float:
+    w1 = tokenize(text1)
+    w2 = tokenize(text2)
+    if not w1 or not w2:
+        return 0.0
+    jac = len(w1 & w2) / len(w1 | w2)
+    ovr = len(w1 & w2) / min(len(w1), len(w2))
+    return (jac + ovr) / 2.0
+
 @mcp.tool()
 def check_duplicate_memories(
     title: str,
     content: str,
     owner_id: str,
-    tags: list = None
+    tags: list = None,
+    project_id: str = None
 ) -> dict:
     """Checks if a proposed memory overlaps with existing ones before writing.
     
@@ -1491,35 +1607,71 @@ def check_duplicate_memories(
         content: Proposed markdown content of the memory.
         owner_id: Mandatory ID of the agent/owner to isolate lanes. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
         tags: Optional list of tags associated with the proposed memory (highly recommended to improve tag-based duplicate filtering).
+        project_id: Optional first-class project identifier to filter duplicates within the same project context.
     """
     if not owner_id:
         return {"error": "owner_id is mandatory."}
         
+    title = title or ""
+    content = content or ""
     db_path = get_db_path()
     conn = init_db(db_path)
     try:
-        # Find active candidate entities with the same owner/scope
-        cursor = conn.execute("""
-            SELECT id, title, full_content FROM entities
-            WHERE status != 'archived' AND (owner_id = ? OR owner_id = 'shared')
-        """, (owner_id,))
+        project_clause = ""
+        project_params = []
+        if project_id:
+            project_clause = " AND (e.project_id = ? OR e.project_id IS NULL)"
+            project_params.append(project_id)
+
+        # Find active candidate entities with the same owner/scope, and fetch their tags
+        cursor = conn.execute(f"""
+            SELECT e.id, e.title, e.full_content,
+                   (SELECT group_concat(t.name) FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE et.entity_id = e.id) as tag_list
+            FROM entities e
+            WHERE e.status != 'archived' AND (e.owner_id = ? OR e.owner_id = 'shared') {project_clause}
+        """, [owner_id] + project_params)
         candidates = cursor.fetchall()
         
         import difflib
         matches = []
+        proposed_tags = set(t.lower().strip() for t in tags) if tags else set()
         
         # Calculate similarity scores
-        for cid, ctitle, ccontent in candidates:
-            # Title similarity (Levenshtein/SequenceMatcher based)
-            title_sim = difflib.SequenceMatcher(None, title.lower(), ctitle.lower()).ratio()
+        for cid, ctitle, ccontent, tag_list in candidates:
+            ctitle = ctitle or ""
+            ccontent = ccontent or ""
+            # Title similarity (Levenshtein/SequenceMatcher + stemmed Word Sim)
+            title_sm = difflib.SequenceMatcher(None, title.lower(), ctitle.lower()).ratio()
+            title_ws = word_sim(title, ctitle)
+            title_sim = max(title_sm, title_ws)
             
-            # Content similarity (on first 500 chars to be fast)
-            snippet1 = content[:500].lower()
-            snippet2 = ccontent[:500].lower()
-            content_sim = difflib.SequenceMatcher(None, snippet1, snippet2).ratio()
+            # Content similarity (SequenceMatcher on first 1000 chars + stemmed Word Sim on full text)
+            snippet1 = content[:1000].lower()
+            snippet2 = ccontent[:1000].lower()
+            content_sm = difflib.SequenceMatcher(None, snippet1, snippet2).ratio()
+            content_ws = word_sim(content, ccontent)
+            content_sim = max(content_sm, content_ws)
             
-            # Weighted overall similarity
-            overall_sim = (title_sim * 0.4) + (content_sim * 0.6)
+            # Penalize/scale content similarity if the content is very short (less than 40 chars)
+            min_content_len = min(len(content), len(ccontent))
+            if min_content_len < 40:
+                scale_factor = 0.2 + 0.8 * (min_content_len / 40.0)
+                content_sim *= scale_factor
+                
+            # Base similarity (weighted title and content)
+            base_sim = (title_sim * 0.40) + (content_sim * 0.60)
+            
+            # Tag similarity
+            candidate_tags = set(t.lower().strip() for t in tag_list.split(',')) if tag_list else set()
+            if proposed_tags and candidate_tags:
+                tag_jac = len(proposed_tags & candidate_tags) / len(proposed_tags | candidate_tags)
+                tag_ovr = len(proposed_tags & candidate_tags) / min(len(proposed_tags), len(candidate_tags))
+                tag_sim = (tag_jac + tag_ovr) / 2.0
+                # Boost overall similarity by up to 0.05 if tags match
+                overall_sim = min(1.0, base_sim + 0.05 * tag_sim)
+            else:
+                tag_sim = 0.0
+                overall_sim = base_sim
             
             if overall_sim > 0.6:  # Return anything with over 60% similarity
                 matches.append({
@@ -1527,13 +1679,14 @@ def check_duplicate_memories(
                     "title": ctitle,
                     "similarity_score": round(overall_sim, 2),
                     "title_similarity": round(title_sim, 2),
-                    "content_similarity": round(content_sim, 2)
+                    "content_similarity": round(content_sim, 2),
+                    "tag_similarity": round(tag_sim, 2)
                 })
                 
         # Sort by similarity score descending
         matches.sort(key=lambda x: x["similarity_score"], reverse=True)
         return {
-            "duplicate_found": len(matches) > 0 and matches[0]["similarity_score"] >= 0.7,
+            "duplicate_found": len(matches) > 0 and matches[0]["similarity_score"] >= 0.65,
             "potential_duplicates": matches[:5]
         }
     except Exception as e:
@@ -1554,6 +1707,9 @@ def store_relation(source_id: str, target_id: str, predicate: str) -> str:
         target_id: UUID of the target entity (object).
         predicate: Description of the relationship. Canonical values: 'depends_on' (dependency link), 'part_of' (logical containment), 'resolved_by' (issue resolution path), 'links_to' (general association), 'duplicate_of' (identifies identical/redundant entries).
     """
+    if source_id == target_id:
+        return "Error: source_id and target_id cannot be identical (self-referential relations forbidden)."
+        
     db_path = get_db_path()
     conn = init_db(db_path)
     relation_id = str(uuid.uuid4())
@@ -1708,7 +1864,8 @@ def scan_memories(
     owner_id: str,
     status_filter: str = "active",
     limit: int = 20,
-    offset: int = 0
+    offset: int = 0,
+    cursor: str = None
 ) -> list:
     """Scans and lists long-term memories for a specific owner to perform audits, contradiction checks, or status reviews.
     
@@ -1720,7 +1877,8 @@ def scan_memories(
         owner_id: Mandatory ID of the agent/owner to isolate lanes and memory access. Pass your active agent/role identifier (e.g., 'ops', 'tea', or your active agent ID).
         status_filter: Filter by memory status: 'raw', 'consolidated', 'archived', 'active' (both raw and consolidated, default), or 'all'.
         limit: Maximum number of memories to return (default 20, max 100).
-        offset: Offset for pagination (default 0).
+        offset: Offset for pagination (default 0, ignored if cursor is provided).
+        cursor: Optional base64 encoded cursor for pagination.
     """
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
@@ -1729,6 +1887,17 @@ def scan_memories(
     conn = init_db(db_path)
     safe_limit = max(1, min(100, limit))
     
+    offset_val = offset
+    if cursor:
+        try:
+            decoded = base64.b64decode(cursor.encode()).decode()
+            if decoded.startswith("offset:"):
+                offset_val = int(decoded.split(":", 1)[1])
+            else:
+                offset_val = int(decoded)
+        except Exception:
+            pass
+            
     try:
         params = [owner_id]
         status_clause = ""
@@ -1749,15 +1918,15 @@ def scan_memories(
             SELECT e.id, e.title, e.scope, e.weight, e.status, e.full_content, e.metadata
             FROM entities e
             WHERE (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system') {status_clause}
-            ORDER BY e.updated_at DESC
+            ORDER BY e.updated_at DESC, e.id DESC
             LIMIT ? OFFSET ?
         """
-        params.extend([safe_limit, offset])
-        cursor = conn.execute(sql, params)
-        rows = cursor.fetchall()
+        params.extend([safe_limit, offset_val])
+        cursor_db = conn.execute(sql, params)
+        rows = cursor_db.fetchall()
         
         memories = []
-        for r in rows:
+        for idx, r in enumerate(rows):
             entity_id, title, scope, weight, status, full_content, metadata_str = r
             
             cursor_tags = conn.execute("""
@@ -1774,6 +1943,7 @@ def scan_memories(
                 except Exception:
                     pass
                     
+            next_c = base64.b64encode(f"offset:{offset_val + idx + 1}".encode()).decode()
             memories.append({
                 "id": entity_id,
                 "title": title,
@@ -1782,7 +1952,8 @@ def scan_memories(
                 "status": status,
                 "tags": tags,
                 "metadata": metadata,
-                "content": full_content
+                "content": full_content,
+                "cursor": next_c
             })
         return memories
     except Exception as e:
@@ -1824,6 +1995,275 @@ def get_session_summary(session_id: str) -> list:
         return [{"error": str(e)}]
     finally:
         conn.close()
+
+@mcp.tool()
+def bulk_commit_consolidation(
+    consolidations: list
+) -> list:
+    """Bulk commits multiple consolidated memories synthesized by the agent atomically.
+    
+    Args:
+        consolidations: List of consolidation configurations, each containing:
+            - parent_ids: List of UUIDs of the raw source memories being consolidated.
+            - title: Custom title for the consolidated summary.
+            - content: Consolidated Markdown representation (SFB format).
+            - tags: List of tags associated with this consolidated memory.
+            - scope: Optional scope level ('private' or 'shared', defaults to 'shared').
+            - weight: Optional priority weight multiplier (default 1).
+    """
+    results = []
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        with conn:
+            for index, cfg in enumerate(consolidations):
+                try:
+                    parent_ids = cfg.get("parent_ids")
+                    title = cfg.get("title")
+                    content = cfg.get("content")
+                    tags = cfg.get("tags")
+                    scope = cfg.get("scope", "shared")
+                    weight = cfg.get("weight", 1)
+                    
+                    if not parent_ids or not title or not content or not tags:
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": "Missing mandatory fields (parent_ids, title, content, tags)."
+                        })
+                        continue
+                        
+                    if scope not in ('private', 'shared'):
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": "scope must be either 'private' or 'shared'"
+                        })
+                        continue
+                        
+                    validate_memory_input(title, content, None)
+                    
+                    entity_id = str(uuid.uuid4())
+                    redacted_content = redact_secrets(content)
+                    now = datetime.now(UTC).isoformat()
+                    
+                    # 1. Insert the new consolidated entity
+                    conn.execute("""
+                        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content)
+                        VALUES (?, ?, ?, ?, 'system', ?, 0, ?, 'consolidated', ?, ?, ?)
+                    """, (entity_id, now, now, now, scope, weight, json.dumps(parent_ids), title, redacted_content))
+                    
+                    # 2. Tag mapping
+                    for tag in tags:
+                        clean_tag = tag.strip()
+                        if clean_tag:
+                            cursor = conn.execute("SELECT id FROM tags WHERE name = ?", (clean_tag,))
+                            tag_row = cursor.fetchone()
+                            if tag_row:
+                                tag_id = tag_row[0]
+                            else:
+                                tag_id = str(uuid.uuid4())
+                                conn.execute("INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)", (tag_id, clean_tag, now))
+                            conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
+                            
+                    # 3. Archive parent entities
+                    placeholders = ",".join("?" for _ in parent_ids)
+                    conn.execute(f"""
+                        UPDATE entities 
+                        SET status = 'archived', updated_at = ?, valid_to = ?
+                        WHERE id IN ({placeholders})
+                    """, [now, now] + parent_ids)
+                    
+                    # 4. Link parents to consolidated child & re-point existing relations
+                    if parent_ids:
+                        p_placeholders = ",".join("?" for _ in parent_ids)
+                        conn.execute(f"""
+                            UPDATE relations SET source_id = ?
+                            WHERE source_id IN ({p_placeholders}) AND source_id != ?
+                        """, [entity_id] + parent_ids + [entity_id])
+                        conn.execute(f"""
+                            UPDATE relations SET target_id = ?
+                            WHERE target_id IN ({p_placeholders}) AND target_id != ?
+                        """, [entity_id] + parent_ids + [entity_id])
+                        conn.execute("DELETE FROM relations WHERE source_id = target_id")
+                        conn.execute("""
+                            DELETE FROM relations 
+                            WHERE id NOT IN (
+                                SELECT MIN(id) FROM relations 
+                                GROUP BY source_id, target_id, predicate
+                            )
+                        """)
+                        for p_id in parent_ids:
+                            relation_id = str(uuid.uuid4())
+                            conn.execute("""
+                                INSERT OR IGNORE INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (relation_id, p_id, entity_id, 'consolidated_into', now, now))
+                        
+                    results.append({
+                        "index": index,
+                        "status": "success",
+                        "entity_id": entity_id,
+                        "title": title
+                    })
+                except Exception as ex:
+                    results.append({
+                        "index": index,
+                        "status": "error",
+                        "error": str(ex)
+                    })
+    except Exception as e:
+        return [{"status": "error", "error": f"Transaction failed: {str(e)}"}]
+    finally:
+        conn.close()
+    return results
+
+@mcp.tool()
+def bulk_archive_memory(
+    archive_requests: list
+) -> list:
+    """Bulk archives multiple memories atomically in a single transaction.
+    
+    Args:
+        archive_requests: List of archiving requests, each containing:
+            - entity_id: UUID of the memory to archive.
+            - owner_id: Mandatory ID of the agent/owner to isolate memory lanes.
+    """
+    results = []
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    try:
+        now = datetime.now(UTC).isoformat()
+        with conn:
+            for index, req in enumerate(archive_requests):
+                try:
+                    entity_id = req.get("entity_id")
+                    owner_id = req.get("owner_id")
+                    
+                    if not entity_id or not owner_id:
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": "Missing entity_id or owner_id."
+                        })
+                        continue
+                        
+                    # Check existence and ownership of active memory
+                    cursor = conn.execute("SELECT id FROM entities WHERE id = ? AND owner_id = ? AND status != 'archived'", (entity_id, owner_id))
+                    row = cursor.fetchone()
+                    if not row:
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": f"Active memory with ID '{entity_id}' not found for owner '{owner_id}'."
+                        })
+                        continue
+                        
+                    # Perform temporal archiving
+                    conn.execute("""
+                        UPDATE entities 
+                        SET status = 'archived', updated_at = ?, valid_to = ?
+                        WHERE id = ? AND owner_id = ?
+                    """, (now, now, entity_id, owner_id))
+                    
+                    results.append({
+                        "index": index,
+                        "status": "success",
+                        "entity_id": entity_id
+                    })
+                except Exception as ex:
+                    results.append({
+                        "index": index,
+                        "status": "error",
+                        "error": str(ex)
+                    })
+    except Exception as e:
+        return [{"status": "error", "error": f"Transaction failed: {str(e)}"}]
+    finally:
+        conn.close()
+    return results
+
+@mcp.tool()
+def bulk_store_relations(
+    relations: list
+) -> list:
+    """Bulk stores directional relationship links between memories.
+    
+    Args:
+        relations: List of relationship configurations, each containing:
+            - source_id: UUID of the source entity (subject).
+            - target_id: UUID of the target entity (object).
+            - predicate: Relationship type description (e.g. 'depends_on', 'part_of', 'resolved_by', 'links_to', 'duplicate_of').
+    """
+    results = []
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    now = datetime.now(UTC).isoformat()
+    try:
+        with conn:
+            for index, rel in enumerate(relations):
+                try:
+                    source_id = rel.get("source_id")
+                    target_id = rel.get("target_id")
+                    predicate = rel.get("predicate")
+                    
+                    if not source_id or not target_id or not predicate:
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": "Missing source_id, target_id, or predicate."
+                        })
+                        continue
+                        
+                    if source_id == target_id:
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": "source_id and target_id cannot be identical (self-referential relations forbidden)."
+                        })
+                        continue
+                        
+                    # Verify both entities exist
+                    cursor = conn.execute("SELECT id FROM entities WHERE id = ?", (source_id,))
+                    if not cursor.fetchone():
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": f"Source entity {source_id} does not exist."
+                        })
+                        continue
+                        
+                    cursor = conn.execute("SELECT id FROM entities WHERE id = ?", (target_id,))
+                    if not cursor.fetchone():
+                        results.append({
+                            "index": index,
+                            "status": "error",
+                            "error": f"Target entity {target_id} does not exist."
+                        })
+                        continue
+                        
+                    relation_id = str(uuid.uuid4())
+                    conn.execute("""
+                        INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (relation_id, source_id, target_id, predicate, now, now))
+                    
+                    results.append({
+                        "index": index,
+                        "status": "success",
+                        "relation_id": relation_id
+                    })
+                except Exception as ex:
+                    results.append({
+                        "index": index,
+                        "status": "error",
+                        "error": str(ex)
+                    })
+    except Exception as e:
+        return [{"status": "error", "error": f"Transaction failed: {str(e)}"}]
+    finally:
+        conn.close()
+    return results
 
 # =====================================================================
 # Main Execution

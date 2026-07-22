@@ -10,7 +10,7 @@ from datetime import datetime
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
-__version__ = "0.1.0-alpha.21"
+__version__ = "0.1.0-alpha.22"
 
 PORT = 8080
 
@@ -31,6 +31,13 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(html_content.encode("utf-8"))
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
@@ -62,6 +69,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         return sqlite3.connect(DB_PATH, timeout=5.0)
 
     def get_entities(self, query):
+        conn = None
         try:
             page = 1
             if "page" in query:
@@ -69,6 +77,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     page = int(query["page"][0])
                 except ValueError:
                     pass
+            page = max(1, page)
             limit = 100
             offset = (page - 1) * limit
             
@@ -108,7 +117,6 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "title": r[10],
                     "tags": tags
                 })
-            conn.close()
             self.send_json({
                 "entities": entities,
                 "pagination": {
@@ -125,8 +133,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_events(self, query):
+        conn = None
         try:
             page = 1
             if "page" in query:
@@ -134,6 +149,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     page = int(query["page"][0])
                 except ValueError:
                     pass
+            page = max(1, page)
             limit = 100
             offset = (page - 1) * limit
             
@@ -148,7 +164,6 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             
             count_cursor = conn.execute("SELECT COUNT(*) FROM events")
             total_count = count_cursor.fetchone()[0]
-            conn.close()
             
             events = [{
                 "id": r[0],
@@ -174,8 +189,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_tags(self):
+        conn = None
         try:
             conn = self.get_db_connection()
             cursor = conn.execute("""
@@ -197,7 +219,6 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "canonical_name": r[3],
                     "count": count
                 })
-            conn.close()
             self.send_json(tags)
         except sqlite3.OperationalError as e:
             msg = str(e)
@@ -206,13 +227,19 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_locks(self):
+        conn = None
         try:
             conn = self.get_db_connection()
             cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks")
             rows = cursor.fetchall()
-            conn.close()
             
             locks = [{
                 "task_name": r[0],
@@ -228,15 +255,21 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_entity_detail(self, entity_id):
+        conn = None
         try:
             conn = self.get_db_connection()
             # 1. Fetch content
             cursor = conn.execute("SELECT full_content, title FROM entities WHERE id = ?", (entity_id,))
             row = cursor.fetchone()
             if not row:
-                conn.close()
                 self.send_json({"error": "Entity not found"}, 404)
                 return
                 
@@ -244,9 +277,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             
             # 2. Fetch outgoing relations (this entity is the source)
             cursor = conn.execute("""
-                SELECT r.id, r.predicate, r.target_id, e.title, r.valid_from, r.valid_to
+                SELECT r.id, r.predicate, r.target_id, COALESCE(e.title, r.target_id), r.valid_from, r.valid_to
                 FROM relations r
-                JOIN entities e ON r.target_id = e.id
+                LEFT JOIN entities e ON r.target_id = e.id
                 WHERE r.source_id = ?
             """, (entity_id,))
             outgoing = [{
@@ -260,9 +293,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             
             # 3. Fetch incoming relations (this entity is the target)
             cursor = conn.execute("""
-                SELECT r.id, r.predicate, r.source_id, e.title, r.valid_from, r.valid_to
+                SELECT r.id, r.predicate, r.source_id, COALESCE(e.title, r.source_id), r.valid_from, r.valid_to
                 FROM relations r
-                JOIN entities e ON r.source_id = e.id
+                LEFT JOIN entities e ON r.source_id = e.id
                 WHERE r.target_id = ?
             """, (entity_id,))
             incoming = [{
@@ -274,7 +307,6 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "valid_to": r[5]
             } for r in cursor.fetchall()]
             
-            conn.close()
             self.send_json({
                 "id": entity_id,
                 "title": title,
@@ -291,19 +323,25 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_all_relations(self):
+        conn = None
         try:
             conn = self.get_db_connection()
             cursor = conn.execute("""
-                SELECT r.id, r.predicate, r.source_id, e1.title, r.target_id, e2.title, r.valid_from, r.valid_to
+                SELECT r.id, r.predicate, r.source_id, COALESCE(e1.title, r.source_id), r.target_id, COALESCE(e2.title, r.target_id), r.valid_from, r.valid_to
                 FROM relations r
-                JOIN entities e1 ON r.source_id = e1.id
-                JOIN entities e2 ON r.target_id = e2.id
+                LEFT JOIN entities e1 ON r.source_id = e1.id
+                LEFT JOIN entities e2 ON r.target_id = e2.id
                 ORDER BY r.created_at DESC
             """)
             rows = cursor.fetchall()
-            conn.close()
             
             relations = [{
                 "id": r[0],
@@ -323,6 +361,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": msg}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def serve_frontend(self):
         html = """<!DOCTYPE html>

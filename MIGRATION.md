@@ -24,6 +24,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.19` | 3 | No schema changes. Shipped specialized Google Antigravity Skills for memory ingestion, consolidation, lifecycle, and relations | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.20` | 3 | No schema changes. Renamed skills folders to include prefix to prevent name collisions in global CLI skills paths | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.21` | 4 | Configured FTS5 Porter tokenizer, added search_aliases metadata column; migrated project_id to entities and session_id to events; renamed store_knowledge to store_memory; changed consolidation to soft-archiving | **Automatic Migration** (init_db runs column changes, Drops/Recreates FTS5 index automatically) |
+| `v0.1.0-alpha.22` | 4 | Added E2E test suite; fixed title secret redaction, tag search canonicalization, duplicate check null safety, self-referential relations, bulk consolidation relation re-pointing, viewer CORS OPTIONS preflight, pagination bounds, and connection leaks | **No Action Required** (fully backward-compatible) |
 
 ---
 

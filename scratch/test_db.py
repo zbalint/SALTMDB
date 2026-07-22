@@ -30,7 +30,10 @@ from saltmdb_server import (
     detect_orphaned_memories,
     check_duplicate_memories,
     scan_memories,
-    fetch_memory_chunk
+    fetch_memory_chunk,
+    bulk_commit_consolidation,
+    bulk_archive_memory,
+    bulk_store_relations
 )
 
 TEST_DB_PATH = "test_saltmdb_run.db"
@@ -1198,6 +1201,213 @@ class TestSALTMDB(unittest.TestCase):
         
         p2_content = fetch_memory_chunk(id2)
         self.assertIn("Tried model B", p2_content)
+
+    def test_search_memory_is_core(self):
+        # 1. Store a core memory and a non-core memory
+        core_id = store_memory(
+            content="This is a core behavior memory.",
+            tags=["#core-test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Core Rule",
+            is_core=True,
+            skip_duplicate_check=True
+        ).split("ID: ")[-1].split(" ")[0].strip()
+
+        non_core_id = store_memory(
+            content="This is a non-core behavior memory.",
+            tags=["#core-test"],
+            scope="shared",
+            owner_id="agent1",
+            title="Non-Core Fact",
+            is_core=False,
+            skip_duplicate_check=True
+        ).split("ID: ")[-1].split(" ")[0].strip()
+
+        # 2. Search filtering by is_core=True
+        results_core = search_memory(owner_id="agent1", tags_filter=["#core-test"], is_core=True)
+        self.assertEqual(len(results_core), 1)
+        self.assertEqual(results_core[0]["id"], core_id)
+        self.assertTrue(results_core[0]["is_core"])
+
+        # 3. Search filtering by is_core=False
+        results_non_core = search_memory(owner_id="agent1", tags_filter=["#core-test"], is_core=False)
+        self.assertEqual(len(results_non_core), 1)
+        self.assertEqual(results_non_core[0]["id"], non_core_id)
+        self.assertFalse(results_non_core[0]["is_core"])
+
+        # 4. Search with is_core=None (default) should return both
+        results_all = search_memory(owner_id="agent1", tags_filter=["#core-test"])
+        self.assertEqual(len(results_all), 2)
+        
+        # Verify both objects have their correct "is_core" flags
+        core_res = next(r for r in results_all if r["id"] == core_id)
+        non_core_res = next(r for r in results_all if r["id"] == non_core_id)
+        self.assertTrue(core_res["is_core"])
+        self.assertFalse(non_core_res["is_core"])
+
+    def test_check_duplicate_memories_rephrasing(self):
+        # 1. Store a memory
+        store_memory(
+            content="We should always configure SQLite write-ahead logging (WAL) mode for local databases.",
+            tags=["#database", "#performance"],
+            scope="shared",
+            owner_id="agent1",
+            title="WAL mode configuration for SQLite",
+            skip_duplicate_check=True
+        )
+
+        # 2. Test duplicate check with shuffled phrasing, suffix variations, and overlapping tags
+        res = check_duplicate_memories(
+            title="SQLite write-ahead logging configure guidelines",
+            content="Always ensure you enable WAL mode for local database setups to improve performance.",
+            owner_id="agent1",
+            tags=["#database", "#sqlite"]
+        )
+
+        self.assertTrue(res["duplicate_found"])
+        self.assertGreaterEqual(len(res["potential_duplicates"]), 1)
+        self.assertEqual(res["potential_duplicates"][0]["title"], "WAL mode configuration for SQLite")
+
+    def test_search_memory_tag_operator(self):
+        # 1. Store memories with unique tags
+        store_memory(
+            content="Setting up Docker configurations.",
+            tags=["#docker"],
+            scope="shared",
+            owner_id="agent1",
+            title="Docker setup",
+            skip_duplicate_check=True
+        )
+
+        store_memory(
+            content="Setting up Kubernetes configurations.",
+            tags=["#k8s"],
+            scope="shared",
+            owner_id="agent1",
+            title="Kubernetes setup",
+            skip_duplicate_check=True
+        )
+
+        store_memory(
+            content="Setting up cloud infrastructure.",
+            tags=["#docker", "#k8s"],
+            scope="shared",
+            owner_id="agent1",
+            title="Cloud infrastructure",
+            skip_duplicate_check=True
+        )
+
+        # 2. Query with default (AND) operator: should only return the memory with BOTH tags
+        res_and = search_memory(owner_id="agent1", tags_filter=["#docker", "#k8s"])
+        self.assertEqual(len(res_and), 1)
+        self.assertEqual(res_and[0]["title"], "Cloud infrastructure")
+
+        # 3. Query with explicit OR operator: should return all 3 memories
+        res_or = search_memory(owner_id="agent1", tags_filter=["#docker", "#k8s"], tag_operator="OR")
+        self.assertEqual(len(res_or), 3)
+        titles = [r["title"] for r in res_or]
+        self.assertIn("Docker setup", titles)
+        self.assertIn("Kubernetes setup", titles)
+        self.assertIn("Cloud infrastructure", titles)
+
+    def test_bulk_operations(self):
+        # 1. Test bulk_store_relations and bulk_archive_memory
+        id1 = store_memory(content="Bulk test node 1", tags=["#bulk"], scope="shared", owner_id="agent1", title="Bulk Title 1", skip_duplicate_check=True).split(": ")[-1]
+        id2 = store_memory(content="Bulk test node 2", tags=["#bulk"], scope="shared", owner_id="agent1", title="Bulk Title 2", skip_duplicate_check=True).split(": ")[-1]
+        
+        # Store relations in bulk
+        rel_res = bulk_store_relations([
+            {"source_id": id1, "target_id": id2, "predicate": "depends_on"},
+            {"source_id": id2, "target_id": id1, "predicate": "links_to"},
+            {"source_id": "invalid-id", "target_id": id2, "predicate": "links_to"}  # Should gracefully fail
+        ])
+        
+        self.assertEqual(len(rel_res), 3)
+        self.assertEqual(rel_res[0]["status"], "success")
+        self.assertEqual(rel_res[1]["status"], "success")
+        self.assertEqual(rel_res[2]["status"], "error")
+        
+        # Verify relation stored in DB
+        cursor = self.conn.execute("SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2))
+        self.assertEqual(cursor.fetchone()[0], "depends_on")
+        
+        # Test bulk_commit_consolidation
+        con_res = bulk_commit_consolidation([
+            {
+                "parent_ids": [id1, id2],
+                "title": "Consolidated Bulk Title",
+                "content": "# Consolidated Bulk Title\nSummary details.",
+                "tags": ["#bulk-summary"]
+            },
+            {
+                "parent_ids": [],  # Should fail due to missing fields / validation
+                "title": "",
+                "content": "",
+                "tags": []
+            }
+        ])
+        
+        self.assertEqual(len(con_res), 2)
+        self.assertEqual(con_res[0]["status"], "success")
+        self.assertEqual(con_res[1]["status"], "error")
+        new_con_id = con_res[0]["entity_id"]
+        
+        # Verify parents are archived and child exists
+        cursor = self.conn.execute("SELECT status FROM entities WHERE id = ?", (id1,))
+        self.assertEqual(cursor.fetchone()[0], "archived")
+        cursor = self.conn.execute("SELECT status FROM entities WHERE id = ?", (new_con_id,))
+        self.assertEqual(cursor.fetchone()[0], "consolidated")
+        
+        # Test bulk_archive_memory
+        arch_res = bulk_archive_memory([
+            {"entity_id": new_con_id, "owner_id": "system"},  # Consolidated is owned by 'system'
+            {"entity_id": "invalid-id", "owner_id": "agent1"}  # Should fail
+        ])
+        self.assertEqual(len(arch_res), 2)
+        self.assertEqual(arch_res[0]["status"], "success")
+        self.assertEqual(arch_res[1]["status"], "error")
+        
+        cursor = self.conn.execute("SELECT status FROM entities WHERE id = ?", (new_con_id,))
+        self.assertEqual(cursor.fetchone()[0], "archived")
+
+    def test_cursor_pagination(self):
+        # 1. Store 3 memories
+        for i in range(3):
+            store_memory(
+                content=f"Pagination fact content {i}",
+                tags=["#page-test"],
+                scope="shared",
+                owner_id="agent1",
+                title=f"Page Title {i}",
+                skip_duplicate_check=True
+            )
+
+        # 2. Test search_memory pagination
+        # Page 1 (limit 2)
+        res1 = search_memory(owner_id="agent1", tags_filter=["#page-test"], limit=2)
+        self.assertEqual(len(res1), 2)
+        self.assertIn("cursor", res1[-1])
+        c1 = res1[-1]["cursor"]
+
+        # Page 2 (limit 2, using cursor)
+        res2 = search_memory(owner_id="agent1", tags_filter=["#page-test"], limit=2, cursor=c1)
+        self.assertEqual(len(res2), 1)
+        self.assertNotEqual(res2[0]["id"], res1[0]["id"])
+        self.assertNotEqual(res2[0]["id"], res1[1]["id"])
+
+        # 3. Test scan_memories pagination
+        # Page 1 (limit 2)
+        scan1 = scan_memories(owner_id="agent1", status_filter="active", limit=2)
+        self.assertEqual(len(scan1), 2)
+        self.assertIn("cursor", scan1[-1])
+        sc1 = scan1[-1]["cursor"]
+
+        # Page 2 (limit 2, using cursor)
+        scan2 = scan_memories(owner_id="agent1", status_filter="active", limit=2, cursor=sc1)
+        self.assertGreaterEqual(len(scan2), 1)
+        self.assertNotEqual(scan2[0]["id"], scan1[0]["id"])
+        self.assertNotEqual(scan2[0]["id"], scan1[1]["id"])
 
 if __name__ == "__main__":
     unittest.main()
