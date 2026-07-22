@@ -9,7 +9,7 @@ from datetime import datetime, UTC
 from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.22"
+__version__ = "0.1.0-alpha.23"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -85,8 +85,38 @@ def redact_secrets(text: str) -> str:
         redacted = re.sub(pattern, "[REDACTED_SECRET]", redacted, flags=re.IGNORECASE)
     return redacted
 
-def init_db(db_path: str):
+UUID_REGEX = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+
+def resolve_entity_id(conn, input_val: str) -> str | None:
+    """Helper to flexibly resolve an entity ID from a raw UUID, a status string containing a UUID, or an entity title."""
+    if not input_val or not isinstance(input_val, str):
+        return input_val
+    input_val = input_val.strip()
+    
+    # 1. Exact UUID pattern
+    if UUID_REGEX.fullmatch(input_val):
+        return input_val
+        
+    # 2. Status string containing UUID (e.g. 'Knowledge stored successfully with ID: <uuid>')
+    match = UUID_REGEX.search(input_val)
+    if match:
+        return match.group(0)
+        
+    # 3. Entity title resolution
+    try:
+        cursor = conn.execute("SELECT id FROM entities WHERE title = ? AND status != 'archived' ORDER BY updated_at DESC LIMIT 1", (input_val,))
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+    except Exception:
+        pass
+        
+    return input_val
+
+def init_db(db_path: str = None):
     """Initialize the local SQLite database with Write-Ahead Logging (WAL) and schemas."""
+    if not db_path:
+        db_path = get_db_path()
     # timeout=10.0 handles concurrent lock retrying transparently
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -371,16 +401,21 @@ def trigger_librarian():
 # =====================================================================
 
 @mcp.tool()
-def log_event(agent_id: str, type: str, content: str, error_code: str = None, session_id: str = None) -> str:
+def log_event(agent_id: str = None, type: str = None, content: str = None, error_code: str = None, session_id: str = None, **kwargs) -> str:
     """Appends an event to the append-only events ledger.
     
     Args:
         agent_id: Identifier of the agent logging the event.
-        type: Category of the event (e.g. 'issue', 'attempt', 'fix', 'decision').
-        content: Description of the action or event.
+        type: Category of the event (e.g. 'issue', 'attempt', 'fix', 'decision'). Accepts alias 'event_type'.
+        content: Description of the action or event. Accepts aliases 'message', 'description'.
         error_code: Optional system error code if applicable.
         session_id: Optional unique session identifier to track related events.
     """
+    agent_id = agent_id or kwargs.get("agent_id") or kwargs.get("agent") or "system"
+    type = type or kwargs.get("type") or kwargs.get("event_type") or "event"
+    content = content or kwargs.get("content") or kwargs.get("message") or kwargs.get("description") or ""
+    error_code = error_code or kwargs.get("error_code")
+    session_id = session_id or kwargs.get("session_id")
     db_path = get_db_path()
     conn = init_db(db_path)
     event_id = str(uuid.uuid4())
@@ -400,12 +435,13 @@ def log_event(agent_id: str, type: str, content: str, error_code: str = None, se
         conn.close()
 
 @mcp.tool()
-def get_canonical_tags(domain: str = None) -> list:
+def get_canonical_tags(domain: str = None, **kwargs) -> list:
     """Queries the database to suggest existing canonical tags to prevent fragmentation.
     
     Args:
-        domain: Optional prefix/substring to filter matching tags.
+        domain: Optional prefix/substring to filter matching tags. Accepts aliases 'query', 'substring', 'tag_filter'.
     """
+    domain = domain or kwargs.get("domain") or kwargs.get("query") or kwargs.get("substring") or kwargs.get("tag_filter")
     db_path = get_db_path()
     conn = init_db(db_path)
     try:
@@ -455,9 +491,9 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
 
 @mcp.tool()
 def store_memory(
-    content: str,
-    tags: list,
-    owner_id: str,
+    content: str = None,
+    tags: list = None,
+    owner_id: str = None,
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
     is_core: bool = False,
@@ -469,7 +505,8 @@ def store_memory(
     actionability: int = None,
     metadata: dict = None,
     skip_duplicate_check: bool = False,
-    project_id: str = None
+    project_id: str = None,
+    **kwargs
 ) -> str:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
     
@@ -496,6 +533,16 @@ def store_memory(
         skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
         project_id: Optional first-class project identifier to associate with the memory.
     """
+    content = content or kwargs.get("content") or kwargs.get("text") or ""
+    owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
+    raw_tag = tags if tags is not None else kwargs.get("tags") or kwargs.get("tag")
+    if isinstance(raw_tag, str):
+        tags = [raw_tag]
+    elif isinstance(raw_tag, list):
+        tags = raw_tag
+    else:
+        tags = []
+
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
         
@@ -667,7 +714,7 @@ def sanitize_fts_query(query: str) -> str:
 
 @mcp.tool()
 def search_memory(
-    owner_id: str,
+    owner_id: str = None,
     query_keywords: str = None,
     tags_filter: list = None,
     metadata_filter: dict = None,
@@ -676,7 +723,8 @@ def search_memory(
     project_id: str = None,
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
-    cursor: str = None
+    cursor: str = None,
+    **kwargs
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
     
@@ -713,6 +761,16 @@ def search_memory(
         tag_operator: Optional operator for multiple tags. Use 'AND' (default, matches all tags) or 'OR' (matches any of the tags).
         cursor: Optional base64 encoded cursor for pagination.
     """
+    owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
+    query_keywords = query_keywords or kwargs.get("query_keywords") or kwargs.get("query") or kwargs.get("q") or kwargs.get("keywords")
+    raw_tags = tags_filter if tags_filter is not None else kwargs.get("tags_filter") or kwargs.get("tags") or kwargs.get("tag")
+    if isinstance(raw_tags, str):
+        tags_filter = [raw_tags]
+    elif isinstance(raw_tags, list):
+        tags_filter = raw_tags
+    else:
+        tags_filter = []
+
     if not owner_id:
         return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
         
@@ -939,14 +997,16 @@ def search_memory(
         conn.close()
 
 @mcp.tool()
-def fetch_memory_chunk(entity_id: str) -> str:
+def fetch_memory_chunk(entity_id: str = None, **kwargs) -> str:
     """Fetches the exact complete markdown text of a specific knowledge base ID.
     
     Args:
-        entity_id: The UUID of the memory chunk.
+        entity_id: The UUID or title of the memory chunk.
     """
+    entity_id = entity_id or kwargs.get("entity_id") or kwargs.get("id")
     db_path = get_db_path()
     conn = init_db(db_path)
+    entity_id = resolve_entity_id(conn, entity_id)
     now = datetime.now(UTC).isoformat()
     try:
         cursor = conn.execute("SELECT full_content FROM entities WHERE id = ?", (entity_id,))
@@ -999,8 +1059,8 @@ def get_ephemeral_memory(key: str) -> str:
         return f"Error retrieving ephemeral memory: {e}"
 
 @mcp.tool()
-def start_db_viewer() -> str:
-    """Spawns the local SALTMDB web dashboard/viewer in the background on port 8080.
+def start_db_viewer(port: int = None, **kwargs) -> str:
+    """Spawns the local SALTMDB web dashboard/viewer in the background on port 8080 or specified port.
     Returns the URL link to access the dashboard.
     """
     import urllib.request
@@ -1008,25 +1068,27 @@ def start_db_viewer() -> str:
     import subprocess
     import time
     
+    port = port or kwargs.get("port") or 8080
+    
     # Check if the viewer is already running by making a fast request
     is_running = False
     try:
-        with urllib.request.urlopen("http://localhost:8080/", timeout=0.5) as res:
+        with urllib.request.urlopen(f"http://localhost:{port}/", timeout=0.5) as res:
             if res.status == 200:
                 is_running = True
     except Exception:
         pass
         
     if is_running:
-        return "SALTMDB Database Viewer is already running! Open it in your browser at http://localhost:8080"
+        return f"SALTMDB Database Viewer is already running! Open it in your browser at http://localhost:{port}"
         
-    # Check if port 8080 is occupied, and if so, stop it and wait for release (up to 1.0s)
+    # Check if port is occupied, and if so, stop it and wait for release (up to 1.0s)
     for _ in range(10):
         port_occupied = False
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.1)
-            s.connect(("127.0.0.1", 8080))
+            s.connect(("127.0.0.1", port))
             s.close()
             port_occupied = True
         except Exception:
@@ -1034,7 +1096,7 @@ def start_db_viewer() -> str:
             
         if not port_occupied:
             break
-        # Port occupied: kill the process holding port 8080 and wait
+        # Port occupied: kill the process holding port and wait
         stop_db_viewer()
         time.sleep(0.1)
         
@@ -1446,18 +1508,21 @@ def create_snapshot() -> str:
         return f"Error creating database snapshot: {str(e)}"
 
 @mcp.tool()
-def archive_memory(entity_id: str, owner_id: str) -> str:
+def archive_memory(entity_id: str = None, owner_id: str = None, **kwargs) -> str:
     """Explicitly archives (retires) a long-term memory, marking it as inactive.
     
     Args:
-        entity_id: The UUID of the memory to archive.
+        entity_id: The UUID or title of the memory to archive.
         owner_id: Mandatory ID of the agent/owner to isolate memory lanes.
     """
+    entity_id = entity_id or kwargs.get("entity_id") or kwargs.get("id")
+    owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
     if not owner_id:
         return "Error: owner_id is mandatory to prevent cross-lane signal contamination."
         
     db_path = get_db_path()
     conn = init_db(db_path)
+    entity_id = resolve_entity_id(conn, entity_id)
     try:
         now = datetime.now(UTC).isoformat()
         with conn:
@@ -1695,7 +1760,7 @@ def check_duplicate_memories(
         conn.close()
 
 @mcp.tool()
-def store_relation(source_id: str, target_id: str, predicate: str) -> str:
+def store_relation(source_id: str = None, target_id: str = None, predicate: str = None, **kwargs) -> str:
     """Stores a typed directional link (edge) between two long-term memory entities.
     
     Backlink Boosting Rule:
@@ -1707,11 +1772,18 @@ def store_relation(source_id: str, target_id: str, predicate: str) -> str:
         target_id: UUID of the target entity (object).
         predicate: Description of the relationship. Canonical values: 'depends_on' (dependency link), 'part_of' (logical containment), 'resolved_by' (issue resolution path), 'links_to' (general association), 'duplicate_of' (identifies identical/redundant entries).
     """
+    source_id = source_id or kwargs.get("source_id") or kwargs.get("from_id") or kwargs.get("source")
+    target_id = target_id or kwargs.get("target_id") or kwargs.get("to_id") or kwargs.get("target")
+    predicate = predicate or kwargs.get("predicate") or kwargs.get("type") or "links_to"
+    
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    source_id = resolve_entity_id(conn, source_id)
+    target_id = resolve_entity_id(conn, target_id)
+    
     if source_id == target_id:
         return "Error: source_id and target_id cannot be identical (self-referential relations forbidden)."
         
-    db_path = get_db_path()
-    conn = init_db(db_path)
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     try:
@@ -1735,14 +1807,16 @@ def store_relation(source_id: str, target_id: str, predicate: str) -> str:
         conn.close()
 
 @mcp.tool()
-def analyze_dependencies(root_entity_id: str) -> list:
+def analyze_dependencies(root_entity_id: str = None, **kwargs) -> list:
     """Traverses the temporal knowledge graph using recursive CTE queries to map downstream components.
     
     Args:
-        root_entity_id: The UUID of the memory node to begin traversal from.
+        root_entity_id: The UUID or title of the memory node to begin traversal from.
     """
+    root_entity_id = root_entity_id or kwargs.get("root_entity_id") or kwargs.get("entity_id") or kwargs.get("id")
     db_path = get_db_path()
     conn = init_db(db_path)
+    root_entity_id = resolve_entity_id(conn, root_entity_id)
     try:
         cursor = conn.execute("""
             WITH RECURSIVE dependency_tree(id, title, status, depth, id_path, title_path) AS (
@@ -2120,15 +2194,11 @@ def bulk_commit_consolidation(
 
 @mcp.tool()
 def bulk_archive_memory(
-    archive_requests: list
+    archive_requests: list = None,
+    **kwargs
 ) -> list:
-    """Bulk archives multiple memories atomically in a single transaction.
-    
-    Args:
-        archive_requests: List of archiving requests, each containing:
-            - entity_id: UUID of the memory to archive.
-            - owner_id: Mandatory ID of the agent/owner to isolate memory lanes.
-    """
+    """Bulk archives multiple memories atomically in a single transaction."""
+    archive_requests = archive_requests or kwargs.get("archive_requests") or kwargs.get("requests") or kwargs.get("items") or []
     results = []
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -2137,25 +2207,35 @@ def bulk_archive_memory(
         with conn:
             for index, req in enumerate(archive_requests):
                 try:
-                    entity_id = req.get("entity_id")
-                    owner_id = req.get("owner_id")
-                    
-                    if not entity_id or not owner_id:
+                    if isinstance(req, str):
+                        raw_eid = req
+                        owner_id = None
+                    elif isinstance(req, dict):
+                        raw_eid = req.get("entity_id") or req.get("id")
+                        owner_id = req.get("owner_id") or req.get("owner")
+                    else:
+                        continue
+                        
+                    entity_id = resolve_entity_id(conn, raw_eid)
+                    if not entity_id:
                         results.append({
                             "index": index,
                             "status": "error",
-                            "error": "Missing entity_id or owner_id."
+                            "error": "Missing entity_id."
                         })
                         continue
                         
                     # Check existence and ownership of active memory
-                    cursor = conn.execute("SELECT id FROM entities WHERE id = ? AND owner_id = ? AND status != 'archived'", (entity_id, owner_id))
+                    if owner_id:
+                        cursor = conn.execute("SELECT id FROM entities WHERE id = ? AND (owner_id = ? OR owner_id = 'shared') AND status != 'archived'", (entity_id, owner_id))
+                    else:
+                        cursor = conn.execute("SELECT id FROM entities WHERE id = ? AND status != 'archived'", (entity_id,))
                     row = cursor.fetchone()
                     if not row:
                         results.append({
                             "index": index,
                             "status": "error",
-                            "error": f"Active memory with ID '{entity_id}' not found for owner '{owner_id}'."
+                            "error": f"Active memory with ID '{entity_id}' not found."
                         })
                         continue
                         
@@ -2163,8 +2243,8 @@ def bulk_archive_memory(
                     conn.execute("""
                         UPDATE entities 
                         SET status = 'archived', updated_at = ?, valid_to = ?
-                        WHERE id = ? AND owner_id = ?
-                    """, (now, now, entity_id, owner_id))
+                        WHERE id = ?
+                    """, (now, now, entity_id))
                     
                     results.append({
                         "index": index,
@@ -2185,16 +2265,11 @@ def bulk_archive_memory(
 
 @mcp.tool()
 def bulk_store_relations(
-    relations: list
+    relations: list = None,
+    **kwargs
 ) -> list:
-    """Bulk stores directional relationship links between memories.
-    
-    Args:
-        relations: List of relationship configurations, each containing:
-            - source_id: UUID of the source entity (subject).
-            - target_id: UUID of the target entity (object).
-            - predicate: Relationship type description (e.g. 'depends_on', 'part_of', 'resolved_by', 'links_to', 'duplicate_of').
-    """
+    """Bulk stores directional relationship links between memories."""
+    relations = relations or kwargs.get("relations") or kwargs.get("items") or []
     results = []
     db_path = get_db_path()
     conn = init_db(db_path)
@@ -2203,9 +2278,12 @@ def bulk_store_relations(
         with conn:
             for index, rel in enumerate(relations):
                 try:
-                    source_id = rel.get("source_id")
-                    target_id = rel.get("target_id")
-                    predicate = rel.get("predicate")
+                    raw_src = rel.get("source_id") or rel.get("source") or rel.get("from_id")
+                    raw_tgt = rel.get("target_id") or rel.get("target") or rel.get("to_id")
+                    predicate = rel.get("predicate") or rel.get("type") or "links_to"
+                    
+                    source_id = resolve_entity_id(conn, raw_src)
+                    target_id = resolve_entity_id(conn, raw_tgt)
                     
                     if not source_id or not target_id or not predicate:
                         results.append({

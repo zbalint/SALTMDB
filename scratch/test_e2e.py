@@ -389,5 +389,55 @@ class TestSALTMDBE2E(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row[0], consolidated_id, "Existing relation target_id must be re-pointed to consolidated memory ID")
 
+    # =========================================================================
+    # 5. Usability & Parameter Aliasing Tests (Post-Blind-Test Refactoring)
+    # =========================================================================
+
+    def test_usability_init_db_default_arg(self):
+        """Usability Test: init_db() should work without mandatory positional args."""
+        conn = saltmdb_server.init_db()
+        self.assertIsNotNone(conn)
+        conn.close()
+
+    def test_usability_smart_entity_id_resolution(self):
+        """Usability Test: Tools expecting entity IDs must automatically resolve status strings and entity titles."""
+        # Store memories
+        m1_res = saltmdb_server.store_memory(content="# Component Alpha\nCore alpha service", tags=["#comp"], owner_id="smart_agent", skip_duplicate_check=True)
+        m2_res = saltmdb_server.store_memory(content="# Component Beta\nCore beta service", tags=["#comp"], owner_id="smart_agent", skip_duplicate_check=True)
+        
+        # 1. Pass status string directly into store_relation
+        rel_res = saltmdb_server.store_relation(source_id=m1_res, target_id="Component Beta", predicate="depends_on")
+        self.assertTrue(rel_res.startswith("Relation successfully stored"), f"Smart resolution failed: {rel_res}")
+
+        # 2. Fetch memory chunk passing title
+        chunk = saltmdb_server.fetch_memory_chunk(entity_id="Component Alpha")
+        self.assertIn("Core alpha service", chunk)
+
+        # 3. Analyze dependencies passing component title
+        deps = saltmdb_server.analyze_dependencies(root_entity_id="Component Alpha")
+        self.assertIsInstance(deps, list)
+        self.assertGreaterEqual(len(deps), 2)
+
+    def test_usability_parameter_aliasing(self):
+        """Usability Test: Tools should accept parameter synonyms (query, event_type, text, tag, owner, etc.)."""
+        # 1. log_event with event_type and message
+        log_res = saltmdb_server.log_event(agent="alias_agent", event_type="fix", message="Applied patch")
+        self.assertTrue(log_res.startswith("Event logged successfully"))
+
+        # 2. store_memory with text, tag, owner
+        mem_res = saltmdb_server.store_memory(text="# Alias Test\nText body", tag="alias_tag", owner="alias_agent", skip_duplicate_check=True)
+        self.assertTrue(mem_res.startswith("Knowledge stored successfully"))
+
+        # 3. search_memory with owner, query, tag
+        search_res = saltmdb_server.search_memory(owner="alias_agent", query="patch", tag="alias_tag")
+        self.assertIsInstance(search_res, list)
+
+    def test_usability_bulk_archive_string_list(self):
+        """Usability Test: bulk_archive_memory should accept simple string lists of UUIDs/titles."""
+        m_id = saltmdb_server.store_memory(content="# To Archive\nTemporary memory", tags=["#temp"], owner_id="bulk_arch_agent", skip_duplicate_check=True).split("ID: ")[1]
+        
+        results = saltmdb_server.bulk_archive_memory(archive_requests=[m_id])
+        self.assertEqual(results[0]["status"], "success")
+
 if __name__ == "__main__":
     unittest.main()

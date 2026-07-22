@@ -9,10 +9,17 @@ from datetime import datetime
 # Resolve central database path
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
+__version__ = "0.1.0-alpha.23"
 
-__version__ = "0.1.0-alpha.22"
+import sys
 
-PORT = 8080
+PORT = int(os.environ.get("SALTMDB_VIEWER_PORT", 8080))
+for idx, arg in enumerate(sys.argv):
+    if arg == "--port" and idx + 1 < len(sys.argv):
+        try:
+            PORT = int(sys.argv[idx + 1])
+        except ValueError:
+            pass
 
 class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     # Disable logging to stdout to keep terminal clean
