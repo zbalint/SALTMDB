@@ -194,11 +194,11 @@ class TestSALTMDB(unittest.TestCase):
         # Run decay
         decay_lru_memories(self.conn)
         
-        # Verify status is now 'archived' (weight decayed from 1 to 0, which triggers archiving)
+        # Verify status remains 'raw' per REVIEW_1.md (decay removed; archive only on supersession/consolidation)
         cursor = self.conn.execute("SELECT status, weight FROM entities WHERE id = 'decay-1'")
         row = cursor.fetchone()
-        self.assertEqual(row[0], 'archived')
-        self.assertEqual(row[1], 0)
+        self.assertEqual(row[0], 'raw')
+        self.assertEqual(row[1], 1)
 
     def test_consolidate_cluttered_tags(self):
         now = datetime.now(UTC).isoformat()
@@ -383,38 +383,32 @@ class TestSALTMDB(unittest.TestCase):
         self.assertEqual(tags, ["#new-tag"])
 
     def test_multi_agent_isolation(self):
-        # Store memory for agent1
+        # Store shared memory for agent1
         store_memory(
             content="# Agent1 Fact\nAgent1 content.",
             tags=["#isolated"],
             scope="shared",
             owner_id="agent1"
         )
-        # Store memory for agent2
+        # Store private memory for agent2
         store_memory(
-            content="# Agent2 Fact\nAgent2 content.",
+            content="# Agent2 Private Fact\nAgent2 secret content.",
             tags=["#isolated"],
-            scope="shared",
+            scope="private",
             owner_id="agent2"
         )
         
-        # Search as agent1
+        # Search as agent1: sees shared Agent1 Fact, but cannot see agent2's private memory
         results1 = search_memory(query_keywords="Fact", owner_id="agent1")
         titles1 = [r["title"] for r in results1]
         self.assertIn("Agent1 Fact", titles1)
-        self.assertNotIn("Agent2 Fact", titles1)
+        self.assertNotIn("Agent2 Private Fact", titles1)
         
-        # Search as agent2
+        # Search as agent2: sees shared Agent1 Fact AND its own private Agent2 Private Fact
         results2 = search_memory(query_keywords="Fact", owner_id="agent2")
         titles2 = [r["title"] for r in results2]
-        self.assertIn("Agent2 Fact", titles2)
-        self.assertNotIn("Agent1 Fact", titles2)
-        
-        # Search without owner_id (should return error payload)
-        results_err = search_memory(query_keywords="Fact", owner_id=None)
-        self.assertEqual(len(results_err), 1)
-        self.assertIn("error", results_err[0])
-        self.assertIn("owner_id is mandatory", results_err[0]["error"])
+        self.assertIn("Agent1 Fact", titles2)
+        self.assertIn("Agent2 Private Fact", titles2)
 
     def test_create_snapshot(self):
         # Test snapshot backup utility
@@ -503,7 +497,8 @@ class TestSALTMDB(unittest.TestCase):
         self.assertIn("Relation successfully stored", res2)
         
         # 3. Analyze dependencies recursively
-        deps = analyze_dependencies(root_entity_id="node-core")
+        res_dict = analyze_dependencies(root_entity_id="node-core")
+        deps = res_dict["dependencies"]
         self.assertEqual(len(deps), 3)
         
         paths = [d["path"] for d in deps]
@@ -885,7 +880,7 @@ class TestSALTMDB(unittest.TestCase):
         store_relation(source_id=id2, target_id=id3, predicate="depends_on")
         
         # Traversal from id1 should return all 3 nodes (depth 0, 1, 2)
-        tree = analyze_dependencies(id1)
+        tree = analyze_dependencies(id1)["dependencies"]
         self.assertEqual(len(tree), 3)
         self.assertEqual(tree[0]["id"], id1)
         self.assertEqual(tree[1]["id"], id2)
@@ -895,7 +890,7 @@ class TestSALTMDB(unittest.TestCase):
         store_relation(source_id=id3, target_id=id1, predicate="depends_on")
         
         # Traversal should not crash or run indefinitely, FTS/CTE should halt at cycle
-        tree_cycle = analyze_dependencies(id1)
+        tree_cycle = analyze_dependencies(id1)["dependencies"]
         # It should still only return 3 unique nodes in the distinct set
         self.assertEqual(len(tree_cycle), 3)
 

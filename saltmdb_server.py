@@ -9,7 +9,7 @@ from datetime import datetime, UTC
 from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.23"
+__version__ = "0.1.0-alpha.24"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -157,14 +157,14 @@ def init_db(db_path: str = None):
         """)
         
         # Schema migration: attempt to add new columns to entities table if they don't exist
-        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT"]:
+        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT", "context_id TEXT"]:
             try:
                 conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
             except sqlite3.OperationalError:
                 pass
                 
         # Schema migration: attempt to add new columns to events table if they don't exist
-        for col in ["session_id TEXT"]:
+        for col in ["session_id TEXT", "context_id TEXT"]:
             try:
                 conn.execute(f"ALTER TABLE events ADD COLUMN {col};")
             except sqlite3.OperationalError:
@@ -370,7 +370,6 @@ def trigger_librarian():
             # 3. Optimize: Check and acquire librarian lock before spawning subprocess
             # If lock is currently held, exit immediately to prevent redundant processes.
             if not acquire_librarian_lock(conn):
-                conn.close()
                 return
                 
             # Release lock immediately so the child process can acquire it and run
@@ -378,8 +377,8 @@ def trigger_librarian():
         finally:
             conn.close()
     except Exception:
-        # Fallback to spawn if check fails (e.g. database lock)
-        pass
+        # If lock/cooldown check fails, do not spawn redundant subprocess
+        return
 
     try:
         import subprocess
@@ -506,6 +505,7 @@ def store_memory(
     metadata: dict = None,
     skip_duplicate_check: bool = False,
     project_id: str = None,
+    context_id: str = None,
     **kwargs
 ) -> str:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
@@ -535,6 +535,8 @@ def store_memory(
     """
     content = content or kwargs.get("content") or kwargs.get("text") or ""
     owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
+    context_id = context_id or project_id or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
+    project_id = context_id
     raw_tag = tags if tags is not None else kwargs.get("tags") or kwargs.get("tag")
     if isinstance(raw_tag, str):
         tags = [raw_tag]
@@ -545,6 +547,9 @@ def store_memory(
 
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
+        
+    if not content or not content.strip():
+        return "Error: content is mandatory and cannot be empty."
         
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
@@ -721,9 +726,11 @@ def search_memory(
     explain_mode: bool = False,
     limit: int = 5,
     project_id: str = None,
+    context_id: str = None,
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
+    include_related: bool = False,
     **kwargs
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
@@ -754,15 +761,12 @@ def search_memory(
         query_keywords: Search terms used to match against indexing content via FTS5 (matches title, content, or search aliases). MUST be passed here, NOT in 'query'.
         tags_filter: List of tag names; if provided, filters matches by tags according to 'tag_operator'.
         metadata_filter: Optional dictionary of structured attributes to match (e.g., project, topic).
-        explain_mode: If True, returns rich diagnostic details and suggested rewrites if query fails or returns 0.
-        limit: Optional maximum number of memories to return (default 5, max 25).
-        project_id: Optional first-class project identifier to filter queries.
-        is_core: Optional boolean to filter only core rules/memories (True) or only non-core rules (False).
-        tag_operator: Optional operator for multiple tags. Use 'AND' (default, matches all tags) or 'OR' (matches any of the tags).
-        cursor: Optional base64 encoded cursor for pagination.
     """
     owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
     query_keywords = query_keywords or kwargs.get("query_keywords") or kwargs.get("query") or kwargs.get("q") or kwargs.get("keywords")
+    context_id = context_id or project_id or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
+    project_id = context_id
+    limit = max(1, min(25, limit))
     raw_tags = tags_filter if tags_filter is not None else kwargs.get("tags_filter") or kwargs.get("tags") or kwargs.get("tag")
     if isinstance(raw_tags, str):
         tags_filter = [raw_tags]
@@ -771,9 +775,6 @@ def search_memory(
     else:
         tags_filter = []
 
-    if not owner_id:
-        return [{"error": "owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."}]
-        
     db_path = get_db_path()
     conn = init_db(db_path)
     safe_limit = max(1, min(limit, 25))
@@ -792,13 +793,19 @@ def search_memory(
             
     try:
         params = []
+        owner_params = []
+        # Relevance over identity: owner_id is demoted to provenance metadata; non-private memories surface globally
+        if owner_id:
+            owner_filter_clause = " AND (e.scope != 'private' OR e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system')"
+            owner_params.append(owner_id)
+        else:
+            owner_filter_clause = " AND (e.scope != 'private' OR e.owner_id = 'shared' OR e.owner_id = 'system')"
+            
         tag_filter_clause = ""
-        
         if tags_filter:
             norm_tags = [t.strip() if t.strip().startswith('#') else '#' + t.strip() for t in tags_filter if t.strip()]
             lower_tags = [t.lower() for t in norm_tags]
             
-            # Resolve tags including canonical aliases and case-insensitivity
             t_placeholders = ",".join("?" for _ in lower_tags)
             cursor_res_tags = conn.execute(f"""
                 SELECT DISTINCT COALESCE(t.canonical_id, t.id)
@@ -812,41 +819,19 @@ def search_memory(
             else:
                 tag_placeholders = ",".join("?" for _ in resolved_tag_ids)
                 if tag_operator.upper() == "OR":
-                    tag_filter_clause = f"""
-                        AND e.id IN (
-                            SELECT et.entity_id 
-                            FROM entity_tags et 
-                            WHERE et.tag_id IN ({tag_placeholders})
-                        )
-                    """
+                    tag_filter_clause = f" AND e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({tag_placeholders}))"
                     params.extend(resolved_tag_ids)
                 else:
-                    tag_filter_clause = f"""
-                        AND e.id IN (
-                            SELECT et.entity_id 
-                            FROM entity_tags et 
-                            WHERE et.tag_id IN ({tag_placeholders})
-                            GROUP BY et.entity_id
-                            HAVING COUNT(DISTINCT et.tag_id) = ?
-                        )
-                    """
+                    tag_filter_clause = f" AND e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({tag_placeholders}) GROUP BY et.entity_id HAVING COUNT(DISTINCT et.tag_id) = ?)"
                     params.extend(resolved_tag_ids)
                     params.append(len(resolved_tag_ids))
             
-        owner_filter_clause = ""
-        owner_params = []
-        if owner_id:
-            owner_filter_clause = " AND (e.owner_id = ? OR e.owner_id = 'shared' OR e.owner_id = 'system')"
-            owner_params.append(owner_id)
-            
-        # Build dynamic project filter
         project_filter_clause = ""
         project_params = []
         if project_id:
             project_filter_clause = " AND e.project_id = ?"
             project_params.append(project_id)
             
-        # Build dynamic metadata filters
         metadata_clauses = ""
         metadata_params = []
         if metadata_filter:
@@ -855,7 +840,6 @@ def search_memory(
                 metadata_params.append(f"$.{key}")
                 metadata_params.append(val)
                 
-        # Build dynamic is_core filter
         is_core_clause = ""
         is_core_params = []
         if is_core is not None:
@@ -866,13 +850,13 @@ def search_memory(
         sanitization_applied = False
         fallback_applied = False
         
-        if query_keywords:
-            # 1. Sanitize the query keywords
+        # FTS5 Full-Text Search Query construction with natural language normalization and relation boosting
+        if query_keywords and query_keywords.strip():
             sanitized_keywords = sanitize_fts_query(query_keywords)
-            if sanitized_keywords != query_keywords:
-                sanitization_applied = True
-                
-            # 10:1:5 title-to-content-to-aliases search weighting, boosted by incoming relations
+            normalized_keywords = normalize_search_query(sanitized_keywords)
+            terms = normalized_keywords.split() if normalized_keywords else sanitized_keywords.split()
+            fts_query_str = " ".join(f'"{t.replace(chr(34), "")}"*' for t in terms) if terms else sanitized_keywords
+            
             sql = f"""
                 SELECT e.id, e.full_content, e.weight, bm25(entities_fts, 0.0, 10.0, 1.0, 5.0) as score, e.title, e.is_core
                 FROM entities_fts f
@@ -885,13 +869,12 @@ def search_memory(
                 ) ASC
                 LIMIT ? OFFSET ?
             """
-            exec_params = [sanitized_keywords] + owner_params + project_params + params + metadata_params + is_core_params + [safe_limit, offset_val]
+            exec_params = [fts_query_str] + owner_params + project_params + params + metadata_params + is_core_params + [safe_limit, offset_val]
             
             try:
                 cursor_db = conn.execute(sql, exec_params)
                 rows = cursor_db.fetchall()
             except sqlite3.OperationalError:
-                # FTS parser failed. Fallback to broad wildcard keyword match
                 fallback_applied = True
                 words = re.findall(r'\b\w+\b', sanitized_keywords)
                 if words:
@@ -925,7 +908,7 @@ def search_memory(
         for idx, (entity_id, full_content, weight, score, title, db_is_core) in enumerate(rows):
             _, snippet = extract_title_and_snippet(full_content)
             next_c = base64.b64encode(f"offset:{offset_val + idx + 1}".encode()).decode()
-            results.append({
+            item_dict = {
                 "id": entity_id,
                 "title": title,
                 "snippet": snippet,
@@ -933,58 +916,51 @@ def search_memory(
                 "weight": weight,
                 "is_core": bool(db_is_core),
                 "cursor": next_c
-            })
+            }
+            if include_related:
+                cursor_rel = conn.execute("""
+                    SELECT e.id, e.title, r.predicate 
+                    FROM relations r
+                    JOIN entities e ON (r.target_id = e.id OR r.source_id = e.id)
+                    WHERE (r.source_id = ? OR r.target_id = ?) AND e.id != ? AND e.status != 'archived' AND r.valid_to IS NULL
+                    LIMIT 3
+                """, (entity_id, entity_id, entity_id))
+                item_dict["related_entities"] = [{"id": r[0], "title": r[1], "predicate": r[2]} for r in cursor_rel.fetchall()]
+            results.append(item_dict)
             entity_ids.append(entity_id)
             
-        # Update last_accessed_at for matched entities (LRU access signal)
         if entity_ids:
             with conn:
                 placeholders = ",".join("?" for _ in entity_ids)
-                conn.execute(f"""
-                    UPDATE entities 
-                    SET last_accessed_at = ? 
-                    WHERE id IN ({placeholders})
-                """, [now] + entity_ids)
+                conn.execute(f"UPDATE entities SET last_accessed_at = ? WHERE id IN ({placeholders})", [now] + entity_ids)
                 
-        # Generate diagnostic explanation package if explain_mode is requested
-        explain_info = {}
         if explain_mode:
             term_presence = {}
-            tag_suggestions = {}
-            rewrites = []
-            
             if query_keywords:
-                # 1. Term existence check
                 words = re.findall(r'\b\w+\b', query_keywords)
                 for w in words:
                     cursor_w = conn.execute("SELECT COUNT(*) FROM entities WHERE full_content LIKE ? OR title LIKE ?", (f"%{w}%", f"%{w}%"))
                     term_presence[w] = cursor_w.fetchone()[0] > 0
                     
-                # 2. Relaxed query suggestions
-                if not results:
-                    if len(words) > 1:
-                        rewrites.append(" OR ".join(words))
-                    rewrites.append(" ".join(f"{w}*" for w in words))
-                    
+            tag_suggestions = {}
             if tags_filter:
-                # 3. Check invalid tags and suggest close matches
                 for tag in tags_filter:
-                    cursor_t = conn.execute("SELECT id FROM tags WHERE name = ?", (tag,))
+                    norm_t = tag.strip() if tag.strip().startswith('#') else '#' + tag.strip()
+                    cursor_t = conn.execute("SELECT id FROM tags WHERE LOWER(name) = ?", (norm_t.lower(),))
                     if not cursor_t.fetchone():
                         cursor_all = conn.execute("SELECT name FROM tags WHERE canonical_id IS NULL")
                         all_db_tags = [r[0] for r in cursor_all.fetchall()]
                         import difflib
-                        closest = difflib.get_close_matches(tag, all_db_tags, n=2, cutoff=0.4)
+                        closest = difflib.get_close_matches(norm_t, all_db_tags, n=2, cutoff=0.3)
                         tag_suggestions[tag] = closest
-                        
+
             explain_info = {
                 "sanitization_applied": sanitization_applied,
                 "fallback_applied": fallback_applied,
                 "searched_terms_found": term_presence,
                 "invalid_tags_suggestions": tag_suggestions,
-                "suggested_rewritten_queries": rewrites
+                "suggested_rewritten_queries": []
             }
-            
             return {
                 "results": results,
                 "explain": explain_info
@@ -1273,33 +1249,10 @@ def merge_tags_heuristics(conn):
                     conn.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
 
 def decay_lru_memories(conn):
-    """Gradually decays weights of non-core memories not accessed in 90 days, archiving them at <= 0."""
-    print("Running Access Decay (LRU) check...")
-    now = datetime.now(UTC).isoformat()
-    with conn:
-        # Decrement weight for stale unaccessed items
-        conn.execute("""
-            UPDATE entities 
-            SET weight = weight - 1, last_accessed_at = ?, updated_at = ? 
-            WHERE is_core = 0 
-              AND status != 'archived'
-              AND datetime(last_accessed_at) < datetime('now', '-90 days')
-        """, (now, now))
-        
-        # Archive any whose weight decays to 0 or below
-        cursor = conn.execute("""
-            SELECT id FROM entities 
-            WHERE weight <= 0 AND status != 'archived'
-        """)
-        to_archive = [row[0] for row in cursor.fetchall()]
-        if to_archive:
-            placeholders = ",".join("?" for _ in to_archive)
-            conn.execute(f"""
-                UPDATE entities 
-                SET status = 'archived', updated_at = ? 
-                WHERE id IN ({placeholders})
-            """, [now] + to_archive)
-            print(f"Archived {len(to_archive)} stale memories due to access decay.")
+    """[DEPRECATED / REMOVED PER DESIGN PRINCIPLES]
+    Access recency is not a proxy for value. Archiving is only justified when content is superseded or consolidated.
+    """
+    pass
 
 def consolidate_cluttered_tags(conn):
     """Scans for tags with 5 or more raw entries per owner (or 3 or more for runbooks/decisions) and logs a consolidation request event for that agent."""
@@ -1473,7 +1426,17 @@ def commit_consolidation(
                     )
                 """)
                 
-                # 4. Archive parent entities (Soft Algorithmic Forgetting - keeps history but hides from active index)
+                # 4. Create explicit lineage edges ('consolidated_from') to archived parent sources
+                for p_id in parent_ids:
+                    p_id_resolved = resolve_entity_id(conn, p_id)
+                    if p_id_resolved and p_id_resolved != entity_id:
+                        rel_id = str(uuid.uuid4())
+                        conn.execute("""
+                            INSERT OR IGNORE INTO relations (id, created_at, source_id, target_id, predicate)
+                            VALUES (?, ?, ?, ?, 'consolidated_from')
+                        """, (rel_id, now, entity_id, p_id_resolved))
+
+                # 5. Archive parent entities (Soft Algorithmic Forgetting - keeps history but hides from active index)
                 conn.execute(f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", parent_ids)
                 
         return f"Successfully committed consolidated memory with ID: {entity_id} and archived {len(parent_ids)} raw source nodes."
@@ -1588,7 +1551,7 @@ def detect_orphaned_memories(owner_id: str) -> dict:
                 cursor_cand = conn.execute(f"""
                     SELECT DISTINCT e.id, e.title, COUNT(et.tag_id) as matching_tags_count
                     FROM entities e
-                    JOIN entity_tags et ON et.entity_id = e.id
+                    JOIN entity_tags et ON e.id = et.entity_id
                     JOIN tags t ON et.tag_id = t.id
                     WHERE e.id != ? AND e.status != 'archived'
                       AND (e.owner_id = ? OR e.owner_id = 'shared')
@@ -1611,7 +1574,17 @@ def detect_orphaned_memories(owner_id: str) -> dict:
     finally:
         conn.close()
 
-STOP_WORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "in", "for", "of", "and", "or", "on", "with", "at", "by", "from", "that", "this", "it", "its", "as", "be", "been", "have", "has", "had", "do", "does", "did", "but", "not", "we", "you", "they", "he", "she", "i"}
+SEARCH_STOP_WORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "in", "for", "of", "and", "or", "on", "with", "at", "by", "from", "that", "this", "it", "its", "as", "be", "been", "have", "has", "had", "do", "does", "did", "but", "not", "we", "you", "they", "he", "she", "i", "how", "what", "can", "my", "need", "should", "code", "memory"}
+
+def normalize_search_query(query: str) -> str:
+    """Strips conversational filler/stop words from natural language queries prior to FTS5 MATCH formatting."""
+    if not query:
+        return ""
+    words = re.findall(r'\b\w+\b', query)
+    filtered = [w for w in words if w.lower() not in SEARCH_STOP_WORDS]
+    if filtered:
+        return " ".join(filtered)
+    return query
 
 SYNONYMS = {
     "wal": "write ahead logging",
@@ -1642,7 +1615,7 @@ def tokenize(text: str) -> set:
     for k, v in SYNONYMS.items():
         text_lower = re.sub(r'\b' + k + r'\b', v, text_lower)
     words = re.findall(r'\b\w+\b', text_lower)
-    return {stem(w) for w in words if w not in STOP_WORDS}
+    return {stem(w) for w in words if w not in SEARCH_STOP_WORDS}
 
 def word_sim(text1: str, text2: str) -> float:
     w1 = tokenize(text1)
@@ -1807,13 +1780,15 @@ def store_relation(source_id: str = None, target_id: str = None, predicate: str 
         conn.close()
 
 @mcp.tool()
-def analyze_dependencies(root_entity_id: str = None, **kwargs) -> list:
+def analyze_dependencies(root_entity_id: str = None, max_depth: int = 5, **kwargs) -> dict:
     """Traverses the temporal knowledge graph using recursive CTE queries to map downstream components.
     
     Args:
         root_entity_id: The UUID or title of the memory node to begin traversal from.
+        max_depth: Maximum depth of graph traversal (default 5, max 20).
     """
     root_entity_id = root_entity_id or kwargs.get("root_entity_id") or kwargs.get("entity_id") or kwargs.get("id")
+    safe_max_depth = max(1, min(20, max_depth))
     db_path = get_db_path()
     conn = init_db(db_path)
     root_entity_id = resolve_entity_id(conn, root_entity_id)
@@ -1835,13 +1810,16 @@ def analyze_dependencies(root_entity_id: str = None, **kwargs) -> list:
                 JOIN relations r ON r.target_id = child.id
                 JOIN dependency_tree dt ON r.source_id = dt.id
                 WHERE child.status != 'archived' AND r.valid_to IS NULL
-                -- Prevent cycles using unique ID paths
-                AND dt.id_path NOT LIKE '%,' || child.id || ',%'
+                  AND dt.depth < ?
+                  AND dt.id_path NOT LIKE '%,' || child.id || ',%'
             )
-            SELECT DISTINCT id, title, status, depth, title_path FROM dependency_tree;
-        """, (root_entity_id,))
+            SELECT DISTINCT id, title, status, depth, title_path FROM dependency_tree
+        """, (root_entity_id, safe_max_depth))
         rows = cursor.fetchall()
-        return [
+        max_depth_reached = max((r[3] for r in rows), default=0)
+        graph_exhausted = max_depth_reached < safe_max_depth
+        
+        dependencies = [
             {
                 "id": r[0],
                 "title": r[1],
@@ -1850,8 +1828,67 @@ def analyze_dependencies(root_entity_id: str = None, **kwargs) -> list:
                 "path": r[4]
             } for r in rows
         ]
+        return {
+            "root_entity_id": root_entity_id,
+            "graph_exhausted": graph_exhausted,
+            "max_depth_traversed": max_depth_reached,
+            "dependencies": dependencies
+        }
     except Exception as e:
-        return [{"error": str(e)}]
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+@mcp.tool()
+def analyze_lineage(entity_id: str = None, **kwargs) -> dict:
+    """Traverses full multi-generation consolidation and derivation lineage for a memory node.
+    
+    Args:
+        entity_id: The UUID or title of the consolidated/derived memory node to trace lineage for.
+    """
+    entity_id = entity_id or kwargs.get("entity_id") or kwargs.get("id")
+    db_path = get_db_path()
+    conn = init_db(db_path)
+    entity_id = resolve_entity_id(conn, entity_id)
+    try:
+        cursor = conn.execute("""
+            WITH RECURSIVE lineage_tree(id, title, status, depth, id_path, lineage_path) AS (
+                -- Anchor member
+                SELECT e.id, e.title, e.status, 0, ',' || e.id || ',', e.title
+                FROM entities e
+                WHERE e.id = ?
+                
+                UNION ALL
+                
+                -- Recursive member: trace consolidated_from or derived_from target parents
+                SELECT parent.id, parent.title, parent.status, lt.depth + 1,
+                       lt.id_path || parent.id || ',',
+                       lt.lineage_path || ' <- ' || parent.title
+                FROM entities parent
+                JOIN relations r ON r.target_id = parent.id
+                JOIN lineage_tree lt ON r.source_id = lt.id
+                WHERE r.predicate IN ('consolidated_from', 'derived_from') AND r.valid_to IS NULL
+                  AND lt.id_path NOT LIKE '%,' || parent.id || ',%'
+            )
+            SELECT DISTINCT id, title, status, depth, lineage_path FROM lineage_tree;
+        """, (entity_id,))
+        rows = cursor.fetchall()
+        lineage = [
+            {
+                "id": r[0],
+                "title": r[1],
+                "status": r[2],
+                "depth": r[3],
+                "path": r[4]
+            } for r in rows
+        ]
+        return {
+            "entity_id": entity_id,
+            "lineage_depth": max((r[3] for r in rows), default=0),
+            "ancestors": lineage
+        }
+    except Exception as e:
+        return {"error": str(e)}
     finally:
         conn.close()
 

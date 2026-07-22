@@ -415,8 +415,9 @@ class TestSALTMDBE2E(unittest.TestCase):
 
         # 3. Analyze dependencies passing component title
         deps = saltmdb_server.analyze_dependencies(root_entity_id="Component Alpha")
-        self.assertIsInstance(deps, list)
-        self.assertGreaterEqual(len(deps), 2)
+        self.assertIsInstance(deps, dict)
+        self.assertTrue(deps.get("graph_exhausted"))
+        self.assertGreaterEqual(len(deps.get("dependencies", [])), 2)
 
     def test_usability_parameter_aliasing(self):
         """Usability Test: Tools should accept parameter synonyms (query, event_type, text, tag, owner, etc.)."""
@@ -438,6 +439,94 @@ class TestSALTMDBE2E(unittest.TestCase):
         
         results = saltmdb_server.bulk_archive_memory(archive_requests=[m_id])
         self.assertEqual(results[0]["status"], "success")
+
+    # =========================================================================
+    # 6. REVIEW_1.md Architectural & Concurrency Tests
+    # =========================================================================
+
+    def test_review1_query_normalization(self):
+        """REVIEW_1 Test: Natural language search queries should be normalized by stripping stop words."""
+        saltmdb_server.store_memory(content="# SQLite WAL Logging\nHow to configure Write Ahead Logging mode in SQLite DB", tags=["#sqlite"], owner_id="norm_agent", skip_duplicate_check=True)
+        
+        # Query with natural language filler words
+        results = saltmdb_server.search_memory(owner_id="norm_agent", query="how can I configure WAL logging in sqlite")
+        self.assertIsInstance(results, list)
+        self.assertGreaterEqual(len(results), 1)
+        self.assertIn("SQLite WAL Logging", results[0]["title"])
+
+    def test_review1_lossless_consolidation_lineage(self):
+        """REVIEW_1 Test: Consolidation must archive (never delete) parent entities and auto-create lineage edges."""
+        p1 = saltmdb_server.store_memory(content="# Source Alpha\nFact alpha content", tags=["#src"], owner_id="lineage_agent", skip_duplicate_check=True).split("ID: ")[1]
+        p2 = saltmdb_server.store_memory(content="# Source Beta\nFact beta content", tags=["#src"], owner_id="lineage_agent", skip_duplicate_check=True).split("ID: ")[1]
+        
+        res = saltmdb_server.commit_consolidation(parent_ids=[p1, p2], title="Synthesized Summary", content="# Summary\nCombined alpha & beta", tags=["#summary"])
+        self.assertTrue(res.startswith("Successfully committed consolidated memory"))
+        c_id = res.split("ID: ")[1].split(" ")[0]
+
+        # Verify parent entities are archived (not deleted)
+        conn = saltmdb_server.init_db(self.db_path)
+        cursor = conn.execute("SELECT status FROM entities WHERE id IN (?, ?)", (p1, p2))
+        statuses = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        self.assertEqual(statuses, ["archived", "archived"])
+
+        # Verify lineage ancestry traversal tool
+        lineage = saltmdb_server.analyze_lineage(entity_id=c_id)
+        self.assertIsInstance(lineage, dict)
+        self.assertEqual(lineage["entity_id"], c_id)
+        self.assertGreaterEqual(len(lineage["ancestors"]), 2)
+
+    def test_concurrency_multiprocess_lock_racing(self):
+        """Concurrency Test: Multiple OS processes racing to acquire the librarian lock must guarantee mutual exclusion."""
+        import subprocess
+        import sys
+        
+        # Script to attempt lock acquisition
+        script_code = f"""
+import sys, os
+sys.path.insert(0, r"{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}")
+import saltmdb_server
+conn = saltmdb_server.init_db(r"{self.db_path}")
+acquired = saltmdb_server.acquire_librarian_lock(conn)
+if acquired:
+    print("ACQUIRED")
+    import time
+    time.sleep(0.5)
+    saltmdb_server.release_librarian_lock(conn)
+else:
+    print("FAILED")
+conn.close()
+"""
+        # Run 4 parallel processes simultaneously
+        processes = [
+            subprocess.Popen([sys.executable, "-c", script_code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for _ in range(4)
+        ]
+        
+        results = [p.communicate()[0].strip() for p in processes]
+        acquired_count = sum(1 for r in results if "ACQUIRED" in r)
+        self.assertEqual(acquired_count, 1, f"Expected exactly 1 process to acquire lock, got outputs: {results}")
+
+    def test_concurrency_multithreaded_write_racing(self):
+        """Concurrency Test: High-concurrency multithreaded writes under WAL mode must execute cleanly without locks."""
+        import threading
+        
+        errors = []
+        def worker(thread_idx):
+            try:
+                for i in range(5):
+                    saltmdb_server.log_event(agent_id=f"thread_{thread_idx}", type="test", content=f"Event {i} from thread {thread_idx}")
+                    saltmdb_server.store_memory(content=f"# Thread {thread_idx} Memory {i}\nContent", tags=["#thread"], owner_id=f"thread_{thread_idx}", skip_duplicate_check=True)
+            except Exception as ex:
+                errors.append(ex)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(errors), 0, f"Concurrent multithreaded write errors: {errors}")
 
 if __name__ == "__main__":
     unittest.main()

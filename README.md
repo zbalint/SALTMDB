@@ -76,7 +76,7 @@ Whenever the database is modified, the server asynchronously spawns a detached b
 
 Once the background Librarian acquires the atomic lock, it runs the following tasks:
 1. **Tag Merging:** Merges case-insensitive tag aliases (e.g. `#Auth-Error` and `#auth_error`) into a canonical tag to prevent folksonomy fragmentation.
-2. **Access Decay (LRU):** Tracks `last_accessed_at` timestamps. Non-core memories unaccessed for 90 days have their ranking `weight` decremented. If weight drops to 0, they are automatically soft-deleted (`status = 'archived'`). Resets the 90-day timer upon decrement to prevent instant weight collapse.
+2. **Lossless Memory Preservation (No LRU Decay):** Unaccessed memories are never archived or weight-decremented based purely on access recency. Archiving occurs only upon explicit supersession or synthesis consolidation, preserving rare-but-important root cause knowledge indefinitely.
 3. **Clutter Tag Consolidation (Request-based):** Identifies tags accumulating $\ge 5$ raw entries and logs a JSON-formatted `consolidation_request` event to the short-term `events` ledger.
 4. **General Consolidation (Request-based):** Identifies overall raw accumulation ($\ge 5$ items sharing owner/scope) and logs a `consolidation_request` event. The cognitive task of merging and rephrasing markdown is offloaded to the active client agent, ensuring the server runs fully offline without independent API requirements.
 
@@ -84,27 +84,28 @@ Once the background Librarian acquires the atomic lock, it runs the following ta
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 12 tools over standard I/O:
+The server exposes 18 tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| `log_event` | `agent_id`, `type`, `content`, `error_code` | Appends a scrubbed entry to the immutable short-term ledger. |
+| `log_event` | `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id` | Appends a scrubbed entry to the immutable short-term ledger. |
 | `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
-| `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter to prevent duplicate tag names. |
-| `store_knowledge` | `content`, `tags`, `scope`, `weight`, `is_core`, `owner_id`, `title`, `entity_id`, `relevance`, `impact`, `novelty`, `actionability`, `metadata` | Stores/upserts facts in raw markdown. Supports structured metadata storage. **`owner_id` is mandatory**. |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode` | Searches knowledge using FTS5 (with query sanitization/fallback), tag filtering, and metadata filters. Supports `explain_mode`. |
-| `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. |
-| `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. **`owner_id` is mandatory**. |
+| `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter (or alias parameters `query`, `substring`, `tag_filter`). |
+| `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id` | Stores/upserts facts in raw markdown. Validates mandatory `content` and `title`. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id` | Searches knowledge using FTS5 with natural language stop-word normalization, tag filtering, metadata filters, and optional 1-hop related entity fetching (`include_related`). Demotes `owner_id` to provenance metadata for shared memories (relevance over identity). |
+| `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. Accepts exact UUID, status string containing UUID, or entity title. |
+| `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. |
 | `detect_orphaned_memories`| `owner_id` | Identifies active memories with no relationship links and suggests candidate links based on tag overlap. |
-| `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags` | Checks the database for potential near-duplicates of a proposed memory using title, tag, and text similarity. |
+| `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags` | Checks the database for potential near-duplicates of a proposed memory using stemming and stop-word similarity. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
-| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a consolidated memory and physically deletes parent raw nodes. |
-| `store_relation` | `source_id`, `target_id`, `predicate` | Stores a directional semantic relationship edge between two entity nodes. |
-| `analyze_dependencies` | `root_entity_id` | Traverses relationship trees using recursive SQL CTEs to map downstream components. |
+| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight` | Atomically commits a consolidated memory, archives parent raw nodes (never deletes), and auto-links `consolidated_from` lineage edges. |
+| `store_relation` | `source_id`, `target_id`, `predicate` | Stores a directional semantic relationship edge between two entity nodes. Auto-resolves UUIDs from titles or status strings. |
+| `analyze_dependencies` | `root_entity_id`, `max_depth` | Traverses relationship trees using recursive SQL CTEs to map downstream components. Returns `graph_exhausted` signal. |
+| `analyze_lineage` | `entity_id` | Traverses full multi-generation consolidation and derivation ancestry (`consolidated_from` / `derived_from`). |
 | `create_snapshot` | None | Safely creates a timestamped database backup in `backups/` using SQLite's backup API. |
-| `start_db_viewer` | None | Launches the zero-dependency database dashboard viewer locally on port 8080. |
-| `stop_db_viewer` | None | Terminates the database dashboard viewer running on port 8080. |
+| `start_db_viewer` | `port` (optional, default 8080) | Launches the zero-dependency database dashboard viewer locally on specified port. |
+| `stop_db_viewer` | None | Terminates the database dashboard viewer running on port 8080 or specified port. |
 
 ---
 

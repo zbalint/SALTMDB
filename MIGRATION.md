@@ -26,6 +26,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.21` | 4 | Configured FTS5 Porter tokenizer, added search_aliases metadata column; migrated project_id to entities and session_id to events; renamed store_knowledge to store_memory; changed consolidation to soft-archiving | **Automatic Migration** (init_db runs column changes, Drops/Recreates FTS5 index automatically) |
 | `v0.1.0-alpha.22` | 4 | Added E2E test suite; fixed title secret redaction, tag search canonicalization, duplicate check null safety, self-referential relations, bulk consolidation relation re-pointing, viewer CORS OPTIONS preflight, pagination bounds, and connection leaks | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.23` | 4 | Usability refactoring following subagent blind testing; implemented smart UUID/title entity resolution, tool parameter aliasing (query, event_type, text, tag, owner, etc.), init_db default arguments, flexible bulk string archiving, and configurable viewer port | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.24` | 5 | REVIEW_1.md architectural overhaul; added context_id domain-agnostic scoping; demoted owner_id to provenance metadata for shared memories; removed LRU decay entirely; added query stop-words normalization, include_related search, graph_exhausted signal, analyze_lineage tool, and auto-linked consolidated_from lineage edges | **Automatic Migration** (init_db auto-adds context_id columns to entities & events tables) |
 
 ---
 
