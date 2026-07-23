@@ -46,7 +46,7 @@ graph TD
 ### 1. Database Schema
 The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe concurrent readers. It includes the following tables:
 * **`events`**: An immutable, append-only ledger tracking agent operations (issues, attempts, decisions, fixes).
-* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, status (`raw`, `consolidated`, `archived`), and `embedding_status` (`pending`, `ready`, `failed`).
+* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, status (`raw`, `consolidated`, `archived`), and `embedding_status` (`pending`, `ready`, `failed`, `archived`).
 * **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects.
 * **`entity_tags`**: A mapping table linking knowledge entities to folksonomy tags.
 * **`relations`**: A typed directional edge table for the knowledge graph (`source_id → predicate → target_id`).

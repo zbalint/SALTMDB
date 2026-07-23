@@ -81,6 +81,9 @@ If you are upgrading an existing production `saltmdb.db` manually (rather than a
 ```sql
 -- 1. Add embedding_status tracking column
 ALTER TABLE entities ADD COLUMN embedding_status TEXT DEFAULT 'pending';
+
+-- 2. Mark existing archived memories as 'archived' in embedding_status
+UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived';
 ```
 
 > [!IMPORTANT]
