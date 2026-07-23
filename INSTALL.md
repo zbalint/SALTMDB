@@ -21,15 +21,23 @@ pip install mcp
 ```
 
 *(Optional)* If you prefer using virtual environments:
-```bash
 python -m venv .venv
 # On Windows (PowerShell):
 .venv\Scripts\Activate.ps1
 # On Unix:
 source .venv/bin/activate
 
-pip install mcp
+pip install -e .
 ```
+
+This installs `saltmdb` along with `mcp`, `sqlite-vec`, and `fastembed` (which uses `onnxruntime` for fast CPU vector embeddings).
+
+### Environment Variables
+
+- `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
+- `SALTMDB_ENABLE_SEMANTIC`: Set to `true` (or `1`) to enable Hybrid FTS5 + Dense Vector RRF search (default: `false`).
+
+*Note on First Run:* When semantic search or embedding generation runs for the first time, `fastembed` automatically downloads the `BAAI/bge-small-en-v1.5` ONNX model weights (~130MB) from Hugging Face and caches them locally.
 
 ---
 
