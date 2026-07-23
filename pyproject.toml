@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saltmdb"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 description = "Local-First MCP Memory Server"
 readme = "README.md"
 authors = [
@@ -13,7 +13,9 @@ authors = [
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=0.1.0"
+    "mcp>=0.1.0",
+    "sqlite-vec>=0.1.0",
+    "fastembed>=0.3.0"
 ]
 
 [project.urls]

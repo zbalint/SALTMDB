@@ -33,6 +33,13 @@ graph TD
     end
 ```
 
+## Features
+
+- **Local-First & Lightweight:** Zero cloud dependencies. Uses SQLite (WAL mode) with `fastembed` (`onnxruntime`) and `sqlite-vec`.
+- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search combined via Reciprocal Rank Fusion (RRF). Feature-gated via `SALTMDB_ENABLE_SEMANTIC=true`.
+- **Secrets Redaction:** Built-in pattern matching to automatically redact API keys, secrets, and private paths before storage.
+- **Folksonomy & Canonical Tags:** Flexible tagging system supporting tag aliases and canonical resolution.
+
 ### 1. Database Schema
 The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe concurrent readers. It includes the following tables:
 * **`events`**: An immutable, append-only ledger tracking agent operations (issues, attempts, decisions, fixes).

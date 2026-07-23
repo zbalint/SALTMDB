@@ -220,6 +220,16 @@ def store_memory(
                 
         from saltmdb.domain.services.librarian_service import trigger_librarian
         trigger_librarian(db_path=db_path)
+
+        if db_path:
+            import threading
+            from saltmdb.domain.services import embedding_service
+            threading.Thread(
+                target=embedding_service.embed_entity_async,
+                args=(entity_id, title, redacted_content, db_path),
+                daemon=True
+            ).start()
+
         return f"Knowledge stored successfully with ID: {entity_id}"
     except Exception as e:
         logger.error("Error storing knowledge: %s", e)
@@ -227,6 +237,86 @@ def store_memory(
     finally:
         if should_close:
             conn.close()
+
+def _run_fts_search(
+    conn, sanitized_query: str, where_clauses: list, params: list,
+    limit: int, offset: int
+) -> list:
+    """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list."""
+    terms = sanitized_query.split()
+    fts_query_str = " ".join(f'"{t}"*' for t in terms)
+    sql = f"""
+        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+               bm25(entities_fts, 10.0, 1.0, 5.0) as rank_score,
+               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
+               (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id
+                AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
+        FROM entities_fts fts
+        JOIN entities e ON fts.id = e.id
+        WHERE fts.entities_fts MATCH ? AND {" AND ".join(where_clauses)}
+        ORDER BY (bm25(entities_fts, 10.0, 1.0, 5.0) * e.weight - (rel_count * 0.1)) ASC,
+                 e.updated_at DESC
+        LIMIT ? OFFSET ?
+    """
+    exec_params = [fts_query_str] + params + [limit, offset]
+    rows = conn.execute(sql, exec_params).fetchall()
+    if not rows and len(terms) > 1:
+        fts_fallback_query = " OR ".join(f'"{t}"*' for t in terms)
+        exec_params_fb = [fts_fallback_query] + params + [limit, offset]
+        rows = conn.execute(sql, exec_params_fb).fetchall()
+    return rows
+
+
+def semantic_search(
+    query: str,
+    where_clauses: list[str],
+    params: list,
+    limit: int,
+    db_connection,
+) -> list[tuple[str, float]]:
+    """Return [(entity_id, cosine_distance), ...] ascending by distance."""
+    try:
+        import sqlite_vec
+        from saltmdb.domain.services import embedding_service
+
+        db_connection.enable_load_extension(True)
+        sqlite_vec.load(db_connection)
+        db_connection.enable_load_extension(False)
+
+        query_vector = embedding_service.embed_text(query)
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        sql = f"""
+            SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
+            FROM entity_embeddings ee
+            JOIN entities e ON ee.entity_id = e.id
+            WHERE e.embedding_status = 'ready' AND {where_sql}
+            ORDER BY distance ASC
+            LIMIT ?
+        """
+        exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit]
+        rows = db_connection.execute(sql, exec_params).fetchall()
+        return [(row[0], row[1]) for row in rows]
+    except Exception as e:
+        logger.warning("Semantic search failed, falling back to FTS5 only: %s", e)
+        return []
+
+
+def reciprocal_rank_fusion(
+    fts_results: list,
+    semantic_results: list[tuple[str, float]],
+    limit: int,
+    k: int = 60,
+) -> list[str]:
+    """Merge two ranked lists by rank position (not raw score)."""
+    scores: dict[str, float] = {}
+    for rank, row in enumerate(fts_results):
+        entity_id = row[0]
+        scores[entity_id] = scores.get(entity_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, (entity_id, _distance) in enumerate(semantic_results):
+        scores[entity_id] = scores.get(entity_id, 0.0) + 1.0 / (k + rank + 1)
+    ranked = sorted(scores.items(), key=lambda item: -item[1])
+    return [entity_id for entity_id, _ in ranked[:limit]]
+
 
 def search_memory(
     owner_id: str = None,
@@ -355,30 +445,40 @@ def search_memory(
 
         rows = []
         if sanitized_query:
-            terms = sanitized_query.split()
-            fts_query_str = " ".join(f'"{t}"*' for t in terms)
-            
-            sql = f"""
-                SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                       bm25(entities_fts, 10.0, 1.0, 5.0) as rank_score,
-                       e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
-                       (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
-                FROM entities_fts fts
-                JOIN entities e ON fts.id = e.id
-                WHERE fts.entities_fts MATCH ? AND {" AND ".join(where_clauses)}
-                ORDER BY (bm25(entities_fts, 10.0, 1.0, 5.0) * e.weight - (rel_count * 0.1)) ASC, e.updated_at DESC
-                LIMIT ? OFFSET ?
-            """
-            exec_params = [fts_query_str] + params + [limit, offset]
-            cursor_obj = conn.execute(sql, exec_params)
-            rows = cursor_obj.fetchall()
-            
-            # Fallback if 0 rows returned for AND term matching
-            if not rows and len(terms) > 1:
-                fts_fallback_query = " OR ".join(f'"{t}"*' for t in terms)
-                exec_params_fb = [fts_fallback_query] + params + [limit, offset]
-                cursor_obj_fb = conn.execute(sql, exec_params_fb)
-                rows = cursor_obj_fb.fetchall()
+            from saltmdb.config import is_semantic_search_enabled
+            if is_semantic_search_enabled():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    fts_future = executor.submit(
+                        _run_fts_search, conn, sanitized_query, where_clauses,
+                        params, limit, offset
+                    )
+                    semantic_future = executor.submit(
+                        semantic_search, query_keywords, where_clauses, params,
+                        limit, conn
+                    )
+                    fts_rows = fts_future.result()
+                    semantic_rows = semantic_future.result()
+
+                merged_ids = reciprocal_rank_fusion(fts_rows, semantic_rows, limit)
+
+                if merged_ids:
+                    placeholders = ",".join("?" for _ in merged_ids)
+                    id_order = {eid: i for i, eid in enumerate(merged_ids)}
+                    fetch_sql = f"""
+                        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                               0.0 as rank_score,
+                               e.created_at, e.updated_at, e.owner_id, e.scope,
+                               e.metadata, e.context_id, 0 as rel_count
+                        FROM entities e
+                        WHERE e.id IN ({placeholders})
+                    """
+                    fetched = conn.execute(fetch_sql, merged_ids).fetchall()
+                    rows = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                else:
+                    rows = fts_rows
+            else:
+                rows = _run_fts_search(conn, sanitized_query, where_clauses, params, limit, offset)
         else:
             sql = f"""
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,

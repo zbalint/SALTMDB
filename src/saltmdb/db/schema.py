@@ -44,7 +44,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         """)
         
         # Schema migration: attempt to add new columns to entities table if they don't exist
-        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT", "context_id TEXT"]:
+        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT", "context_id TEXT", "embedding_status TEXT DEFAULT 'pending'"]:
             try:
                 conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
             except sqlite3.OperationalError:
@@ -118,6 +118,13 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
                 """)
         except sqlite3.OperationalError:
             pass
+            
+        from saltmdb.db.vector_schema import init_vector_schema
+        try:
+            init_vector_schema(conn)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Vector schema init deferred/failed: %s", e)
         
         # 6. Mutex Lock Table for Leader Election
         conn.execute("""
