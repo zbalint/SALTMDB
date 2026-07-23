@@ -29,6 +29,9 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.24` | 5 | REVIEW_1.md architectural overhaul; added context_id domain-agnostic scoping; demoted owner_id to provenance metadata for shared memories; removed LRU decay entirely; added query stop-words normalization, include_related search, graph_exhausted signal, analyze_lineage tool, and auto-linked consolidated_from lineage edges | **Automatic Migration** (init_db auto-adds context_id columns to entities & events tables) |
 | `v0.1.0-alpha.25` | 5 | Viewer & Server comprehensive audit fixes; fixed bulk_commit_consolidation predicate direction to `consolidated_from`, context_id column persistence in store_memory & log_event, start_db_viewer port check; overhaul of database viewer SPA with Stats Dashboard, FTS Search UI, server-side filter dropdowns, Lineage tab, complete entity detail modal, and interactive graph zoom/pan & predicate legend | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.26` | 5 | Fixed critical frontend JavaScript regex syntax crash in `saltmdb_viewer.py` by converting SPA HTML templates to raw string literals (`r"""..."""`); fixed `start_db_viewer` environment and `--port` parameter passing; updated `get_entities` empty string filter logic; updated `get_lineage` entity resolution by ID or title | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.27` | 5 | Codebase refactored from single `saltmdb_server.py` monolith into `src/saltmdb` package layout (`db/`, `domain/services/`, `mcp/`, `viewer/`, `utils/`); entry point changed from `saltmdb_server.py` to `python -m saltmdb` | **No Action Required** (no schema change; update MCP client config to use `python -m saltmdb` instead of `saltmdb_server.py`) |
+| `v0.1.0-alpha.28` | 5 | No schema changes. Internal service-layer cleanups and stabilization on refactor branch | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.29` | 6 | Added Hybrid FTS5 + Semantic Vector RRF Search: new `sqlite-vec` `entity_embeddings` vec0 virtual table; `embedding_status` column on `entities`; `embedding_service.py` for lazy `fastembed` ONNX inference; parallel `ThreadPoolExecutor` search with RRF merge; `SALTMDB_ENABLE_SEMANTIC` env-var flag (read-path only) | **Automatic Migration** (`init_db` auto-adds `embedding_status` column and creates `entity_embeddings` virtual table; run `scratch/backfill_embeddings.py` once for pre-existing rows) |
 
 ---
 
@@ -71,12 +74,29 @@ ALTER TABLE entities ADD COLUMN metadata TEXT;
 
 ---
 
+## DDL Migrations (v0.1.0-alpha.28 ➔ v0.1.0-alpha.29)
+
+If you are upgrading an existing production `saltmdb.db` manually (rather than allowing `init_db` to run migrations automatically), run the following steps:
+
+```sql
+-- 1. Add embedding_status tracking column
+ALTER TABLE entities ADD COLUMN embedding_status TEXT DEFAULT 'pending';
+```
+
+Then initialize the `entity_embeddings` vec0 virtual table by starting the server once — `init_db()` will call `init_vector_schema()` automatically which requires `sqlite-vec` to be installed.
+
+Finally, run the one-time backfill script to generate embeddings for existing rows:
+```bash
+python scratch/backfill_embeddings.py
+```
+
+---
+
 ## Upgrade Verification
 
-To verify your database schema compatibility, execute **[examples/query_db.py](examples/query_db.py)** or run unit tests:
+To verify your database schema compatibility, run the hybrid search test suite:
 
 ```bash
-$env:PYTHONPATH="C:\path\to\SALTMDB"
-python scratch/test_db.py
+python -m pytest scratch/test_hybrid_search.py -v
 ```
-If all unit tests execute and pass cleanly, your database schema is correctly aligned.
+If all tests execute and pass cleanly, your database schema is correctly aligned.

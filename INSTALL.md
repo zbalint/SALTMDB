@@ -14,30 +14,33 @@ Follow these steps to set up and configure the SALTMDB Model Context Protocol (M
 
 ## 2. Dependencies
 
-The server requires the standard `mcp` package to handle the Model Context Protocol JSON-RPC layer. Run the installation command:
+Install all dependencies (including `mcp`, `sqlite-vec`, and `fastembed`) via editable install from the repo root:
 
 ```bash
-pip install mcp
+pip install -e .
 ```
 
-*(Optional)* If you prefer using virtual environments:
+This installs:
+- `mcp` — Model Context Protocol JSON-RPC layer
+- `sqlite-vec` — SQLite extension for `vec0` vector tables
+- `fastembed` — Lightweight ONNX embedding runtime (no PyTorch); uses `onnxruntime` internally
+
+*(Optional)* If you prefer a virtual environment:
+```bash
 python -m venv .venv
 # On Windows (PowerShell):
 .venv\Scripts\Activate.ps1
 # On Unix:
 source .venv/bin/activate
-
 pip install -e .
 ```
-
-This installs `saltmdb` along with `mcp`, `sqlite-vec`, and `fastembed` (which uses `onnxruntime` for fast CPU vector embeddings).
 
 ### Environment Variables
 
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
-- `SALTMDB_ENABLE_SEMANTIC`: Set to `true` (or `1`) to enable Hybrid FTS5 + Dense Vector RRF search (default: `false`).
+- `SALTMDB_ENABLE_SEMANTIC`: Set to `true` (or `1`) to enable Hybrid FTS5 + Dense Vector RRF search (default: `false`, read-path only).
 
-*Note on First Run:* When semantic search or embedding generation runs for the first time, `fastembed` automatically downloads the `BAAI/bge-small-en-v1.5` ONNX model weights (~130MB) from Hugging Face and caches them locally.
+> **Note on first run:** When `store_memory` is first called, `fastembed` automatically downloads the `BAAI/bge-small-en-v1.5` ONNX model weights (~130 MB) from Hugging Face and caches them locally. Internet access is required on first use only.
 
 ---
 
