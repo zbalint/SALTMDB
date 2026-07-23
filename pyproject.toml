@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saltmdb"
-version = "0.1.0-alpha.26"
+version = "0.1.0-alpha.27"
 description = "Local-First MCP Memory Server"
 readme = "README.md"
 authors = [
@@ -18,3 +18,10 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/your-username/SALTMDB"
+
+[project.scripts]
+saltmdb-server = "saltmdb.__main__:main"
+saltmdb-viewer = "saltmdb.viewer.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
