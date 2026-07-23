@@ -374,9 +374,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         try:
             conn = self.get_db_connection()
             counts = {}
-            for emb_status in ['pending', 'ready', 'failed']:
+            for emb_status in ['pending', 'ready', 'failed', 'archived']:
                 cur = conn.execute(
-                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ? AND status != 'archived'",
+                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ?",
                     (emb_status,)
                 )
                 counts[emb_status] = cur.fetchone()[0]
