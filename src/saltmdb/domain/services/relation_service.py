@@ -283,7 +283,7 @@ def commit_consolidation(
             placeholders = ",".join("?" for _ in resolved_parents)
             conn.execute(f"""
                 UPDATE entities 
-                SET status = 'archived', updated_at = ?, valid_to = ? 
+                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? 
                 WHERE id IN ({placeholders})
             """, [now, now] + resolved_parents)
             

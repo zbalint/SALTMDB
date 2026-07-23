@@ -610,7 +610,7 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         with conn:
             conn.execute("""
                 UPDATE entities
-                SET status = 'archived', updated_at = ?, valid_to = ?
+                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id = ? AND status != 'archived'
             """, (now, now, resolved_id))
             
