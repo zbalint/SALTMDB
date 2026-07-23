@@ -94,40 +94,23 @@ def search_memory(
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
-    include_related: bool = False,
-    **kwargs
+    include_related: bool = False
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
-    query_keywords_ = query_keywords or kw.get("query_keywords") or kw.get("query") or kw.get("q") or kw.get("keywords") or kwargs.get("query_keywords") or kwargs.get("query") or kwargs.get("q") or kwargs.get("keywords")
-    context_id_ = context_id or project_id or kw.get("context_id") or kw.get("project_id") or kw.get("context") or kw.get("project") or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
-    raw_tags = tags_filter if tags_filter is not None else (kw.get("tags_filter") or kw.get("tags") or kw.get("tag") or kwargs.get("tags_filter") or kwargs.get("tags") or kwargs.get("tag"))
-    if isinstance(raw_tags, str):
-        tags_filter_ = [raw_tags]
-    elif isinstance(raw_tags, list):
-        tags_filter_ = raw_tags
-    else:
-        tags_filter_ = None
-
-    explain_mode_ = explain_mode or kw.get("explain_mode") or kwargs.get("explain_mode") or False
-    limit_ = kw.get("limit") or limit or 5
-    is_core_ = is_core if is_core is not None else (kw.get("is_core") if "is_core" in kw else kwargs.get("is_core"))
-    include_related_ = include_related or kw.get("include_related") or kwargs.get("include_related") or False
-
+    context_id_ = context_id or project_id
     return memory_service.search_memory(
-        owner_id=owner_id_,
-        query_keywords=query_keywords_,
-        tags_filter=tags_filter_,
-        metadata_filter=metadata_filter or kw.get("metadata_filter") or kwargs.get("metadata_filter"),
-        explain_mode=explain_mode_,
-        limit=limit_,
+        owner_id=owner_id,
+        query_keywords=query_keywords,
+        tags_filter=tags_filter,
+        metadata_filter=metadata_filter,
+        explain_mode=explain_mode,
+        limit=limit,
         project_id=context_id_,
         context_id=context_id_,
-        is_core=is_core_,
+        is_core=is_core,
         tag_operator=tag_operator,
-        cursor=cursor or kw.get("cursor") or kwargs.get("cursor"),
-        include_related=include_related_
+        cursor=cursor,
+        include_related=include_related
     )
 
 @mcp.tool()
