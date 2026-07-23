@@ -80,7 +80,43 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def get_db_connection(self):
-        return sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        self._ensure_schema(conn)
+        return conn
+
+    def _ensure_schema(self, conn):
+        """Safely ensure optional schema columns exist on older databases to prevent query errors."""
+        try:
+            # 1. Ensure entities columns
+            cursor = conn.execute("PRAGMA table_info(entities)")
+            ent_cols = {r[1] for r in cursor.fetchall()}
+            if ent_cols:
+                for col in ["context_id", "project_id", "metadata", "valid_from", "valid_to"]:
+                    if col not in ent_cols:
+                        conn.execute(f"ALTER TABLE entities ADD COLUMN {col} TEXT")
+                if "is_core" not in ent_cols:
+                    conn.execute("ALTER TABLE entities ADD COLUMN is_core INTEGER DEFAULT 0")
+                if "parent_ids" not in ent_cols:
+                    conn.execute("ALTER TABLE entities ADD COLUMN parent_ids TEXT DEFAULT '[]'")
+
+            # 2. Ensure events columns
+            cursor = conn.execute("PRAGMA table_info(events)")
+            evt_cols = {r[1] for r in cursor.fetchall()}
+            if evt_cols:
+                for col in ["context_id", "session_id"]:
+                    if col not in evt_cols:
+                        conn.execute(f"ALTER TABLE events ADD COLUMN {col} TEXT")
+
+            # 3. Ensure tags columns
+            cursor = conn.execute("PRAGMA table_info(tags)")
+            tag_cols = {r[1] for r in cursor.fetchall()}
+            if tag_cols and "canonical_id" not in tag_cols:
+                conn.execute("ALTER TABLE tags ADD COLUMN canonical_id INTEGER")
+
+            conn.commit()
+        except Exception:
+            pass
+
 
     def get_entities(self, query):
         conn = None
@@ -297,10 +333,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             } for r in rows]
             self.send_json(tags)
         except sqlite3.OperationalError as e:
-            msg = str(e)
-            if "no such table" in msg:
-                msg = "Database not initialized. Please run the MCP server first to create tables."
-            self.send_json({"error": msg}, 500)
+            if "no such table" in str(e):
+                self.send_json([])
+            else:
+                self.send_json({"error": str(e)}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
         finally:
@@ -314,9 +350,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
-            cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks")
+            cursor = conn.execute("""
+                SELECT task_name, locked_at, locked_by_pid, last_run_at
+                FROM task_locks
+            """)
             rows = cursor.fetchall()
-            
+
             locks = [{
                 "task_name": r[0],
                 "locked_at": r[1],
@@ -325,10 +364,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             } for r in rows]
             self.send_json(locks)
         except sqlite3.OperationalError as e:
-            msg = str(e)
-            if "no such table" in msg:
-                msg = "Database not initialized. Please run the MCP server first to create tables."
-            self.send_json({"error": msg}, 500)
+            if "no such table" in str(e):
+                self.send_json([])
+            else:
+                self.send_json({"error": str(e)}, 500)
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
         finally:
