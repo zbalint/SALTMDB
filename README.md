@@ -1,6 +1,6 @@
 # SALTMDB: Local-First MCP Memory Server
 
-**SALTMDB** (Short And Long-Term Memory DataBase) is a centralized, local-first memory framework designed for AI CLI tools and agents (such as Antigravity, Copilot, and Claude Code). It acts as a shared memory layer, allowing multiple concurrent agents to read, write, and consolidate contextual facts without heavy ML dependencies, vector databases, or high API overhead.
+**SALTMDB** (Short And Long-Term Memory DataBase) is a centralized, local-first memory framework designed for AI CLI tools and agents (such as Antigravity, Copilot, and Claude Code). It acts as a shared memory layer, allowing multiple concurrent agents to read, write, and consolidate contextual facts using a lightweight Python package with SQLite and ONNX-based vector embeddings.
 
 > [!TIP]
 > * **Installation:** To install and register the MCP server, see the **[Installation Guide](INSTALL.md)**.
@@ -20,13 +20,15 @@ graph TD
     end
 
     subgraph MCP Server Layer
-        A -->|Stdio / MCP| Server[saltmdb_server.py]
+        A -->|Stdio / MCP| Server[saltmdb.mcp.server]
         B -->|Stdio / MCP| Server
         Server -->|timeout=10.0 / WAL| MainDB[(sqlite3: saltmdb.db)]
         Server -->|check_same_thread=False| EphemDB[(sqlite3: :memory:)]
     end
 
-    subgraph Background Process
+    subgraph Background Threads
+        Server -->|daemon thread| EmbedWorker[embedding_service.embed_entity_async]
+        EmbedWorker -->|fastembed ONNX| VecDB[(entity_embeddings vec0)]
         Server -->|Asynchronous detached spawn| Lib[Librarian gc worker]
         Lib -->|Atomic Leader Election Lock| Lock[_system_locks]
         Lib -->|Consolidate & Archive| MainDB
@@ -35,28 +37,33 @@ graph TD
 
 ## Features
 
-- **Local-First & Lightweight:** Zero cloud dependencies. Uses SQLite (WAL mode) with `fastembed` (`onnxruntime`) and `sqlite-vec`.
-- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search combined via Reciprocal Rank Fusion (RRF). Feature-gated via `SALTMDB_ENABLE_SEMANTIC=true`.
-- **Secrets Redaction:** Built-in pattern matching to automatically redact API keys, secrets, and private paths before storage.
-- **Folksonomy & Canonical Tags:** Flexible tagging system supporting tag aliases and canonical resolution.
+- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Feature-gated via `SALTMDB_ENABLE_SEMANTIC=true`.
+- **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
+- **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.
+- **SCD Type 2 Temporal History:** Every upsert preserves the prior version as an archived snapshot for full audit lineage.
+- **Lossless Consolidation:** Soft-archives source memories, auto-creates `consolidated_from` graph edges — never hard-deletes.
 
 ### 1. Database Schema
 The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe concurrent readers. It includes the following tables:
 * **`events`**: An immutable, append-only ledger tracking agent operations (issues, attempts, decisions, fixes).
-* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, and status fields (`raw`, `consolidated`, `archived`).
+* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, status (`raw`, `consolidated`, `archived`), and `embedding_status` (`pending`, `ready`, `failed`).
 * **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects.
 * **`entity_tags`**: A mapping table linking knowledge entities to folksonomy tags.
-* **`entities_fts`**: A virtual table using **SQLite FTS5** to index entity titles and full contents for fast, weighted keyword searches.
+* **`relations`**: A typed directional edge table for the knowledge graph (`source_id → predicate → target_id`).
+* **`entities_fts`**: A virtual table using **SQLite FTS5** (Porter tokenizer) to index titles, full content, and search aliases for weighted keyword search.
+* **`entity_embeddings`**: A `sqlite-vec` `vec0` virtual table storing 384-dimensional ONNX embeddings for semantic vector search.
 * **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent processes.
 
 ---
 
 ## 🚀 Core Features
 
-### 1. Weighted Keyword FTS5 Search
-SALTMDB bypasses expensive vector embedding models in favor of standard keyword search. It leverages SQLite FTS5's built-in `bm25` auxiliary function configured with a **10:1 title-to-content weight ratio**:
-* Matches found in the entity's **Title** are prioritized 10x higher than matches in the **Body Content**.
-* The final rank score merges BM25 ranking and the entity's priority `weight` multiplier.
+### 1. Hybrid FTS5 + Vector Search
+SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in parallel**, merging results via **Reciprocal Rank Fusion (RRF)**:
+* FTS5 uses SQLite's built-in `bm25` auxiliary function with a **10:1 title-to-content weight ratio**.
+* Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~130MB auto-downloaded) stored in a `sqlite-vec` `vec0` virtual table.
+* RRF merges on rank position (not raw scores), keeping the existing BM25 tuning intact.
+* Enable via `SALTMDB_ENABLE_SEMANTIC=true`; write-path embedding generation is **always active** regardless of the flag.
 
 ### 2. Hybrid Title Extraction
 When storing new knowledge, agents can optionally specify a custom `title`. If omitted, the server automatically extracts the first markdown heading (`# Heading`) as the title, falling back to a snippet of the first line if no heading is present.
@@ -99,7 +106,7 @@ The server exposes 18 tools over standard I/O:
 | `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
 | `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter (or alias parameters `query`, `substring`, `tag_filter`). |
 | `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id` | Stores/upserts facts in raw markdown. Validates mandatory `content` and `title`. |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id` | Searches knowledge using FTS5 with natural language stop-word normalization, tag filtering, metadata filters, and optional 1-hop related entity fetching (`include_related`). Demotes `owner_id` to provenance metadata for shared memories (relevance over identity). |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id` | Hybrid FTS5 + vector RRF search (when `SALTMDB_ENABLE_SEMANTIC=true`; otherwise FTS5-only). Supports stop-word normalization, tag filtering, metadata filters, and 1-hop related entity fetching. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. Accepts exact UUID, status string containing UUID, or entity title. |
 | `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. |
 | `detect_orphaned_memories`| `owner_id` | Identifies active memories with no relationship links and suggests candidate links based on tag overlap. |
@@ -130,9 +137,10 @@ To connect SALTMDB to Claude Desktop or Claude Code, add the following to your c
 "mcpServers": {
   "saltmdb": {
     "command": "python",
-    "args": ["/path/to/SALTMDB/saltmdb_server.py"],
+    "args": ["-m", "saltmdb"],
     "env": {
-      "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY"
+      "SALTMDB_DB_PATH": "/path/to/saltmdb.db",
+      "SALTMDB_ENABLE_SEMANTIC": "true"
     }
   }
 }
@@ -148,10 +156,9 @@ SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events,
    [http://localhost:8080](http://localhost:8080)
 
 ### 4. Running Unit Tests
-You can run the test suite to verify database schemas, triggers, and lock rules:
-   ```bash
-$env:PYTHONPATH="C:\path\to\SALTMDB"
-python scratch/test_db.py
+Run the hybrid search test suite (against the refactored package):
+```bash
+python -m pytest scratch/test_hybrid_search.py -v
 ```
 
 ---

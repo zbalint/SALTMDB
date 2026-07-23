@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the **SALTMDB
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via 18 parameterized MCP tools exposed by [saltmdb_server.py](saltmdb_server.py):
+Agents interface with SALTMDB via 21 parameterized MCP tools exposed by the `saltmdb` package (`src/saltmdb/mcp/tools.py`):
 
 ```mermaid
 graph TD
@@ -53,7 +53,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > **FORBIDDEN ACTION: NO DIRECT SQL ACCESS**
 > You are strictly forbidden from running shell commands like `sqlite3` or using scripts to connect directly to the `saltmdb.db` file. Bypassing the MCP server skips the secrets redaction middleware and FTS5 search indexing triggers, corrupting the database state. All queries and updates must occur via MCP tool calls.
 
-## 1. Available Tools Overview (18 Tools)
+## 1. Available Tools Overview (21 Tools)
 * `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode, limit, include_related, context_id)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search (when `SALTMDB_ENABLE_SEMANTIC=true` is set; defaults to FTS5 with natural language stop-word normalization). Supports parameter aliases (`query`, `q`, `keywords`). Parameter `include_related=True` pulls 1-hop active linked entities via `relations`. Shared memories surface globally across all agent queries based on relevance score.
 * `scan_memories(owner_id, status_filter, limit, offset)`: Scan and inspect lists/contents of memories for audits, consistency reviews, or contradiction checks.
 * `store_memory(content, tags, owner_id, scope, weight, is_core, title, entity_id, metadata, context_id)`: Save/upsert long-term knowledge. Requires non-empty `content` and `title`. Supports parameter aliases (`text`, `tag`, `owner`). Runs internal duplicate detection prior to storage.
@@ -72,6 +72,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `bulk_store_relations(relations)`: Bulk store directional relationship edges atomically.
 * `store_ephemeral_memory(key, value)` / `get_ephemeral_memory(key)`: In-memory volatile secret storage.
 * `start_db_viewer(port)` / `stop_db_viewer(port)`: Control zero-dependency dark-mode web dashboard viewer (default port 8080).
+* `get_session_summary(session_id)`: Retrieves all events grouped by a specific session ID for targeted session auditing.
 
 ## 2. Operational Lifecycle
 
