@@ -83,7 +83,15 @@ If you are upgrading an existing production `saltmdb.db` manually (rather than a
 ALTER TABLE entities ADD COLUMN embedding_status TEXT DEFAULT 'pending';
 ```
 
-Then initialize the `entity_embeddings` vec0 virtual table by starting the server once — `init_db()` will call `init_vector_schema()` automatically which requires `sqlite-vec` to be installed.
+> [!IMPORTANT]
+> **Order of Operations for Backfill:**
+> Before running `backfill_embeddings.py`, the `entity_embeddings` virtual `vec0` table **must** be created. 
+> 
+> You can create it by either:
+> 1. Launching the server once (`python -m saltmdb`), or
+> 2. Running `python -c "from saltmdb.db.schema import init_db; init_db()"`
+> 
+> If `backfill_embeddings.py` is executed before initializing `init_db()`, embedding generation will fail with `no such table: entity_embeddings` and mark entity statuses as `failed`. If this happens, run `init_db()`, reset failed records (`UPDATE entities SET embedding_status = 'pending' WHERE embedding_status = 'failed'`), and re-run `backfill_embeddings.py`.
 
 Finally, run the one-time backfill script to generate embeddings for existing rows:
 ```bash

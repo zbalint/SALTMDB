@@ -1,7 +1,9 @@
+import os
 import sqlite3
 import json
 import http.server
 import urllib.parse
+import sys
 from saltmdb.config import get_db_path
 from saltmdb.viewer.templates import get_frontend_html
 
@@ -67,7 +69,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
 
     def get_db_connection(self):
-        db_path = os.environ.get("SALTMDB_DB_PATH") or get_db_path()
+        db_path = None
+        if "saltmdb_viewer" in sys.modules:
+            db_path = getattr(sys.modules["saltmdb_viewer"], "DB_PATH", None)
+        db_path = os.environ.get("SALTMDB_DB_PATH") or db_path or get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
