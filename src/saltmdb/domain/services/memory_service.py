@@ -68,7 +68,7 @@ def store_memory(
         
     if not content or not content.strip():
         return "Error: content is mandatory and cannot be empty."
-        
+
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
         
@@ -88,11 +88,14 @@ def store_memory(
         
     redacted_content = redact_secrets(content)
     now = datetime.now(UTC).isoformat()
-    
+
     if not title:
         title, _ = extract_title_and_snippet(redacted_content)
     else:
         title = redact_secrets(title)
+
+    if not title or not title.strip():
+        return "Error: title is mandatory and cannot be empty."
         
     try:
         validate_memory_input(title, redacted_content, metadata)

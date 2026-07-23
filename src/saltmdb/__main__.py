@@ -18,7 +18,9 @@ def main():
             merge_tags_heuristics,
             decay_lru_memories,
             consolidate_cluttered_tags,
-            consolidate_memories
+            consolidate_memories,
+            consolidate_vector_clusters,
+            scout_consolidated_supersessions
         )
         db_path = get_db_path()
         conn = init_db(db_path)
@@ -33,6 +35,8 @@ def main():
             decay_lru_memories(conn)
             consolidate_cluttered_tags(conn)
             consolidate_memories(conn)
+            consolidate_vector_clusters(conn)
+            scout_consolidated_supersessions(conn)
         finally:
             release_librarian_lock(conn)
             conn.close()

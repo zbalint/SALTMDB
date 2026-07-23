@@ -204,3 +204,154 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
     finally:
         if should_close:
             conn.close()
+
+def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):
+    """Discovers topically related raw memories via vector embeddings and logs consolidation request events."""
+    should_close = False
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+        
+    try:
+        logger.info("Running Vector Topic Clustering for Raw Memories...")
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception as e:
+            logger.debug("sqlite-vec extension not available for vector clustering: %s", e)
+            return
+
+        cursor = conn.execute("""
+            SELECT e.id, e.owner_id
+            FROM entities e
+            JOIN entity_embeddings ee ON e.id = ee.entity_id
+            WHERE e.status = 'raw' AND e.embedding_status = 'ready'
+        """)
+        raw_rows = cursor.fetchall()
+        if len(raw_rows) < 3:
+            return
+
+        raw_ids = [r[0] for r in raw_rows]
+        owner_map = {r[0]: r[1] for r in raw_rows}
+        
+        clusters = []
+        visited = set()
+
+        for eid in raw_ids:
+            if eid in visited:
+                continue
+
+            query_vec_cur = conn.execute("SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (eid,))
+            vec_row = query_vec_cur.fetchone()
+            if not vec_row or not vec_row[0]:
+                continue
+
+            vec_blob = vec_row[0]
+            placeholders = ",".join("?" for _ in raw_ids)
+            sql = f"""
+                SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
+                FROM entity_embeddings ee
+                JOIN entities e ON ee.entity_id = e.id
+                WHERE e.id IN ({placeholders}) AND e.status = 'raw'
+                ORDER BY distance ASC
+            """
+            neighbors_cur = conn.execute(sql, [vec_blob] + raw_ids)
+            cluster_members = []
+            for nid, dist in neighbors_cur.fetchall():
+                if dist <= 0.25:  # Cosine distance <= 0.25 means cosine similarity >= 0.75
+                    cluster_members.append(nid)
+
+            if len(cluster_members) >= 3:
+                clusters.append(cluster_members)
+                visited.update(cluster_members)
+
+        for cluster in clusters:
+            primary_owner = owner_map.get(cluster[0]) or "librarian"
+            event_id = str(uuid.uuid4())
+            now = datetime.now(UTC).isoformat()
+            content = json.dumps({
+                "target": "vector_cluster",
+                "owner_id": primary_owner,
+                "entity_ids": cluster
+            })
+            with conn:
+                conn.execute("""
+                    INSERT INTO events (id, timestamp, agent_id, type, content)
+                    VALUES (?, ?, ?, 'consolidation_request', ?)
+                """, (event_id, now, primary_owner, content))
+            logger.info("Logged vector cluster consolidation request for Owner '%s' (Entity IDs: %s)", primary_owner, cluster)
+    except Exception as e:
+        logger.warning("Error in consolidate_vector_clusters: %s", e)
+    finally:
+        if should_close:
+            conn.close()
+
+def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):
+    """Scouts for consolidated entities that may be outdated due to new raw memories."""
+    should_close = False
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    try:
+        logger.info("Scouting Consolidated Memories for Supersession Candidates...")
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception as e:
+            logger.debug("sqlite-vec extension not available for supersession scouting: %s", e)
+            return
+
+        consolidated_cur = conn.execute("""
+            SELECT e.id, e.title, e.owner_id, e.valid_from
+            FROM entities e
+            JOIN entity_embeddings ee ON e.id = ee.entity_id
+            WHERE e.status = 'consolidated' AND e.embedding_status = 'ready'
+        """)
+        consolidated_nodes = consolidated_cur.fetchall()
+        if not consolidated_nodes:
+            return
+
+        for cid, ctitle, cowner, cvalid_from in consolidated_nodes:
+            vec_row = conn.execute("SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (cid,)).fetchone()
+            if not vec_row or not vec_row[0]:
+                continue
+
+            vec_blob = vec_row[0]
+            new_raw_cur = conn.execute("""
+                SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
+                FROM entity_embeddings ee
+                JOIN entities e ON ee.entity_id = e.id
+                WHERE e.status = 'raw' AND e.created_at > COALESCE(?, '1970-01-01T00:00:00')
+                ORDER BY distance ASC
+            """, (vec_blob, cvalid_from))
+
+            overlapping_new_raw = [row[0] for row in new_raw_cur.fetchall() if row[1] <= 0.25]
+            if len(overlapping_new_raw) >= 3:
+                event_id = str(uuid.uuid4())
+                now = datetime.now(UTC).isoformat()
+                target_agent = cowner or "librarian"
+                content = json.dumps({
+                    "target": "supersession_candidate",
+                    "consolidated_entity_id": cid,
+                    "consolidated_title": ctitle,
+                    "new_raw_entity_ids": overlapping_new_raw
+                })
+                with conn:
+                    conn.execute("""
+                        INSERT INTO events (id, timestamp, agent_id, type, content)
+                        VALUES (?, ?, ?, 'consolidation_request', ?)
+                    """, (event_id, now, target_agent, content))
+                logger.info("Logged supersession candidate request for consolidated memory '%s' (ID: %s)", ctitle, cid)
+    except Exception as e:
+        logger.warning("Error in scout_consolidated_supersessions: %s", e)
+    finally:
+        if should_close:
+            conn.close()
+
