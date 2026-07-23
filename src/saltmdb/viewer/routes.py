@@ -36,7 +36,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
         
-        if path in ("/api/entities", "/api/entity"):
+        if path == "/api/embeddings_stats":
+            self.get_embeddings_stats()
+        elif path in ("/api/entities", "/api/entity"):
             self.get_entities(query)
         elif path == "/api/events":
             self.get_events(query)
@@ -63,9 +65,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Endpoint not found"}, 404)
 
+
     def get_db_connection(self):
-        import saltmdb_viewer
-        db_path = getattr(saltmdb_viewer, "DB_PATH", None) or get_db_path()
+        db_path = os.environ.get("SALTMDB_DB_PATH") or get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
@@ -107,7 +109,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             conn = self.get_db_connection()
             cursor = conn.execute(f"""
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id
+                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status
                 FROM entities
                 {where_sql}
                 ORDER BY updated_at DESC
@@ -148,6 +150,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "parent_ids": json.loads(r[9]) if r[9] else [],
                     "title": r[10],
                     "context_id": r[11],
+                    "embedding_status": r[12],
                     "tags": tag_map.get(r[0], [])
                 })
 
@@ -334,6 +337,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             stats["total_relations"] = cur.fetchone()[0]
             cur = conn.execute("SELECT COUNT(*) FROM tags")
             stats["total_tags"] = cur.fetchone()[0]
+            for emb_status in ['ready', 'pending', 'failed']:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ? AND status != 'archived'",
+                    (emb_status,)
+                )
+                stats[f"embeddings_{emb_status}"] = cur.fetchone()[0]
 
             self.send_json(stats)
         except Exception as e:
@@ -354,6 +363,28 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"query": q, "results": results})
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+
+    def get_embeddings_stats(self):
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            counts = {}
+            for emb_status in ['pending', 'ready', 'failed']:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ? AND status != 'archived'",
+                    (emb_status,)
+                )
+                counts[emb_status] = cur.fetchone()[0]
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE (embedding_status IS NULL OR embedding_status = '') AND status != 'archived'"
+            )
+            counts['null'] = cur.fetchone()[0]
+            self.send_json(counts)
+        except Exception as e:
+            self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                conn.close()
 
     def get_lineage(self, entity_id):
         try:
