@@ -238,13 +238,27 @@ def store_memory(
         if should_close:
             conn.close()
 
+STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is", "it", "its",
+    "of", "on", "that", "the", "to", "was", "were", "will", "with", "what", "my", "when", "i", "type", "did",
+    "how", "does", "or", "which", "who", "whom", "this", "these", "those"
+}
+
 def _run_fts_search(
     conn, sanitized_query: str, where_clauses: list, params: list,
     limit: int, offset: int
 ) -> list:
     """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list."""
-    terms = sanitized_query.split()
+    raw_terms = sanitized_query.split()
+    terms = [t for t in raw_terms if t.lower() not in STOP_WORDS]
+    if not terms:
+        terms = raw_terms
+
+    if not terms:
+        return []
+
     fts_query_str = " ".join(f'"{t}"*' for t in terms)
+    where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                bm25(entities_fts, 10.0, 1.0, 5.0) as rank_score,
@@ -253,7 +267,7 @@ def _run_fts_search(
                 AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
         FROM entities_fts fts
         JOIN entities e ON fts.id = e.id
-        WHERE fts.entities_fts MATCH ? AND {" AND ".join(where_clauses)}
+        WHERE fts.entities_fts MATCH ?{where_sql}
         ORDER BY (bm25(entities_fts, 10.0, 1.0, 5.0) * e.weight - (rel_count * 0.1)) ASC,
                  e.updated_at DESC
         LIMIT ? OFFSET ?
