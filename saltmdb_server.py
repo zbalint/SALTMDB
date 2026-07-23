@@ -9,7 +9,7 @@ from datetime import datetime, UTC
 from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.25"
+__version__ = "0.1.0-alpha.26"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -1077,7 +1077,7 @@ def start_db_viewer(port: int = None, **kwargs) -> str:
         if not port_occupied:
             break
         # Port occupied: kill the process holding port and wait
-        stop_db_viewer()
+        stop_db_viewer(port=port)
         time.sleep(0.1)
         
     # Start it in the background
@@ -1095,17 +1095,22 @@ def start_db_viewer(port: int = None, **kwargs) -> str:
             
         log_file = open(log_path, "a", encoding="utf-8")
         
-        kwargs = {
+        env = dict(os.environ)
+        env["SALTMDB_DB_PATH"] = get_db_path()
+        env["SALTMDB_VIEWER_PORT"] = str(port)
+        
+        popen_kwargs = {
             "stdout": log_file,
             "stderr": log_file,
+            "env": env
         }
         if sys.platform == "win32":
-            kwargs["creationflags"] = 0x08000000 # CREATE_NO_WINDOW
+            popen_kwargs["creationflags"] = 0x08000000 # CREATE_NO_WINDOW
         else:
-            kwargs["start_new_session"] = True
+            popen_kwargs["start_new_session"] = True
             
         # Run python with -u (unbuffered) so print output/tracebacks are written immediately
-        process = subprocess.Popen([sys.executable, "-u", viewer_script], **kwargs)
+        process = subprocess.Popen([sys.executable, "-u", viewer_script, "--port", str(port)], **popen_kwargs)
         log_file.close()
         
         # Active verification: poll process health and check if port becomes reachable (up to 3.0s)
@@ -1147,28 +1152,30 @@ def start_db_viewer(port: int = None, **kwargs) -> str:
         return f"Error starting database viewer: {e}"
 
 @mcp.tool()
-def stop_db_viewer() -> str:
-    """Stops the running local SALTMDB web dashboard/viewer if it is running on port 8080."""
+def stop_db_viewer(port: int = None, **kwargs) -> str:
+    """Stops the running local SALTMDB web dashboard/viewer if it is running on specified port (default 8080)."""
     import subprocess
     import socket
     
-    # Check if port 8080 is actually open
+    port = port or kwargs.get("port") or 8080
+    
+    # Check if port is actually open
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(0.5)
-        s.connect(("127.0.0.1", 8080))
+        s.connect(("127.0.0.1", port))
         s.close()
     except Exception:
-        return "SALTMDB Database Viewer is not running (port 8080 is closed)."
+        return f"SALTMDB Database Viewer is not running (port {port} is closed)."
         
-    # Attempt to kill process holding port 8080
+    # Attempt to kill process holding port
     try:
         if sys.platform == "win32":
             # Find PID using netstat
             cmd = "netstat -ano"
             out = subprocess.check_output(cmd, shell=True, text=True)
             for line in out.splitlines():
-                if ":8080" in line and "LISTENING" in line:
+                if f":{port}" in line and "LISTENING" in line:
                     parts = line.strip().split()
                     if len(parts) >= 5:
                         pid = parts[-1]
@@ -1176,20 +1183,20 @@ def stop_db_viewer() -> str:
                         subprocess.run(f"taskkill /F /PID {pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         return f"SALTMDB Database Viewer (PID {pid}) stopped successfully."
         else:
-            # Unix-like: lsof -t -i:8080
+            # Unix-like: lsof -t -i:port
             try:
-                pid = subprocess.check_output(["lsof", "-t", "-i:8080"], text=True).strip()
+                pid = subprocess.check_output(["lsof", "-t", f"-i:{port}"], text=True).strip()
                 if pid:
                     subprocess.run(["kill", "-9", pid])
                     return f"SALTMDB Database Viewer (PID {pid}) stopped successfully."
             except Exception:
                 # Try fuser
                 try:
-                    subprocess.run(["fuser", "-k", "8080/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return "SALTMDB Database Viewer stopped successfully (using fuser)."
+                    subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return f"SALTMDB Database Viewer stopped successfully (using fuser on port {port})."
                 except Exception:
                     pass
-        return "Failed to determine the PID of the viewer on port 8080."
+        return f"Failed to determine the PID of the viewer on port {port}."
     except Exception as e:
         return f"Error stopping database viewer: {e}"
 

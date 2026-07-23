@@ -9,7 +9,7 @@ from datetime import datetime
 # Resolve central database path
 default_dir = os.path.expanduser("~/.saltmdb")
 DB_PATH = os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
-__version__ = "0.1.0-alpha.25"
+__version__ = "0.1.0-alpha.26"
 
 import sys
 
@@ -148,7 +148,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if context_id_filter:
                 where_clauses.append("(context_id = ? OR project_id = ?)")
                 params.extend([context_id_filter, context_id_filter])
-            if is_core_filter is not None:
+            if is_core_filter:
                 where_clauses.append("is_core = ?")
                 params.append(1 if is_core_filter.lower() in ('true', '1', 'yes') else 0)
 
@@ -707,12 +707,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             conn = self.get_db_connection()
 
             # Check entity exists
-            cur = conn.execute("SELECT title, status FROM entities WHERE id = ?", (entity_id,))
+            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR title = ?", (entity_id, entity_id))
             row = cur.fetchone()
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)
                 return
-            root_title, root_status = row
+            entity_id, root_title, root_status = row
 
             # Recursive CTE walking consolidated_from edges (source=child, target=parent)
             cur = conn.execute("""
@@ -780,7 +780,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     pass
 
     def serve_frontend(self):
-        html = """<!DOCTYPE html>
+        html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1069,7 +1069,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             <h1>SALTMDB</h1>
             <span>Short and Long-Term Memory Explorer</span>
         </div>
-        <div class="db-path">""" + DB_PATH + """</div>
+        <div class="db-path">""" + DB_PATH + r"""</div>
     </header>
 
     <!-- Stats Bar -->

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saltmdb"
-version = "0.1.0-alpha.25"
+version = "0.1.0-alpha.26"
 description = "Local-First MCP Memory Server"
 readme = "README.md"
 authors = [
