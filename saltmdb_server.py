@@ -9,7 +9,7 @@ from datetime import datetime, UTC
 from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
-__version__ = "0.1.0-alpha.24"
+__version__ = "0.1.0-alpha.25"
 
 # Define the FastMCP server
 mcp = FastMCP("SALTMDB")
@@ -400,7 +400,7 @@ def trigger_librarian():
 # =====================================================================
 
 @mcp.tool()
-def log_event(agent_id: str = None, type: str = None, content: str = None, error_code: str = None, session_id: str = None, **kwargs) -> str:
+def log_event(agent_id: str = None, type: str = None, content: str = None, error_code: str = None, session_id: str = None, context_id: str = None, **kwargs) -> str:
     """Appends an event to the append-only events ledger.
     
     Args:
@@ -409,12 +409,14 @@ def log_event(agent_id: str = None, type: str = None, content: str = None, error
         content: Description of the action or event. Accepts aliases 'message', 'description'.
         error_code: Optional system error code if applicable.
         session_id: Optional unique session identifier to track related events.
+        context_id: Optional project/context scoping identifier (e.g. 'my-project', 'tea-sessions').
     """
     agent_id = agent_id or kwargs.get("agent_id") or kwargs.get("agent") or "system"
     type = type or kwargs.get("type") or kwargs.get("event_type") or "event"
     content = content or kwargs.get("content") or kwargs.get("message") or kwargs.get("description") or ""
     error_code = error_code or kwargs.get("error_code")
     session_id = session_id or kwargs.get("session_id")
+    context_id = context_id or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("project")
     db_path = get_db_path()
     conn = init_db(db_path)
     event_id = str(uuid.uuid4())
@@ -423,9 +425,9 @@ def log_event(agent_id: str = None, type: str = None, content: str = None, error
     try:
         with conn:
             conn.execute("""
-                INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (event_id, now, agent_id, type, redacted_content, error_code, session_id))
+                INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id, context_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (event_id, now, agent_id, type, redacted_content, error_code, session_id, context_id))
         trigger_librarian()
         return f"Event logged successfully with ID: {event_id}"
     except Exception as e:
@@ -467,7 +469,7 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
     """
     if title:
         pattern = r"^[a-zA-Z0-9_\-\.]+\.(md|txt|json|yml|yaml)\s*[-—–:|]\s*"
-        if re.search(pattern, title):
+        if re.search(pattern, title, re.IGNORECASE):
             raise ValueError(
                 "Error: Title violates clean title guidelines. Do not prefix memory titles with file names or file extensions (e.g., use 'Language Rules' instead of 'CORE.md — Language Rules')."
             )
@@ -532,6 +534,7 @@ def store_memory(
         metadata: Optional dictionary of structured attributes. If provided, you MUST include metadata['source_path'] specifying the relative repository path.
         skip_duplicate_check: Optional boolean. If True, bypasses the fuzzy duplication check and forces creation of a new memory (default False).
         project_id: Optional first-class project identifier to associate with the memory.
+        context_id: Optional context/project scoping identifier. If provided, both context_id and project_id columns are populated. Accepts alias 'project' or 'context'.
     """
     content = content or kwargs.get("content") or kwargs.get("text") or ""
     owner_id = owner_id or kwargs.get("owner_id") or kwargs.get("owner")
@@ -647,8 +650,8 @@ def store_memory(
             
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -662,8 +665,9 @@ def store_memory(
                     valid_from = excluded.valid_from,
                     valid_to = NULL,
                     metadata = excluded.metadata,
-                    project_id = COALESCE(excluded.project_id, entities.project_id)
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id))
+                    project_id = COALESCE(excluded.project_id, entities.project_id),
+                    context_id = COALESCE(excluded.context_id, entities.context_id)
+            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id))
             
             # Fetch all existing tags to do pre-write tag normalization (prevent drift)
             cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
@@ -1116,7 +1120,7 @@ def start_db_viewer(port: int = None, **kwargs) -> str:
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(0.1)
-                    s.connect(("127.0.0.1", 8080))
+                    s.connect(("127.0.0.1", port))
                     s.close()
                     server_started = True
                     break
@@ -1138,7 +1142,7 @@ def start_db_viewer(port: int = None, **kwargs) -> str:
             exit_code_str = f"code {poll}" if poll is not None else "timeout (failed to listen within 3s)"
             return f"Error: Database viewer failed to start: {exit_code_str}.\nLog snippet:\n{log_snippet}"
             
-        return "SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:8080"
+        return f"SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:{port}"
     except Exception as e:
         return f"Error starting database viewer: {e}"
 
@@ -1724,7 +1728,7 @@ def check_duplicate_memories(
         # Sort by similarity score descending
         matches.sort(key=lambda x: x["similarity_score"], reverse=True)
         return {
-            "duplicate_found": len(matches) > 0 and matches[0]["similarity_score"] >= 0.65,
+            "duplicate_found": len(matches) > 0 and matches[0]["similarity_score"] >= 0.65,  # threshold: 0.65
             "potential_duplicates": matches[:5]
         }
     except Exception as e:
@@ -2206,10 +2210,12 @@ def bulk_commit_consolidation(
                         """)
                         for p_id in parent_ids:
                             relation_id = str(uuid.uuid4())
+                            # Use consolidated_from (same direction as commit_consolidation):
+                            # new_entity --consolidated_from--> parent (source=new, target=parent)
                             conn.execute("""
                                 INSERT OR IGNORE INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                                 VALUES (?, ?, ?, ?, ?, ?)
-                            """, (relation_id, p_id, entity_id, 'consolidated_into', now, now))
+                            """, (relation_id, entity_id, p_id, 'consolidated_from', now, now))
                         
                     results.append({
                         "index": index,
@@ -2227,6 +2233,7 @@ def bulk_commit_consolidation(
         return [{"status": "error", "error": f"Transaction failed: {str(e)}"}]
     finally:
         conn.close()
+    trigger_librarian()
     return results
 
 @mcp.tool()

@@ -19,6 +19,7 @@ ENV/
 
 # Excluded example memory dataset
 example_data/
+scratch/
 
 ISSUES*.md
 UPGRADE*.md
