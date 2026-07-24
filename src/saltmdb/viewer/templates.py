@@ -797,10 +797,34 @@ def get_frontend_html(db_path: str = None) -> str:
                     </tbody>
                 </table>
             </div>
+            <div class="pagination-bar" id="entities-pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; background:var(--bg-card); padding:10px 16px; border-radius:var(--radius); border:var(--glass-border);">
+                <span id="entities-pagination-info" style="color:var(--text-muted); font-size:0.8rem;">Showing 0 of 0 entities</span>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button id="entities-prev-btn" class="btn" onclick="changeEntitiesPage(-1)" disabled>Previous</button>
+                    <span id="entities-page-indicator" style="font-size:0.85rem; color:var(--text-secondary); font-weight:600;">Page 1 of 1</span>
+                    <button id="entities-next-btn" class="btn" onclick="changeEntitiesPage(1)" disabled>Next</button>
+                </div>
+            </div>
         </div>
 
         <!-- 3. Event Ledger View -->
         <div class="view-container" id="view-events">
+            <div class="toolbar" style="margin-bottom:14px;">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="event-search-input" placeholder="Search by agent ID or content..." onkeyup="handleEventSearch(event)">
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <select id="event-type-filter" class="btn" onchange="loadEvents(1)">
+                        <option value="">All Event Types</option>
+                        <option value="decision">decision</option>
+                        <option value="fix">fix</option>
+                        <option value="issue">issue</option>
+                        <option value="attempt">attempt</option>
+                        <option value="consolidation_request">consolidation_request</option>
+                    </select>
+                </div>
+            </div>
             <div class="data-table-container">
                 <table class="data-table">
                     <thead>
@@ -815,6 +839,14 @@ def get_frontend_html(db_path: str = None) -> str:
                         <tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Loading events...</td></tr>
                     </tbody>
                 </table>
+            </div>
+            <div class="pagination-bar" id="events-pagination" style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; background:var(--bg-card); padding:10px 16px; border-radius:var(--radius); border:var(--glass-border);">
+                <span id="events-pagination-info" style="color:var(--text-muted); font-size:0.8rem;">Showing 0 of 0 events</span>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <button id="events-prev-btn" class="btn" onclick="changeEventsPage(-1)" disabled>Previous</button>
+                    <span id="events-page-indicator" style="font-size:0.85rem; color:var(--text-secondary); font-weight:600;">Page 1 of 1</span>
+                    <button id="events-next-btn" class="btn" onclick="changeEventsPage(1)" disabled>Next</button>
+                </div>
             </div>
         </div>
 
@@ -1082,7 +1114,11 @@ def get_frontend_html(db_path: str = None) -> str:
             }, 300);
         }
 
+        let currentEntitiesPage = 1;
+        let totalEntitiesPages = 1;
+
         async function loadEntities(page = 1) {
+            currentEntitiesPage = page;
             const status = document.getElementById('entity-status-filter').value;
             const search = document.getElementById('entity-search-input').value;
             let url = `/api/entities?page=${page}`;
@@ -1095,6 +1131,10 @@ def get_frontend_html(db_path: str = None) -> str:
                 const tbody = document.getElementById('entities-table-body');
                 if (!data.entities || data.entities.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-muted);">No entities found matching filters.</td></tr>';
+                    document.getElementById('entities-pagination-info').innerText = 'Showing 0 of 0 entities';
+                    document.getElementById('entities-page-indicator').innerText = 'Page 1 of 1';
+                    document.getElementById('entities-prev-btn').disabled = true;
+                    document.getElementById('entities-next-btn').disabled = true;
                     return;
                 }
                 tbody.innerHTML = data.entities.map(e => `
@@ -1107,8 +1147,24 @@ def get_frontend_html(db_path: str = None) -> str:
                         <td style="color:var(--text-muted); font-size:0.78rem;">${e.updated_at}</td>
                     </tr>
                 `).join('');
+
+                totalEntitiesPages = data.total_pages || 1;
+                const totalCount = data.total_count || 0;
+                const startItem = (page - 1) * 50 + 1;
+                const endItem = Math.min(page * 50, totalCount);
+                document.getElementById('entities-pagination-info').innerText = `Showing ${startItem}–${endItem} of ${totalCount} entities`;
+                document.getElementById('entities-page-indicator').innerText = `Page ${page} of ${totalEntitiesPages}`;
+                document.getElementById('entities-prev-btn').disabled = page <= 1;
+                document.getElementById('entities-next-btn').disabled = page >= totalEntitiesPages;
             } catch (err) {
                 console.error("Error loading entities:", err);
+            }
+        }
+
+        function changeEntitiesPage(delta) {
+            const newPage = currentEntitiesPage + delta;
+            if (newPage >= 1 && newPage <= totalEntitiesPages) {
+                loadEntities(newPage);
             }
         }
 
@@ -1517,12 +1573,46 @@ def get_frontend_html(db_path: str = None) -> str:
             });
         }
 
+        let eventSearchTimeout = null;
+        function handleEventSearch(event) {
+            if (event && event.key === 'Enter') {
+                if (eventSearchTimeout) clearTimeout(eventSearchTimeout);
+                loadEvents(1);
+                return;
+            }
+            if (eventSearchTimeout) clearTimeout(eventSearchTimeout);
+            eventSearchTimeout = setTimeout(() => {
+                loadEvents(1);
+            }, 300);
+        }
+
+        let currentEventsPage = 1;
+        let totalEventsPages = 1;
+
         async function loadEvents(page = 1) {
+            currentEventsPage = page;
+            const searchInput = document.getElementById('event-search-input');
+            const typeFilter = document.getElementById('event-type-filter');
+            const search = searchInput ? searchInput.value : '';
+            const type = typeFilter ? typeFilter.value : '';
+
+            let url = `/api/events?page=${page}`;
+            if (type) url += `&type=${encodeURIComponent(type)}`;
+            if (search) url += `&agent_id=${encodeURIComponent(search)}`;
+
             try {
-                const res = await fetch(`/api/events?page=${page}`);
+                const res = await fetch(url);
                 const data = await res.json();
                 const tbody = document.getElementById('events-table-body');
-                tbody.innerHTML = (data.events || []).map(ev => `
+                if (!data.events || data.events.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">No events found matching filters.</td></tr>';
+                    document.getElementById('events-pagination-info').innerText = 'Showing 0 of 0 events';
+                    document.getElementById('events-page-indicator').innerText = 'Page 1 of 1';
+                    document.getElementById('events-prev-btn').disabled = true;
+                    document.getElementById('events-next-btn').disabled = true;
+                    return;
+                }
+                tbody.innerHTML = data.events.map(ev => `
                     <tr>
                         <td style="color:var(--text-muted); font-size:0.78rem;">${ev.timestamp}</td>
                         <td><strong>${escapeHtml(ev.agent_id)}</strong></td>
@@ -1530,8 +1620,24 @@ def get_frontend_html(db_path: str = None) -> str:
                         <td style="color:var(--text-secondary);">${escapeHtml(ev.content)}</td>
                     </tr>
                 `).join('');
+
+                totalEventsPages = data.total_pages || 1;
+                const totalCount = data.total_count || 0;
+                const startItem = (page - 1) * 50 + 1;
+                const endItem = Math.min(page * 50, totalCount);
+                document.getElementById('events-pagination-info').innerText = `Showing ${startItem}–${endItem} of ${totalCount} events`;
+                document.getElementById('events-page-indicator').innerText = `Page ${page} of ${totalEventsPages}`;
+                document.getElementById('events-prev-btn').disabled = page <= 1;
+                document.getElementById('events-next-btn').disabled = page >= totalEventsPages;
             } catch (err) {
                 console.error("Error loading events:", err);
+            }
+        }
+
+        function changeEventsPage(delta) {
+            const newPage = currentEventsPage + delta;
+            if (newPage >= 1 && newPage <= totalEventsPages) {
+                loadEvents(newPage);
             }
         }
 
