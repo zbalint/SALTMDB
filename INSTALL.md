@@ -58,39 +58,90 @@ To point the server to a different database path, set the `SALTMDB_DB_PATH` envi
 
 ## 4. Registering the MCP Server
 
-Depending on the development client you are using, add the server registration to the client's configuration file.
+> [!IMPORTANT]
+> MCP clients launch server processes in a minimal environment and **do not inherit your terminal's PATH**. Using bare `python` or `saltmdb-server` often fails silently. Always use the **full absolute path** to your Python executable.
+
+### Step 1 — Find your Python path
+
+Run this in the terminal where you installed saltmdb:
+
+```bash
+# On Windows (PowerShell):
+python -c "import sys; print(sys.executable)"
+
+# On macOS / Linux:
+python3 -c "import sys; print(sys.executable)"
+```
+
+Copy the output path (e.g. `C:\Users\you\AppData\Local\Python\python.exe` or `/home/you/.venv/bin/python`).
+
+---
 
 ### A. Google Antigravity CLI (`agy`)
 Global MCP config location: `~/.gemini/config/mcp_config.json` (Create this file if it does not exist).
 
-Add the following config:
 ```json
 {
   "mcpServers": {
     "saltmdb": {
-      "command": "python",
+      "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
       "args": ["-m", "saltmdb"]
     }
   }
 }
 ```
+
+Replace `C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe` with your own path from Step 1.
+Use double backslashes (`\\`) on Windows.
+
+**Alternative — point directly to the launch script** (avoids module resolution entirely):
+```json
+{
+  "mcpServers": {
+    "saltmdb": {
+      "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
+      "args": ["C:\\path\\to\\SALTMDB\\saltmdb_server.py"]
+    }
+  }
+}
+```
+
+---
 
 ### B. Claude Desktop
 Config location:
 * **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 * **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-Add the following config to the `mcpServers` block:
+Add the following to the `mcpServers` block (replace paths with your own from Step 1):
+
+**Windows:**
 ```json
 {
   "mcpServers": {
     "saltmdb": {
-      "command": "python",
+      "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
       "args": ["-m", "saltmdb"]
     }
   }
 }
 ```
+
+**macOS / Linux:**
+```json
+{
+  "mcpServers": {
+    "saltmdb": {
+      "command": "/home/you/.venv/bin/python",
+      "args": ["-m", "saltmdb"]
+    }
+  }
+}
+```
+
+> [!TIP]
+> If `-m saltmdb` still fails (e.g. `ModuleNotFoundError`), switch to the script path approach:
+> `"args": ["/path/to/SALTMDB/saltmdb_server.py"]`
 
 ---
 

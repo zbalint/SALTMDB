@@ -138,11 +138,16 @@ $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 ```
 
 ### 2. Registering with MCP Clients
-To connect SALTMDB to Claude Desktop or Claude Code, add the following to your configuration file:
+MCP clients do not inherit your shell's PATH — always use the **full path** to your Python executable. Find it first:
+```bash
+python -c "import sys; print(sys.executable)"
+```
+
+Then add to your MCP client configuration file:
 ```json
 "mcpServers": {
   "saltmdb": {
-    "command": "python",
+    "command": "/full/path/to/python",
     "args": ["-m", "saltmdb"],
     "env": {
       "SALTMDB_DB_PATH": "/path/to/saltmdb.db",
@@ -152,11 +157,15 @@ To connect SALTMDB to Claude Desktop or Claude Code, add the following to your c
 }
 ```
 
+See [INSTALL.md](INSTALL.md) for platform-specific examples and troubleshooting.
+
 ### 3. Database Dashboard Viewer
 SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**:
-1. Run the viewer script locally:
+1. Run the viewer:
    ```bash
-   python saltmdb_viewer.py
+   python -m saltmdb.viewer.server
+   # or if installed via pip install -e .:
+   saltmdb-viewer
    ```
 2. Open your web browser and navigate to:
    [http://localhost:8080](http://localhost:8080)
