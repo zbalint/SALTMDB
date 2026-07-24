@@ -94,15 +94,29 @@ def search_memory(
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
-    include_related: bool = False
+    include_related: bool = False,
+    query: str = None,
+    q: str = None,
+    keywords: str = None,
+    **kwargs
 ) -> list | dict:
-    """Performs full-text keyword search and filtering in long-term memory."""
-    context_id_ = context_id or project_id
+    """Performs full-text keyword and dense vector hybrid search in long-term memory."""
+    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
+    query_keywords_ = (
+        query_keywords or query or q or keywords
+        or kw.get("query_keywords") or kw.get("query") or kw.get("q") or kw.get("keywords")
+        or kwargs.get("query_keywords") or kwargs.get("query") or kwargs.get("q") or kwargs.get("keywords")
+    )
+    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
+    context_id_ = context_id or project_id or kw.get("context_id") or kw.get("project_id") or kw.get("context") or kw.get("project") or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
+    tags_filter_ = tags_filter or kw.get("tags_filter") or kw.get("tags") or kwargs.get("tags_filter") or kwargs.get("tags")
+    metadata_filter_ = metadata_filter or kw.get("metadata_filter") or kwargs.get("metadata_filter")
+
     return memory_service.search_memory(
-        owner_id=owner_id,
-        query_keywords=query_keywords,
-        tags_filter=tags_filter,
-        metadata_filter=metadata_filter,
+        owner_id=owner_id_,
+        query_keywords=query_keywords_,
+        tags_filter=tags_filter_,
+        metadata_filter=metadata_filter_,
         explain_mode=explain_mode,
         limit=limit,
         project_id=context_id_,
