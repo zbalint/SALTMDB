@@ -43,6 +43,13 @@ def main():
     else:
         from saltmdb.mcp.server import mcp
         import saltmdb.mcp.tools  # Register all MCP tools
+        try:
+            from saltmdb.domain.services.embedding_service import backfill_pending_embeddings
+            count = backfill_pending_embeddings()
+            if count > 0:
+                logger.info("Queued %d pending entity embeddings for background generation.", count)
+        except Exception as e:
+            logger.warning("Startup embedding backfill check failed: %s", e)
         mcp.run()
 
 if __name__ == "__main__":
