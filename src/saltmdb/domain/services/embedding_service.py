@@ -9,6 +9,26 @@ _model = None
 
 import os
 
+def _is_valid_local_model(model_dir: str) -> bool:
+    """Verify that bundled model directory exists and contains non-pointer binary weights."""
+    if not os.path.isdir(model_dir):
+        return False
+    onnx_file = os.path.join(model_dir, "model_optimized.onnx")
+    if not os.path.isfile(onnx_file):
+        return False
+    try:
+        # Check size > 10MB to avoid un-pulled Git LFS pointer files (~130 bytes)
+        if os.path.getsize(onnx_file) < 10 * 1024 * 1024:
+            logger.warning(
+                "Bundled model file %s is too small (likely an un-fetched Git LFS pointer). Skipping local load.",
+                onnx_file
+            )
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def get_model():
     """Lazily load the fastembed TextEmbedding model once per process."""
     global _model
@@ -19,10 +39,19 @@ def get_model():
                 local_model_dir = os.path.abspath(
                     os.path.join(os.path.dirname(__file__), "..", "models", "bge-small-en-v1.5")
                 )
-                if os.path.isdir(local_model_dir):
+                if _is_valid_local_model(local_model_dir):
                     logger.info("Loading bundled ONNX embedding model from %s", local_model_dir)
-                    _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=os.path.dirname(local_model_dir), local_files_only=True)
+                    try:
+                        _model = TextEmbedding(
+                            model_name="BAAI/bge-small-en-v1.5",
+                            cache_dir=os.path.dirname(local_model_dir),
+                            local_files_only=True
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to load bundled model from %s: %s. Falling back to online model load.", local_model_dir, e)
+                        _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
                 else:
+                    logger.info("Bundled model not present or invalid at %s. Falling back to online model load.", local_model_dir)
                     _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _model
 
