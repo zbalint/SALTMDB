@@ -470,20 +470,53 @@ def get_frontend_html(db_path: str = None) -> str:
         .md-content em { font-style: italic; }
         .md-content hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 
-        /* ── Relations graph canvas ──────────────────── */
-        #relations-canvas {
-            width: 100%; height: 480px;
+        /* ── SVG Graph & Lineage ─────────────────────── */
+        .graph-container {
             background: var(--bg-secondary);
             border: 1px solid var(--border);
             border-radius: var(--radius);
-            cursor: grab; display: block;
+            position: relative;
+            overflow: hidden;
+            height: 600px;
         }
-        #relations-canvas:active { cursor: grabbing; }
-
-        .graph-controls {
-            display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;
+        .graph-toolbar {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 10;
+            display: flex;
+            gap: 8px;
             align-items: center;
         }
+        .graph-btn {
+            background: rgba(17, 24, 39, 0.9);
+            border: 1px solid var(--border-light);
+            color: var(--text-primary);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all .15s;
+        }
+        .graph-btn:hover { border-color: var(--accent); color: #fff; }
+        .graph-legend {
+            position: absolute;
+            bottom: 12px;
+            right: 12px;
+            background: rgba(17, 24, 39, 0.9);
+            border: 1px solid var(--border);
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.78rem;
+        }
+        .legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; color: var(--text-secondary); }
+        .legend-item:last-child { margin-bottom: 0; }
+        .legend-line { width: 20px; height: 3px; border-radius: 2px; flex-shrink: 0; }
+
+        .lineage-layout { display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+        .lineage-panel { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; overflow-y: auto; max-height: 600px; }
+        .lineage-tree-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; transition: background .15s; margin-bottom: 4px; }
+        .lineage-tree-item:hover { background: var(--bg-card); }
 
         /* ── Embeddings health ───────────────────────── */
         .emb-health-grid {
@@ -548,6 +581,9 @@ def get_frontend_html(db_path: str = None) -> str:
         </li>
         <li class="nav-item" id="nav-relations" onclick="switchView('relations')">
             <span class="nav-icon">🕸️</span>Relations Graph
+        </li>
+        <li class="nav-item" id="nav-lineage" onclick="switchView('lineage')">
+            <span class="nav-icon">🌳</span>Lineage
         </li>
         <li class="nav-item" id="nav-embeddings" onclick="switchView('embeddings')">
             <span class="nav-icon">🔬</span>Embeddings
@@ -687,47 +723,37 @@ async function copyToClipboard(text) {
 }
 
 // ═══════════════════════════════════════════════════
-// Minimal Markdown Renderer (no CDN)
+// Minimal Markdown Renderer
 // ═══════════════════════════════════════════════════
 function renderMd(raw) {
     if (!raw) return '';
     let s = esc(raw);
-    // Restore &amp; for code blocks first pass protection — use placeholder
-    // code fences
     const fences = [];
     s = s.replace(/```(?:[a-z]*)\n([\s\S]*?)```/g, (_, code) => {
         fences.push(code);
         return `\x00FENCE${fences.length-1}\x00`;
     });
-    // inline code
     const inlines = [];
     s = s.replace(/`([^`]+)`/g, (_, c) => {
         inlines.push(c);
         return `\x00INLINE${inlines.length-1}\x00`;
     });
-    // headings
     s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
     s = s.replace(/^## (.+)$/gm,  '<h2>$1</h2>');
     s = s.replace(/^# (.+)$/gm,   '<h1>$1</h1>');
-    // bold/italic
     s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*(.+?)\*/g,     '<em>$1</em>');
-    // blockquote
     s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-    // hr
     s = s.replace(/^---+$/gm, '<hr>');
-    // lists
     s = s.replace(/^[-*•] (.+)$/gm, '<li>$1</li>');
     s = s.replace(/(<li>.*?<\/li>\n?)+/gs, m => '<ul>' + m + '</ul>');
     s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-    // paragraphs
     s = s.replace(/\n\n+/g, '</p><p>');
     s = '<p>' + s + '</p>';
     s = s.replace(/<p><h/g, '<h').replace(/<\/h(\d)><\/p>/g, '</h$1>');
     s = s.replace(/<p><ul>/g, '<ul>').replace(/<\/ul><\/p>/g, '</ul>');
     s = s.replace(/<p><hr><\/p>/g, '<hr>');
     s = s.replace(/<p><\/p>/g, '');
-    // restore fences
     s = s.replace(/\x00FENCE(\d+)\x00/g, (_, i) =>
         `<pre><code>${fences[i]}</code></pre>`);
     s = s.replace(/\x00INLINE(\d+)\x00/g, (_, i) =>
@@ -819,7 +845,7 @@ async function switchView(view) {
     setNav(view);
     document.getElementById('page-title').textContent = {
         dashboard:'Dashboard', entities:'Memories', events:'Event Log',
-        relations:'Relations Graph', embeddings:'Embeddings Health',
+        relations:'Relations Graph', lineage:'Lineage Explorer', embeddings:'Embeddings Health',
         tags:'Tags Folksonomy', locks:'System Locks'
     }[view] || view;
 
@@ -830,6 +856,7 @@ async function switchView(view) {
     else if (view === 'entities') await renderEntities(content);
     else if (view === 'events')   await renderEvents(content);
     else if (view === 'relations')await renderRelations(content);
+    else if (view === 'lineage')  await renderLineage(content);
     else if (view === 'embeddings')await renderEmbeddings(content);
     else if (view === 'tags')     await renderTags(content);
     else if (view === 'locks')    await renderLocks(content);
@@ -842,7 +869,6 @@ async function renderDashboard(content) {
     content.innerHTML = skeleton(4);
     const [stats, recent] = await Promise.all([api('stats'), api('entities?page=1')]);
     const s = stats || {};
-    const total_active = (s.raw_count||0) + (s.consolidated_count||0);
     const emb_total = (s.embeddings_ready||0)+(s.embeddings_pending||0)+(s.embeddings_failed||0);
     const emb_pct = emb_total > 0 ? Math.round(s.embeddings_ready/emb_total*100) : 0;
 
@@ -932,9 +958,7 @@ async function renderEntities(content, preserveFilters=false) {
         <div id="entities-body">${skeleton()}</div>
     `;
 
-    // Restore select value
     if (entitiesState.status) document.getElementById('f-status').value = entitiesState.status;
-
     await _fetchAndRenderEntities();
 }
 
@@ -951,7 +975,6 @@ async function _fetchAndRenderEntities() {
     if (entitiesState.status) qs.set('status', entitiesState.status);
     if (entitiesState.owner)  qs.set('owner_id', entitiesState.owner);
     if (entitiesState.core_only) qs.set('is_core', '1');
-    // Tag filter not natively supported by /api/entities query — we filter client-side for now
     const data = await api('entities?' + qs);
     let entities = data?.entities || [];
 
@@ -1051,177 +1074,461 @@ async function renderEvents(content) {
 }
 
 // ═══════════════════════════════════════════════════
-// RELATIONS GRAPH (pure-JS Canvas force layout)
+// RELATIONS GRAPH (SVG Force-directed Layout)
 // ═══════════════════════════════════════════════════
-let _graphSimRunning = false;
+let currentRelationsPage = 1;
+let graphViewTransform = { x: 0, y: 0, scale: 1 };
+let graphNodes = [];
+let graphLinks = [];
+let graphNodeMap = {};
+let graphDraggedNode = null;
+let knownPredicates = new Set();
+
+const PREDICATE_COLORS = {
+    'depends_on': '#f87171',
+    'part_of': '#60a5fa',
+    'resolved_by': '#34d399',
+    'links_to': '#94a3b8',
+    'duplicate_of': '#fbbf24',
+    'consolidated_from': '#c084fc',
+    'consolidated_into': '#a78bfa',
+};
+
+function getPredicateColor(predicate) {
+    return PREDICATE_COLORS[predicate] || '#64748b';
+}
 
 async function renderRelations(content) {
     content.innerHTML = `
-        <div class="graph-controls">
-            <button class="btn btn-ghost" onclick="resetGraphView()">⟲ Reset View</button>
-            <span class="text-muted" style="font-size:0.78rem;">Drag to pan · Scroll to zoom · Click node to inspect</span>
-        </div>
-        <canvas id="relations-canvas"></canvas>
-        <div id="relations-table-fallback" style="margin-top:16px;display:none;"></div>`;
-    const data = await api('relations');
-    const rels = data?.relations || [];
-    if (!rels.length) {
-        content.innerHTML = emptyState('🕸️','No relations yet','Relations are created via store_relation()');
+        <div style="display:grid; grid-template-columns: 1fr 320px; gap: 16px;">
+            <div class="graph-container">
+                <div class="graph-toolbar">
+                    <button class="graph-btn" onclick="resetGraphView()">⟲ Reset View</button>
+                    <select class="filter-select" id="predicate-filter" onchange="currentRelationsPage=1;loadRelationsGraph()" style="background:rgba(17,24,39,0.9);">
+                        <option value="">All predicates</option>
+                    </select>
+                </div>
+                <svg id="relations-svg" width="100%" height="100%" style="cursor:grab;"></svg>
+                <div class="graph-legend" id="graph-legend"></div>
+            </div>
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:var(--radius); padding:16px; overflow-y:auto; height:600px; display:flex; flex-direction:column;">
+                <div class="section-title" style="margin-bottom:12px;">All Relationships</div>
+                <div id="relations-sidebar-list" style="display:flex; flex-direction:column; gap:8px; overflow-y:auto; flex:1;"></div>
+                <div class="pagination" id="relations-pagination" style="margin-top:12px;"></div>
+            </div>
+        </div>`;
+    await loadRelationsGraph();
+}
+
+async function loadRelationsGraph() {
+    const predFilter = document.getElementById('predicate-filter')?.value || '';
+    const qs = new URLSearchParams({ page: currentRelationsPage });
+    if (predFilter) qs.set('predicate', predFilter);
+
+    const data = await api('relations?' + qs);
+    const relations = data?.relations || [];
+    const sidebar = document.getElementById('relations-sidebar-list');
+    if (!sidebar) return;
+
+    sidebar.innerHTML = '';
+    if (!relations.length) {
+        sidebar.innerHTML = '<p class="text-muted" style="text-align:center; padding:20px;">No relationships found.</p>';
+        const svg = document.getElementById('relations-svg');
+        if (svg) svg.innerHTML = '';
         return;
     }
-    initGraph(rels);
-}
 
-function initGraph(relations) {
-    const canvas = document.getElementById('relations-canvas');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    relations.forEach(r => knownPredicates.add(r.predicate));
+    populatePredicateDropdown();
+    buildGraphLegend();
 
-    // DPI scaling
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    const W = rect.width || 800, H = rect.height || 480;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    ctx.scale(dpr, dpr);
-
-    // Build node set
-    const nodeMap = {};
     relations.forEach(r => {
-        if (!nodeMap[r.source_id]) nodeMap[r.source_id] = { id:r.source_id, title:r.source_title||r.source_id, x:W/2+(Math.random()-.5)*300, y:H/2+(Math.random()-.5)*200, vx:0, vy:0, r:22 };
-        if (!nodeMap[r.target_id]) nodeMap[r.target_id] = { id:r.target_id, title:r.target_title||r.target_id, x:W/2+(Math.random()-.5)*300, y:H/2+(Math.random()-.5)*200, vx:0, vy:0, r:22 };
+        const item = document.createElement('div');
+        item.style.cssText = 'background:var(--bg-primary); border:1px solid var(--border); border-radius:6px; padding:8px 10px; font-size:0.82rem;';
+        const color = getPredicateColor(r.predicate);
+        item.innerHTML = `
+            <div style="display:flex; justify-content:space-between; margin-bottom:4px; align-items:center;">
+                <a href="#" onclick="showEntity('${esc(r.source_id)}');return false;" style="color:var(--accent); font-weight:600;">${esc(r.source_title)}</a>
+                <span class="badge" style="background:${color}22; color:${color}; font-size:0.7rem;">${esc(r.predicate)}</span>
+            </div>
+            <div style="text-align:right;">
+                <a href="#" onclick="showEntity('${esc(r.target_id)}');return false;" style="color:var(--accent); font-weight:600;">${esc(r.target_title)}</a>
+            </div>`;
+        sidebar.appendChild(item);
     });
-    const nodes = Object.values(nodeMap);
-    const edges = relations.map(r => ({ s: nodeMap[r.source_id], t: nodeMap[r.target_id], label: r.predicate }));
 
-    // Pan / zoom state
-    let ox=0, oy=0, scale=1;
-    let dragging=false, dragNode=null, lastMx=0, lastMy=0;
+    renderRelationsPagination(data?.pagination || { page: currentRelationsPage, total_pages: 1 });
 
-    function toWorld(mx, my) { return { x:(mx-W/2-ox)/scale+W/2, y:(my-H/2-oy)/scale+H/2 }; }
-    function nodeAt(mx,my) {
-        const w = toWorld(mx,my);
-        return nodes.find(n => Math.hypot(n.x-w.x, n.y-w.y) < n.r+4);
-    }
+    graphNodeMap = {};
+    graphNodes = [];
+    graphLinks = [];
 
-    canvas.onmousedown = e => {
-        const rect2 = canvas.getBoundingClientRect();
-        const mx = e.clientX-rect2.left, my = e.clientY-rect2.top;
-        dragNode = nodeAt(mx,my);
-        dragging = true; lastMx=mx; lastMy=my;
-    };
-    canvas.onmousemove = e => {
-        if (!dragging) return;
-        const rect2 = canvas.getBoundingClientRect();
-        const mx = e.clientX-rect2.left, my = e.clientY-rect2.top;
-        const dx=mx-lastMx, dy=my-lastMy;
-        if (dragNode) { dragNode.x += dx/scale; dragNode.y += dy/scale; dragNode.vx=0; dragNode.vy=0; }
-        else { ox+=dx; oy+=dy; }
-        lastMx=mx; lastMy=my;
-    };
-    canvas.onmouseup = e => {
-        if (!dragging) return;
-        const rect2 = canvas.getBoundingClientRect();
-        const mx = e.clientX-rect2.left, my = e.clientY-rect2.top;
-        if (Math.hypot(mx-lastMx,my-lastMy)<3 && dragNode) showEntity(dragNode.id);
-        dragging=false; dragNode=null;
-    };
-    canvas.onwheel = e => {
-        e.preventDefault();
-        scale = Math.max(.25, Math.min(3, scale * (e.deltaY<0?1.12:.89)));
-    };
-
-    window._graphReset = () => { ox=0; oy=0; scale=1; };
-
-    // Force simulation
-    let frame = 0;
-    function tick() {
-        if (!document.getElementById('relations-canvas')) { _graphSimRunning=false; return; }
-        frame++;
-        const cool = Math.max(0.1, 1 - frame/1200);
-
-        // Repulsion
-        for (let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++) {
-            const dx=nodes[j].x-nodes[i].x, dy=nodes[j].y-nodes[i].y;
-            const dist=Math.max(1,Math.hypot(dx,dy));
-            const force = 2400/(dist*dist);
-            nodes[i].vx -= dx/dist*force; nodes[i].vy -= dy/dist*force;
-            nodes[j].vx += dx/dist*force; nodes[j].vy += dy/dist*force;
+    relations.forEach(r => {
+        if (!graphNodeMap[r.source_id]) {
+            graphNodeMap[r.source_id] = { id: r.source_id, title: r.source_title };
+            graphNodes.push(graphNodeMap[r.source_id]);
         }
-        // Attraction (springs)
-        edges.forEach(({s,t}) => {
-            const dx=t.x-s.x, dy=t.y-s.y, dist=Math.max(1,Math.hypot(dx,dy));
-            const force=(dist-120)*0.03;
-            const fx=dx/dist*force, fy=dy/dist*force;
-            s.vx+=fx; s.vy+=fy; t.vx-=fx; t.vy-=fy;
-        });
-        // Center gravity
-        nodes.forEach(n => {
-            n.vx += (W/2-n.x)*0.005;
-            n.vy += (H/2-n.y)*0.005;
-        });
-        // Integrate
-        nodes.forEach(n => {
-            if (dragNode===n) return;
-            n.x += n.vx*cool; n.y += n.vy*cool;
-            n.vx*=.7; n.vy*=.7;
-            n.x=Math.max(n.r,Math.min(W-n.r,n.x));
-            n.y=Math.max(n.r,Math.min(H-n.r,n.y));
-        });
+        if (!graphNodeMap[r.target_id]) {
+            graphNodeMap[r.target_id] = { id: r.target_id, title: r.target_title };
+            graphNodes.push(graphNodeMap[r.target_id]);
+        }
+        graphLinks.push({ source_id: r.source_id, target_id: r.target_id, predicate: r.predicate });
+    });
 
-        // Draw
-        ctx.save();
-        ctx.clearRect(0,0,W,H);
-        ctx.translate(W/2+ox,H/2+oy);
-        ctx.scale(scale,scale);
-        ctx.translate(-W/2,-H/2);
+    const svg = document.getElementById('relations-svg');
+    if (!svg) return;
+    const W = svg.clientWidth || 800;
+    const H = svg.clientHeight || 600;
 
-        // Edges
-        edges.forEach(({s,t,label}) => {
-            // Arrow
-            const ang = Math.atan2(t.y-s.y, t.x-s.x);
-            const ex = t.x - Math.cos(ang)*t.r, ey = t.y - Math.sin(ang)*t.r;
-            const sx = s.x + Math.cos(ang)*s.r, sy = s.y + Math.sin(ang)*s.r;
-            ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey);
-            ctx.strokeStyle='rgba(56,189,248,.4)'; ctx.lineWidth=1.5; ctx.stroke();
-            // Arrowhead
-            ctx.beginPath();
-            ctx.moveTo(ex,ey);
-            ctx.lineTo(ex-10*Math.cos(ang-.45), ey-10*Math.sin(ang-.45));
-            ctx.lineTo(ex-10*Math.cos(ang+.45), ey-10*Math.sin(ang+.45));
-            ctx.closePath(); ctx.fillStyle='rgba(56,189,248,.6)'; ctx.fill();
-            // Label
-            const mx=(sx+ex)/2, my=(sy+ey)/2;
-            ctx.save();
-            ctx.translate(mx,my); ctx.rotate(ang);
-            ctx.font='9px "Segoe UI",system-ui,sans-serif';
-            ctx.fillStyle='rgba(148,163,184,.9)';
-            ctx.textAlign='center'; ctx.textBaseline='bottom';
-            ctx.fillText(label||'',-0,-3);
-            ctx.restore();
-        });
+    graphNodes.forEach((n, idx) => {
+        const angle = (idx / graphNodes.length) * 2 * Math.PI;
+        n.x = W / 2 + Math.min(W, H) * 0.35 * Math.cos(angle);
+        n.y = H / 2 + Math.min(W, H) * 0.35 * Math.sin(angle);
+        n.vx = 0; n.vy = 0;
+    });
 
-        // Nodes
-        nodes.forEach(n => {
-            ctx.beginPath();
-            ctx.arc(n.x,n.y,n.r,0,Math.PI*2);
-            ctx.fillStyle='#1e2a3a'; ctx.fill();
-            ctx.strokeStyle='#38bdf8'; ctx.lineWidth=1.5; ctx.stroke();
-            // Label
-            ctx.font='bold 10px "Segoe UI",system-ui,sans-serif';
-            ctx.fillStyle='#f1f5f9';
-            ctx.textAlign='center'; ctx.textBaseline='middle';
-            const label = n.title.length>16 ? n.title.slice(0,15)+'…' : n.title;
-            ctx.fillText(label, n.x, n.y);
-        });
-
-        ctx.restore();
-        requestAnimationFrame(tick);
-    }
-    _graphSimRunning = true;
-    tick();
+    runGraphSimulation(W, H);
+    drawRelationsSvgGraph(svg);
+    setupGraphInteraction(svg);
 }
 
-function resetGraphView() { if (window._graphReset) window._graphReset(); }
+function renderRelationsPagination(p) {
+    const el = document.getElementById('relations-pagination');
+    if (!el) return;
+    const page = p.page || 1;
+    const pages = p.total_pages || p.pages || 1;
+    if (pages <= 1) { el.innerHTML = ''; return; }
+    el.innerHTML = `
+        <button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="changeRelationsPage(${page - 1})">‹ Prev</button>
+        <span class="page-info">${page}/${pages}</span>
+        <button class="page-btn" ${page >= pages ? 'disabled' : ''} onclick="changeRelationsPage(${page + 1})">Next ›</button>`;
+}
+
+function changeRelationsPage(p) {
+    currentRelationsPage = p;
+    loadRelationsGraph();
+}
+
+function populatePredicateDropdown() {
+    const sel = document.getElementById('predicate-filter');
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">All predicates</option>';
+    [...knownPredicates].sort().forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        if (p === current) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+function buildGraphLegend() {
+    const legend = document.getElementById('graph-legend');
+    if (!legend) return;
+    const entries = Object.entries(PREDICATE_COLORS);
+    legend.innerHTML = entries.map(([p, c]) => `
+        <div class="legend-item">
+            <span class="legend-line" style="background:${c};"></span>
+            <span>${esc(p)}</span>
+        </div>
+    `).join('');
+}
+
+function runGraphSimulation(W, H) {
+    for (let step = 0; step < 120; step++) {
+        for (let i = 0; i < graphNodes.length; i++) {
+            for (let j = i + 1; j < graphNodes.length; j++) {
+                const a = graphNodes[i], b = graphNodes[j];
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const dist = Math.hypot(dx, dy) || 1;
+                if (dist < 140) {
+                    const f = (140 - dist) / dist * 0.18;
+                    a.x -= dx * f; a.y -= dy * f;
+                    b.x += dx * f; b.y += dy * f;
+                }
+            }
+        }
+        graphLinks.forEach(l => {
+            const s = graphNodeMap[l.source_id], t = graphNodeMap[l.target_id];
+            if (!s || !t) return;
+            const dx = t.x - s.x, dy = t.y - s.y;
+            const dist = Math.hypot(dx, dy) || 1;
+            const f = (dist - 110) / dist * 0.07;
+            s.x += dx * f; s.y += dy * f;
+            t.x -= dx * f; t.y -= dy * f;
+        });
+        graphNodes.forEach(n => {
+            n.x += (W/2 - n.x) * 0.015;
+            n.y += (H/2 - n.y) * 0.015;
+        });
+    }
+}
+
+function drawRelationsSvgGraph(svg) {
+    svg.innerHTML = '';
+    const transform = graphViewTransform;
+
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const usedColors = [...new Set(graphLinks.map(l => getPredicateColor(l.predicate)))];
+    usedColors.forEach(color => {
+        const markerId = 'arrow-' + color.replace('#', '');
+        defs.innerHTML += `<marker id="${markerId}" viewBox="0 0 10 10" refX="18" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 2 L 10 5 L 0 8 z" fill="${color}" opacity="0.85"/>
+        </marker>`;
+    });
+    svg.appendChild(defs);
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('transform', `translate(${transform.x},${transform.y}) scale(${transform.scale})`);
+    svg.appendChild(g);
+
+    graphLinks.forEach(l => {
+        const s = graphNodeMap[l.source_id], t = graphNodeMap[l.target_id];
+        if (!s || !t) return;
+        const color = getPredicateColor(l.predicate);
+        const markerId = 'arrow-' + color.replace('#', '');
+
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', s.x); line.setAttribute('y1', s.y);
+        line.setAttribute('x2', t.x); line.setAttribute('y2', t.y);
+        line.setAttribute('stroke', color); line.setAttribute('stroke-width', '1.5');
+        line.setAttribute('stroke-opacity', '0.7');
+        line.setAttribute('marker-end', 'url(#' + markerId + ')');
+        g.appendChild(line);
+
+        const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+        const edgeLbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        edgeLbl.setAttribute('x', mx); edgeLbl.setAttribute('y', my - 4);
+        edgeLbl.setAttribute('fill', color); edgeLbl.setAttribute('font-size', '9px');
+        edgeLbl.setAttribute('font-weight', '600'); edgeLbl.setAttribute('text-anchor', 'middle');
+        edgeLbl.setAttribute('opacity', '0.85');
+        edgeLbl.textContent = l.predicate;
+        g.appendChild(edgeLbl);
+    });
+
+    graphNodes.forEach(n => {
+        const ng = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        ng.style.cursor = 'pointer';
+
+        ng.onmousedown = (e) => {
+            e.stopPropagation();
+            graphDraggedNode = n;
+        };
+        ng.onclick = (e) => { e.stopPropagation(); showEntity(n.id); };
+
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', n.x); circle.setAttribute('cy', n.y);
+        circle.setAttribute('r', '12');
+        circle.setAttribute('fill', '#0284c7'); circle.setAttribute('stroke', '#0a0f1e'); circle.setAttribute('stroke-width', '2');
+        ng.appendChild(circle);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', n.x); label.setAttribute('y', n.y + 24);
+        label.setAttribute('fill', '#f1f5f9'); label.setAttribute('font-size', '10px');
+        label.setAttribute('font-weight', '500');
+        label.setAttribute('text-anchor', 'middle');
+        let t = n.title || n.id; if (t.length > 20) t = t.substring(0, 18) + '…';
+        label.textContent = t;
+        ng.appendChild(label);
+        g.appendChild(ng);
+    });
+}
+
+function setupGraphInteraction(svg) {
+    let panStart = null;
+    let panOrigin = null;
+
+    svg.onmousedown = (e) => {
+        if (graphDraggedNode) return;
+        panStart = { x: e.clientX, y: e.clientY };
+        panOrigin = { x: graphViewTransform.x, y: graphViewTransform.y };
+        svg.style.cursor = 'grabbing';
+    };
+
+    svg.onmousemove = (e) => {
+        if (graphDraggedNode) {
+            const rect = svg.getBoundingClientRect();
+            graphDraggedNode.x = (e.clientX - rect.left - graphViewTransform.x) / graphViewTransform.scale;
+            graphDraggedNode.y = (e.clientY - rect.top - graphViewTransform.y) / graphViewTransform.scale;
+            drawRelationsSvgGraph(svg);
+        } else if (panStart) {
+            graphViewTransform.x = panOrigin.x + (e.clientX - panStart.x);
+            graphViewTransform.y = panOrigin.y + (e.clientY - panStart.y);
+            drawRelationsSvgGraph(svg);
+        }
+    };
+
+    svg.onmouseup = () => {
+        graphDraggedNode = null;
+        panStart = null;
+        svg.style.cursor = 'grab';
+    };
+    svg.onmouseleave = () => {
+        graphDraggedNode = null;
+        panStart = null;
+        svg.style.cursor = 'grab';
+    };
+
+    svg.onwheel = (e) => {
+        e.preventDefault();
+        const rect = svg.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const oldScale = graphViewTransform.scale;
+        const newScale = Math.max(0.2, Math.min(4, oldScale * (e.deltaY < 0 ? 1.12 : 0.9)));
+        graphViewTransform.x = mx - (mx - graphViewTransform.x) * (newScale / oldScale);
+        graphViewTransform.y = my - (my - graphViewTransform.y) * (newScale / oldScale);
+        graphViewTransform.scale = newScale;
+        drawRelationsSvgGraph(svg);
+    };
+}
+
+function resetGraphView() {
+    graphViewTransform = { x: 0, y: 0, scale: 1 };
+    const svg = document.getElementById('relations-svg');
+    if (svg) drawRelationsSvgGraph(svg);
+}
+
+// ═══════════════════════════════════════════════════
+// LINEAGE EXPLORER (Tree Graph & Ancestor List)
+// ═══════════════════════════════════════════════════
+async function renderLineage(content) {
+    content.innerHTML = `
+        <div class="filter-bar" style="margin-bottom:16px;">
+            <input class="filter-input" id="lineage-search-inp" placeholder="Enter entity ID or Title to trace lineage…" style="width:360px;" onkeydown="if(event.key==='Enter')loadLineagePage()">
+            <button class="btn" onclick="loadLineagePage()">Show Lineage</button>
+        </div>
+        <div class="lineage-layout" id="lineage-layout" style="display:none;">
+            <div class="lineage-panel">
+                <div class="section-title" style="margin-bottom:12px;">Ancestor Chain</div>
+                <div id="lineage-nodes-list"></div>
+            </div>
+            <div class="graph-container">
+                <svg id="lineage-svg" width="100%" height="100%"></svg>
+            </div>
+        </div>
+        <div id="lineage-empty" class="empty-state">
+            <div class="e-icon">🌳</div>
+            <div class="e-title">Lineage Explorer</div>
+            <div class="e-sub">Enter an entity ID or title above to trace its consolidation ancestry graph.</div>
+        </div>`;
+}
+
+async function loadLineagePage() {
+    const q = document.getElementById('lineage-search-inp')?.value.trim();
+    if (!q) return;
+
+    const empty = document.getElementById('lineage-empty');
+    const layout = document.getElementById('lineage-layout');
+    if (empty) empty.style.display = 'none';
+    if (layout) layout.style.display = 'none';
+
+    const data = await api('entities/' + encodeURIComponent(q) + '/lineage');
+    if (!data || data.error) {
+        if (empty) {
+            empty.innerHTML = `<div class="e-icon">⚠️</div><div class="e-title">${esc(data?.error || 'Entity not found')}</div>`;
+            empty.style.display = 'block';
+        }
+        return;
+    }
+
+    const nodes = data.nodes || data.ancestry_tree || [];
+    if (!nodes.length) {
+        if (empty) {
+            empty.innerHTML = `<div class="e-icon">🌱</div><div class="e-title">No Lineage Found</div><div class="e-sub">Memory "${esc(data.root_title || q)}" has no consolidation parents.</div>`;
+            empty.style.display = 'block';
+        }
+        return;
+    }
+
+    if (layout) layout.style.display = 'grid';
+
+    const list = document.getElementById('lineage-nodes-list');
+    if (list) {
+        list.innerHTML = nodes.map(n => {
+            const depth = n.depth !== undefined ? n.depth : (n.generation_depth || 0);
+            const indent = depth * 16;
+            return `
+                <div class="lineage-tree-item" style="margin-left:${indent}px;" onclick="showEntity('${esc(n.id)}')">
+                    <div>
+                        <div style="font-weight:600; color:var(--text-primary); font-size:0.85rem;">${esc(n.title)}</div>
+                        <div style="font-size:0.72rem; color:var(--text-secondary); margin-top:2px;">
+                            depth: ${depth} · ${statusBadge(n.status)}
+                        </div>
+                    </div>
+                </div>`;
+        }).join('');
+    }
+
+    renderLineageSvg(data);
+}
+
+function renderLineageSvg(data) {
+    const svg = document.getElementById('lineage-svg');
+    if (!svg) return;
+    svg.innerHTML = '';
+
+    const nodes = data.nodes || [];
+    const edges = data.edges || [];
+    if (!nodes.length) return;
+
+    const nodeMap = {};
+    nodes.forEach(n => { nodeMap[n.id] = n; });
+
+    const maxDepth = Math.max(...nodes.map(n => n.depth !== undefined ? n.depth : (n.generation_depth || 0)));
+    const W = svg.clientWidth || 700;
+    const H = svg.clientHeight || 550;
+    const levelGroups = {};
+
+    nodes.forEach(n => {
+        const d = n.depth !== undefined ? n.depth : (n.generation_depth || 0);
+        if (!levelGroups[d]) levelGroups[d] = [];
+        levelGroups[d].push(n);
+    });
+
+    Object.entries(levelGroups).forEach(([depth, groupNodes]) => {
+        const y = 60 + (parseInt(depth) / (maxDepth || 1)) * (H - 120);
+        groupNodes.forEach((n, idx) => {
+            n.svgX = W * (idx + 1) / (groupNodes.length + 1);
+            n.svgY = y;
+        });
+    });
+
+    edges.forEach(e => {
+        const s = nodeMap[e.source], t = nodeMap[e.target];
+        if (!s || !t || !s.svgX || !t.svgX) return;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', s.svgX); line.setAttribute('y1', s.svgY);
+        line.setAttribute('x2', t.svgX); line.setAttribute('y2', t.svgY);
+        line.setAttribute('stroke', '#c084fc'); line.setAttribute('stroke-width', '2');
+        line.setAttribute('stroke-dasharray', '6,3');
+        svg.appendChild(line);
+    });
+
+    nodes.forEach(n => {
+        if (!n.svgX) return;
+        const color = n.id === data.root_id ? '#38bdf8' : (n.status === 'archived' ? '#64748b' : '#34d399');
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.style.cursor = 'pointer';
+        g.onclick = () => showEntity(n.id);
+
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', n.svgX); circle.setAttribute('cy', n.svgY);
+        circle.setAttribute('r', '14'); circle.setAttribute('fill', color);
+        circle.setAttribute('stroke', '#0a0f1e'); circle.setAttribute('stroke-width', '2');
+        g.appendChild(circle);
+
+        const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        lbl.setAttribute('x', n.svgX); lbl.setAttribute('y', n.svgY + 28);
+        lbl.setAttribute('fill', '#f1f5f9'); lbl.setAttribute('font-size', '10px');
+        lbl.setAttribute('font-weight', '500');
+        lbl.setAttribute('text-anchor', 'middle');
+        let t = n.title; if (t.length > 18) t = t.substring(0, 16) + '…';
+        lbl.textContent = t;
+        g.appendChild(lbl);
+        svg.appendChild(g);
+    });
+}
 
 // ═══════════════════════════════════════════════════
 // EMBEDDINGS HEALTH
@@ -1301,7 +1608,7 @@ async function renderTags(content) {
                 <div class="stat-card" style="cursor:pointer;" onclick="filterByTagGlobal('${esc(t.name)}')">
                     <div class="sc-label">${t.canonical_id?'🔀 Alias':'🏷️ Tag'}</div>
                     <div style="font-size:0.95rem;font-weight:700;color:var(--accent);margin-bottom:4px;">${esc(t.name)}</div>
-                    <div class="sc-sub">${t.usage_count} memor${t.usage_count===1?'y':'ies'}</div>
+                    <div class="sc-sub">${t.usage_count||t.count||0} memor${(t.usage_count||t.count)===1?'y':'ies'}</div>
                     ${t.canonical_id?`<div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px;">→ canonical</div>`:''}
                 </div>`).join('')}
         </div>`;
@@ -1350,7 +1657,6 @@ async function showEntity(id) {
     _modalTabData = data;
     document.getElementById('modal-title').textContent = data.title || 'Untitled Memory';
 
-    // Build tabs
     const tabs = [
         { id:'overview', label:'Overview' },
         { id:'content',  label:'Content' },
@@ -1429,12 +1735,15 @@ function renderModalTab(tabId, data) {
     } else if (tabId === 'lineage') {
         body.innerHTML = `<div class="text-muted" style="padding:12px;">Loading lineage…</div>`;
         api('entities/' + data.id + '/lineage').then(linData => {
-            const nodes = linData?.ancestry_tree || [];
+            const nodes = linData?.nodes || linData?.ancestry_tree || [];
             document.getElementById('modal-body').innerHTML = nodes.length
                 ? `<div class="modal-section-title" style="margin-top:0;">Consolidation Ancestry (${nodes.length} nodes)</div>` +
-                  nodes.map(n=>`<div style="padding:10px;background:var(--bg-primary);border-radius:6px;margin-bottom:8px;font-size:0.82rem;">
-                      <strong>Depth ${n.generation_depth}:</strong> ${esc(n.title)} ${statusBadge(n.status)}
-                  </div>`).join('')
+                  nodes.map(n=>{
+                      const d = n.depth !== undefined ? n.depth : (n.generation_depth || 0);
+                      return `<div style="padding:10px;background:var(--bg-primary);border-radius:6px;margin-bottom:8px;font-size:0.82rem;margin-left:${d*12}px;">
+                          <strong>Depth ${d}:</strong> ${esc(n.title)} ${statusBadge(n.status)}
+                      </div>`;
+                  }).join('')
                 : '<p class="text-muted">No lineage data available.</p>';
         });
     }

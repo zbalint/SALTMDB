@@ -283,8 +283,16 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
-            cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks")
-            rows = cursor.fetchall()
+            rows = []
+            try:
+                cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks")
+                rows = cursor.fetchall()
+            except sqlite3.OperationalError:
+                try:
+                    cursor = conn.execute("SELECT task_name, locked_at, locked_by_pid, last_run_at FROM task_locks")
+                    rows = cursor.fetchall()
+                except sqlite3.OperationalError:
+                    pass
             locks = [{
                 "task_name": r[0],
                 "locked_at": r[1],
@@ -301,16 +309,35 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def get_all_relations(self, query):
         conn = None
         try:
+            page = 1
+            if "page" in query:
+                try:
+                    page = int(query["page"][0])
+                except ValueError:
+                    pass
+            page = max(1, page)
+            limit = 200
+            offset = (page - 1) * limit
+
+            predicate_filter = query.get("predicate", [None])[0]
+            where_sql = "WHERE r.predicate = ?" if predicate_filter else ""
+            params = [predicate_filter] if predicate_filter else []
+
             conn = self.get_db_connection()
-            cursor = conn.execute("""
-                SELECT r.id, r.source_id, e1.title, r.target_id, e2.title, r.predicate, r.created_at
+            cursor = conn.execute(f"""
+                SELECT r.id, r.source_id, COALESCE(e1.title, r.source_id), r.target_id, COALESCE(e2.title, r.target_id), r.predicate, r.created_at
                 FROM relations r
                 LEFT JOIN entities e1 ON r.source_id = e1.id
                 LEFT JOIN entities e2 ON r.target_id = e2.id
+                {where_sql}
                 ORDER BY r.created_at DESC
-                LIMIT 200
-            """)
+                LIMIT ? OFFSET ?
+            """, params + [limit, offset])
             rows = cursor.fetchall()
+
+            count_cursor = conn.execute(f"SELECT COUNT(*) FROM relations r {where_sql}", params)
+            total_count = count_cursor.fetchone()[0]
+
             relations = [{
                 "id": r[0],
                 "source_id": r[1],
@@ -320,7 +347,21 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "predicate": r[5],
                 "created_at": r[6]
             } for r in rows]
-            self.send_json({"relations": relations})
+
+            total_pages = (total_count + limit - 1) // limit if limit > 0 else 0
+            self.send_json({
+                "page": page,
+                "limit": limit,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "pagination": {
+                    "page": page,
+                    "per_page": limit,
+                    "total": total_count,
+                    "total_pages": total_pages
+                },
+                "relations": relations
+            })
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
         finally:
@@ -392,12 +433,72 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
 
     def get_lineage(self, entity_id):
+        conn = None
         try:
-            from saltmdb.domain.services.relation_service import analyze_lineage
-            res = analyze_lineage(entity_id=entity_id)
-            self.send_json(res)
+            conn = self.get_db_connection()
+            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR title = ?", (entity_id, entity_id))
+            row = cur.fetchone()
+            if not row:
+                self.send_json({"error": "Entity not found"}, 404)
+                return
+            entity_id, root_title, root_status = row[0], row[1], row[2]
+
+            cur = conn.execute("""
+                WITH RECURSIVE lineage(entity_id, depth, path) AS (
+                    SELECT ?, 0, ''
+                    UNION ALL
+                    SELECT r.target_id, l.depth + 1, l.path || '/' || l.entity_id
+                    FROM relations r
+                    JOIN lineage l ON r.source_id = l.entity_id
+                    WHERE r.predicate = 'consolidated_from' AND l.depth < 10
+                )
+                SELECT DISTINCT l.entity_id, l.depth, e.title, e.status, e.owner_id, e.updated_at
+                FROM lineage l
+                JOIN entities e ON l.entity_id = e.id
+                ORDER BY l.depth ASC
+            """, (entity_id,))
+            nodes = [{
+                "id": r[0],
+                "depth": r[1],
+                "title": r[2],
+                "status": r[3],
+                "owner_id": r[4],
+                "updated_at": r[5],
+                "generation_depth": r[1]
+            } for r in cur.fetchall()]
+
+            cur = conn.execute("""
+                SELECT r.source_id, r.target_id, r.predicate
+                FROM relations r
+                WHERE r.predicate = 'consolidated_from'
+                AND (r.source_id IN (SELECT entity_id FROM (WITH RECURSIVE l(entity_id, depth) AS (
+                    SELECT ?, 0
+                    UNION ALL SELECT r2.target_id, l.depth+1 FROM relations r2 JOIN l ON r2.source_id = l.entity_id WHERE r2.predicate = 'consolidated_from' AND l.depth < 10
+                ) SELECT entity_id FROM l))
+                OR r.target_id IN (SELECT entity_id FROM (WITH RECURSIVE l(entity_id, depth) AS (
+                    SELECT ?, 0
+                    UNION ALL SELECT r2.target_id, l.depth+1 FROM relations r2 JOIN l ON r2.source_id = l.entity_id WHERE r2.predicate = 'consolidated_from' AND l.depth < 10
+                ) SELECT entity_id FROM l)))
+            """, (entity_id, entity_id))
+            edges = [{
+                "source": r[0],
+                "target": r[1],
+                "predicate": r[2]
+            } for r in cur.fetchall()]
+
+            self.send_json({
+                "root_id": entity_id,
+                "root_title": root_title,
+                "root_status": root_status,
+                "nodes": nodes,
+                "edges": edges,
+                "ancestry_tree": nodes
+            })
         except Exception as e:
             self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                conn.close()
 
     def get_entity_detail(self, entity_id):
         conn = None
