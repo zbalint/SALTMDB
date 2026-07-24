@@ -157,8 +157,8 @@ def store_memory(
                  hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
                  
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id, context_id
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id, context_id, 'archived'
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  

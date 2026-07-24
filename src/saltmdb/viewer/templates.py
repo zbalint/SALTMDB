@@ -695,9 +695,12 @@ function statusBadge(s) {
     return `<span class="badge badge-${cls}">${esc(s)}</span>`;
 }
 
-function embBadge(s) {
+function embBadge(s, entityStatus) {
+    if (entityStatus === 'archived' || s === 'archived') {
+        return `<span class="badge badge-archived">archived</span>`;
+    }
     s = s || 'pending';
-    const cls = {'ready':'ready','pending':'pending','failed':'failed'}[s] || 'default';
+    const cls = {'ready':'ready','pending':'pending','failed':'failed','archived':'archived'}[s] || 'default';
     return `<span class="badge badge-${cls}">${s}</span>`;
 }
 
@@ -1019,7 +1022,7 @@ async function _fetchAndRenderEntities() {
                             <td>${statusBadge(e.status)}</td>
                             <td class="text-muted">${esc(e.scope||'shared')}</td>
                             <td class="text-muted">${e.weight||1}</td>
-                            <td>${embBadge(e.embedding_status)}</td>
+                            <td>${embBadge(e.embedding_status, e.status)}</td>
                             <td class="text-muted" style="white-space:nowrap;">${fmtDate(e.updated_at)}</td>
                             <td>${(e.tags||[]).slice(0,3).map(t=>`<span class="tag" onclick="filterByTag(event,'${esc(t)}')">${esc(t)}</span>`).join('')}</td>
                         </tr>`).join('')}
@@ -1695,7 +1698,7 @@ function renderModalTab(tabId, data) {
                 <div><div class="meta-k">Weight</div><div class="meta-v">${data.weight||1}</div></div>
                 <div><div class="meta-k">Is Core</div><div class="meta-v">${data.is_core?'⭐ Yes':'No'}</div></div>
                 <div><div class="meta-k">Context</div><div class="meta-v">${esc(data.context_id||data.project_id||'—')}</div></div>
-                <div><div class="meta-k">Embedding</div><div class="meta-v">${embBadge(data.embedding_status)}</div></div>
+                <div><div class="meta-k">Embedding</div><div class="meta-v">${embBadge(data.embedding_status, data.status)}</div></div>
                 <div><div class="meta-k">Created</div><div class="meta-v">${fmtDate(data.created_at)}</div></div>
                 <div><div class="meta-k">Updated</div><div class="meta-v">${fmtDate(data.updated_at)}</div></div>
                 <div><div class="meta-k">Valid From</div><div class="meta-v">${fmtDate(data.valid_from)||'—'}</div></div>

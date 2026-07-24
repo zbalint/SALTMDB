@@ -56,6 +56,12 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE events ADD COLUMN {col};")
             except sqlite3.OperationalError:
                 pass
+
+        # Backfill embedding_status = 'archived' for any archived entities
+        try:
+            conn.execute("UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived' AND (embedding_status != 'archived' OR embedding_status IS NULL);")
+        except sqlite3.OperationalError:
+            pass
         
         # 3. Tags Table (Folksonomy with support for canonical aliases)
         conn.execute("""
@@ -192,6 +198,15 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         WHEN NEW.status = 'archived'
         BEGIN
             DELETE FROM entities_fts WHERE id = OLD.id;
+        END;
+        """)
+
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS archive_memory_embedding_status
+        AFTER UPDATE ON entities
+        WHEN NEW.status = 'archived' AND (NEW.embedding_status IS NULL OR NEW.embedding_status != 'archived')
+        BEGIN
+            UPDATE entities SET embedding_status = 'archived' WHERE id = NEW.id;
         END;
         """)
         
