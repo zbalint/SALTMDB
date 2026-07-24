@@ -232,9 +232,10 @@ def store_memory(
         from saltmdb.domain.services.librarian_service import trigger_librarian
         trigger_librarian(db_path=db_path)
 
-        if db_path:
+        target_db = db_path or get_db_path()
+        if target_db:
             from saltmdb.domain.services import embedding_service
-            _embed_pool.submit(embedding_service.embed_entity_async, entity_id, title, redacted_content, db_path)
+            _embed_pool.submit(embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db)
 
         return f"Knowledge stored successfully with ID: {entity_id}"
     except Exception as e:
