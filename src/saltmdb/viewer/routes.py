@@ -16,29 +16,47 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+            self.close_connection = True
+            logger.debug("Client connection aborted during request: %s", e)
+
     def send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        origin = self.headers.get("Origin", "")
-        if origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1"):
-            self.send_header("Access-Control-Allow-Origin", origin)
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            headers = getattr(self, "headers", None)
+            origin = headers.get("Origin", "") if headers else ""
+            if origin and (origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")):
+                self.send_header("Access-Control-Allow-Origin", origin)
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug("Client disconnected before JSON response was sent: %s", e)
 
     def send_html(self, html_content, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(html_content.encode("utf-8"))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html_content.encode("utf-8"))
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug("Client disconnected before HTML response was sent: %s", e)
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        origin = self.headers.get("Origin", "")
-        if origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1"):
-            self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        try:
+            self.send_response(200)
+            headers = getattr(self, "headers", None)
+            origin = headers.get("Origin", "") if headers else ""
+            if origin and (origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")):
+                self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug("Client disconnected during OPTIONS request: %s", e)
 
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)

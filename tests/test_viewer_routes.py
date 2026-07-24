@@ -16,6 +16,10 @@ class DummyRequest:
 class DummyServer:
     pass
 
+class BrokenWFile:
+    def write(self, b):
+        raise ConnectionAbortedError(10053, "An established connection was aborted by the software in your host machine")
+
 class TestViewerRoutes(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -34,6 +38,15 @@ class TestViewerRoutes(unittest.TestCase):
         conn = handler.get_db_connection()
         self.assertIsNotNone(conn)
         conn.close()
+
+    def test_client_disconnect_during_send_json_and_html(self):
+        handler = SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), DummyServer())
+        handler.requestline = "GET / HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.wfile = BrokenWFile()
+        # Should catch ConnectionAbortedError silently without throwing
+        handler.send_json({"test": "data"})
+        handler.send_html("<html></html>")
 
 if __name__ == "__main__":
     unittest.main()
