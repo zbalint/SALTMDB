@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/SALTMDB"
+Homepage = "https://github.com/zbalint/SALTMDB"
 
 [project.scripts]
 saltmdb-server = "saltmdb.__main__:main"
