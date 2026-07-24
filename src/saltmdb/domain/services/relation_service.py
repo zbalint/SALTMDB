@@ -225,6 +225,8 @@ def commit_consolidation(
     tags: list[str] = None,
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
+    owner_id: str = None,
+    context_id: str = None,
     db_connection = None,
     db_path: str = None
 ) -> str:
@@ -257,12 +259,13 @@ def commit_consolidation(
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     
+    owner_val = owner_id or 'system'
     try:
         with conn:
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from)
-                VALUES (?, ?, ?, ?, 'system', ?, 0, ?, 'consolidated', ?, ?, ?, ?)
-            """, (consolidated_id, now, now, now, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?)
+            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id))
             
             if tags:
                 for tag_name in tags:

@@ -75,8 +75,13 @@ def start_viewer(port: int = 8080) -> str:
         process = subprocess.Popen(viewer_cmd, **popen_kwargs)
         log_file.close()
 
-        if "mock" in str(type(process)).lower():
-            return f"SALTMDB Database Viewer started successfully! Open it in your browser at http://localhost:{port}"
+        # Store PID for clean shutdown
+        try:
+            pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), "viewer.pid")
+            with open(pid_file, "w") as pf:
+                pf.write(str(process.pid))
+        except Exception:
+            pass
 
         server_started = False
         for _ in range(30):
@@ -114,6 +119,23 @@ def start_viewer(port: int = 8080) -> str:
 def stop_viewer(port: int = 8080) -> str:
     """Stops the running local SALTMDB web dashboard/viewer."""
     port = port or 8080
+    
+    # Try PID-based termination first (precise, no false positives)
+    try:
+        pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), "viewer.pid")
+        if os.path.exists(pid_file):
+            with open(pid_file) as pf:
+                pid = int(pf.read().strip())
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            try:
+                os.remove(pid_file)
+            except Exception:
+                pass
+            return f"Database viewer stopped (PID {pid}) on port {port}."
+    except Exception:
+        pass
+    # Fallback: broad process name match
     try:
         if sys.platform == "win32":
             subprocess.run(

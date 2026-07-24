@@ -24,3 +24,7 @@ scratch/
 ISSUES*.md
 UPGRADE*.md
 *.egg-info/
+
+# Test artifact databases
+test_*.db
+*.db.bak

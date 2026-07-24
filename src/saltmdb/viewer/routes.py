@@ -4,7 +4,10 @@ import json
 import http.server
 import urllib.parse
 import sys
+import logging
 from saltmdb.config import get_db_path
+
+logger = logging.getLogger(__name__)
 from saltmdb.viewer.templates import get_frontend_html
 
 class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
@@ -16,7 +19,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     def send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1"):
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.end_headers()
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
@@ -28,7 +33,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1"):
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -50,6 +57,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.get_locks()
         elif path == "/api/relations":
             self.get_all_relations(query)
+        elif path == "/api/relations/graph":
+            self.get_relations_graph()
         elif path == "/api/stats":
             self.get_stats()
         elif path == "/api/search":
@@ -94,6 +103,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             status_filter = query.get("status", [None])[0]
             context_id_filter = query.get("context_id", [None])[0]
             is_core_filter = query.get("is_core", [None])[0]
+            tag_filter = query.get("tag", [None])[0]
 
             where_clauses = []
             params = []
@@ -109,6 +119,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if is_core_filter:
                 where_clauses.append("is_core = ?")
                 params.append(1 if is_core_filter.lower() in ('true', '1', 'yes') else 0)
+            if tag_filter:
+                where_clauses.append(
+                    "id IN (SELECT et.entity_id FROM entity_tags et "
+                    "JOIN tags t ON et.tag_id = t.id WHERE t.name = ?)"
+                )
+                params.append(tag_filter)
 
             where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -174,7 +190,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "entities": entities
             })
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -249,7 +266,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "events": events
             })
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -274,7 +292,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             } for r in rows]
             self.send_json({"tags": tags})
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -301,7 +320,37 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             } for r in rows]
             self.send_json({"locks": locks})
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+        finally:
+            if conn:
+                conn.close()
+
+    def get_relations_graph(self):
+        """Returns all relations as a graph (nodes+edges) for SVG topology visualization. No pagination."""
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.execute("""
+                SELECT r.source_id, COALESCE(e1.title, r.source_id), r.target_id,
+                       COALESCE(e2.title, r.target_id), r.predicate
+                FROM relations r
+                LEFT JOIN entities e1 ON r.source_id = e1.id
+                LEFT JOIN entities e2 ON r.target_id = e2.id
+                LIMIT 1000
+            """)
+            rows = cursor.fetchall()
+            node_map = {}
+            edges = []
+            for src_id, src_title, tgt_id, tgt_title, pred in rows:
+                node_map[src_id] = src_title
+                node_map[tgt_id] = tgt_title
+                edges.append({"source": src_id, "target": tgt_id, "predicate": pred})
+            nodes = [{"id": nid, "title": ntitle} for nid, ntitle in node_map.items()]
+            self.send_json({"nodes": nodes, "edges": edges, "total": len(edges)})
+        except Exception as e:
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -363,7 +412,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "relations": relations
             })
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -392,7 +442,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             self.send_json(stats)
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -408,7 +459,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             results = search_memory(query_keywords=q, limit=20)
             self.send_json({"query": q, "results": results})
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
 
     def get_embeddings_stats(self):
         conn = None
@@ -427,7 +479,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             counts['null'] = cur.fetchone()[0]
             self.send_json(counts)
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -495,7 +548,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "ancestry_tree": nodes
             })
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
@@ -573,7 +627,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             }
             self.send_json(detail)
         except Exception as e:
-            self.send_json({"error": str(e)}, 500)
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
         finally:
             if conn:
                 conn.close()
