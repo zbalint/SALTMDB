@@ -76,6 +76,21 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Endpoint not found"}, 404)
 
+    def do_POST(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+
+        if path == "/api/embeddings/backfill":
+            try:
+                from saltmdb.domain.services.embedding_service import backfill_pending_embeddings
+                count = backfill_pending_embeddings()
+                self.send_json({"message": f"Queued {count} pending embeddings for background generation", "count": count})
+            except Exception as e:
+                logger.error("Error triggering backfill: %s", e, exc_info=True)
+                self.send_json({"error": str(e)}, 500)
+        else:
+            self.send_json({"error": "Endpoint not found"}, 404)
+
 
     def get_db_connection(self):
         db_path = None
@@ -427,6 +442,13 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 cur = conn.execute("SELECT COUNT(*) FROM entities WHERE status = ?", (status,))
                 stats[f"{status}_count"] = cur.fetchone()[0]
 
+            cur = conn.execute("SELECT COUNT(*) FROM entities")
+            stats["total_entities"] = cur.fetchone()[0]
+
+            for scope in ['shared', 'private']:
+                cur = conn.execute("SELECT COUNT(*) FROM entities WHERE scope = ? AND status != 'archived'", (scope,))
+                stats[f"scope_{scope}"] = cur.fetchone()[0]
+
             cur = conn.execute("SELECT COUNT(*) FROM events")
             stats["total_events"] = cur.fetchone()[0]
             cur = conn.execute("SELECT COUNT(*) FROM relations")
@@ -439,6 +461,16 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     (emb_status,)
                 )
                 stats[f"embeddings_{emb_status}"] = cur.fetchone()[0]
+
+            # Database file size
+            try:
+                db_path = get_db_path()
+                if os.path.exists(db_path):
+                    stats["db_size_mb"] = round(os.path.getsize(db_path) / (1024 * 1024), 2)
+                else:
+                    stats["db_size_mb"] = 0.0
+            except Exception:
+                stats["db_size_mb"] = 0.0
 
             self.send_json(stats)
         except Exception as e:

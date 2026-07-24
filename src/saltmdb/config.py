@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-__version__ = "0.1.0-alpha.33"
+__version__ = "0.1.0-alpha.34"
 
 # Path to the root of the repository (3 levels up from src/saltmdb/config.py)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
