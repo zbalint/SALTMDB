@@ -552,7 +552,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
-            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR title = ?", (entity_id, entity_id))
+            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ? ORDER BY status ASC LIMIT 1", (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%"))
             row = cur.fetchone()
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)

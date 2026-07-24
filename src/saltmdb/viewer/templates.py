@@ -54,6 +54,23 @@ def get_frontend_html(db_path: str = None) -> str:
             overflow: hidden;
         }
 
+        /* ── Select Dropdowns Fix ───────────────────────── */
+        select {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+            border: var(--glass-border) !important;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.825rem;
+            outline: none;
+            cursor: pointer;
+        }
+
+        select option {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+        }
+
         /* ── Sidebar ─────────────────────────────────── */
         .sidebar {
             width: 250px;
@@ -966,6 +983,7 @@ def get_frontend_html(db_path: str = None) -> str:
             else if (currentView === 'entities') loadEntities(1);
             else if (currentView === 'events') loadEvents(1);
             else if (currentView === 'relations') loadGraphTopology();
+            else if (currentView === 'lineage') loadLineage();
             else if (currentView === 'embeddings') runVectorSearch();
             else if (currentView === 'tags') loadTags();
             else if (currentView === 'locks') loadLocks();
@@ -1157,6 +1175,74 @@ def get_frontend_html(db_path: str = None) -> str:
             }
         }
 
+        async function loadLineage() {
+            const input = document.getElementById('lineage-search-input');
+            const query = input ? input.value.trim() : '';
+            const container = document.getElementById('lineage-tree-container');
+            if (!query) {
+                container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:40px;">Enter an entity ID or title to inspect multi-generation ancestry.</div>';
+                return;
+            }
+            container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:30px;">Tracing consolidation ancestry & lineage tree...</div>';
+            try {
+                const res = await fetch(`/api/entities/${encodeURIComponent(query)}/lineage`);
+                const data = await res.json();
+                if (data.error) {
+                    container.innerHTML = `<div style="color:var(--red); text-align:center; padding:30px;">${escapeHtml(data.error)}</div>`;
+                    return;
+                }
+                if (!data.nodes || data.nodes.length === 0) {
+                    container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:30px;">No lineage tree found for this entity.</div>';
+                    return;
+                }
+
+                let html = `
+                    <div style="margin-bottom:16px; display:flex; align-items:center; justify-content:space-between;">
+                        <div>
+                            <span style="font-size:1.1rem; font-weight:700; color:var(--accent);">${escapeHtml(data.root_title)}</span>
+                            <span class="badge ${data.root_status==='raw'?'badge-green':(data.root_status==='consolidated'?'badge-yellow':'badge-red')}" style="margin-left:8px;">${data.root_status}</span>
+                        </div>
+                        <span class="badge badge-purple">${data.nodes.length} nodes traced</span>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:12px;">
+                `;
+
+                const depthMap = {};
+                data.nodes.forEach(n => {
+                    const d = n.depth || 0;
+                    if (!depthMap[d]) depthMap[d] = [];
+                    depthMap[d].push(n);
+                });
+
+                Object.keys(depthMap).sort((a,b) => a-b).forEach(d => {
+                    const levelNodes = depthMap[d];
+                    html += `
+                        <div style="background:rgba(255,255,255,0.03); padding:14px; border-radius:8px; border:var(--glass-border);">
+                            <div style="font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase; margin-bottom:8px;">
+                                ${d === '0' ? '🎯 Target Entity (Generation 0)' : `👴 Parent Ancestor (Generation ${d})`}
+                            </div>
+                            <div style="display:flex; flex-wrap:wrap; gap:10px;">
+                                ${levelNodes.map(n => `
+                                    <div class="bento-card" style="padding:10px 14px; cursor:pointer;" onclick="openEntityDetail('${n.id}')">
+                                        <div style="font-weight:700; color:var(--text-primary); margin-bottom:4px;">${escapeHtml(n.title)}</div>
+                                        <div style="display:flex; gap:6px; font-size:0.75rem;">
+                                            <span class="badge ${n.status==='raw'?'badge-green':(n.status==='consolidated'?'badge-yellow':'badge-red')}">${n.status}</span>
+                                            <span style="color:var(--text-muted);">${escapeHtml(n.owner_id || 'system')}</span>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = `<div style="color:var(--red); text-align:center; padding:30px;">Error inspecting lineage: ${err}</div>`;
+            }
+        }
+
         async function runVectorSearch() {
             const input = document.getElementById('vector-query-input');
             const query = input ? input.value.trim() : '';
@@ -1212,7 +1298,6 @@ def get_frontend_html(db_path: str = None) -> str:
                 const res = await fetch(url);
                 rawGraphData = await res.json();
 
-                // Dynamically collect all unique predicates from database results
                 if (rawGraphData.edges) {
                     rawGraphData.edges.forEach(e => {
                         if (e.predicate) knownPredicates.add(e.predicate);
@@ -1298,7 +1383,6 @@ def get_frontend_html(db_path: str = None) -> str:
                 n.y = cy + (radius + (i % 3) * 30) * Math.sin(angle);
             });
 
-            // Iterative physics force simulation
             for (let iter = 0; iter < 25; iter++) {
                 for (let i = 0; i < nodes.length; i++) {
                     for (let j = i + 1; j < nodes.length; j++) {
@@ -1334,7 +1418,6 @@ def get_frontend_html(db_path: str = None) -> str:
                 });
             }
 
-            // Draw Edges
             const edgeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
             filteredEdges.forEach(e => {
                 const s = nodes.find(n => n.id === e.source);
@@ -1353,7 +1436,6 @@ def get_frontend_html(db_path: str = None) -> str:
             });
             svg.appendChild(edgeGroup);
 
-            // Draw Nodes
             const nodeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
             nodes.forEach(n => {
                 const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
