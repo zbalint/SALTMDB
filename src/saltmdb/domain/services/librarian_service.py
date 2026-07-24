@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import json
 import uuid
+import math
 import logging
 from datetime import datetime, UTC
 from saltmdb.config import get_db_path
@@ -347,6 +348,71 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
                 logger.info("Logged supersession candidate request for consolidated memory '%s' (ID: %s)", ctitle, cid)
     except Exception as e:
         logger.warning("Error in scout_consolidated_supersessions: %s", e)
+    finally:
+        if should_close:
+            conn.close()
+
+def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = None):
+    """
+    Applies quality-weighted LRU decay: Effective Weight = Base Weight * Quality Score * e^(-lambda * dt).
+    Exempts core memories (is_core = 1) and pinned memories (metadata.is_pinned = 1).
+    Log consolidation request or soft-archives stale low-quality clutter below threshold (< 0.15).
+    """
+    should_close = False
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    try:
+        logger.info("Running Quality-Weighted LRU Decay & Purging...")
+        cursor = conn.execute("""
+            SELECT id, title, weight, quality_score, updated_at, last_accessed_at, is_core, metadata
+            FROM entities
+            WHERE status = 'raw' AND (is_core IS NULL OR is_core = 0)
+        """)
+        rows = cursor.fetchall()
+        now_dt = datetime.now(UTC).replace(tzinfo=None)
+
+        decayed_ids = []
+        for eid, title, weight, q_score, updated_at, last_accessed, is_core, metadata_raw in rows:
+            # Check pinned metadata exemption
+            if metadata_raw:
+                try:
+                    meta = json.loads(metadata_raw)
+                    if isinstance(meta, dict) and meta.get("is_pinned"):
+                        continue
+                except Exception:
+                    pass
+
+            q_score = q_score if q_score is not None else 0.5
+            weight = weight if weight is not None else 1.0
+
+            ref_time_str = last_accessed or updated_at
+            if ref_time_str:
+                try:
+                    ref_str = ref_time_str.replace("Z", "").split("+")[0]
+                    ref_dt = datetime.fromisoformat(ref_str)
+                    days_elapsed = (now_dt - ref_dt).total_seconds() / 86400.0
+                except Exception:
+                    days_elapsed = 0.0
+            else:
+                days_elapsed = 0.0
+
+            # Lambda = 0.05 (decay rate per day)
+            decay_factor = math.exp(-0.05 * days_elapsed)
+            effective_weight = weight * q_score * decay_factor
+
+            if effective_weight < 0.15:
+                decayed_ids.append(eid)
+
+        if decayed_ids:
+            logger.info("Identified %d decayed low-quality raw memories for archiving.", len(decayed_ids))
+            with conn:
+                placeholders = ",".join("?" for _ in decayed_ids)
+                conn.execute(f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", decayed_ids)
+    except Exception as e:
+        logger.warning("Error in decay_low_quality_memories: %s", e)
     finally:
         if should_close:
             conn.close()

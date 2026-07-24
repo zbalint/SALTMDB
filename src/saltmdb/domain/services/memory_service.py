@@ -107,12 +107,16 @@ def store_memory(
             conn.close()
         return str(e)
         
+    # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
+    from saltmdb.utils.nlp import auto_format_markdown
+    redacted_content = auto_format_markdown(redacted_content)
+
     context_id = context_id or project_id
     if not context_id and metadata and isinstance(metadata, dict):
         context_id = metadata.get("project") or metadata.get("project_id")
     project_id = context_id
 
-    # Execute Tier 1 & Tier 2 Pre-Embedding Quality Gate Evaluation
+    # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
     quality_res = evaluate_memory_quality(redacted_content, title)
     if quality_res["status"] == "REJECT":
         if should_close:
@@ -124,7 +128,7 @@ def store_memory(
     quality_status = quality_res["status"]
     quality_flags_str = json.dumps(quality_res["quality_flags"])
 
-    # Stage A Exact Hash Collision Lookup
+    # Stage 4: Stage A Exact Hash Collision Lookup
     if not entity_id:
         try:
             cursor = conn.execute("""
@@ -151,7 +155,8 @@ def store_memory(
                 logger.debug("Deduplication: Matched existing memory '%s' (ID: %s). Routing to temporal upsert.", title, entity_id)
         except Exception:
             pass
-            
+
+    matched_supersession_id = None
     if not entity_id and not skip_duplicate_check:
         try:
             dup_check = check_duplicate_memories(
@@ -164,12 +169,21 @@ def store_memory(
             )
             if dup_check.get("duplicate_found") and "error" not in dup_check:
                 top = dup_check["potential_duplicates"][0]
-                if should_close:
-                    conn.close()
-                return (f"Warning: Potential duplicate of existing memory '{top['title']}' "
-                        f"(ID: {top['id']}, similarity {top['similarity_score']}). "
-                        f"Call store_memory with entity_id='{top['id']}' to update it instead, "
-                        f"or set skip_duplicate_check=True to force a new entry.")
+                sim_score = top.get("similarity_score", 0.0)
+                matched_owner = top.get("owner_id")
+                
+                # Calibrated Auto-Supersession: similarity >= 0.88 (Cosine Distance <= 0.12)
+                # Enforce owner_id namespace isolation: match caller_owner_id or 'shared'
+                if sim_score >= 0.88 and (matched_owner is None or matched_owner == owner_id or matched_owner == "shared" or owner_id == "shared"):
+                    matched_supersession_id = top["id"]
+                    logger.info("Calibrated Auto-Supersession: New memory '%s' supersedes existing memory '%s' (ID: %s, Similarity: %.2f)", title, top["title"], top["id"], sim_score)
+                else:
+                    if should_close:
+                        conn.close()
+                    return (f"Warning: Potential duplicate of existing memory '{top['title']}' "
+                            f"(ID: {top['id']}, similarity {top['similarity_score']}). "
+                            f"Call store_memory with entity_id='{top['id']}' to update it instead, "
+                            f"or set skip_duplicate_check=True to force a new entry.")
         except Exception:
             pass
             
@@ -261,6 +275,22 @@ def store_memory(
 
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
+            # Stage 5: Calibrated Auto-Supersession Relation Edge Insertion & Weight Adjustment
+            if matched_supersession_id:
+                try:
+                    from saltmdb.domain.services.relation_service import store_relation
+                    store_relation(
+                        source_id=entity_id,
+                        target_id=matched_supersession_id,
+                        predicate="supersedes",
+                        db_connection=conn
+                    )
+                    # Lower older superseded entity's weight to 1
+                    conn.execute("UPDATE entities SET weight = 1 WHERE id = ?", (matched_supersession_id,))
+                    logger.info("Auto-Supersession: Created 'supersedes' relation edge from %s -> %s and set older entity weight to 1", entity_id, matched_supersession_id)
+                except Exception as ex:
+                    logger.warning("Failed to auto-store supersedes relation edge: %s", ex)
+
         from saltmdb.domain.services.librarian_service import trigger_librarian
         trigger_librarian(db_path=db_path)
 
@@ -782,7 +812,7 @@ def check_duplicate_memories(
             try:
                 fts_where = " AND ".join(f"e.{c}" for c in where) if where else "1=1"
                 fts_rows = conn.execute(
-                    f"SELECT e.id, e.title, e.full_content FROM entities_fts fts "
+                    f"SELECT e.id, e.title, e.full_content, e.owner_id FROM entities_fts fts "
                     f"JOIN entities e ON fts.id = e.id "
                     f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
                     [search_terms] + params
@@ -793,16 +823,17 @@ def check_duplicate_memories(
         
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:
-            cursor = conn.execute(f"SELECT id, title, full_content FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
+            cursor = conn.execute(f"SELECT id, title, full_content, owner_id FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
             fts_candidates = cursor.fetchall()
         
-        for eid, etitle, econtent in fts_candidates:
+        for eid, etitle, econtent, eowner in fts_candidates:
             existing_text = f"{etitle} {econtent}"
             sim = word_sim(input_text, existing_text)
             if sim >= 0.25:
                 duplicates.append({
                     "id": eid,
                     "title": etitle,
+                    "owner_id": eowner,
                     "similarity_score": round(sim, 3)
                 })
                 
