@@ -94,7 +94,7 @@ def search_memory(
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
-    include_related: bool = False,
+    include_related: bool = True,
     query: str = None,
     q: str = None,
     keywords: str = None,

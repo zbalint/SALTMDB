@@ -361,7 +361,7 @@ def search_memory(
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
-    include_related: bool = False,
+    include_related: bool = True,
     db_connection = None,
     db_path: str = None
 ) -> list | dict:
