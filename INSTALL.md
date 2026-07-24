@@ -69,9 +69,7 @@ Add the following config:
   "mcpServers": {
     "saltmdb": {
       "command": "python",
-      "args": [
-        "/path/to/SALTMDB/saltmdb_server.py"
-      ]
+      "args": ["-m", "saltmdb"]
     }
   }
 }
@@ -88,9 +86,7 @@ Add the following config to the `mcpServers` block:
   "mcpServers": {
     "saltmdb": {
       "command": "python",
-      "args": [
-        "/path/to/SALTMDB/saltmdb_server.py"
-      ]
+      "args": ["-m", "saltmdb"]
     }
   }
 }
@@ -103,7 +99,10 @@ Add the following config to the `mcpServers` block:
 Start the local dashboard to monitor events, tag relations, and locks in your web browser:
 
 ```bash
-python saltmdb_viewer.py
+# If installed via pip install -e .:
+saltmdb-viewer
+# Or directly:
+python -m saltmdb.viewer.server
 ```
 
 Open your browser and navigate to:
@@ -116,12 +115,7 @@ Open your browser and navigate to:
 To verify that the database schemas, triggers, and lock rules operate correctly, run the unified unit tests:
 
 ```bash
-# On Windows:
-$env:PYTHONPATH="C:\path\to\SALTMDB"
-python scratch/test_db.py
-
-# On Unix:
-PYTHONPATH="." python scratch/test_db.py
+python -m unittest discover tests
 ```
 
 ---
