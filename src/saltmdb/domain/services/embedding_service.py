@@ -7,6 +7,8 @@ _model_lock = threading.Lock()
 _model = None
 
 
+import os
+
 def get_model():
     """Lazily load the fastembed TextEmbedding model once per process."""
     global _model
@@ -14,7 +16,14 @@ def get_model():
         with _model_lock:
             if _model is None:
                 from fastembed import TextEmbedding
-                _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                local_model_dir = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "models", "bge-small-en-v1.5")
+                )
+                if os.path.isdir(local_model_dir):
+                    logger.info("Loading bundled ONNX embedding model from %s", local_model_dir)
+                    _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=os.path.dirname(local_model_dir), local_files_only=True)
+                else:
+                    _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _model
 
 
