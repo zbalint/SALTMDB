@@ -1069,6 +1069,19 @@ def get_frontend_html(db_path: str = None) -> str:
             }
         }
 
+        let entitySearchTimeout = null;
+        function handleEntitySearch(event) {
+            if (event && event.key === 'Enter') {
+                if (entitySearchTimeout) clearTimeout(entitySearchTimeout);
+                loadEntities(1);
+                return;
+            }
+            if (entitySearchTimeout) clearTimeout(entitySearchTimeout);
+            entitySearchTimeout = setTimeout(() => {
+                loadEntities(1);
+            }, 300);
+        }
+
         async function loadEntities(page = 1) {
             const status = document.getElementById('entity-status-filter').value;
             const search = document.getElementById('entity-search-input').value;
