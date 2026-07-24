@@ -336,8 +336,8 @@ def reciprocal_rank_fusion(
     semantic_results: list[tuple[str, float]],
     limit: int,
     k: int = 60,
-) -> list[str]:
-    """Merge two ranked lists by rank position (not raw score)."""
+) -> dict[str, float]:
+    """Merge two ranked lists by rank position (not raw score). Returns {entity_id: rrf_score}."""
     scores: dict[str, float] = {}
     for rank, row in enumerate(fts_results):
         entity_id = row[0]
@@ -345,7 +345,7 @@ def reciprocal_rank_fusion(
     for rank, (entity_id, _distance) in enumerate(semantic_results):
         scores[entity_id] = scores.get(entity_id, 0.0) + 1.0 / (k + rank + 1)
     ranked = sorted(scores.items(), key=lambda item: -item[1])
-    return [entity_id for entity_id, _ in ranked[:limit]]
+    return dict(ranked[:limit])
 
 
 def search_memory(
@@ -494,9 +494,10 @@ def search_memory(
                     fts_rows = fts_future.result()
                     semantic_rows = semantic_future.result()
 
-                merged_ids = reciprocal_rank_fusion(fts_rows, semantic_rows, limit)
+                rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, limit)
 
-                if merged_ids:
+                if rrf_score_map:
+                    merged_ids = list(rrf_score_map.keys())
                     placeholders = ",".join("?" for _ in merged_ids)
                     id_order = {eid: i for i, eid in enumerate(merged_ids)}
                     fetch_sql = f"""
@@ -508,7 +509,12 @@ def search_memory(
                         WHERE e.id IN ({placeholders})
                     """
                     fetched = conn.execute(fetch_sql, merged_ids).fetchall()
-                    rows = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                    sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                    rows = []
+                    for r in sorted_fetched:
+                        r_list = list(r)
+                        r_list[5] = rrf_score_map.get(r[0], 0.0)
+                        rows.append(r_list)
                 else:
                     rows = fts_rows
             else:
@@ -556,7 +562,7 @@ def search_memory(
                 "id": eid,
                 "title": etitle,
                 "snippet": snippet,
-                "score": round(abs(score), 4),
+                "score": round(abs(score), 6),
                 "weight": eweight,
                 "is_core": bool(eis_core),
                 "cursor": f"offset:{offset + limit}"
