@@ -151,6 +151,15 @@ def stop_viewer(port: int = 8080) -> str:
         logger.error("Error stopping database viewer: %s", e)
         return f"Error: Database viewer is not running or failed to stop: {e}"
 
+class SALTMDBTCPServer(socketserver.TCPServer):
+    """TCPServer subclass that suppresses noisy tracebacks for expected client disconnects."""
+    def handle_error(self, request, client_address):
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        if exc_type in (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+            logger.debug("Client %s disconnected before request completed: %s", client_address, exc_value)
+            return
+        super().handle_error(request, client_address)
+
 def main():
     port = int(os.environ.get("SALTMDB_VIEWER_PORT", 8080))
     for idx, arg in enumerate(sys.argv):
@@ -169,8 +178,8 @@ def main():
     logger.info("Starting SALTMDB Viewer on http://localhost:%d", port)
     logger.info("Reading database: %s", db_path)
 
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", port), SALTMDBHandler) as httpd:
+    SALTMDBTCPServer.allow_reuse_address = True
+    with SALTMDBTCPServer(("127.0.0.1", port), SALTMDBHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
