@@ -32,8 +32,10 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.27` | 5 | Codebase refactored from single `saltmdb_server.py` monolith into `src/saltmdb` package layout (`db/`, `domain/services/`, `mcp/`, `viewer/`, `utils/`); entry point changed from `saltmdb_server.py` to `python -m saltmdb` | **No Action Required** (no schema change; update MCP client config to use `python -m saltmdb` instead of `saltmdb_server.py`) |
 | `v0.1.0-alpha.28` | 5 | No schema changes. Internal service-layer cleanups and stabilization on refactor branch | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.29` | 6 | Added Hybrid FTS5 + Semantic Vector RRF Search: new `sqlite-vec` `entity_embeddings` vec0 virtual table; `embedding_status` column on `entities`; `embedding_service.py` for lazy `fastembed` ONNX inference; parallel `ThreadPoolExecutor` search with RRF merge; `SALTMDB_ENABLE_SEMANTIC` env-var flag (read-path only) | **Automatic Migration** (`init_db` auto-adds `embedding_status` column and creates `entity_embeddings` virtual table; run `scratch/backfill_embeddings.py` once for pre-existing rows) |
+| `v0.1.0-alpha.30` | 6 | No schema changes. Bundled ONNX embedding model directly into package data (`pyproject.toml`); removed Git LFS dependency; added local file size validation & fallback in `embedding_service.py`; updated documentation for all 23 MCP tools | **No Action Required** (fully backward-compatible) |
 
 ---
+
 
 ## DDL Migrations (v0.1.0-alpha.6 ➔ v0.1.0-alpha.7)
 
