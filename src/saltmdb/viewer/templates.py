@@ -820,10 +820,6 @@ def get_frontend_html(db_path: str = None) -> str:
                     </select>
                     <select id="graph-predicate-filter" class="btn" onchange="loadGraphTopology()">
                         <option value="">All Predicates</option>
-                        <option value="consolidated_from">consolidated_from</option>
-                        <option value="derived_from">derived_from</option>
-                        <option value="complements">complements</option>
-                        <option value="resolves">resolves</option>
                     </select>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
@@ -831,12 +827,11 @@ def get_frontend_html(db_path: str = None) -> str:
                     <button class="btn" onclick="loadGraphTopology()">🔄 Reload</button>
                 </div>
             </div>
-            <div style="display:flex; gap:12px; margin-bottom:10px; align-items:center; font-size:0.8rem; color:var(--text-secondary);">
-                <span>Legend:</span>
-                <span class="badge badge-purple">consolidated_from</span>
-                <span class="badge badge-blue">derived_from</span>
-                <span class="badge badge-green">complements</span>
-                <span class="badge badge-yellow">resolves</span>
+            <div style="display:flex; gap:12px; margin-bottom:10px; align-items:center; font-size:0.8rem; color:var(--text-secondary); flex-wrap:wrap;">
+                <span>Dynamic Predicate Legend:</span>
+                <div id="graph-dynamic-legend" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
+                    <span class="badge badge-purple">loading predicates...</span>
+                </div>
                 <span style="margin-left:auto; color:var(--text-muted);">Hover node to highlight 1-hop connections • Drag node • Click for details</span>
             </div>
             <svg id="graph-canvas"></svg>
@@ -937,6 +932,7 @@ def get_frontend_html(db_path: str = None) -> str:
     <script>
         let currentView = 'dashboard';
         let rawGraphData = { nodes: [], edges: [] };
+        let knownPredicates = new Set();
 
         function switchView(viewId) {
             currentView = viewId;
@@ -1150,17 +1146,65 @@ def get_frontend_html(db_path: str = None) -> str:
 
         async function loadGraphTopology() {
             const excludeArchived = document.getElementById('graph-status-filter').value;
-            const predicate = document.getElementById('graph-predicate-filter').value;
-            let url = `/api/relations/graph?exclude_archived=${excludeArchived}&limit=250`;
-            if (predicate) url += `&predicate=${encodeURIComponent(predicate)}`;
+            const predicateSelect = document.getElementById('graph-predicate-filter');
+            const selectedPredicate = predicateSelect.value;
+
+            let url = `/api/relations/graph?exclude_archived=${excludeArchived}&limit=500`;
+            if (selectedPredicate) url += `&predicate=${encodeURIComponent(selectedPredicate)}`;
 
             try {
                 const res = await fetch(url);
                 rawGraphData = await res.json();
+
+                // Dynamically collect all unique predicates from database results
+                if (rawGraphData.edges) {
+                    rawGraphData.edges.forEach(e => {
+                        if (e.predicate) knownPredicates.add(e.predicate);
+                    });
+                    updateDynamicPredicateDropdown(selectedPredicate);
+                    renderDynamicLegend();
+                }
+
                 renderGraph();
             } catch (err) {
                 console.error("Error loading topology:", err);
             }
+        }
+
+        function updateDynamicPredicateDropdown(currentSelected) {
+            const select = document.getElementById('graph-predicate-filter');
+            const sortedPredicates = Array.from(knownPredicates).sort();
+            
+            let html = '<option value="">All Predicates (' + sortedPredicates.length + ' types)</option>';
+            sortedPredicates.forEach(p => {
+                const sel = (p === currentSelected) ? 'selected' : '';
+                html += `<option value="${escapeHtml(p)}" ${sel}>${escapeHtml(p)}</option>`;
+            });
+            select.innerHTML = html;
+        }
+
+        function getPredicateBadgeClass(pred) {
+            if (pred === 'consolidated_from') return 'badge-purple';
+            if (pred === 'derived_from') return 'badge-blue';
+            if (pred === 'complements') return 'badge-green';
+            if (pred === 'resolves') return 'badge-yellow';
+            
+            const badgeClasses = ['badge-purple', 'badge-blue', 'badge-green', 'badge-yellow', 'badge-red'];
+            let hash = 0;
+            for (let i = 0; i < pred.length; i++) hash = pred.charCodeAt(i) + ((hash << 5) - hash);
+            return badgeClasses[Math.abs(hash) % badgeClasses.length];
+        }
+
+        function renderDynamicLegend() {
+            const container = document.getElementById('graph-dynamic-legend');
+            const sortedPredicates = Array.from(knownPredicates).sort();
+            if (sortedPredicates.length === 0) {
+                container.innerHTML = '<span style="color:var(--text-muted);">No predicates found.</span>';
+                return;
+            }
+            container.innerHTML = sortedPredicates.map(p => `
+                <span class="badge ${getPredicateBadgeClass(p)}" style="margin-right:4px;">${escapeHtml(p)}</span>
+            `).join('');
         }
 
         function filterGraphNodes() {
@@ -1178,7 +1222,6 @@ def get_frontend_html(db_path: str = None) -> str:
             const minDegree = parseInt(document.getElementById('graph-degree-filter').value || '1');
             const searchStr = (document.getElementById('graph-search-input').value || '').toLowerCase().trim();
 
-            // Filter nodes by min degree
             let filteredNodes = rawGraphData.nodes.filter(n => n.degree >= minDegree);
             const validNodeIds = new Set(filteredNodes.map(n => n.id));
             let filteredEdges = rawGraphData.edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
@@ -1190,7 +1233,6 @@ def get_frontend_html(db_path: str = None) -> str:
             const cx = width / 2;
             const cy = height / 2;
 
-            // Clustered force layout simulation
             const nodes = filteredNodes;
             const radius = Math.min(width, height) / 2.6;
 
@@ -1200,9 +1242,8 @@ def get_frontend_html(db_path: str = None) -> str:
                 n.y = cy + (radius + (i % 3) * 30) * Math.sin(angle);
             });
 
-            // Iterative repulsion & edge attraction physics simulation (20 iterations)
+            // Iterative physics force simulation
             for (let iter = 0; iter < 25; iter++) {
-                // Repulsion between nodes
                 for (let i = 0; i < nodes.length; i++) {
                     for (let j = i + 1; j < nodes.length; j++) {
                         let dx = nodes[j].x - nodes[i].x;
@@ -1217,7 +1258,6 @@ def get_frontend_html(db_path: str = None) -> str:
                         }
                     }
                 }
-                // Attraction along edges
                 filteredEdges.forEach(e => {
                     let s = nodes.find(n => n.id === e.source);
                     let t = nodes.find(n => n.id === e.target);
@@ -1232,7 +1272,6 @@ def get_frontend_html(db_path: str = None) -> str:
                         t.y -= (dy / dist) * force;
                     }
                 });
-                // Constrain within bounding box
                 nodes.forEach(n => {
                     n.x = Math.max(40, Math.min(width - 40, n.x));
                     n.y = Math.max(40, Math.min(height - 40, n.y));
@@ -1265,12 +1304,9 @@ def get_frontend_html(db_path: str = None) -> str:
                 g.setAttribute('class', 'node');
                 g.dataset.id = n.id;
                 g.onclick = () => openEntityDetail(n.id);
-
-                // Hover 1-hop connection highlight
                 g.onmouseenter = () => highlightNodeNeighbors(n.id);
                 g.onmouseleave = () => resetGraphHighlight();
 
-                // Dynamic node radius based on connection degree
                 const nodeRadius = 8 + Math.min((n.degree || 1) * 3, 16);
 
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -1301,7 +1337,6 @@ def get_frontend_html(db_path: str = None) -> str:
             const svg = document.getElementById('graph-canvas');
             const connectedIds = new Set([nodeId]);
 
-            // Find all connected edges and targets
             svg.querySelectorAll('.link').forEach(link => {
                 if (link.dataset.source === nodeId || link.dataset.target === nodeId) {
                     link.classList.add('highlight');
