@@ -22,11 +22,11 @@ def log_event(agent_id: str = None, type: str = None, content: str = None, error
     return event_service.log_event(agent_id=agent_id_, type=type_, content=content_, error_code=error_code_, session_id=session_id_, context_id=context_id_)
 
 @mcp.tool()
-def get_canonical_tags(domain: str = None, **kwargs) -> list:
-    """Queries the database to suggest existing canonical tags to prevent fragmentation."""
+def get_canonical_tags(query: str = None, domain: str = None, **kwargs) -> list:
+    """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use the `query` parameter (e.g. query='auth') to filter by tag name substring."""
     kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    domain_ = domain or kw.get("domain") or kw.get("query") or kw.get("substring") or kw.get("tag_filter") or kwargs.get("domain") or kwargs.get("query") or kwargs.get("substring") or kwargs.get("tag_filter")
-    return memory_service.get_canonical_tags(domain=domain_)
+    query_ = query or domain or kw.get("query") or kw.get("domain") or kw.get("substring") or kw.get("tag_filter") or kwargs.get("query") or kwargs.get("domain") or kwargs.get("substring") or kwargs.get("tag_filter")
+    return memory_service.get_canonical_tags(domain=query_)
 
 @mcp.tool()
 def store_memory(
@@ -159,15 +159,22 @@ def commit_consolidation(
     tags: list = None,
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
+    owner_id: str = None,
+    context_id: str = None,
     **kwargs
 ) -> str:
-    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents."""
+    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and creating consolidated_from lineage edges."""
     kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
     parent_ids_ = parent_ids or kw.get("parent_ids") or kwargs.get("parent_ids") or []
     title_ = title or kw.get("title") or kwargs.get("title")
     content_ = content or kw.get("content") or kw.get("text") or kwargs.get("content") or kwargs.get("text")
     tags_ = tags or kw.get("tags") or kwargs.get("tags") or []
-    return relation_service.commit_consolidation(parent_ids=parent_ids_, title=title_, content=content_, tags=tags_, scope=scope, weight=weight)
+    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
+    context_id_ = context_id or kw.get("context_id") or kw.get("project_id") or kwargs.get("context_id") or kwargs.get("project_id")
+    return relation_service.commit_consolidation(
+        parent_ids=parent_ids_, title=title_, content=content_, tags=tags_,
+        scope=scope, weight=weight, owner_id=owner_id_, context_id=context_id_
+    )
 
 @mcp.tool()
 def create_snapshot(**kwargs) -> str:

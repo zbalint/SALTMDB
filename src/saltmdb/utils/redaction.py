@@ -52,7 +52,8 @@ def redact_secrets(text: str) -> str:
     """Scrub potential credentials and API keys from text using high-speed precompiled regex."""
     if not isinstance(text, str) or not text:
         return text
-    # Fast path guard to bypass regex execution when no secret prefix exists
-    if not any(prefix in text for prefix in _FAST_PATH_PREFIXES) and not CUSTOM_REDACT_PATTERNS:
+    # Only skip if BOTH standard prefixes AND custom patterns have no match candidates
+    has_standard_prefix = any(prefix in text for prefix in _FAST_PATH_PREFIXES)
+    if not has_standard_prefix and not CUSTOM_REDACT_PATTERNS:
         return text
     return _compiled_regex.sub("[REDACTED_SECRET]", text)
