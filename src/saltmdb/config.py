@@ -14,11 +14,11 @@ def get_db_path() -> str:
     return os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
 def is_semantic_search_enabled() -> bool:
-    """Check SALTMDB_ENABLE_SEMANTIC env var.
+    """Check SALTMDB_ENABLE_SEMANTIC env var. Defaults to True (enabled).
 
-    Gates the read-path (search_memory hybrid FTS5+semantic) only.
-    Write-path embedding generation is always active regardless of this flag.
+    Hybrid FTS5 + Dense Vector RRF search is enabled by default.
+    Set SALTMDB_ENABLE_SEMANTIC=false (or 0/off/no) to explicitly disable vector search.
     """
-    val = os.environ.get("SALTMDB_ENABLE_SEMANTIC", "").strip().lower()
-    return val in ("1", "true", "yes", "on")
+    val = os.environ.get("SALTMDB_ENABLE_SEMANTIC", "true").strip().lower()
+    return val not in ("0", "false", "no", "off")
 

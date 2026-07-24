@@ -37,7 +37,7 @@ graph TD
 
 ## Features
 
-- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Feature-gated via `SALTMDB_ENABLE_SEMANTIC=true`.
+- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default.
 - **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
 - **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.
 - **SCD Type 2 Temporal History:** Every upsert preserves the prior version as an archived snapshot for full audit lineage.
@@ -63,7 +63,7 @@ SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in para
 * FTS5 uses SQLite's built-in `bm25` auxiliary function with a **10:1 title-to-content weight ratio**.
 * Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~130MB auto-downloaded) stored in a `sqlite-vec` `vec0` virtual table.
 * RRF merges on rank position (not raw scores), keeping the existing BM25 tuning intact.
-* Enable via `SALTMDB_ENABLE_SEMANTIC=true`; write-path embedding generation is **always active** regardless of the flag.
+* Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search.
 
 ### 2. Hybrid Title Extraction
 When storing new knowledge, agents can optionally specify a custom `title`. If omitted, the server automatically extracts the first markdown heading (`# Heading`) as the title, falling back to a snippet of the first line if no heading is present.
@@ -107,7 +107,7 @@ The server exposes 23 tools over standard I/O:
 | `get_session_summary` | `session_id` | Retrieves all events logged under a specific session ID for targeted session auditing. |
 | `get_canonical_tags` | `query (alias: domain)` | Queries non-alias tags matching the search filter (or alias parameters `query`, `substring`, `tag_filter`). |
 | `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id`, `skip_duplicate_check`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. Validates mandatory `content` and `title`. |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id`, `is_core`, `tag_operator`, `cursor` | Hybrid FTS5 + vector RRF search (when `SALTMDB_ENABLE_SEMANTIC=true`; otherwise FTS5-only). Supports stop-word normalization, tag filtering, metadata filters, and 1-hop related entity fetching. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id`, `is_core`, `tag_operator`, `cursor` | Hybrid FTS5 + vector RRF search (enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to disable). Supports stop-word normalization, tag filtering, metadata filters, and 1-hop related entity fetching. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. Accepts exact UUID, status string containing UUID, or entity title. |
 | `scan_memories` | `owner_id`, `status_filter`, `limit`, `offset` | Scans and inspects lists/contents of memories for audits, consistency reviews, or contradiction checks. |
 | `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. |
