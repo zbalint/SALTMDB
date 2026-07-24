@@ -35,8 +35,7 @@ graph TD
     end
 ```
 
-## Features
-
+- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond pre-embedding quality evaluation (Tier 1/2 boundary, Shannon character entropy, Type-Token Ratio, and fluff filters; Tier 4 technical specificity scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Includes target exclusion (`exclude_ids`) to prevent false deduplication warnings during parent memory consolidation.
 - **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default.
 - **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
 - **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.
@@ -106,16 +105,16 @@ The server exposes 23 tools over standard I/O:
 | `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
 | `get_session_summary` | `session_id` | Retrieves all events logged under a specific session ID for targeted session auditing. |
 | `get_canonical_tags` | `query (alias: domain)` | Queries non-alias tags matching the search filter (or alias parameters `query`, `substring`, `tag_filter`). |
-| `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id`, `skip_duplicate_check`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. Validates mandatory `content` and `title`. |
+| `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id`, `skip_duplicate_check`, `relevance`, `impact`, `novelty`, `actionability` | Stores/upserts facts in raw markdown. Enforces sub-ms Tier 1/2 quality gates, SHA-256 exact hash collision checks, and Tier 4 technical quality scoring ($0.0 - 1.0$) before ONNX embedding generation. |
 | `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id`, `is_core`, `tag_operator`, `cursor` | Hybrid FTS5 + vector RRF search. Includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports stop-word normalization, tag filtering, and metadata filters. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. Accepts exact UUID, status string containing UUID, or entity title. |
 | `scan_memories` | `owner_id`, `status_filter`, `limit`, `offset` | Scans and inspects lists/contents of memories for audits, consistency reviews, or contradiction checks. |
 | `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. |
 | `detect_orphaned_memories`| `owner_id` | Identifies active memories with no relationship links and suggests candidate links based on tag overlap. |
-| `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags` | Checks the database for potential near-duplicates of a proposed memory using stemming and stop-word similarity. |
+| `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags`, `exclude_ids` | Checks the database for potential near-duplicates of a proposed memory using stemming and stop-word similarity. Supports `exclude_ids` for consolidation target exclusion. |
 | `store_ephemeral_memory`| `key`, `value` | Saves a volatile secret to the in-memory database. |
 | `get_ephemeral_memory` | `key` | Retrieves a volatile secret. |
-| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight`, `owner_id`, `context_id` | Atomically commits a consolidated memory, archives parent raw nodes (never deletes), and auto-links `consolidated_from` lineage edges. |
+| `commit_consolidation` | `parent_ids`, `title`, `content`, `tags`, `scope`, `weight`, `owner_id`, `context_id` | Atomically commits a consolidated memory, archives parent raw nodes (never deletes), and auto-links `consolidated_from` lineage edges. Executes Tier 1/2/4 quality checks and target-excluded deduplication on summary content. |
 | `store_relation` | `source_id`, `target_id`, `predicate` | Stores a directional semantic relationship edge between two entity nodes. Auto-resolves UUIDs from titles or status strings. |
 | `analyze_dependencies` | `root_entity_id`, `max_depth` | Traverses relationship trees using recursive SQL CTEs to map downstream components. Returns `graph_exhausted` signal. |
 | `analyze_lineage` | `entity_id` | Traverses full multi-generation consolidation and derivation ancestry (`consolidated_from` / `derived_from`). |

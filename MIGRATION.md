@@ -42,6 +42,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.37` | 6 | Metrics Accuracy release: updated Database Viewer Bento Grid overview stat card to calculate Vector Embeddings Ready % strictly against `active_entities` (`raw` + `consolidated`) instead of `total_entities` (which included archived snapshots), adding `active_entities` field to `/api/stats` and clear description label (`X / Y active memories indexed`) | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.38` | 6 | Memory Detail Modal Expansion release: upgraded Database Viewer memory detail drawer (`openEntityDetail`) with a complete Metadata Grid (Created At, Updated At, Last Accessed, Entity UUID, Context ID, Weight, Is Core #core flag), custom JSON metadata inspector, and interactive Knowledge Graph relation list (outgoing & incoming links with clickable targets) | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.39` | 6 | UI Fixes release: fixed native `<select>` dropdown styling (`select` & `select option` background/color rules for dark mode); implemented `loadLineage()` JS handler and enhanced `get_lineage` backend query with ID prefix / partial title matching so searching entity IDs or titles in Lineage Inspector renders the multi-generation ancestry tree | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.40` | 7 | Mechanical Text Quality Gate & Consolidation Deduplication release: added pre-embedding quality evaluation (`evaluate_memory_quality`), Shannon character entropy ($H(X)$), TTR lexical diversity, fluff regex filters, and Tier 4 technical specificity scoring; added sub-ms SHA-256 exact hash collision lookup (`compute_content_hash`); extended quality gate and target exclusion (`exclude_ids`) to `commit_consolidation`; added `content_hash`, `quality_score`, `quality_status`, and `quality_flags` columns on `entities` table | **Automatic Migration** (`init_db` auto-adds `content_hash`, `quality_score`, `quality_status`, `quality_flags` columns and `idx_entities_content_hash` index) |
 
 ---
 
@@ -114,11 +115,27 @@ python scratch/backfill_embeddings.py
 
 ---
 
-## Upgrade Verification
-
-To verify your database schema compatibility, run the hybrid search test suite:
+To verify your database schema compatibility, run the test suite:
 
 ```bash
-python -m pytest scratch/test_hybrid_search.py -v
+python -m unittest discover tests
 ```
 If all tests execute and pass cleanly, your database schema is correctly aligned.
+
+---
+
+## DDL Migrations (v0.1.0-alpha.39 ➔ v0.1.0-alpha.40)
+
+If upgrading a production `saltmdb.db` database manually:
+
+```sql
+-- 1. Add quality gate metadata columns to entities
+ALTER TABLE entities ADD COLUMN content_hash TEXT;
+ALTER TABLE entities ADD COLUMN quality_score REAL;
+ALTER TABLE entities ADD COLUMN quality_status TEXT;
+ALTER TABLE entities ADD COLUMN quality_flags TEXT;
+
+-- 2. Create index for SHA-256 exact deduplication queries
+CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived';
+```
+

@@ -17,10 +17,10 @@ class TestLibrarianService(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_commit_consolidation_soft_archives_parents_and_links_lineage(self):
-        res1 = store_memory(title="Parent Fact A", content="Fact A details", owner_id="agent1", skip_duplicate_check=True, db_path=self.db_path)
+        res1 = store_memory(title="Parent Fact A", content="Detailed description of Fact A for testing consolidation", owner_id="agent1", skip_duplicate_check=True, db_path=self.db_path)
         id1 = res1.split("ID: ")[1]
 
-        res2 = store_memory(title="Parent Fact B", content="Fact B details", owner_id="agent1", skip_duplicate_check=True, db_path=self.db_path)
+        res2 = store_memory(title="Parent Fact B", content="Detailed description of Fact B for testing consolidation", owner_id="agent1", skip_duplicate_check=True, db_path=self.db_path)
         id2 = res2.split("ID: ")[1]
 
         c_res = commit_consolidation(

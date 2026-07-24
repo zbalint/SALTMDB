@@ -44,7 +44,18 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         """)
         
         # Schema migration: attempt to add new columns to entities table if they don't exist
-        for col in ["valid_from DATETIME", "valid_to DATETIME", "metadata TEXT", "project_id TEXT", "context_id TEXT", "embedding_status TEXT DEFAULT 'pending'"]:
+        for col in [
+            "valid_from DATETIME",
+            "valid_to DATETIME",
+            "metadata TEXT",
+            "project_id TEXT",
+            "context_id TEXT",
+            "embedding_status TEXT DEFAULT 'pending'",
+            "content_hash TEXT",
+            "quality_score REAL",
+            "quality_status TEXT",
+            "quality_flags TEXT"
+        ]:
             try:
                 conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
             except sqlite3.OperationalError:
@@ -225,6 +236,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id, project_id)",
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
+            "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",

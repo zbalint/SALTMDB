@@ -10,9 +10,10 @@ from saltmdb.utils.text import (
     resolve_entity_id,
     extract_title_and_snippet,
     sanitize_fts_query,
-    normalize_search_query
+    normalize_search_query,
+    compute_content_hash
 )
-from saltmdb.utils.nlp import word_sim
+from saltmdb.utils.nlp import word_sim, evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
 from concurrent.futures import ThreadPoolExecutor
 
@@ -110,7 +111,34 @@ def store_memory(
     if not context_id and metadata and isinstance(metadata, dict):
         context_id = metadata.get("project") or metadata.get("project_id")
     project_id = context_id
-        
+
+    # Execute Tier 1 & Tier 2 Pre-Embedding Quality Gate Evaluation
+    quality_res = evaluate_memory_quality(redacted_content, title)
+    if quality_res["status"] == "REJECT":
+        if should_close:
+            conn.close()
+        return f"Error: Memory quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
+
+    content_hash = compute_content_hash(redacted_content)
+    quality_score = quality_res["quality_score"]
+    quality_status = quality_res["status"]
+    quality_flags_str = json.dumps(quality_res["quality_flags"])
+
+    # Stage A Exact Hash Collision Lookup
+    if not entity_id:
+        try:
+            cursor = conn.execute("""
+                SELECT id FROM entities
+                WHERE content_hash = ? AND owner_id = ? AND status != 'archived'
+            """, (content_hash, owner_id))
+            row = cursor.fetchone()
+            if row:
+                if should_close:
+                    conn.close()
+                return f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}"
+        except Exception:
+            pass
+
     if not entity_id:
         try:
             cursor = conn.execute("""
@@ -157,8 +185,8 @@ def store_memory(
                  hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
                  
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id, context_id, 'archived'
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  
@@ -171,8 +199,8 @@ def store_memory(
             
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, content_hash, quality_score, quality_status, quality_flags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -187,8 +215,12 @@ def store_memory(
                     valid_to = NULL,
                     metadata = excluded.metadata,
                     project_id = COALESCE(excluded.project_id, entities.project_id),
-                    context_id = COALESCE(excluded.context_id, entities.context_id)
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id))
+                    context_id = COALESCE(excluded.context_id, entities.context_id),
+                    content_hash = excluded.content_hash,
+                    quality_score = excluded.quality_score,
+                    quality_status = excluded.quality_status,
+                    quality_flags = excluded.quality_flags
+            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id, content_hash, quality_score, quality_status, quality_flags_str))
             
             tags = tags or []
             tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
@@ -705,6 +737,7 @@ def check_duplicate_memories(
     owner_id: str = None,
     tags: list = None,
     project_id: str = None,
+    exclude_ids: list = None,
     db_connection = None,
     db_path: str = None
 ) -> dict:
@@ -722,6 +755,14 @@ def check_duplicate_memories(
     try:
         where = ["status != 'archived'"]
         params = []
+        
+        if exclude_ids:
+            clean_excludes = [str(x) for x in exclude_ids if str(x)]
+            if clean_excludes:
+                placeholders = ",".join("?" for _ in clean_excludes)
+                where.append(f"id NOT IN ({placeholders})")
+                params.extend(clean_excludes)
+
         if owner_id:
             where.append("(owner_id = ? OR owner_id IS NULL)")
             params.append(owner_id)
