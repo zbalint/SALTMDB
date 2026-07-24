@@ -98,3 +98,27 @@ def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: s
         logger.error("Embedding generation failed for %s: %s", entity_id, e)
     finally:
         conn.close()
+
+
+def backfill_pending_embeddings(db_path: str = None) -> int:
+    """Scans for active entities where embedding_status = 'pending' or NULL and queues embedding generation."""
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+    from saltmdb.domain.services.memory_service import _embed_pool
+
+    db_path = db_path or get_db_path()
+    try:
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT id, title, full_content FROM entities "
+            "WHERE (embedding_status = 'pending' OR embedding_status IS NULL OR embedding_status = '') "
+            "AND status != 'archived'"
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning("Error fetching pending embeddings for backfill: %s", e)
+        return 0
+
+    for eid, title, content in rows:
+        _embed_pool.submit(embed_entity_async, eid, title, content, db_path)
+    return len(rows)
