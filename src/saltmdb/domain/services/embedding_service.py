@@ -75,8 +75,9 @@ def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: s
 
         text = f"{title}\n\n{full_content}"
         vector = embed_text(text)
+        conn.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (entity_id,))
         conn.execute(
-            "INSERT OR REPLACE INTO entity_embeddings(entity_id, embedding) VALUES (?, ?)",
+            "INSERT INTO entity_embeddings(entity_id, embedding) VALUES (?, ?)",
             (entity_id, sqlite_vec.serialize_float32(vector))
         )
         conn.execute(
