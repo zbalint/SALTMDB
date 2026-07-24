@@ -549,7 +549,7 @@ def get_frontend_html(db_path: str = None) -> str:
         /* ── SVG Graph Topology ───────────────────────── */
         #graph-canvas {
             width: 100%;
-            height: 600px;
+            height: 620px;
             background: #080c14;
             border: var(--glass-border);
             border-radius: var(--radius);
@@ -561,26 +561,37 @@ def get_frontend_html(db_path: str = None) -> str:
         .node circle {
             fill: #1e293b;
             stroke: var(--accent);
-            stroke-width: 2.5px;
+            stroke-width: 2px;
             transition: all 0.2s ease;
+            cursor: pointer;
         }
 
-        .node:hover circle {
+        .node:hover circle, .node.highlight circle {
             fill: var(--accent-dark);
             stroke: #fff;
-            filter: drop-shadow(0 0 10px var(--accent));
+            filter: drop-shadow(0 0 12px var(--accent));
         }
+
+        .node.dimmed { opacity: 0.15; }
+        .link.dimmed { opacity: 0.05; }
 
         .node text {
             fill: var(--text-primary);
             font-size: 11px;
             font-weight: 600;
             pointer-events: none;
+            transition: opacity 0.2s ease;
         }
 
         .link {
-            stroke: rgba(255, 255, 255, 0.15);
+            stroke: rgba(255, 255, 255, 0.18);
             stroke-width: 1.5px;
+            transition: stroke 0.2s ease, opacity 0.2s ease;
+        }
+
+        .link.highlight {
+            stroke: var(--accent);
+            stroke-width: 2.5px;
         }
 
         .link-label {
@@ -792,13 +803,41 @@ def get_frontend_html(db_path: str = None) -> str:
 
         <!-- 4. Graph Topology View -->
         <div class="view-container" id="view-relations">
-            <div style="display:flex; gap:12px; margin-bottom:14px; align-items:center;">
-                <span style="font-weight:600;">Predicate Legend:</span>
+            <div class="toolbar" style="margin-bottom:14px; background:var(--bg-card); padding:12px 16px; border-radius:var(--radius); border:var(--glass-border);">
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:1;">
+                    <div class="search-box" style="min-width:180px; flex:0.8;">
+                        <span class="search-icon">🔍</span>
+                        <input type="text" id="graph-search-input" placeholder="Highlight node title..." onkeyup="filterGraphNodes()">
+                    </div>
+                    <select id="graph-status-filter" class="btn" onchange="loadGraphTopology()">
+                        <option value="true" selected>Active Memories Only (Hide Archived)</option>
+                        <option value="false">All Memories (Inc. Archived)</option>
+                    </select>
+                    <select id="graph-degree-filter" class="btn" onchange="filterGraphNodes()">
+                        <option value="1" selected>Connected Only (Degree ≥ 1)</option>
+                        <option value="2">Hubs Only (Degree ≥ 2)</option>
+                        <option value="0">All Nodes (Inc. Isolated)</option>
+                    </select>
+                    <select id="graph-predicate-filter" class="btn" onchange="loadGraphTopology()">
+                        <option value="">All Predicates</option>
+                        <option value="consolidated_from">consolidated_from</option>
+                        <option value="derived_from">derived_from</option>
+                        <option value="complements">complements</option>
+                        <option value="resolves">resolves</option>
+                    </select>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <span id="graph-stats-badge" class="badge badge-blue">0 nodes | 0 edges</span>
+                    <button class="btn" onclick="loadGraphTopology()">🔄 Reload</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:12px; margin-bottom:10px; align-items:center; font-size:0.8rem; color:var(--text-secondary);">
+                <span>Legend:</span>
                 <span class="badge badge-purple">consolidated_from</span>
                 <span class="badge badge-blue">derived_from</span>
                 <span class="badge badge-green">complements</span>
                 <span class="badge badge-yellow">resolves</span>
-                <button class="btn" style="margin-left:auto;" onclick="loadGraphTopology()">🔄 Reload Network</button>
+                <span style="margin-left:auto; color:var(--text-muted);">Hover node to highlight 1-hop connections • Drag node • Click for details</span>
             </div>
             <svg id="graph-canvas"></svg>
         </div>
@@ -830,7 +869,7 @@ def get_frontend_html(db_path: str = None) -> str:
                 </div>
             </div>
             <div id="vector-results-container" class="data-table-container" style="padding:16px;">
-                <div style="color:var(--text-muted); text-align:center; padding:30px;">Enter a query above to test live hybrid dense vector matching.</div>
+                <div style="color:var(--text-muted); text-align:center; padding:30px;">Enter a query above to test live dense vector matching.</div>
             </div>
         </div>
 
@@ -897,6 +936,7 @@ def get_frontend_html(db_path: str = None) -> str:
     <!-- ── Dashboard Logic JS ──────────────────────────── -->
     <script>
         let currentView = 'dashboard';
+        let rawGraphData = { nodes: [], edges: [] };
 
         function switchView(viewId) {
             currentView = viewId;
@@ -1109,68 +1149,186 @@ def get_frontend_html(db_path: str = None) -> str:
         }
 
         async function loadGraphTopology() {
+            const excludeArchived = document.getElementById('graph-status-filter').value;
+            const predicate = document.getElementById('graph-predicate-filter').value;
+            let url = `/api/relations/graph?exclude_archived=${excludeArchived}&limit=250`;
+            if (predicate) url += `&predicate=${encodeURIComponent(predicate)}`;
+
             try {
-                const res = await fetch('/api/relations/graph');
-                const data = await res.json();
-                const svg = document.getElementById('graph-canvas');
-                svg.innerHTML = '';
-                if (!data.nodes || data.nodes.length === 0) return;
-
-                const width = svg.clientWidth || 800;
-                const height = 550;
-                
-                // Simple positioning circle layout for topology view
-                const nodes = data.nodes;
-                const radius = Math.min(width, height) / 2.8;
-                const cx = width / 2;
-                const cy = height / 2;
-
-                nodes.forEach((n, i) => {
-                    const angle = (i / nodes.length) * 2 * Math.PI;
-                    n.x = cx + radius * Math.cos(angle);
-                    n.y = cy + radius * Math.sin(angle);
-                });
-
-                const edgeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                data.edges.forEach(e => {
-                    const s = nodes.find(n => n.id === e.source);
-                    const t = nodes.find(n => n.id === e.target);
-                    if (s && t) {
-                        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                        line.setAttribute('x1', s.x);
-                        line.setAttribute('y1', s.y);
-                        line.setAttribute('x2', t.x);
-                        line.setAttribute('y2', t.y);
-                        line.setAttribute('class', 'link');
-                        edgeGroup.appendChild(line);
-                    }
-                });
-                svg.appendChild(edgeGroup);
-
-                const nodeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                nodes.forEach(n => {
-                    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                    g.setAttribute('class', 'node');
-                    g.onclick = () => openEntityDetail(n.id);
-
-                    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                    circle.setAttribute('cx', n.x);
-                    circle.setAttribute('cy', n.y);
-                    circle.setAttribute('r', 12);
-
-                    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                    text.setAttribute('x', n.x + 16);
-                    text.setAttribute('y', n.y + 4);
-                    text.textContent = n.title.length > 20 ? n.title.substring(0, 20) + '...' : n.title;
-
-                    g.appendChild(circle);
-                    g.appendChild(text);
-                    nodeGroup.appendChild(g);
-                });
-                svg.appendChild(nodeGroup);
+                const res = await fetch(url);
+                rawGraphData = await res.json();
+                renderGraph();
             } catch (err) {
                 console.error("Error loading topology:", err);
             }
+        }
+
+        function filterGraphNodes() {
+            renderGraph();
+        }
+
+        function renderGraph() {
+            const svg = document.getElementById('graph-canvas');
+            svg.innerHTML = '';
+            if (!rawGraphData.nodes || rawGraphData.nodes.length === 0) {
+                document.getElementById('graph-stats-badge').innerText = '0 nodes | 0 edges';
+                return;
+            }
+
+            const minDegree = parseInt(document.getElementById('graph-degree-filter').value || '1');
+            const searchStr = (document.getElementById('graph-search-input').value || '').toLowerCase().trim();
+
+            // Filter nodes by min degree
+            let filteredNodes = rawGraphData.nodes.filter(n => n.degree >= minDegree);
+            const validNodeIds = new Set(filteredNodes.map(n => n.id));
+            let filteredEdges = rawGraphData.edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
+
+            document.getElementById('graph-stats-badge').innerText = `${filteredNodes.length} nodes | ${filteredEdges.length} edges`;
+
+            const width = svg.clientWidth || 800;
+            const height = 600;
+            const cx = width / 2;
+            const cy = height / 2;
+
+            // Clustered force layout simulation
+            const nodes = filteredNodes;
+            const radius = Math.min(width, height) / 2.6;
+
+            nodes.forEach((n, i) => {
+                const angle = (i / nodes.length) * 2 * Math.PI;
+                n.x = cx + (radius + (i % 3) * 30) * Math.cos(angle);
+                n.y = cy + (radius + (i % 3) * 30) * Math.sin(angle);
+            });
+
+            // Iterative repulsion & edge attraction physics simulation (20 iterations)
+            for (let iter = 0; iter < 25; iter++) {
+                // Repulsion between nodes
+                for (let i = 0; i < nodes.length; i++) {
+                    for (let j = i + 1; j < nodes.length; j++) {
+                        let dx = nodes[j].x - nodes[i].x;
+                        let dy = nodes[j].y - nodes[i].y;
+                        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                        if (dist < 120) {
+                            let force = (120 - dist) / dist * 0.4;
+                            nodes[i].x -= dx * force;
+                            nodes[i].y -= dy * force;
+                            nodes[j].x += dx * force;
+                            nodes[j].y += dy * force;
+                        }
+                    }
+                }
+                // Attraction along edges
+                filteredEdges.forEach(e => {
+                    let s = nodes.find(n => n.id === e.source);
+                    let t = nodes.find(n => n.id === e.target);
+                    if (s && t) {
+                        let dx = t.x - s.x;
+                        let dy = t.y - s.y;
+                        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                        let force = (dist - 140) * 0.04;
+                        s.x += (dx / dist) * force;
+                        s.y += (dy / dist) * force;
+                        t.x -= (dx / dist) * force;
+                        t.y -= (dy / dist) * force;
+                    }
+                });
+                // Constrain within bounding box
+                nodes.forEach(n => {
+                    n.x = Math.max(40, Math.min(width - 40, n.x));
+                    n.y = Math.max(40, Math.min(height - 40, n.y));
+                });
+            }
+
+            // Draw Edges
+            const edgeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            filteredEdges.forEach(e => {
+                const s = nodes.find(n => n.id === e.source);
+                const t = nodes.find(n => n.id === e.target);
+                if (s && t) {
+                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    line.setAttribute('x1', s.x);
+                    line.setAttribute('y1', s.y);
+                    line.setAttribute('x2', t.x);
+                    line.setAttribute('y2', t.y);
+                    line.setAttribute('class', 'link');
+                    line.dataset.source = s.id;
+                    line.dataset.target = t.id;
+                    edgeGroup.appendChild(line);
+                }
+            });
+            svg.appendChild(edgeGroup);
+
+            // Draw Nodes
+            const nodeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            nodes.forEach(n => {
+                const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                g.setAttribute('class', 'node');
+                g.dataset.id = n.id;
+                g.onclick = () => openEntityDetail(n.id);
+
+                // Hover 1-hop connection highlight
+                g.onmouseenter = () => highlightNodeNeighbors(n.id);
+                g.onmouseleave = () => resetGraphHighlight();
+
+                // Dynamic node radius based on connection degree
+                const nodeRadius = 8 + Math.min((n.degree || 1) * 3, 16);
+
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', n.x);
+                circle.setAttribute('cy', n.y);
+                circle.setAttribute('r', nodeRadius);
+
+                const isMatch = searchStr && n.title.toLowerCase().includes(searchStr);
+                if (isMatch) {
+                    circle.setAttribute('stroke', '#34d399');
+                    circle.setAttribute('stroke-width', '3.5');
+                    circle.setAttribute('filter', 'drop-shadow(0 0 10px #34d399)');
+                }
+
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', n.x + nodeRadius + 4);
+                text.setAttribute('y', n.y + 4);
+                text.textContent = n.title.length > 22 ? n.title.substring(0, 22) + '...' : n.title;
+
+                g.appendChild(circle);
+                g.appendChild(text);
+                nodeGroup.appendChild(g);
+            });
+            svg.appendChild(nodeGroup);
+        }
+
+        function highlightNodeNeighbors(nodeId) {
+            const svg = document.getElementById('graph-canvas');
+            const connectedIds = new Set([nodeId]);
+
+            // Find all connected edges and targets
+            svg.querySelectorAll('.link').forEach(link => {
+                if (link.dataset.source === nodeId || link.dataset.target === nodeId) {
+                    link.classList.add('highlight');
+                    connectedIds.add(link.dataset.source);
+                    connectedIds.add(link.dataset.target);
+                } else {
+                    link.classList.add('dimmed');
+                }
+            });
+
+            svg.querySelectorAll('.node').forEach(node => {
+                if (connectedIds.has(node.dataset.id)) {
+                    node.classList.add('highlight');
+                } else {
+                    node.classList.add('dimmed');
+                }
+            });
+        }
+
+        function resetGraphHighlight() {
+            const svg = document.getElementById('graph-canvas');
+            svg.querySelectorAll('.link').forEach(link => {
+                link.classList.remove('highlight', 'dimmed');
+            });
+            svg.querySelectorAll('.node').forEach(node => {
+                node.classList.remove('highlight', 'dimmed');
+            });
         }
 
         async function loadEvents(page = 1) {

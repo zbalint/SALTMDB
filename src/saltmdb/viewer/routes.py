@@ -58,7 +58,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/relations":
             self.get_all_relations(query)
         elif path == "/api/relations/graph":
-            self.get_relations_graph()
+            self.get_relations_graph(query)
         elif path == "/api/stats":
             self.get_stats()
         elif path == "/api/search":
@@ -341,28 +341,58 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if conn:
                 conn.close()
 
-    def get_relations_graph(self):
-        """Returns all relations as a graph (nodes+edges) for SVG topology visualization. No pagination."""
+    def get_relations_graph(self, query=None):
+        """Returns relations graph (nodes+edges) with node degree, status filtering, and query parameters."""
+        query = query or {}
         conn = None
         try:
+            exclude_archived = query.get("exclude_archived", ["true"])[0].lower() in ("true", "1", "yes")
+            predicate_filter = query.get("predicate", [None])[0]
+            limit_str = query.get("limit", ["250"])[0]
+            try:
+                limit = int(limit_str)
+            except ValueError:
+                limit = 250
+
+            where_clauses = []
+            params = []
+
+            if exclude_archived:
+                where_clauses.append("(COALESCE(e1.status, 'raw') != 'archived' AND COALESCE(e2.status, 'raw') != 'archived')")
+            if predicate_filter:
+                where_clauses.append("r.predicate = ?")
+                params.append(predicate_filter)
+
+            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
             conn = self.get_db_connection()
-            cursor = conn.execute("""
-                SELECT r.source_id, COALESCE(e1.title, r.source_id), r.target_id,
-                       COALESCE(e2.title, r.target_id), r.predicate
+            cursor = conn.execute(f"""
+                SELECT r.source_id, COALESCE(e1.title, r.source_id), COALESCE(e1.status, 'raw'),
+                       r.target_id, COALESCE(e2.title, r.target_id), COALESCE(e2.status, 'raw'),
+                       r.predicate
                 FROM relations r
                 LEFT JOIN entities e1 ON r.source_id = e1.id
                 LEFT JOIN entities e2 ON r.target_id = e2.id
-                LIMIT 1000
-            """)
+                {where_sql}
+                ORDER BY r.created_at DESC
+                LIMIT ?
+            """, params + [limit])
             rows = cursor.fetchall()
+
             node_map = {}
             edges = []
-            for src_id, src_title, tgt_id, tgt_title, pred in rows:
-                node_map[src_id] = src_title
-                node_map[tgt_id] = tgt_title
+            for src_id, src_title, src_status, tgt_id, tgt_title, tgt_status, pred in rows:
+                if src_id not in node_map:
+                    node_map[src_id] = {"id": src_id, "title": src_title or src_id, "status": src_status, "degree": 0}
+                if tgt_id not in node_map:
+                    node_map[tgt_id] = {"id": tgt_id, "title": tgt_title or tgt_id, "status": tgt_status, "degree": 0}
+
+                node_map[src_id]["degree"] += 1
+                node_map[tgt_id]["degree"] += 1
                 edges.append({"source": src_id, "target": tgt_id, "predicate": pred})
-            nodes = [{"id": nid, "title": ntitle} for nid, ntitle in node_map.items()]
-            self.send_json({"nodes": nodes, "edges": edges, "total": len(edges)})
+
+            nodes = list(node_map.values())
+            self.send_json({"nodes": nodes, "edges": edges, "total_edges": len(edges), "total_nodes": len(nodes)})
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
             self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
