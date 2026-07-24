@@ -98,16 +98,18 @@ Once the background Librarian acquires the atomic lock, it runs the following ta
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 18 tools over standard I/O:
+The server exposes 23 tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `log_event` | `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id` | Appends a scrubbed entry to the immutable short-term ledger. |
 | `get_recent_events` | `agent_id` (optional), `type_filter` (optional), `limit` | Retrieves events logged to the short-term ledger, allowing agents to read consolidation requests. |
+| `get_session_summary` | `session_id` | Retrieves all events logged under a specific session ID for targeted session auditing. |
 | `get_canonical_tags` | `domain` (optional) | Queries non-alias tags matching the search filter (or alias parameters `query`, `substring`, `tag_filter`). |
 | `store_memory` | `content`, `tags`, `owner_id`, `scope`, `weight`, `is_core`, `title`, `entity_id`, `metadata`, `context_id` | Stores/upserts facts in raw markdown. Validates mandatory `content` and `title`. |
 | `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `metadata_filter`, `explain_mode`, `include_related`, `context_id` | Hybrid FTS5 + vector RRF search (when `SALTMDB_ENABLE_SEMANTIC=true`; otherwise FTS5-only). Supports stop-word normalization, tag filtering, metadata filters, and 1-hop related entity fetching. |
 | `fetch_memory_chunk` | `entity_id` | Returns the complete markdown text of a specific entity. Accepts exact UUID, status string containing UUID, or entity title. |
+| `scan_memories` | `owner_id`, `status_filter`, `limit`, `offset` | Scans and inspects lists/contents of memories for audits, consistency reviews, or contradiction checks. |
 | `archive_memory` | `entity_id`, `owner_id` | Explicitly archives (retires) a long-term memory, marking it as inactive. |
 | `detect_orphaned_memories`| `owner_id` | Identifies active memories with no relationship links and suggests candidate links based on tag overlap. |
 | `check_duplicate_memories`| `title`, `content`, `owner_id`, `tags` | Checks the database for potential near-duplicates of a proposed memory using stemming and stop-word similarity. |
@@ -120,6 +122,10 @@ The server exposes 18 tools over standard I/O:
 | `create_snapshot` | None | Safely creates a timestamped database backup in `backups/` using SQLite's backup API. |
 | `start_db_viewer` | `port` (optional, default 8080) | Launches the zero-dependency database dashboard viewer locally on specified port. |
 | `stop_db_viewer` | None | Terminates the database dashboard viewer running on port 8080 or specified port. |
+| `bulk_commit_consolidation` | `consolidations` | Bulk commits synthesized consolidations atomically. |
+| `bulk_archive_memory` | `archive_requests` | Bulk archives memories atomically. |
+| `bulk_store_relations` | `relations` | Bulk stores directional relationship edges atomically. |
+
 
 ---
 

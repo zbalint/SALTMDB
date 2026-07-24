@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the **SALTMDB
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via 21 parameterized MCP tools exposed by the `saltmdb` package (`src/saltmdb/mcp/tools.py`):
+Agents interface with SALTMDB via 23 parameterized MCP tools exposed by the `saltmdb` package (`src/saltmdb/mcp/tools.py`):
 
 ```mermaid
 graph TD
@@ -53,17 +53,19 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > **FORBIDDEN ACTION: NO DIRECT SQL ACCESS**
 > You are strictly forbidden from running shell commands like `sqlite3` or using scripts to connect directly to the `saltmdb.db` file. Bypassing the MCP server skips the secrets redaction middleware and FTS5 search indexing triggers, corrupting the database state. All queries and updates must occur via MCP tool calls.
 
-## 1. Available Tools Overview (21 Tools)
+## 1. Available Tools Overview (23 Tools)
 * `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode, limit, include_related, context_id)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search (when `SALTMDB_ENABLE_SEMANTIC=true` is set; defaults to FTS5 with natural language stop-word normalization). Supports parameter aliases (`query`, `q`, `keywords`). Parameter `include_related=True` pulls 1-hop active linked entities via `relations`. Shared memories surface globally across all agent queries based on relevance score.
 * `scan_memories(owner_id, status_filter, limit, offset)`: Scan and inspect lists/contents of memories for audits, consistency reviews, or contradiction checks.
 * `store_memory(content, tags, owner_id, scope, weight, is_core, title, entity_id, metadata, context_id)`: Save/upsert long-term knowledge. Requires non-empty `content` and `title`. Supports parameter aliases (`text`, `tag`, `owner`). Runs internal duplicate detection prior to storage.
 * `fetch_memory_chunk(entity_id)`: Returns full markdown text of a memory. Accepts exact UUID, status string containing UUID, or entity title.
+* `get_canonical_tags(domain)`: Queries non-alias tags matching search filter (or alias parameters `query`, `substring`, `tag_filter`).
 * `detect_orphaned_memories(owner_id)`: Identifies active memories with zero relationship links, suggesting candidate links based on tag overlap.
 * `check_duplicate_memories(title, content, owner_id, tags)`: Run before storing to verify if a proposed memory overlaps with existing ones (returns duplicate warning if similarity >= 70%).
 * `log_event(agent_id, type, content, error_code, session_id, context_id)`: Log a short-term operational event. Accepts parameter aliases (`event_type`, `message`, `description`).
 * `get_recent_events(agent_id, type_filter, limit)`: Retrieve event logs to check for background signals (e.g. consolidation requests).
 * `archive_memory(entity_id, owner_id)`: Explicitly archives (retires) a long-term memory, marking it as inactive.
 * `commit_consolidation(parent_ids, title, content, tags, scope, weight)`: Commit a consolidated memory, soft-archive parent raw nodes (never hard-deletes), and auto-create `consolidated_from` lineage edges.
+* `create_snapshot()`: Safely creates a timestamped database backup in `backups/` using SQLite's backup API.
 * `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories. Auto-resolves entity IDs from titles or status strings.
 * `analyze_dependencies(root_entity_id, max_depth)`: Recursively trace downstream relational paths using SQL CTEs. Returns `graph_exhausted` signal.
 * `analyze_lineage(entity_id)`: Traverses full multi-generation consolidation and derivation ancestry (`consolidated_from` / `derived_from`).
@@ -73,6 +75,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `store_ephemeral_memory(key, value)` / `get_ephemeral_memory(key)`: In-memory volatile secret storage.
 * `start_db_viewer(port)` / `stop_db_viewer(port)`: Control zero-dependency dark-mode web dashboard viewer (default port 8080).
 * `get_session_summary(session_id)`: Retrieves all events grouped by a specific session ID for targeted session auditing.
+
 
 ## 2. Operational Lifecycle
 
