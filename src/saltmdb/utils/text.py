@@ -80,3 +80,13 @@ def normalize_search_query(query: str) -> str:
     q = query.lower()
     q = re.sub(r'[^\w\s]', ' ', q)
     return " ".join(q.split())
+
+import hashlib
+
+def compute_content_hash(text: str) -> str:
+    """Computes a SHA-256 hash of normalized text (lowercase and stripped of leading/trailing whitespace)."""
+    if not text:
+        return ""
+    normalized = text.strip().lower()
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+

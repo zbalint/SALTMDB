@@ -37,7 +37,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertGreater(res3[0]["score"], 0.0)
 
     def test_store_memory_alias_resolution(self):
-        res = tools.store_memory(text="Some text content", tag="#python", owner="user_test", skip_duplicate_check=True)
+        res = tools.store_memory(text="Some valid long enough text content for testing quality gate", tag="#python", owner="user_test", skip_duplicate_check=True)
         self.assertIn("stored successfully", res)
 
     def test_log_event_alias_resolution(self):

@@ -5,8 +5,10 @@ from datetime import datetime, UTC
 from typing import Literal
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection
-from saltmdb.utils.text import resolve_entity_id, extract_title_and_snippet
+from saltmdb.utils.text import resolve_entity_id, extract_title_and_snippet, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
+from saltmdb.utils.nlp import evaluate_memory_quality
+from saltmdb.domain.services.memory_service import check_duplicate_memories
 
 logger = logging.getLogger(__name__)
 
@@ -256,16 +258,61 @@ def commit_consolidation(
         
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
+    owner_val = owner_id or 'system'
+
+    # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
+    quality_res = evaluate_memory_quality(redacted_content, clean_title)
+    if quality_res["status"] == "REJECT":
+        if should_close:
+            conn.close()
+        return f"Error: Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
+
+    content_hash = compute_content_hash(redacted_content)
+    quality_score = quality_res["quality_score"]
+    quality_status = quality_res["status"]
+    quality_flags_str = json.dumps(quality_res["quality_flags"])
+
+    # Stage A Exact Hash Collision Lookup (excluding resolved parent IDs)
+    try:
+        placeholders_p = ",".join("?" for _ in resolved_parents)
+        query_sql = f"""
+            SELECT id FROM entities
+            WHERE content_hash = ? AND owner_id = ? AND status != 'archived'
+              AND id NOT IN ({placeholders_p})
+        """
+        cursor = conn.execute(query_sql, [content_hash, owner_val] + resolved_parents)
+        row = cursor.fetchone()
+        if row:
+            if should_close:
+                conn.close()
+            return f"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}"
+    except Exception:
+        pass
+
+    # Stage B Near-Duplicate Check (excluding resolved parent IDs)
+    try:
+        dup_check = check_duplicate_memories(
+            title=clean_title,
+            content=redacted_content,
+            owner_id=owner_val,
+            exclude_ids=resolved_parents,
+            db_connection=conn
+        )
+        if dup_check.get("duplicate_found") and "error" not in dup_check:
+            top = dup_check["potential_duplicates"][0]
+            logger.warning("Consolidation potential near-duplicate detected against unrelated memory '%s' (ID: %s)", top['title'], top['id'])
+    except Exception:
+        pass
+
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     
-    owner_val = owner_id or 'system'
     try:
         with conn:
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?)
-            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str))
             
             if tags:
                 for tag_name in tags:

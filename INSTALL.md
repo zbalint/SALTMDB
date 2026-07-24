@@ -40,6 +40,8 @@ pip install -e .
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
 - `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`) to disable vector search.
 
+> **Mechanical Text Quality Gate & Deduplication:** All writes (`store_memory`) and merges (`commit_consolidation`) undergo sub-millisecond pre-embedding quality evaluation (Tier 1/2 boundary, entropy, and fluff filters; Tier 4 technical scoring) and Stage A SHA-256 exact hash deduplication before ONNX model embedding execution. Target exclusion prevents false deduplication warnings during parent memory consolidation.
+
 > **Note on bundled model:** The `BAAI/bge-small-en-v1.5` ONNX model weights (~66 MB) are pre-bundled directly within the `saltmdb` package for offline execution out of the box. If bundled model files are missing or modified, `fastembed` will fall back to downloading them from Hugging Face automatically.
 
 ---
