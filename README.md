@@ -153,7 +153,7 @@ To connect SALTMDB to Claude Desktop or Claude Code, add the following to your c
 ```
 
 ### 3. Database Dashboard Viewer
-SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, and system lock states:
+SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**:
 1. Run the viewer script locally:
    ```bash
    python saltmdb_viewer.py
