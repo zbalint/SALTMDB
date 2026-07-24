@@ -86,6 +86,84 @@ def calculate_technical_specificity(text: str) -> float:
     tech_identifiers = re.findall(r"\b[a-z0-9_]+[A-Z0-9_\.][a-zA-Z0-9_]*\b|\b[A-Z0-9_]{2,}\b|\b\w+\.(py|js|ts|json|md|rs|go|c|cpp|h|yml|yaml|sql|sh|db)\b", text)
     return len(tech_identifiers) / len(words)
 
+def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
+    """Calculate the ratio of duplicate word N-grams in text."""
+    words = re.findall(r"\b\w+\b", text.lower())
+    if len(words) < n:
+        return 0.0
+    ngrams = [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+    if not ngrams:
+        return 0.0
+    unique_count = len(set(ngrams))
+    total_count = len(ngrams)
+    return 1.0 - (unique_count / total_count)
+
+def validate_markdown_structure(text: str) -> dict:
+    """
+    Validates Markdown syntax integrity, header hierarchy, code block annotations, and MSDI.
+    """
+    # 1. Syntax Integrity Checks
+    # Balanced code fences
+    fence_count = len(re.findall(r"^```", text, re.MULTILINE))
+    if fence_count % 2 != 0:
+        return {
+            "is_valid": False,
+            "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+            "reason": "Unclosed Markdown code block detected (odd count of ``` markers)."
+        }
+        
+    # Table Column Symmetry check
+    lines = text.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            pipe_count = stripped.count("|")
+            if pipe_count < 3: # Must have at least start, divider, end
+                return {
+                    "is_valid": False,
+                    "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+                    "reason": "Malformed Markdown table row detected (insufficient pipe separators)."
+                }
+
+    # 2. Header Hierarchy & Progression Check
+    headers = re.findall(r"^(#{1,6})\s+(.+)$", text, re.MULTILINE)
+    header_levels = [len(h[0]) for h in headers]
+    has_skip = False
+    for i in range(len(header_levels) - 1):
+        if header_levels[i + 1] > header_levels[i] + 1:
+            has_skip = True
+            break
+
+    # 3. Untyped Code Fences Check
+    code_fences = re.findall(r"^```(\w*)", text, re.MULTILINE)
+    # Filter only opening fences (even index if formatted properly)
+    untyped_blocks = 0
+    for i in range(0, len(code_fences), 2):
+        if not code_fences[i].strip():
+            untyped_blocks += 1
+
+    # 4. MSDI (Markdown Structural Density Index) Calculation
+    words = re.findall(r"\b\w+\b", text)
+    total_words = len(words)
+    
+    header_words = sum(len(re.findall(r"\b\w+\b", h[1])) for h in headers)
+    
+    list_items = re.findall(r"^\s*[\-\*\d\.]+\s+(.+)$", text, re.MULTILINE)
+    list_item_words = sum(len(re.findall(r"\b\w+\b", item)) for item in list_items)
+    
+    code_blocks = re.findall(r"```[\s\S]*?```", text)
+    code_block_words = sum(len(re.findall(r"\b\w+\b", cb)) for cb in code_blocks)
+    
+    msdi = (header_words + list_item_words + code_block_words) / total_words if total_words > 0 else 0.0
+
+    return {
+        "is_valid": True,
+        "header_count": len(headers),
+        "has_header_skip": has_skip,
+        "untyped_blocks": untyped_blocks,
+        "msdi": round(msdi, 3)
+    }
+
 def evaluate_memory_quality(content: str, title: str = None) -> dict:
     """
     Evaluates memory content quality across Tier 1, Tier 2, and Tier 4 quality gates.
@@ -128,7 +206,18 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
         flags.append("OVERSIZED_PAYLOAD")
         tier1_warn = True
 
-    # Tier 2: Information-Theoretic Density Filters
+    # Tier 1.5: Markdown Syntax Integrity Verification
+    md_res = validate_markdown_structure(text)
+    if not md_res["is_valid"]:
+        flags.append(md_res["error_flag"])
+        return {
+            "status": "REJECT",
+            "quality_score": 0.0,
+            "quality_flags": flags,
+            "reason": md_res["reason"]
+        }
+
+    # Tier 2: Information-Theoretic & Sequence Density Filters
     entropy = calculate_shannon_entropy(text)
     if entropy < 2.5:
         flags.append("LOW_ENTROPY")
@@ -143,9 +232,30 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
         tier1_warn = True
 
     words = re.findall(r"\b\w+\b", text.lower())
+    if len(words) >= 20:
+        dup_3gram = calculate_ngram_duplicate_ratio(text, 3)
+        if dup_3gram > 0.30:
+            flags.append("HIGH_3GRAM_REPETITION")
+            return {
+                "status": "REJECT",
+                "quality_score": 0.10,
+                "quality_flags": flags,
+                "reason": f"High 3-gram sequence repetition detected ({dup_3gram:.1%})."
+            }
+            
+        dup_5gram = calculate_ngram_duplicate_ratio(text, 5)
+        if dup_5gram > 0.20:
+            flags.append("HIGH_5GRAM_REPETITION")
+            return {
+                "status": "REJECT",
+                "quality_score": 0.10,
+                "quality_flags": flags,
+                "reason": f"High 5-gram sequence repetition detected ({dup_5gram:.1%})."
+            }
+
     if len(words) > 30:
         ttr = calculate_ttr(text)
-        if ttr < 0.20:
+        if ttr < 0.35:
             flags.append("LOW_TTR")
             return {
                 "status": "REJECT",
@@ -156,7 +266,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
 
     # Tier 4: Technical Specificity & Structural Formatting Scoring
     score = 0.50
-    if re.search(r"^#{1,6}\s+", text, re.MULTILINE):
+    if md_res["header_count"] > 0:
         score += 0.15
         flags.append("HAS_HEADERS")
         
@@ -171,6 +281,23 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     if re.search(r"\b[\w/-]+\.(py|rs|js|ts|json|md|sql|yml|yaml|c|cpp|h|sh)\b|\b[a-z0-9_]+_[a-z0-9_]+\b", text):
         score += 0.10
         flags.append("HAS_PATHS_OR_IDENTIFIERS")
+
+    # MSDI Structure Density Score
+    msdi = md_res["msdi"]
+    if msdi >= 0.35:
+        score += 0.15
+        flags.append("HIGH_MSDI")
+    elif len(words) > 80 and msdi < 0.10:
+        score -= 0.15
+        flags.append("MONOLITHIC_TEXT_WALL")
+
+    if md_res["untyped_blocks"] > 0:
+        score -= 0.10
+        flags.append("UNANNOTATED_CODE_BLOCKS")
+
+    if md_res["has_header_skip"]:
+        score -= 0.10
+        flags.append("NON_HIERARCHICAL_HEADERS")
         
     if len(words) > 25:
         spec_ratio = calculate_technical_specificity(text)
