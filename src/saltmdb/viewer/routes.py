@@ -171,7 +171,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "parent_ids": json.loads(r[9]) if r[9] else [],
                     "title": r[10],
                     "context_id": r[11],
-                    "embedding_status": r[12],
+                    "embedding_status": "archived" if r[8] == "archived" else (r[12] or "pending"),
                     "tags": tag_map.get(r[0], [])
                 })
 
@@ -559,7 +559,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         try:
             conn = self.get_db_connection()
             cursor = conn.execute("""
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id
+                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status
                 FROM entities WHERE id = ?
             """, (entity_id,))
             row = cursor.fetchone()
@@ -618,6 +618,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "metadata": json.loads(row[14]) if row[14] else None,
                 "project_id": row[15],
                 "context_id": row[16],
+                "embedding_status": "archived" if row[8] == "archived" else (row[17] or "pending"),
                 "tags": tags,
                 "relations": {
                     "outgoing": outgoing,
