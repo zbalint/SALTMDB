@@ -151,8 +151,10 @@ def stop_viewer(port: int = 8080) -> str:
         logger.error("Error stopping database viewer: %s", e)
         return f"Error: Database viewer is not running or failed to stop: {e}"
 
-class SALTMDBTCPServer(socketserver.TCPServer):
-    """TCPServer subclass that suppresses noisy tracebacks for expected client disconnects."""
+class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """Multithreaded TCPServer subclass that handles concurrent requests and suppresses noisy client disconnect tracebacks."""
+    daemon_threads = True
+    
     def handle_error(self, request, client_address):
         exc_type, exc_value, exc_tb = sys.exc_info()
         if exc_type in (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
