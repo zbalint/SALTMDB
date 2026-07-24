@@ -37,7 +37,7 @@ def get_model():
             if _model is None:
                 from fastembed import TextEmbedding
                 local_model_dir = os.path.abspath(
-                    os.path.join(os.path.dirname(__file__), "..", "models", "bge-small-en-v1.5")
+                    os.path.join(os.path.dirname(__file__), "..", "..", "models", "bge-small-en-v1.5")
                 )
                 if _is_valid_local_model(local_model_dir):
                     logger.info("Loading bundled ONNX embedding model from %s", local_model_dir)
