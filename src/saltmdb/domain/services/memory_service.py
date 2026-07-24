@@ -292,16 +292,23 @@ def semantic_search(
     where_clauses: list[str],
     params: list,
     limit: int,
-    db_connection,
+    db_path: str,
 ) -> list[tuple[str, float]]:
-    """Return [(entity_id, cosine_distance), ...] ascending by distance."""
+    """Return [(entity_id, cosine_distance), ...] ascending by distance.
+    
+    Opens its own dedicated connection so it can safely load the sqlite_vec
+    extension without conflicting with a concurrent FTS search on a shared conn.
+    """
+    conn = None
     try:
         import sqlite_vec
         from saltmdb.domain.services import embedding_service
+        from saltmdb.db.connection import get_connection
 
-        db_connection.enable_load_extension(True)
-        sqlite_vec.load(db_connection)
-        db_connection.enable_load_extension(False)
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
 
         query_vector = embedding_service.embed_text(query)
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
@@ -314,11 +321,14 @@ def semantic_search(
             LIMIT ?
         """
         exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit]
-        rows = db_connection.execute(sql, exec_params).fetchall()
+        rows = conn.execute(sql, exec_params).fetchall()
         return [(row[0], row[1]) for row in rows]
     except Exception as e:
         logger.warning("Semantic search failed, falling back to FTS5 only: %s", e)
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
 def reciprocal_rank_fusion(
@@ -467,15 +477,19 @@ def search_memory(
         if sanitized_query:
             from saltmdb.config import is_semantic_search_enabled
             if is_semantic_search_enabled():
+                if not db_path:
+                    db_path = get_db_path()
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     fts_future = executor.submit(
                         _run_fts_search, conn, sanitized_query, where_clauses,
                         params, limit, offset
                     )
+                    # semantic_search gets db_path so it opens its OWN connection
+                    # — never share a connection across threads with sqlite_vec loaded
                     semantic_future = executor.submit(
                         semantic_search, query_keywords, where_clauses, params,
-                        limit, conn
+                        limit, db_path
                     )
                     fts_rows = fts_future.result()
                     semantic_rows = semantic_future.result()
