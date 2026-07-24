@@ -98,6 +98,107 @@ def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     total_count = len(ngrams)
     return 1.0 - (unique_count / total_count)
 
+from saltmdb.utils.perplexity import calculate_transition_perplexity
+
+def extract_prose_content(text: str) -> str:
+    """
+    Strips code fences, inline backticks, file paths, and URLs to isolate pure prose text.
+    Prevents false readability or perplexity quality rejections on raw technical logs.
+    """
+    if not text:
+        return ""
+    # Strip triple-backtick code blocks
+    cleaned = re.sub(r"```[\s\S]*?```", " ", text)
+    # Strip inline backticks
+    cleaned = re.sub(r"`[^`\n]+`", " ", cleaned)
+    # Strip URLs
+    cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    # Strip file paths
+    cleaned = re.sub(r"\b[\w/-]+\.(py|rs|js|ts|json|md|sql|yml|yaml|c|cpp|h|sh|db)\b", " ", cleaned)
+    # Strip redundant spaces
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+def calculate_coleman_liau_index(prose_text: str) -> float:
+    """
+    Calculates Coleman-Liau Readability Index (CLI) on prose text:
+    CLI = 0.0588 * L - 0.296 * S - 15.8
+    (L: avg letters per 100 words, S: avg sentences per 100 words)
+    """
+    words = re.findall(r"\b[a-zA-Z0-9_-]+\b", prose_text)
+    if not words:
+        return 0.0
+    word_count = len(words)
+    letter_count = sum(len(w) for w in words)
+    # Sentences delimited by ., !, or ?
+    sentences = [s for s in re.split(r"[.!?]+", prose_text) if s.strip()]
+    sentence_count = max(1, len(sentences))
+    
+    L = (letter_count / word_count) * 100.0
+    S = (sentence_count / word_count) * 100.0
+    cli = (0.0588 * L) - (0.296 * S) - 15.8
+    return round(cli, 2)
+
+def auto_format_markdown(text: str) -> str:
+    """
+    Idempotent pre-formatting pipeline: f(f(x)) = f(x).
+    Auto-annotates untyped code blocks with language identifiers and normalizes whitespace.
+    """
+    if not text:
+        return ""
+    
+    # 1. Normalize line endings and trailing whitespace
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").splitlines()]
+    
+    # 2. Auto-annotate untyped code blocks based on syntax heuristics
+    formatted_lines = []
+    in_code_block = False
+    block_buffer = []
+    
+    for line in lines:
+        if line.startswith("```"):
+            if not in_code_block:
+                in_code_block = True
+                block_lang = line[3:].strip()
+                block_buffer = [("fence", block_lang)]
+            else:
+                in_code_block = False
+                fence_lang = block_buffer[0][1]
+                code_lines = [l for _, l in block_buffer[1:]]
+                code_text = "\n".join(code_lines)
+                
+                # If fence was untyped, apply heuristic keyword detection
+                if not fence_lang:
+                    if re.search(r"\b(def|import|from|class|elif|self|print)\b", code_text):
+                        fence_lang = "python"
+                    elif re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE|FROM|WHERE)\b", code_text, re.IGNORECASE):
+                        fence_lang = "sql"
+                    elif re.search(r"^\s*[\{\[]", code_text) and ("\"" in code_text or ":" in code_text):
+                        fence_lang = "json"
+                    elif re.search(r"\b(function|const|let|var|console\.log|export|import)\b", code_text):
+                        fence_lang = "javascript"
+                
+                formatted_lines.append(f"```{fence_lang}")
+                formatted_lines.extend(code_lines)
+                formatted_lines.append("```")
+                block_buffer = []
+        else:
+            if in_code_block:
+                block_buffer.append(("line", line))
+            else:
+                formatted_lines.append(line)
+                
+    # If block was left unclosed, append buffered lines
+    if in_code_block and block_buffer:
+        fence_lang = block_buffer[0][1]
+        formatted_lines.append(f"```{fence_lang}")
+        formatted_lines.extend([l for _, l in block_buffer[1:]])
+        
+    result = "\n".join(formatted_lines)
+    # Collapse 3+ consecutive newlines to 2 newlines
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result
+
 def validate_markdown_structure(text: str) -> dict:
     """
     Validates Markdown syntax integrity, header hierarchy, code block annotations, and MSDI.
@@ -262,6 +363,34 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "quality_score": 0.15,
                 "quality_flags": flags,
                 "reason": f"Type-Token Ratio too low ({ttr:.2f}) - boilerplate repetition detected."
+            }
+
+    # Extract pure prose content for Readability and Perplexity evaluation
+    prose_content = extract_prose_content(text)
+    prose_words = re.findall(r"\b[a-zA-Z0-9_-]+\b", prose_content)
+
+    # Bigram Transition Perplexity Gate (Word-Salad Protection)
+    if len(prose_words) > 25:
+        perp_res = calculate_transition_perplexity(prose_content)
+        if perp_res["validity_ratio"] < 0.15:
+            flags.append("WORD_SALAD_PERPLEXITY")
+            return {
+                "status": "REJECT",
+                "quality_score": 0.10,
+                "quality_flags": flags,
+                "reason": f"Nonsensical word-salad sequence detected (valid transition ratio {perp_res['validity_ratio']:.1%} < 15%)."
+            }
+
+    # Coleman-Liau Syntactic Readability Bounds
+    if len(prose_words) > 30:
+        cli = calculate_coleman_liau_index(prose_content)
+        if cli < 2.0 or cli > 26.0:
+            flags.append("EXTREME_READABILITY_BOUNDS")
+            return {
+                "status": "REJECT",
+                "quality_score": 0.15,
+                "quality_flags": flags,
+                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [2.0, 26.0]."
             }
 
     # Tier 4: Technical Specificity & Structural Formatting Scoring
