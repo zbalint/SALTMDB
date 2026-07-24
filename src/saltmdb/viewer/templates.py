@@ -981,9 +981,11 @@ def get_frontend_html(db_path: str = None) -> str:
                 document.getElementById('dash-stat-relations').innerText = data.total_relations || 0;
                 
                 const ready = data.embeddings_ready || 0;
-                const total = data.total_entities || 1;
-                const readyPct = Math.round((ready / Math.max(1, total)) * 100);
+                const active = data.active_entities || (data.raw_count || 0) + (data.consolidated_count || 0);
+                const readyPct = Math.round((ready / Math.max(1, active)) * 100);
                 document.getElementById('dash-stat-embeddings').innerText = readyPct + '%';
+                const descEl = document.getElementById('dash-stat-embeddings-desc');
+                if (descEl) descEl.innerText = `${ready} / ${active} active memories indexed`;
                 
                 document.getElementById('db-size-label').innerText = 'Database Size: ' + (data.db_size_mb || 0) + ' MB';
 
