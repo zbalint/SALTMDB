@@ -203,4 +203,23 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         END;
         """)
         
+        # Performance indexes for high-traffic filtering columns
+        for index_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_owner_scope ON entities(owner_id, scope)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id, project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
+            "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
+            "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
+            "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
+            "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
+        ]:
+            try:
+                conn.execute(index_sql)
+            except Exception:
+                pass
+        
     return conn

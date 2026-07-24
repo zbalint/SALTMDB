@@ -14,8 +14,10 @@ from saltmdb.utils.text import (
 )
 from saltmdb.utils.nlp import word_sim
 from saltmdb.utils.redaction import redact_secrets
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+_embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
 
 def validate_memory_input(title: str, content: str, metadata: dict) -> None:
     """Validates memory input to enforce title hygiene and relative path constraints."""
@@ -188,50 +190,51 @@ def store_memory(
                     context_id = COALESCE(excluded.context_id, entities.context_id)
             """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id))
             
-            cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
-            db_tags = cursor.fetchall()
-            tag_lookup = {}
-            for tid, tname, tcanon in db_tags:
-                norm = tname.strip().lower().lstrip('#')
-                norm = re.sub(r'[-_\s]+', '', norm)
-                tag_lookup[norm] = tcanon if tcanon else tid
-
             tags = tags or []
+            tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
             for tag_name in tags:
                 tag_name = tag_name.strip()
                 if not tag_name:
                     continue
                 if not tag_name.startswith('#'):
                     tag_name = '#' + tag_name
-                    
+
                 norm_input = tag_name.lower().lstrip('#')
                 norm_input = re.sub(r'[-_\s]+', '', norm_input)
-                
+
+                # Use cached result if we already resolved this tag
                 if norm_input in tag_lookup:
                     tag_id = tag_lookup[norm_input]
                 else:
-                    cursor = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,))
-                    row = cursor.fetchone()
+                    # Targeted point query instead of full table scan
+                    row = conn.execute(
+                        "SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,)
+                    ).fetchone()
                     if row:
                         tag_id = row[1] if row[1] else row[0]
-                    else:
-                        tag_id = str(uuid.uuid4())
-                        conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
                         tag_lookup[norm_input] = tag_id
-                
+                    else:
+                        # Try normalized lookup for fuzzy match
+                        fuzzy_row = conn.execute(
+                            "SELECT id, canonical_id FROM tags WHERE lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
+                            (norm_input,)
+                        ).fetchone()
+                        if fuzzy_row:
+                            tag_id = fuzzy_row[1] if fuzzy_row[1] else fuzzy_row[0]
+                            tag_lookup[norm_input] = tag_id
+                        else:
+                            tag_id = str(uuid.uuid4())
+                            conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
+                            tag_lookup[norm_input] = tag_id
+
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
         from saltmdb.domain.services.librarian_service import trigger_librarian
         trigger_librarian(db_path=db_path)
 
         if db_path:
-            import threading
             from saltmdb.domain.services import embedding_service
-            threading.Thread(
-                target=embedding_service.embed_entity_async,
-                args=(entity_id, title, redacted_content, db_path),
-                daemon=True
-            ).start()
+            _embed_pool.submit(embedding_service.embed_entity_async, entity_id, title, redacted_content, db_path)
 
         return f"Knowledge stored successfully with ID: {entity_id}"
     except Exception as e:
@@ -511,6 +514,25 @@ def search_memory(
             cursor_obj = conn.execute(sql, exec_params)
             rows = cursor_obj.fetchall()
 
+        # Batch-fetch all related entities in a single query to avoid N+1
+        related_map = {}  # {entity_id: [related items]}
+        if include_related and rows:
+            all_eids = [r[0] for r in rows]
+            placeholders_r = ",".join("?" for _ in all_eids)
+            batch_rel_cursor = conn.execute(f"""
+                SELECT r.source_id, r.target_id, r.predicate, e.id, e.title
+                FROM relations r
+                JOIN entities e ON (r.target_id = e.id OR r.source_id = e.id)
+                WHERE (r.source_id IN ({placeholders_r}) OR r.target_id IN ({placeholders_r}))
+                  AND e.id NOT IN ({placeholders_r})
+                  AND e.status != 'archived'
+            """, all_eids * 3)
+            for bsrc, btgt, bpred, beid, betitle in batch_rel_cursor.fetchall():
+                anchor = bsrc if bsrc in all_eids else btgt
+                related_map.setdefault(anchor, [])[:5]
+                if len(related_map.get(anchor, [])) < 5:
+                    related_map.setdefault(anchor, []).append({"predicate": bpred, "id": beid, "title": betitle})
+
         results = []
         for r in rows:
             eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, rel_c = r
@@ -526,14 +548,7 @@ def search_memory(
                 "cursor": f"offset:{offset + limit}"
             }
             if include_related:
-                rel_cursor = conn.execute("""
-                    SELECT r.predicate, e.id, e.title
-                    FROM relations r
-                    JOIN entities e ON (r.target_id = e.id OR r.source_id = e.id)
-                    WHERE (r.source_id = ? OR r.target_id = ?) AND e.id != ? AND e.status != 'archived'
-                    LIMIT 5
-                """, (eid, eid, eid))
-                item["related_entities"] = [{"predicate": rr[0], "id": rr[1], "title": rr[2]} for rr in rel_cursor.fetchall()]
+                item["related_entities"] = related_map.get(eid, [])
 
             results.append(item)
             
@@ -694,13 +709,32 @@ def check_duplicate_memories(
             where.append("(project_id IS NULL OR project_id = ? OR context_id = ?)")
             params.extend([project_id, project_id])
             
-        cursor = conn.execute(f"SELECT id, title, full_content FROM entities WHERE {' AND '.join(where)}", params)
-        rows = cursor.fetchall()
-        
+        from saltmdb.utils.text import sanitize_fts_query
         input_text = f"{title or ''} {content or ''}"
         duplicates = []
         
-        for eid, etitle, econtent in rows:
+        # Pre-filter using FTS5 to reduce candidates from O(N) to ~30 max
+        fts_candidates = []
+        search_terms = sanitize_fts_query(title or content or "")
+        if search_terms:
+            try:
+                fts_where = " AND ".join(f"e.{c}" for c in where) if where else "1=1"
+                fts_rows = conn.execute(
+                    f"SELECT e.id, e.title, e.full_content FROM entities_fts fts "
+                    f"JOIN entities e ON fts.id = e.id "
+                    f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
+                    [search_terms] + params
+                ).fetchall()
+                fts_candidates = fts_rows
+            except Exception:
+                pass
+        
+        # Fallback to full scan only if FTS returned nothing
+        if not fts_candidates:
+            cursor = conn.execute(f"SELECT id, title, full_content FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
+            fts_candidates = cursor.fetchall()
+        
+        for eid, etitle, econtent in fts_candidates:
             existing_text = f"{etitle} {econtent}"
             sim = word_sim(input_text, existing_text)
             if sim >= 0.25:
