@@ -474,6 +474,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             cur = conn.execute("SELECT COUNT(*) FROM entities")
             stats["total_entities"] = cur.fetchone()[0]
+            stats["active_entities"] = stats["raw_count"] + stats["consolidated_count"]
 
             for scope in ['shared', 'private']:
                 cur = conn.execute("SELECT COUNT(*) FROM entities WHERE scope = ? AND status != 'archived'", (scope,))
