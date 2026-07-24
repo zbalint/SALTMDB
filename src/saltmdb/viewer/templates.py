@@ -1085,18 +1085,72 @@ def get_frontend_html(db_path: str = None) -> str:
             try {
                 const res = await fetch(`/api/entities/${id}`);
                 const data = await res.json();
+                if (data.error) {
+                    alert("Error: " + data.error);
+                    return;
+                }
                 document.getElementById('modal-entity-title').innerText = data.title || 'Entity Detail';
-                document.getElementById('modal-entity-body').innerHTML = `
-                    <div style="margin-bottom:14px; display:flex; gap:8px;">
-                        <span class="badge badge-green">${data.status}</span>
-                        <span class="badge badge-blue">${data.scope}</span>
-                        <span class="badge badge-purple">Owner: ${data.owner_id || 'system'}</span>
+                
+                const metaHtml = `
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px; background:rgba(255,255,255,0.03); padding:14px; border-radius:8px; border:var(--glass-border); font-size:0.8rem;">
+                        <div><strong style="color:var(--text-muted);">Status:</strong> <span class="badge ${data.status==='raw'?'badge-green':(data.status==='consolidated'?'badge-yellow':'badge-red')}">${data.status}</span></div>
+                        <div><strong style="color:var(--text-muted);">Embedding:</strong> <span class="badge ${data.embedding_status==='ready'?'badge-green':'badge-yellow'}">${data.embedding_status}</span></div>
+                        <div><strong style="color:var(--text-muted);">Scope:</strong> <span class="badge badge-blue">${data.scope}</span></div>
+                        <div><strong style="color:var(--text-muted);">Owner:</strong> ${escapeHtml(data.owner_id || 'system')}</div>
+                        <div><strong style="color:var(--text-muted);">Weight:</strong> ${data.weight || 1.0}</div>
+                        <div><strong style="color:var(--text-muted);">Is Core:</strong> ${data.is_core ? 'Yes (#core)' : 'No'}</div>
+                        <div><strong style="color:var(--text-muted);">Created:</strong> ${data.created_at || 'N/A'}</div>
+                        <div><strong style="color:var(--text-muted);">Updated:</strong> ${data.updated_at || 'N/A'}</div>
+                        <div><strong style="color:var(--text-muted);">Last Accessed:</strong> ${data.last_accessed_at || 'N/A'}</div>
+                        <div style="grid-column: 1 / -1;"><strong style="color:var(--text-muted);">Entity ID:</strong> <code style="color:var(--accent);">${data.id}</code></div>
+                        ${data.context_id ? `<div style="grid-column: 1 / -1;"><strong style="color:var(--text-muted);">Context ID:</strong> ${escapeHtml(data.context_id)}</div>` : ''}
                     </div>
-                    <h4 style="margin-bottom:6px;">Content Markdown:</h4>
-                    <pre>${escapeHtml(data.full_content || '')}</pre>
-                    <h4 style="margin:14px 0 6px;">Tags:</h4>
-                    <div>${(data.tags||[]).map(t => `<span class="badge badge-blue" style="margin-right:4px;">${t}</span>`).join('')}</div>
                 `;
+
+                const tagsHtml = `
+                    <div style="margin-bottom:16px;">
+                        <h4 style="margin-bottom:6px; font-size:0.85rem; color:var(--text-secondary);">Tags:</h4>
+                        <div>${(data.tags||[]).length > 0 ? data.tags.map(t => `<span class="badge badge-blue" style="margin-right:4px;">${escapeHtml(t)}</span>`).join('') : '<span style="color:var(--text-muted);">No tags</span>'}</div>
+                    </div>
+                `;
+
+                let relationsHtml = '';
+                if (data.relations && data.relations.all && data.relations.all.length > 0) {
+                    relationsHtml = `
+                        <div style="margin-bottom:16px;">
+                            <h4 style="margin-bottom:6px; font-size:0.85rem; color:var(--text-secondary);">Knowledge Graph Relations (${data.relations.all.length}):</h4>
+                            <div style="display:flex; flex-direction:column; gap:6px; background:rgba(0,0,0,0.2); padding:10px; border-radius:8px; border:var(--glass-border);">
+                                ${data.relations.all.map(r => `
+                                    <div style="font-size:0.8rem; display:flex; align-items:center; gap:8px;">
+                                        <span class="badge ${getPredicateBadgeClass(r.predicate)}">${escapeHtml(r.predicate)}</span>
+                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${r.source_id}')">${escapeHtml(r.source_title)}</span>
+                                        <span>➔</span>
+                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${r.target_id}')">${escapeHtml(r.target_title)}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                let metaJsonHtml = '';
+                if (data.metadata && Object.keys(data.metadata).length > 0) {
+                    metaJsonHtml = `
+                        <div style="margin-bottom:16px;">
+                            <h4 style="margin-bottom:6px; font-size:0.85rem; color:var(--text-secondary);">Custom Metadata JSON:</h4>
+                            <pre>${escapeHtml(JSON.stringify(data.metadata, null, 2))}</pre>
+                        </div>
+                    `;
+                }
+
+                const contentHtml = `
+                    <div>
+                        <h4 style="margin-bottom:6px; font-size:0.85rem; color:var(--text-secondary);">Full Content Markdown:</h4>
+                        <pre>${escapeHtml(data.full_content || '')}</pre>
+                    </div>
+                `;
+
+                document.getElementById('modal-entity-body').innerHTML = metaHtml + tagsHtml + relationsHtml + metaJsonHtml + contentHtml;
                 document.getElementById('entity-modal').classList.add('active');
             } catch (err) {
                 alert("Error fetching detail: " + err);
