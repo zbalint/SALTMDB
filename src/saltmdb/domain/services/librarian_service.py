@@ -98,10 +98,6 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
         if should_close:
             conn.close()
 
-def decay_lru_memories(conn: sqlite3.Connection = None, db_path: str = None):
-    """[DEPRECATED / REMOVED PER DESIGN PRINCIPLES]"""
-    pass
-
 def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = None):
     """Scans for tags with 5 or more raw entries per owner and logs a consolidation request event."""
     should_close = False

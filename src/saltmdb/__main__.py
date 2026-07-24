@@ -16,7 +16,6 @@ def main():
         from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock
         from saltmdb.domain.services.librarian_service import (
             merge_tags_heuristics,
-            decay_lru_memories,
             consolidate_cluttered_tags,
             consolidate_memories,
             consolidate_vector_clusters,
@@ -32,7 +31,6 @@ def main():
         try:
             logger.info("Starting SALTMDB Librarian on %s...", db_path)
             merge_tags_heuristics(conn)
-            decay_lru_memories(conn)
             consolidate_cluttered_tags(conn)
             consolidate_memories(conn)
             consolidate_vector_clusters(conn)
