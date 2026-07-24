@@ -27,3 +27,6 @@ saltmdb-viewer = "saltmdb.viewer.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"saltmdb.models.bge-small-en-v1.5" = ["*"]
