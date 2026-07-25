@@ -346,7 +346,16 @@ def commit_consolidation(
                     INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                     VALUES (?, ?, ?, 'consolidated_from', ?, ?)
                 """, (rel_id, consolidated_id, parent_id, now, now))
-                
+
+        try:
+            target_db = conn.execute("PRAGMA database_list").fetchone()[2]
+        except Exception:
+            target_db = db_path or get_db_path()
+        if target_db:
+            from saltmdb.domain.services import embedding_service
+            from saltmdb.domain.services.memory_service import _embed_pool
+            _embed_pool.submit(embedding_service.embed_entity_async, consolidated_id, clean_title, redacted_content, target_db)
+
         return f"Successfully committed consolidated memory with ID: {consolidated_id}"
     except Exception as e:
         logger.error("Error committing consolidation: %s", e)
