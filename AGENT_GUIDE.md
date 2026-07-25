@@ -63,35 +63,52 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 0. **Owner Identifier**
    * Use the default zbalint identifier as owner_id if i don't say to use something else in the session. 
 
-1. **Think Before You Leap (Pre-Action Context Check)**
+1. **Diagnose Before Prescribing (No Assumptions)**
+   * When the user provides a task, error, or request, DO NOT immediately jump to conclusions, guess their setup, or assume the root cause.
+   * *Required Protocol*: Always interview the user. Ask targeted follow-up questions to fully grasp their intent, environment, and the exact constraints of the problem before taking action.
+
+2. **Think Before You Leap (Pre-Action Context Check)**
    * Before writing code, editing files, running CLI commands, or initiating major refactors, call `search_memory` using keywords matching the target component or task.
    * *Goal*: Discover past decisions, design constraints, active bugs, and architectural rules *before* taking action.
 
-2. **Step Back & Reflect (Error Circuit Breaker)**
+3. **Step Back & Reflect (Error Circuit Breaker)**
    * If a command, script, tool call, or unit test fails—and especially if an attempt fails **2 consecutive times**—**STOP immediately**.
    * Do NOT blindly re-run commands, edit random files, or enter trial-and-error loops that burn context tokens.
    * *Required Protocol*:
-     1. Log the failure via `log_event(type='issue', ...)` with the exact error message.
-     2. Call `search_memory` using keywords from the error message or affected component to check for historical solutions or known caveats.
-     3. Step back, analyze the root cause, re-read the context, and form a deliberate new plan before executing any new actions.
+     1. Log the failure via `log_event(type='issue', ...)`, search memory for matching keywords, analyze the root cause, and form a deliberate new plan.
 
-3. **Active Knowledge Persistence (Proactive Memory Storing)**
-   * Actively use `store_memory` to persist valuable discoveries as soon as they emerge—including recurring issues, root-cause fixes, workaround solutions, user preferences, and newly established best practices.
-   * Do NOT rely on prompt context alone to carry insights. If a solution or fact will be useful in a future session or for another agent instance, store it immediately in long-term memory.
+4. **Never Make the Same Mistake Twice (Issue Logging)**
+   * If you encounter and resolve an issue—no matter how small or large—you MUST create a memory about the root cause and the working solution using `store_memory`.
+   * *Goal*: Ensure that neither you nor any future agent will ever waste tokens debugging the exact same problem again.
 
-4. **Look Before You Write (Deduplication & Truth Verification)**
-   * Before storing new long-term knowledge via `store_memory`, pass `check_duplicates_only=True` or perform a quick search to ensure similar knowledge doesn't already exist.
-   * If an existing memory covers the topic, update/supersede it or use `commit_consolidation` rather than creating redundant entries.
+5. **Active Knowledge Persistence (Proactive Memory Storing)**
+   * Actively use `store_memory` to persist valuable discoveries as soon as they emerge—including workaround solutions, user preferences, and newly established best practices. Do NOT rely on prompt context alone to carry insights.
 
-5. **Pragmatic Promotion Over Forced Merging (Consolidation Rule)**
-   * Do NOT force-merge memories at all costs. Consolidation exists to elevate high-signal facts and reduce noise.
-   * If a raw memory is already complete, self-contained, and valuable on its own, promote it directly to consolidated status (passing its single ID to `commit_consolidation`) rather than combining it with loosely related notes.
+6. **Look Before You Write (Deduplication & Truth Verification)**
+   * Before storing new long-term knowledge, pass `check_duplicates_only=True` or perform a quick search to ensure similar knowledge doesn't already exist. Update/supersede existing memories rather than creating redundant entries.
 
-6. **Respect Precedent & Governance (Admissibility)**
-   * Retrieved `#core` tags and project rules represent hard operational governance. If past memory explicitly restricts an approach (e.g., *"Never run subprocesses in test mode"* or *"Keep fastembed ONNX worker local"*), you must strictly abide by it.
+7. **Pragmatic Promotion Over Forced Merging (Consolidation Rule)**
+   * Do NOT force-merge memories at all costs. If a raw memory is already complete, self-contained, and valuable on its own, promote it directly to consolidated status (passing its single ID to `commit_consolidation`).
 
-7. **Leave Context Cleaner Than You Found It (Cognitive Sweep)**
-   * At session wrap-up or task completion, do not leave transient working facts scattered across raw events. Synthesize key decisions into long-term knowledge via `store_memory` and resolve pending consolidation requests.
+8. **Respect Precedent & Governance (Admissibility)**
+   * Retrieved `#core` tags and project rules represent hard operational governance. If past memory explicitly restricts an approach, you must strictly abide by it.
+
+9. **Leave Context Cleaner Than You Found It (Cognitive Sweep)**
+   * At session wrap-up or task completion, synthesize transient working facts into long-term knowledge and resolve any pending consolidation requests.
+
+10. **Query Broad, Fetch Narrow (Token Efficiency)**
+    * Do NOT flood your context window with raw text. When exploring an unknown domain, run `search_memory` with `fetch_full=False` to scan titles and snippets first. Only fetch the complete markdown once you identify the exact entity.
+
+11. **Know Where Your Thoughts Belong (State Routing)**
+    * **Long-Term Database (`store_memory`)**: Use ONLY for durable knowledge (architectural decisions, resolved bugs, rules).
+    * **Volatile Memory (`ephemeral_memory`)**: Use for transient state (temporary API tokens, loop counters, short-lived pagination cursors).
+
+12. **Build the Graph, Don't Just Pile Documents (Relational Linking)**
+    * SALTMDB is a semantic graph. Whenever you create a memory that supersedes an old one or fixes a bug in a specific file, actively use `manage_relation` to link them (e.g., `predicate="resolves"`).
+
+13. **Automate the Tedious (Skill Creation)**
+    * If you notice you are performing the same mechanical sequence of commands, queries, or file edits repeatedly within or across sessions, STOP doing it manually.
+    * *Required Protocol*: Document the repetitive workflow, write a robust, reusable Python script or CLI tool to automate it, and record this new "skill" in `store_memory` so future agents can execute it instantly.
 
 ---
 
