@@ -100,6 +100,27 @@ class TestBugFixes(unittest.TestCase):
         self.assertIsNotNone(row[2])
         self.assertNotEqual(row[1], old_time)
 
+    def test_is_core_flag_persistence(self):
+        """Fix Verification: Ensure is_core=True sets is_core=1, and updating without specifying is_core preserves is_core=1."""
+        mem_text = "# Core System Guideline\n\nMust enforce strict circuit breaker on tool failures."
+        res = store_memory(mem_text, owner_id="AgentA", scope="shared", is_core=True, title="Core Guideline", db_path=self.db_path)
+        self.assertIn("Knowledge stored successfully", res)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute("SELECT id, is_core FROM entities WHERE title = 'Core Guideline'").fetchone()
+        self.assertIsNotNone(row)
+        entity_id, is_core = row
+        self.assertEqual(is_core, 1)
+
+        # Now update content without passing is_core (defaults to None)
+        updated_text = "# Core System Guideline\n\nMust enforce strict circuit breaker on tool failures. Updated line added."
+        res_update = store_memory(updated_text, entity_id=entity_id, owner_id="AgentA", scope="shared", title="Core Guideline", db_path=self.db_path, skip_duplicate_check=True)
+        self.assertIn("Knowledge stored successfully", res_update)
+
+        row_updated = conn.execute("SELECT is_core FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        conn.close()
+        self.assertEqual(row_updated[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

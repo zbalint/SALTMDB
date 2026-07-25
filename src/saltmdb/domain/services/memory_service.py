@@ -52,7 +52,7 @@ def store_memory(
     owner_id: str = None,
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
-    is_core: bool = False,
+    is_core: bool = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -213,15 +213,20 @@ def store_memory(
             conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
             
             metadata_str = json.dumps(metadata) if metadata else None
+            if is_core is None:
+                is_core_val = None
+            else:
+                is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
+
             conn.execute("""
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
                     owner_id = COALESCE(excluded.owner_id, entities.owner_id),
                     scope = excluded.scope,
-                    is_core = excluded.is_core,
+                    is_core = COALESCE(?, entities.is_core),
                     weight = excluded.weight,
                     status = excluded.status,
                     title = excluded.title,
@@ -235,7 +240,7 @@ def store_memory(
                     quality_score = excluded.quality_score,
                     quality_status = excluded.quality_status,
                     quality_flags = excluded.quality_flags
-            """, (entity_id, now, now, now, owner_id, scope, 1 if is_core else 0, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id, content_hash, quality_score, quality_status, quality_flags_str))
+            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
             
             tags = tags or []
             tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily

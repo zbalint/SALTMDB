@@ -35,7 +35,7 @@ def store_memory(
     owner_id: str = None,
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
-    is_core: bool = False,
+    is_core: bool = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -62,13 +62,19 @@ def store_memory(
     else:
         tags_ = []
 
+    raw_is_core = is_core if is_core is not None else (kw.get("is_core") if "is_core" in kw else kwargs.get("is_core"))
+    if raw_is_core is not None:
+        is_core_ = raw_is_core in (True, 1, "true", "1", "True")
+    else:
+        is_core_ = None
+
     return memory_service.store_memory(
         content=content_,
         tags=tags_,
         owner_id=owner_id_,
         scope=scope,
         weight=weight,
-        is_core=is_core,
+        is_core=is_core_,
         title=title or kw.get("title") or kwargs.get("title"),
         entity_id=entity_id or kw.get("entity_id") or kw.get("id") or kwargs.get("entity_id") or kwargs.get("id"),
         relevance=relevance,
