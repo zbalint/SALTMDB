@@ -214,17 +214,33 @@ def validate_markdown_structure(text: str) -> dict:
         }
         
     # Table Column Symmetry check
-    lines = text.splitlines()
-    for line in lines:
+    table_block_pipes = []
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("|") and stripped.endswith("|"):
             pipe_count = stripped.count("|")
-            if pipe_count < 3: # Must have start, column divider(s), and end pipe
+            if pipe_count < 2:
                 return {
                     "is_valid": False,
                     "error_flag": "BROKEN_MARKDOWN_SYNTAX",
                     "reason": "Malformed Markdown table row detected (insufficient pipe separators)."
                 }
+            table_block_pipes.append(pipe_count)
+        else:
+            if table_block_pipes:
+                if len(set(table_block_pipes)) > 1:
+                    return {
+                        "is_valid": False,
+                        "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+                        "reason": "Malformed Markdown table row detected (mismatched column pipe separators)."
+                    }
+                table_block_pipes = []
+    if table_block_pipes and len(set(table_block_pipes)) > 1:
+        return {
+            "is_valid": False,
+            "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+            "reason": "Malformed Markdown table row detected (mismatched column pipe separators)."
+        }
 
     # 2. Header Hierarchy & Progression Check
     headers = re.findall(r"^(#{1,6})\s+(.+)$", text, re.MULTILINE)
