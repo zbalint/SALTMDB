@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the **SALTMDB
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via 23 parameterized MCP tools exposed by the `saltmdb` package (`src/saltmdb/mcp/tools.py`):
+Agents interface with SALTMDB via 10 parameterized MCP tools exposed by the `saltmdb` package (`src/saltmdb/mcp/tools.py`):
 
 ```mermaid
 graph TD
@@ -53,28 +53,17 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > **FORBIDDEN ACTION: NO DIRECT SQL ACCESS**
 > You are strictly forbidden from running shell commands like `sqlite3` or using scripts to connect directly to the `saltmdb.db` file. Bypassing the MCP server skips the secrets redaction middleware and FTS5 search indexing triggers, corrupting the database state. All queries and updates must occur via MCP tool calls.
 
-## 1. Available Tools Overview (23 Tools)
-* `search_memory(owner_id, query_keywords, tags_filter, metadata_filter, explain_mode, limit, include_related, context_id, is_core, tag_operator, cursor)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Shared memories surface globally across all agent queries based on relevance score.
-* `scan_memories(owner_id, status_filter, limit, offset)`: Scan and inspect lists/contents of memories for audits, consistency reviews, or contradiction checks.
-* `store_memory(content, tags, owner_id, scope, weight, is_core, title, entity_id, metadata, context_id, skip_duplicate_check, relevance, impact, novelty, actionability)`: Save/upsert long-term knowledge. Requires non-empty `content` and `title`. Enforces sub-millisecond 6-stage quality gates (idempotent auto-formatting, prose extraction, Bigram Perplexity word-salad filtering, Coleman-Liau readability bounds), SHA-256 exact hash collision checks, calibrated auto-supersession ($\ge 0.88$ similarity), and Tier 4 technical quality scoring ($0.0 - 1.0$) before ONNX vector embedding execution. Supports parameter aliases (`text`, `tag`, `owner`).
-* `fetch_memory_chunk(entity_id)`: Returns full markdown text of a memory. Accepts exact UUID, status string containing UUID, or entity title.
-* `get_canonical_tags(query, domain)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (or alias parameters `query`, `substring`, `tag_filter`).
-* `detect_orphaned_memories(owner_id)`: Identifies active memories with zero relationship links, suggesting candidate links based on tag overlap.
-* `check_duplicate_memories(title, content, owner_id, tags, exclude_ids)`: Run before storing to verify if a proposed memory overlaps with existing ones (returns duplicate warning if similarity >= 70%). Supports `exclude_ids` to suppress false positive duplicate collisions during consolidation.
+## 1. Available Tools Overview (10 Consolidated Tools)
+* `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` or `fetch_full=True` retrieves full markdown text.
+* `store_memory(content, title, tags, is_core, owner_id, context_id, scope, check_duplicates_only)`: Save/upsert long-term knowledge with built-in quality gates, auto-supersession ($\ge 0.88$ similarity), and Tier 4 technical quality scoring. Setting `check_duplicates_only=True` returns duplicate detection without writing to the DB. Supports parameter aliases (`text`, `tag`, `owner`).
+* `get_canonical_tags(query, domain)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (`query`, `substring`, `tag_filter`).
 * `log_event(agent_id, type, content, error_code, session_id, context_id)`: Log a short-term operational event. Accepts parameter aliases (`event_type`, `message`, `description`).
-* `get_recent_events(agent_id, type_filter, limit)`: Retrieve event logs to check for background signals (e.g. consolidation requests).
-* `archive_memory(entity_id, owner_id)`: Explicitly archives (retires) a long-term memory, marking it as inactive.
-* `commit_consolidation(parent_ids, title, content, tags, scope, weight, owner_id, context_id)`: Commit a consolidated memory, soft-archive parent raw nodes (never hard-deletes), and auto-create `consolidated_from` lineage edges. Executes Tier 1/2/4 quality checks and target-excluded deduplication on summary content.
-* `create_snapshot()`: Safely creates a timestamped database backup in `backups/` using SQLite's backup API.
-* `store_relation(source_id, target_id, predicate)`: Store a typed directional edge between two memories. Auto-resolves entity IDs from titles or status strings.
-* `analyze_dependencies(root_entity_id, max_depth)`: Recursively trace downstream relational paths using SQL CTEs. Returns `graph_exhausted` signal.
-* `analyze_lineage(entity_id)`: Traverses full multi-generation consolidation and derivation ancestry (`consolidated_from` / `derived_from`).
-* `bulk_archive_memory(archive_requests)`: Bulk archive memories atomically. Accepts UUID string arrays or dict lists.
-* `bulk_commit_consolidation(consolidations)`: Bulk commit synthesized consolidations atomically.
-* `bulk_store_relations(relations)`: Bulk store directional relationship edges atomically.
-* `store_ephemeral_memory(key, value)` / `get_ephemeral_memory(key)`: In-memory volatile secret storage.
-* `start_db_viewer(port)` / `stop_db_viewer(port)`: Control zero-dependency dark-mode web dashboard viewer (default port 8080).
-* `get_session_summary(session_id)`: Retrieves all events grouped by a specific session ID for targeted session auditing.
+* `get_events(agent_id, type_filter, session_id, limit, offset, status_filter, owner_id, mode)`: Retrieve operational events (`mode='events'`), session summary events (`mode='session'`), or scan memory logs (`mode='memories'`).
+* `archive_memory(entity_id, owner_id)`: Polymorphic tool to archive (retire) one or multiple long-term memories. Accepts a single `entity_id` string OR a list of string IDs.
+* `manage_relation(relations, source_id, target_id, predicate)`: Polymorphic tool to store single or multiple directional semantic relationship edges between memory nodes.
+* `commit_consolidation(consolidations, parent_ids, title, content, tags, owner_id, context_id)`: Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parent raw nodes and creating `consolidated_from` lineage edges.
+* `inspect_graph(entity_id, mode, max_depth, owner_id)`: Unifies graph inspection (`mode='dependencies'`, `mode='lineage'`, or `mode='orphans'`). `entity_id` is optional when `mode='orphans'`.
+* `ephemeral_memory(action, key, value)`: Unified volatile in-memory secret manager (`action='get'` or `action='store'`).
 
 
 ## 2. Operational Lifecycle
