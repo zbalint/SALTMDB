@@ -22,10 +22,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install mcp
+          pip install .
           
       - name: Run Test Suite
         env:
-          PYTHONPATH: .
+          PYTHONPATH: src
         run: |
-          python scratch/test_db.py
+          python -m unittest discover -s tests
+
