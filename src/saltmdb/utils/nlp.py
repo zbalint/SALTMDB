@@ -1,4 +1,16 @@
 import re
+from saltmdb.config import (
+    QG_MIN_LENGTH,
+    QG_MAX_SYMBOL_RATIO,
+    QG_MIN_ENTROPY,
+    QG_MAX_ENTROPY,
+    QG_MAX_3GRAM_DUP,
+    QG_MAX_5GRAM_DUP,
+    QG_MIN_TTR,
+    QG_CLI_MIN,
+    QG_CLI_MAX,
+    QG_PERPLEXITY_VALIDITY_MIN,
+)
 
 STOP_WORDS = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
@@ -290,13 +302,13 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     text = (content or "").strip()
     
     # Tier 1: Boundary & Fluff Scanners
-    if len(text) < 20:
+    if len(text) < QG_MIN_LENGTH:
         flags.append("SHORT_LENGTH")
         return {
             "status": "REJECT",
             "quality_score": 0.0,
             "quality_flags": flags,
-            "reason": f"Payload string length ({len(text)} chars) below minimum threshold of 20 characters."
+            "reason": f"Payload string length ({len(text)} chars) below minimum threshold of {QG_MIN_LENGTH} characters."
         }
         
     if FLUFF_PATTERN.match(text):
@@ -309,13 +321,13 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
         }
         
     symbol_ratio = calculate_symbol_ratio(text)
-    if symbol_ratio > 0.35:
+    if symbol_ratio > QG_MAX_SYMBOL_RATIO:
         flags.append("HIGH_SYMBOL_RATIO")
         return {
             "status": "REJECT",
             "quality_score": 0.05,
             "quality_flags": flags,
-            "reason": f"Symbol-to-alpha ratio ({symbol_ratio:.2f}) exceeds threshold of 0.35."
+            "reason": f"Symbol-to-alpha ratio ({symbol_ratio:.2f}) exceeds threshold of {QG_MAX_SYMBOL_RATIO}."
         }
         
     tier1_warn = False
@@ -336,7 +348,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
 
     # Tier 2: Information-Theoretic & Sequence Density Filters
     entropy = calculate_shannon_entropy(text)
-    if entropy < 2.5:
+    if entropy < QG_MIN_ENTROPY:
         flags.append("LOW_ENTROPY")
         return {
             "status": "REJECT",
@@ -344,14 +356,14 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             "quality_flags": flags,
             "reason": f"Character entropy too low ({entropy:.2f} bits/char) - repetitive text loop detected."
         }
-    elif entropy > 5.3:
+    elif entropy > QG_MAX_ENTROPY:
         flags.append("HIGH_ENTROPY")
         tier1_warn = True
 
     words = re.findall(r"\b\w+\b", text.lower())
     if len(words) >= 20:
         dup_3gram = calculate_ngram_duplicate_ratio(text, 3)
-        if dup_3gram > 0.30:
+        if dup_3gram > QG_MAX_3GRAM_DUP:
             flags.append("HIGH_3GRAM_REPETITION")
             return {
                 "status": "REJECT",
@@ -361,7 +373,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             }
             
         dup_5gram = calculate_ngram_duplicate_ratio(text, 5)
-        if dup_5gram > 0.20:
+        if dup_5gram > QG_MAX_5GRAM_DUP:
             flags.append("HIGH_5GRAM_REPETITION")
             return {
                 "status": "REJECT",
@@ -372,7 +384,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
 
     if len(words) > 30:
         ttr = calculate_ttr(text)
-        if ttr < 0.35:
+        if ttr < QG_MIN_TTR:
             flags.append("LOW_TTR")
             return {
                 "status": "REJECT",
@@ -389,20 +401,20 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     perp_penalty = 0.0
     if len(prose_words) > 25:
         perp_res = calculate_transition_perplexity(prose_content)
-        if perp_res["validity_ratio"] < 0.15:
+        if perp_res["validity_ratio"] < QG_PERPLEXITY_VALIDITY_MIN:
             flags.append("WORD_SALAD_PERPLEXITY")
             perp_penalty = 0.20
 
     # Coleman-Liau Syntactic Readability Bounds
     if len(prose_words) > 30:
         cli = calculate_coleman_liau_index(prose_content)
-        if cli < 2.0 or cli > 26.0:
+        if cli < QG_CLI_MIN or cli > QG_CLI_MAX:
             flags.append("EXTREME_READABILITY_BOUNDS")
             return {
                 "status": "REJECT",
                 "quality_score": 0.15,
                 "quality_flags": flags,
-                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [2.0, 26.0]."
+                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [{QG_CLI_MIN}, {QG_CLI_MAX}]."
             }
 
     # Tier 4: Technical Specificity & Structural Formatting Scoring

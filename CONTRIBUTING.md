@@ -42,13 +42,13 @@ Every modification must pass the unit test suite before submission.
 1. Set the PYTHONPATH environment variable:
    ```bash
    # On Windows:
-   $env:PYTHONPATH="."
+   $env:PYTHONPATH="src"
    # On Unix:
-   export PYTHONPATH="."
+   export PYTHONPATH="src"
    ```
-2. Run the hybrid search test suite:
+2. Run the unit test suite (matches the command CI enforces in `.github/workflows/python-tests.yml`):
    ```bash
-   python -m pytest scratch/test_hybrid_search.py -v
+   python -m unittest discover -s tests
    ```
 3. Inspect and verify the live outputs inside the local browser viewer by running:
    ```bash

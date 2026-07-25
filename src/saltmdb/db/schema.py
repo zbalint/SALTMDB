@@ -1,6 +1,18 @@
 import sqlite3
+import logging
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection
+
+logger = logging.getLogger(__name__)
+
+def _add_column_if_missing(conn, table: str, column_def: str) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN: swallows the genuine 'already exists' case,
+    re-raises anything else so real schema bugs don't vanish silently."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def};")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
 
 def init_db(db_path: str = None) -> sqlite3.Connection:
     """Initialize the local SQLite database with Write-Ahead Logging (WAL), DDL tables, triggers, and migrations."""
@@ -56,21 +68,22 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "quality_status TEXT",
             "quality_flags TEXT"
         ]:
-            try:
-                conn.execute(f"ALTER TABLE entities ADD COLUMN {col};")
-            except sqlite3.OperationalError:
-                pass
-                
+            _add_column_if_missing(conn, "entities", col)
+
         # Schema migration: attempt to add new columns to events table if they don't exist
         for col in ["session_id TEXT", "context_id TEXT"]:
-            try:
-                conn.execute(f"ALTER TABLE events ADD COLUMN {col};")
-            except sqlite3.OperationalError:
-                pass
+            _add_column_if_missing(conn, "events", col)
 
         # Backfill embedding_status = 'archived' for any archived entities
         try:
             conn.execute("UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived' AND (embedding_status != 'archived' OR embedding_status IS NULL);")
+        except sqlite3.OperationalError:
+            pass
+
+        # Schema migration: project_id is retired in favor of context_id (kept as a physical
+        # column for compatibility, but no longer written/read by application code past this backfill)
+        try:
+            conn.execute("UPDATE entities SET context_id = project_id WHERE context_id IS NULL AND project_id IS NOT NULL;")
         except sqlite3.OperationalError:
             pass
         
@@ -86,10 +99,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         );
         """)
         
-        try:
-            conn.execute("ALTER TABLE tags ADD COLUMN normalized_name TEXT;")
-        except sqlite3.OperationalError:
-            pass
+        _add_column_if_missing(conn, "tags", "normalized_name TEXT")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_normalized_name ON tags(normalized_name);")
         
@@ -148,8 +158,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         try:
             init_vector_schema(conn)
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Vector schema init deferred/failed: %s", e)
+            logger.warning("Vector schema init deferred/failed: %s", e)
         
         # 6. Mutex Lock Table for Leader Election
         conn.execute("""
@@ -162,10 +171,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         """)
         
         # Schema migration: attempt to add last_run_at column if updating an existing database
-        try:
-            conn.execute("ALTER TABLE _system_locks ADD COLUMN last_run_at DATETIME;")
-        except sqlite3.OperationalError:
-            pass # Column already exists
+        _add_column_if_missing(conn, "_system_locks", "last_run_at DATETIME")
             
         conn.execute("""
         INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at) 
@@ -241,7 +247,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         for index_sql in [
             "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_entities_owner_scope ON entities(owner_id, scope)",
-            "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id, project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
@@ -254,7 +260,9 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         ]:
             try:
                 conn.execute(index_sql)
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "already exists" not in msg and "already an index" not in msg:
+                    logger.error("Failed to create index (%s): %s", index_sql, e)
         
     return conn

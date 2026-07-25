@@ -22,3 +22,26 @@ def is_semantic_search_enabled() -> bool:
     val = os.environ.get("SALTMDB_ENABLE_SEMANTIC", "true").strip().lower()
     return val not in ("0", "false", "no", "off")
 
+# Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
+DEDUP_SUPERSESSION_THRESHOLD = 0.75   # >= this -> log a supersession_candidate event
+DEDUP_DUPLICATE_THRESHOLD = 0.85      # >= this -> warn the caller of a likely duplicate
+DEDUP_LEXICAL_THRESHOLD = 0.40        # non-semantic (word_sim) fallback threshold
+
+# BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
+BM25_TITLE_WEIGHT = 10.0
+BM25_CONTENT_WEIGHT = 1.0
+BM25_ALIAS_WEIGHT = 5.0
+RELATION_COUNT_PENALTY = 0.1
+
+# Quality gate thresholds (src/saltmdb/utils/nlp.py:evaluate_memory_quality)
+QG_MIN_LENGTH = 20
+QG_MAX_SYMBOL_RATIO = 0.35
+QG_MIN_ENTROPY = 2.5
+QG_MAX_ENTROPY = 5.3
+QG_MAX_3GRAM_DUP = 0.30
+QG_MAX_5GRAM_DUP = 0.20
+QG_MIN_TTR = 0.35
+QG_CLI_MIN = 2.0
+QG_CLI_MAX = 26.0
+QG_PERPLEXITY_VALIDITY_MIN = 0.15
+

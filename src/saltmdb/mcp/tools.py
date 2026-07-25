@@ -29,23 +29,40 @@ def _normalize_list_or_str(val) -> list:
         return [val_str]
     return [val]
 
+def _unwrap_kwargs(kwargs: dict) -> dict:
+    """FastMCP emits a required 'kwargs' schema field for bare **kwargs params; some clients
+    nest their actual payload under it. Unwrap that nested dict when present, else use kwargs as-is."""
+    return kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
+
+def _resolve(explicit, kw: dict, raw_kwargs: dict, *aliases: str):
+    """Resolve a parameter value: explicit arg wins, then each alias checked against
+    the unwrapped kwargs dict, then against the raw kwargs dict, first alias wins within each."""
+    if explicit is not None:
+        return explicit
+    for source in (kw, raw_kwargs):
+        for alias in aliases:
+            val = source.get(alias)
+            if val is not None:
+                return val
+    return None
+
 @mcp.tool()
 def log_event(agent_id: str = None, type: str = None, content: str = None, error_code: str = None, session_id: str = None, context_id: str = None, **kwargs) -> str:
     """Appends an event to the append-only events ledger."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    agent_id_ = agent_id or kw.get("agent_id") or kw.get("agent") or kwargs.get("agent_id") or kwargs.get("agent") or "system"
-    type_ = type or kw.get("type") or kw.get("event_type") or kwargs.get("type") or kwargs.get("event_type") or "event"
-    content_ = content or kw.get("content") or kw.get("message") or kw.get("description") or kwargs.get("content") or kwargs.get("message") or kwargs.get("description") or ""
-    error_code_ = error_code or kw.get("error_code") or kwargs.get("error_code")
-    session_id_ = session_id or kw.get("session_id") or kwargs.get("session_id")
-    context_id_ = context_id or kw.get("context_id") or kw.get("project_id") or kw.get("project") or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("project")
+    kw = _unwrap_kwargs(kwargs)
+    agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent") or "system"
+    type_ = _resolve(type, kw, kwargs, "type", "event_type") or "event"
+    content_ = _resolve(content, kw, kwargs, "content", "message", "description") or ""
+    error_code_ = _resolve(error_code, kw, kwargs, "error_code")
+    session_id_ = _resolve(session_id, kw, kwargs, "session_id")
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project")
     return event_service.log_event(agent_id=agent_id_, type=type_, content=content_, error_code=error_code_, session_id=session_id_, context_id=context_id_)
 
 @mcp.tool()
 def get_canonical_tags(query: str = None, domain: str = None, **kwargs) -> list:
     """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use query='auth' to filter by tag name substring."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    query_ = query or domain or kw.get("query") or kw.get("domain") or kw.get("substring") or kw.get("tag_filter") or kwargs.get("query") or kwargs.get("domain") or kwargs.get("substring") or kwargs.get("tag_filter")
+    kw = _unwrap_kwargs(kwargs)
+    query_ = query or domain or _resolve(None, kw, kwargs, "query", "domain", "substring", "tag_filter")
     return memory_service.get_canonical_tags(domain=query_)
 
 @mcp.tool()
@@ -61,36 +78,34 @@ def store_memory(
     **kwargs
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as long-term memory.
-    
+
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
     """
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    content_ = content or kw.get("content") or kw.get("text") or kwargs.get("content") or kwargs.get("text") or ""
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
-    project_id = kwargs.get("project_id")
-    context_id_ = context_id or project_id or kw.get("context_id") or kw.get("project_id") or kw.get("context") or kw.get("project") or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
-    project_id_ = context_id_
-    title_ = title or kw.get("title") or kwargs.get("title")
+    kw = _unwrap_kwargs(kwargs)
+    content_ = _resolve(content, kw, kwargs, "content", "text") or ""
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "context", "project")
+    title_ = _resolve(title, kw, kwargs, "title")
 
-    raw_tag = tags if tags is not None else (kw.get("tags") or kw.get("tag") or kwargs.get("tags") or kwargs.get("tag"))
+    raw_tag = tags if tags is not None else _resolve(None, kw, kwargs, "tags", "tag")
     tags_ = _normalize_list_or_str(raw_tag)
 
-    raw_is_core = is_core if is_core is not None else (kw.get("is_core") if "is_core" in kw else kwargs.get("is_core"))
+    raw_is_core = is_core if is_core is not None else _resolve(None, kw, kwargs, "is_core")
     if raw_is_core is not None:
         is_core_ = raw_is_core in (True, 1, "true", "1", "True")
     else:
         is_core_ = None
 
     if check_duplicates_only or kw.get("check_duplicates_only"):
-        return memory_service.check_duplicate_memories(title=title_, content=content_, owner_id=owner_id_, tags=tags_, project_id=project_id_)
+        return memory_service.check_duplicate_memories(title=title_, content=content_, owner_id=owner_id_, tags=tags_, context_id=context_id_)
 
-    entity_id = kwargs.get("entity_id") or kw.get("entity_id") or kw.get("id")
+    entity_id = _resolve(None, kw, kwargs, "entity_id", "id")
     weight = kwargs.get("weight", 1)
-    relevance = kwargs.get("relevance") or kw.get("relevance")
-    impact = kwargs.get("impact") or kw.get("impact")
-    novelty = kwargs.get("novelty") or kw.get("novelty")
-    actionability = kwargs.get("actionability") or kw.get("actionability")
-    metadata = kwargs.get("metadata") or kw.get("metadata")
+    relevance = _resolve(None, kw, kwargs, "relevance")
+    impact = _resolve(None, kw, kwargs, "impact")
+    novelty = _resolve(None, kw, kwargs, "novelty")
+    actionability = _resolve(None, kw, kwargs, "actionability")
+    metadata = _resolve(None, kw, kwargs, "metadata")
     skip_duplicate_check = kwargs.get("skip_duplicate_check", False) or kw.get("skip_duplicate_check", False)
 
     return memory_service.store_memory(
@@ -108,7 +123,6 @@ def store_memory(
         actionability=actionability,
         metadata=metadata,
         skip_duplicate_check=skip_duplicate_check,
-        project_id=project_id_,
         context_id=context_id_
     )
 
@@ -127,25 +141,21 @@ def search_memory(
     **kwargs
 ) -> list | dict | str:
     """Performs full-text keyword & dense vector hybrid search in long-term memory.
-    
+
     If entity_id or fetch_full is specified, retrieves full Markdown text chunk directly.
     """
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    entity_id_ = entity_id or kw.get("entity_id") or kw.get("id") or kwargs.get("entity_id") or kwargs.get("id")
+    kw = _unwrap_kwargs(kwargs)
+    entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "id")
     if entity_id_ or fetch_full or kw.get("fetch_full"):
         if entity_id_:
             return memory_service.fetch_memory_chunk(entity_id=entity_id_)
 
-    query_keywords_ = (
-        query_keywords or kwargs.get("query") or kwargs.get("q") or kwargs.get("keywords")
-        or kw.get("query_keywords") or kw.get("query") or kw.get("q") or kw.get("keywords")
-    )
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
-    project_id = kwargs.get("project_id")
-    context_id_ = context_id or project_id or kw.get("context_id") or kw.get("project_id") or kw.get("context") or kw.get("project") or kwargs.get("context_id") or kwargs.get("project_id") or kwargs.get("context") or kwargs.get("project")
-    raw_tags = tags_filter or kw.get("tags_filter") or kw.get("tags") or kwargs.get("tags_filter") or kwargs.get("tags")
+    query_keywords_ = _resolve(query_keywords, kw, kwargs, "query_keywords", "query", "q", "keywords")
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "context", "project")
+    raw_tags = tags_filter or _resolve(None, kw, kwargs, "tags_filter", "tags")
     tags_filter_ = _normalize_list_or_str(raw_tags) if raw_tags else None
-    metadata_filter_ = kwargs.get("metadata_filter") or kw.get("metadata_filter")
+    metadata_filter_ = _resolve(None, kw, kwargs, "metadata_filter")
     explain_mode = kwargs.get("explain_mode", False) or kw.get("explain_mode", False)
     tag_operator = kwargs.get("tag_operator", "AND") or kw.get("tag_operator", "AND")
 
@@ -156,7 +166,6 @@ def search_memory(
         metadata_filter=metadata_filter_,
         explain_mode=explain_mode,
         limit=limit,
-        project_id=context_id_,
         context_id=context_id_,
         is_core=is_core,
         tag_operator=tag_operator,
@@ -172,10 +181,10 @@ def ephemeral_memory(
     **kwargs
 ) -> str:
     """Manages volatile in-memory secret storage (get or store)."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    action_ = action or kw.get("action") or kwargs.get("action") or "get"
-    key_ = key or kw.get("key") or kwargs.get("key")
-    value_ = value or kw.get("value") or kwargs.get("value")
+    kw = _unwrap_kwargs(kwargs)
+    action_ = _resolve(action, kw, kwargs, "action") or "get"
+    key_ = _resolve(key, kw, kwargs, "key")
+    value_ = _resolve(value, kw, kwargs, "value")
 
     if action_ == "store" or value_ is not None:
         return ephemeral_service.store_ephemeral_memory(key=key_, value=value_)
@@ -184,13 +193,13 @@ def ephemeral_memory(
 @mcp.tool()
 def archive_memory(entity_id: str | list[str] = None, owner_id: str = None, **kwargs) -> str | list:
     """Explicitly archives (retires) one or multiple long-term memories.
-    
+
     Accepts entity_id as a single string ID OR a list of string IDs.
     """
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    raw_target = entity_id or kw.get("entity_id") or kw.get("archive_requests") or kw.get("id") or kwargs.get("archive_requests")
+    kw = _unwrap_kwargs(kwargs)
+    raw_target = _resolve(entity_id, kw, kwargs, "entity_id", "archive_requests", "id")
     target = _normalize_list_or_str(raw_target)
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
 
     if len(target) > 1 or (isinstance(raw_target, list) and len(target) > 0):
         return memory_service.bulk_archive_memory(archive_requests=target)
@@ -207,16 +216,16 @@ def manage_relation(
     **kwargs
 ) -> str | list:
     """Stores one or multiple directional semantic relationship edges between memory nodes."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    relations_ = relations or kw.get("relations") or kwargs.get("relations")
+    kw = _unwrap_kwargs(kwargs)
+    relations_ = _resolve(relations, kw, kwargs, "relations")
     if relations_:
         if isinstance(relations_, str):
             relations_ = _normalize_list_or_str(relations_)
         return relation_service.bulk_store_relations(relations=relations_)
 
-    source_id_ = source_id or kw.get("source_id") or kw.get("source") or kwargs.get("source_id") or kwargs.get("source")
-    target_id_ = target_id or kw.get("target_id") or kw.get("target") or kwargs.get("target_id") or kwargs.get("target")
-    predicate_ = predicate or kw.get("predicate") or kw.get("relation") or kwargs.get("predicate") or kwargs.get("relation")
+    source_id_ = _resolve(source_id, kw, kwargs, "source_id", "source")
+    target_id_ = _resolve(target_id, kw, kwargs, "target_id", "target")
+    predicate_ = _resolve(predicate, kw, kwargs, "predicate", "relation")
     return relation_service.store_relation(source_id=source_id_, target_id=target_id_, predicate=predicate_)
 
 @mcp.tool()
@@ -231,21 +240,21 @@ def commit_consolidation(
     **kwargs
 ) -> str | list:
     """Commits single or multiple consolidated memories, archiving raw parents and creating lineage edges."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    consolidations_ = consolidations or kw.get("consolidations") or kwargs.get("consolidations")
+    kw = _unwrap_kwargs(kwargs)
+    consolidations_ = _resolve(consolidations, kw, kwargs, "consolidations")
     if consolidations_:
         if isinstance(consolidations_, str):
             consolidations_ = _normalize_list_or_str(consolidations_)
         return relation_service.bulk_commit_consolidation(consolidations=consolidations_)
 
-    raw_parents = parent_ids or kw.get("parent_ids") or kwargs.get("parent_ids")
+    raw_parents = _resolve(parent_ids, kw, kwargs, "parent_ids")
     parent_ids_ = _normalize_list_or_str(raw_parents)
-    title_ = title or kw.get("title") or kwargs.get("title")
-    content_ = content or kw.get("content") or kw.get("text") or kwargs.get("content") or kwargs.get("text")
-    raw_tags = tags or kw.get("tags") or kwargs.get("tags")
+    title_ = _resolve(title, kw, kwargs, "title")
+    content_ = _resolve(content, kw, kwargs, "content", "text")
+    raw_tags = _resolve(tags, kw, kwargs, "tags")
     tags_ = _normalize_list_or_str(raw_tags)
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
-    context_id_ = context_id or kw.get("context_id") or kw.get("project_id") or kwargs.get("context_id") or kwargs.get("project_id")
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id")
     scope = kwargs.get("scope", "shared")
     weight = kwargs.get("weight", 1)
 
@@ -263,20 +272,20 @@ def inspect_graph(
     **kwargs
 ) -> dict:
     """Inspects memory graph structure (dependencies, consolidation lineage, or orphaned nodes).
-    
+
     entity_id is optional when mode='orphans'.
     """
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    entity_id_ = entity_id or kw.get("entity_id") or kw.get("root_entity_id") or kw.get("root_id") or kw.get("id") or kwargs.get("root_entity_id") or kwargs.get("root_id")
-    mode_ = mode or kw.get("mode") or kwargs.get("mode") or "dependencies"
-    owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
+    kw = _unwrap_kwargs(kwargs)
+    entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "root_entity_id", "root_id", "id")
+    mode_ = _resolve(mode, kw, kwargs, "mode") or "dependencies"
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
 
     if mode_ == "lineage":
         return relation_service.analyze_lineage(entity_id=entity_id_)
     elif mode_ == "orphans":
         return memory_service.detect_orphaned_memories(owner_id=owner_id_)
     else:
-        max_depth_ = max_depth or kw.get("max_depth") or kwargs.get("max_depth") or 5
+        max_depth_ = _resolve(max_depth, kw, kwargs, "max_depth") or 5
         return relation_service.analyze_dependencies(root_entity_id=entity_id_, max_depth=max_depth_)
 
 @mcp.tool()
@@ -292,18 +301,17 @@ def get_events(
     **kwargs
 ) -> list:
     """Retrieves operational events, session summary events, or scans memory logs."""
-    kw = kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
-    mode_ = mode or kw.get("mode") or kwargs.get("mode") or "events"
-    session_id_ = session_id or kw.get("session_id") or kwargs.get("session_id")
+    kw = _unwrap_kwargs(kwargs)
+    mode_ = _resolve(mode, kw, kwargs, "mode") or "events"
+    session_id_ = _resolve(session_id, kw, kwargs, "session_id")
 
     if session_id_ or mode_ == "session":
         return event_service.get_session_summary(session_id=session_id_)
     elif mode_ == "memories":
-        owner_id_ = owner_id or kw.get("owner_id") or kw.get("owner") or kwargs.get("owner_id") or kwargs.get("owner")
-        status_filter_ = status_filter or kw.get("status_filter") or kwargs.get("status_filter")
+        owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+        status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
         return memory_service.scan_memories(owner_id=owner_id_, status_filter=status_filter_, limit=limit, offset=offset)
     else:
-        agent_id_ = agent_id or kw.get("agent_id") or kw.get("agent") or kwargs.get("agent_id") or kwargs.get("agent")
-        type_filter_ = type_filter or kw.get("type_filter") or kw.get("type") or kwargs.get("type_filter") or kwargs.get("type")
+        agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent")
+        type_filter_ = _resolve(type_filter, kw, kwargs, "type_filter", "type")
         return event_service.get_recent_events(agent_id=agent_id_, type_filter=type_filter_, limit=limit)
-

@@ -4,7 +4,16 @@ import re
 import logging
 from datetime import datetime, UTC
 from typing import Literal
-from saltmdb.config import get_db_path
+from saltmdb.config import (
+    get_db_path,
+    DEDUP_SUPERSESSION_THRESHOLD,
+    DEDUP_DUPLICATE_THRESHOLD,
+    DEDUP_LEXICAL_THRESHOLD,
+    BM25_TITLE_WEIGHT,
+    BM25_CONTENT_WEIGHT,
+    BM25_ALIAS_WEIGHT,
+    RELATION_COUNT_PENALTY,
+)
 from saltmdb.db.connection import get_connection
 from saltmdb.utils.text import (
     resolve_entity_id,
@@ -61,7 +70,6 @@ def store_memory(
     actionability: int = None,
     metadata: dict = None,
     skip_duplicate_check: bool = False,
-    project_id: str = None,
     context_id: str = None,
     db_connection = None,
     db_path: str = None
@@ -112,10 +120,8 @@ def store_memory(
     from saltmdb.utils.nlp import auto_format_markdown
     redacted_content = auto_format_markdown(redacted_content)
 
-    context_id = context_id or project_id
     if not context_id and metadata and isinstance(metadata, dict):
         context_id = metadata.get("project") or metadata.get("project_id")
-    project_id = context_id
 
     # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
     quality_res = evaluate_memory_quality(redacted_content, title)
@@ -169,7 +175,7 @@ def store_memory(
                 content=redacted_content,
                 owner_id=owner_id,
                 tags=tags,
-                project_id=project_id,
+                context_id=context_id,
                 db_connection=conn
             )
             if dup_check.get("duplicate_found") and "error" not in dup_check:
@@ -177,18 +183,17 @@ def store_memory(
                 sim_score = top.get("similarity_score", 0.0)
                 matched_owner = top.get("owner_id")
                 
-                # Check namespace isolation: match caller_owner_id or 'shared'
-                if matched_owner is None or matched_owner == owner_id or matched_owner == "shared" or owner_id == "shared":
-                    # Calibrated Cosine Similarity Thresholds for bge-small-en-v1.5:
-                    # >= 0.75 triggers supersession_candidate event logging
-                    # >= 0.85 triggers duplicate store-and-warn response
-                    if sim_score >= 0.75:
+                # Check namespace isolation: candidate must be ownerless, owned by the caller,
+                # or itself scope='shared' (visible to any owner) - not a literal owner_id match on "shared".
+                matched_scope = top.get("scope")
+                if matched_owner is None or matched_owner == owner_id or matched_scope == "shared":
+                    if sim_score >= DEDUP_SUPERSESSION_THRESHOLD:
                         matched_supersession_id = top["id"]
                         matched_supersession_title = top["title"]
                         matched_sim_score = sim_score
                         logger.info("Calibrated Cosine Supersession Candidate: New memory '%s' matches existing memory '%s' (ID: %s, Cosine Similarity: %.2f)", title, top["title"], top["id"], sim_score)
-                    
-                    if sim_score >= 0.85:
+
+                    if sim_score >= DEDUP_DUPLICATE_THRESHOLD:
                         duplicate_warning_str = f" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]"
         except Exception:
             pass
@@ -205,8 +210,8 @@ def store_memory(
                  hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
                  
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, project_id, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  
@@ -224,8 +229,8 @@ def store_memory(
                 is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
 
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags)
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -239,13 +244,12 @@ def store_memory(
                     valid_from = excluded.valid_from,
                     valid_to = NULL,
                     metadata = excluded.metadata,
-                    project_id = COALESCE(excluded.project_id, entities.project_id),
                     context_id = COALESCE(excluded.context_id, entities.context_id),
                     content_hash = excluded.content_hash,
                     quality_score = excluded.quality_score,
                     quality_status = excluded.quality_status,
                     quality_flags = excluded.quality_flags
-            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, project_id, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
+            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
             
             tags = tags or []
             tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
@@ -348,16 +352,17 @@ def _run_fts_search(
 
     fts_query_str = " ".join(f'"{t}"*' for t in terms)
     where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
+    bm25_weights = f"{BM25_TITLE_WEIGHT}, {BM25_CONTENT_WEIGHT}, {BM25_ALIAS_WEIGHT}"
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-               bm25(entities_fts, 10.0, 1.0, 5.0) as rank_score,
+               bm25(entities_fts, {bm25_weights}) as rank_score,
                e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
                (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id
                 AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
         FROM entities_fts fts
         JOIN entities e ON fts.id = e.id
         WHERE fts.entities_fts MATCH ?{where_sql}
-        ORDER BY (bm25(entities_fts, 10.0, 1.0, 5.0) * e.weight - (rel_count * 0.1)) ASC,
+        ORDER BY (bm25(entities_fts, {bm25_weights}) * e.weight - (rel_count * {RELATION_COUNT_PENALTY})) ASC,
                  e.updated_at DESC
         LIMIT ? OFFSET ?
     """
@@ -438,7 +443,6 @@ def search_memory(
     metadata_filter: dict = None,
     explain_mode: bool = False,
     limit: int = 5,
-    project_id: str = None,
     context_id: str = None,
     is_core: bool = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
@@ -470,10 +474,9 @@ def search_memory(
             where_clauses.append("(e.owner_id = ? OR e.scope = 'shared')")
             params.append(owner_id)
 
-        context_val = context_id or project_id
-        if context_val:
-            where_clauses.append("(e.context_id = ? OR e.project_id = ? OR json_extract(e.metadata, '$.project') = ? OR json_extract(e.metadata, '$.project_id') = ?)")
-            params.extend([context_val, context_val, context_val, context_val])
+        if context_id:
+            where_clauses.append("(e.context_id = ? OR json_extract(e.metadata, '$.project') = ? OR json_extract(e.metadata, '$.project_id') = ?)")
+            params.extend([context_id, context_id, context_id])
 
         if is_core is not None:
             where_clauses.append("e.is_core = ?")
@@ -787,7 +790,7 @@ def check_duplicate_memories(
     content: str = None,
     owner_id: str = None,
     tags: list = None,
-    project_id: str = None,
+    context_id: str = None,
     exclude_ids: list = None,
     db_connection = None,
     db_path: str = None
@@ -815,12 +818,12 @@ def check_duplicate_memories(
                 params.extend(clean_excludes)
 
         if owner_id:
-            where.append("(owner_id = ? OR owner_id IS NULL)")
+            where.append("(owner_id = ? OR owner_id IS NULL OR scope = 'shared')")
             params.append(owner_id)
             
-        if project_id:
-            where.append("(project_id IS NULL OR project_id = ? OR context_id = ?)")
-            params.extend([project_id, project_id])
+        if context_id:
+            where.append("(context_id IS NULL OR context_id = ?)")
+            params.append(context_id)
             
         from saltmdb.utils.text import sanitize_fts_query
         input_text = f"{title or ''} {content or ''}"
@@ -833,7 +836,7 @@ def check_duplicate_memories(
             try:
                 fts_where = " AND ".join(f"e.{c}" for c in where) if where else "1=1"
                 fts_rows = conn.execute(
-                    f"SELECT e.id, e.title, e.full_content, e.owner_id FROM entities_fts fts "
+                    f"SELECT e.id, e.title, e.full_content, e.owner_id, e.scope FROM entities_fts fts "
                     f"JOIN entities e ON fts.id = e.id "
                     f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
                     [search_terms] + params
@@ -841,10 +844,10 @@ def check_duplicate_memories(
                 fts_candidates = fts_rows
             except Exception:
                 pass
-        
+
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:
-            cursor = conn.execute(f"SELECT id, title, full_content, owner_id FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
+            cursor = conn.execute(f"SELECT id, title, full_content, owner_id, scope FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
             fts_candidates = cursor.fetchall()
         
         from saltmdb.config import is_semantic_search_enabled
@@ -858,7 +861,7 @@ def check_duplicate_memories(
             except Exception as ex:
                 logger.warning("Could not generate query embedding for duplicate check: %s", ex)
 
-        for eid, etitle, econtent, eowner in fts_candidates:
+        for eid, etitle, econtent, eowner, escope in fts_candidates:
             existing_text = f"{etitle} {econtent}"
             sim = 0.0
             if use_semantic and query_vector is not None:
@@ -877,12 +880,13 @@ def check_duplicate_memories(
             else:
                 sim = word_sim(input_text, existing_text)
 
-            min_threshold = 0.75 if use_semantic else 0.40
+            min_threshold = DEDUP_SUPERSESSION_THRESHOLD if use_semantic else DEDUP_LEXICAL_THRESHOLD
             if sim >= min_threshold:
                 duplicates.append({
                     "id": eid,
                     "title": etitle,
                     "owner_id": eowner,
+                    "scope": escope,
                     "similarity_score": round(sim, 3)
                 })
                 

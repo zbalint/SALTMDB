@@ -13,5 +13,5 @@
 * **The #Core Pollution Rule:** Do NOT set `is_core=1` and `weight=5` when resolving an ordinary technical conflict or factual dispute. Only use those flags when you are establishing a permanent, behavioral project law (e.g., "Always use UUIDs").
 * **Global Laws:** As the Orchestrator, you are the ONLY entity allowed to save `#core` rules with `scope="shared"`.
 
-# 📜 The 13 Core Operating Commandments
-[PASTE FULL 13 RULES HERE]
+# 📜 The 14 Core Operating Commandments
+[PASTE FULL 14 RULES HERE]
