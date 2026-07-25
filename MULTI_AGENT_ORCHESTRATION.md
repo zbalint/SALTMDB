@@ -1,11 +1,11 @@
-# 🌐 Claude Code: Multi-Agent Orchestration Protocol
+# 🌐 Multi-Agent Orchestration Protocol
 
-**Target Audience:** The orchestrating Claude Code session (main conversation)
-**Objective:** Define the strict procedural rules for spawning sub-agents via the `Agent` tool, passing context, and managing multi-agent database state in SALTMDB without data corruption or domain leakage.
+**Target Audience:** The orchestrating agent session (main conversation)
+**Objective:** Define the strict procedural rules for spawning sub-agents, passing context, and managing multi-agent database state in SALTMDB without data corruption or domain leakage.
 
 ## 1. The Two-Tier Architecture
 
-In a multi-agent workflow, you (the main Claude Code session, `owner_id="claude"`) act as the **Orchestrator**. You hold the global context and the 14 Core Commandments (see `~/.claude/CLAUDE.md`). When you encounter a highly specialized or parallelizable task (e.g., writing tests, auditing security, optimizing CSS), you must spawn **Workers** via the `Agent` tool.
+In a multi-agent workflow, you (the main orchestrating session, e.g. `owner_id="claude"` or `owner_id="antigravity"` depending on which assistant you are) act as the **Orchestrator**. You hold the global context and the 14 Core Commandments (see your own persistent global instruction file — for Claude Code that's `~/.claude/CLAUDE.md`). When you encounter a highly specialized or parallelizable task (e.g., writing tests, auditing security, optimizing CSS), you must spawn **Workers** using your runtime's sub-agent spawning mechanism (for Claude Code, the `Agent` tool).
 
 Workers are short-lived, task-scoped, and operate on a strict, token-efficient subset of rules defined in `WORKER_TEMPLATE.md`.
 
@@ -16,7 +16,7 @@ To maintain a coherent database, you must enforce the following data constraints
 ### Rule 1: Identity by Role (`owner_id`)
 
 * **The Rule:** `owner_id` is a fixed role, not a temporary instance.
-* **Execution:** When spawning a worker, assign it a fixed role ID (e.g., `agent_frontend`, `agent_security`, `agent_db`) in the prompt you pass to the `Agent` tool.
+* **Execution:** When spawning a worker, assign it a fixed role ID (e.g., `agent_frontend`, `agent_security`, `agent_db`) in the prompt you pass to it.
 * **DO NOT** generate randomized IDs per task (e.g., no `agent_frontend_task99`). This ensures that the next time a frontend worker is spawned, it correctly inherits all `#core` rules previously established by other frontend workers.
 
 ### Rule 2: The Context Thread (`context_id`)
@@ -32,7 +32,7 @@ To maintain a coherent database, you must enforce the following data constraints
 ### Rule 4: The `#core` Namespace Scope (Private vs. Shared)
 
 * **The Rule:** Role-specific standing rules must never pollute the global scope.
-* **Execution:** If a worker learns a new permanent behavioral rule for its specific domain and tags it `#core`, it MUST store it with `scope="private"`. This ensures `agent_frontend`'s CSS preferences are strictly invisible to `agent_db`. Only you, the Orchestrator, may store `#core` rules with `scope="shared"` (creating global project laws visible to all workers/agents, including the Antigravity/Gemini CLI sharing this database).
+* **Execution:** If a worker learns a new permanent behavioral rule for its specific domain and tags it `#core`, it MUST store it with `scope="private"`. This ensures `agent_frontend`'s CSS preferences are strictly invisible to `agent_db`. Only you, the Orchestrator, may store `#core` rules with `scope="shared"` (creating global project laws visible to all workers/agents, including any other AI assistant sharing this database).
 
 ---
 
@@ -41,10 +41,10 @@ To maintain a coherent database, you must enforce the following data constraints
 When you determine a task should be delegated, follow this sequence:
 
 1. **Initialize the Task:** Generate your `context_id`.
-2. **Draft the Sub-Agent Prompt:** Construct the prompt for the sub-agent. This prompt MUST strictly adhere to the `WORKER_TEMPLATE.md` structure, and must be self-contained (a fresh `Agent` call has no memory of this conversation).
+2. **Draft the Sub-Agent Prompt:** Construct the prompt for the sub-agent. This prompt MUST strictly adhere to the `WORKER_TEMPLATE.md` structure, and must be self-contained (a fresh worker instance has no memory of this conversation).
 3. **Inject Context:** Clearly define the sub-agent's `owner_id`, the assigned `context_id`, and the exact task objective.
-4. **Dispatch:** Spawn the agent via the `Agent` tool (use `run_in_background: true` for independent, longer-running work; `false` only when you need the result before continuing).
-5. **Await Completion:** Do not poll. Background agents notify you automatically via a task notification, or explicitly via `SendMessage(to="main", ...)`, before you proceed to the wrap-up phase.
+4. **Dispatch:** Spawn the worker using your runtime's sub-agent mechanism (for Claude Code, the `Agent` tool — use `run_in_background: true` for independent, longer-running work; `false` only when you need the result before continuing).
+5. **Await Completion:** Do not poll. Rely on your runtime's completion notification mechanism (for Claude Code, background agents notify automatically via a task notification), or an explicit message from the worker, before you proceed to the wrap-up phase.
 
 ---
 
@@ -76,7 +76,7 @@ Once you have synthesized the findings or resolved a conflict, you must explicit
 
 ### Step 4: Finalize
 
-Once the synthesis is stored, log a final `log_event` under your Orchestrator `owner_id="claude"` explicitly stating that the `context_id` thread has been closed and consolidated.
+Once the synthesis is stored, log a final `log_event` under your Orchestrator `owner_id` explicitly stating that the `context_id` thread has been closed and consolidated.
 
 ---
 
@@ -84,8 +84,8 @@ Once the synthesis is stored, log a final `log_event` under your Orchestrator `o
 
 To prevent subagents from getting trapped in trial-and-error loops, polling background processes, or burning token budget, the Orchestrator must enforce the following guardrails during prompt construction and lifecycle monitoring:
 
-1. **2-Attempt Error Circuit Breaker**: Instruct every worker that if a tool call, script, or unit test fails 2 consecutive times, it MUST stop immediately, log an issue event (`log_event(type="issue")`), and notify the Orchestrator via `SendMessage(to="main", ...)`.
-2. **No-Polling Invariant**: Subagents must never enter `while true` status loops, sleep in loops, or poll status repeatedly. Subagents must rely on reactive completion notifications (this is how Claude Code's `Agent` tool works by default).
+1. **2-Attempt Error Circuit Breaker**: Instruct every worker that if a tool call, script, or unit test fails 2 consecutive times, it MUST stop immediately, log an issue event (`log_event(type="issue")`), and notify the Orchestrator via `send_message` (or your runtime's equivalent direct-notification mechanism).
+2. **No-Polling Invariant**: Subagents must never enter `while true` status loops, sleep in loops, or poll status repeatedly. Subagents must rely on reactive completion notifications (this is how most modern agent runtimes, including Claude Code's `Agent` tool, work by default).
 3. **Task-Calibrated Action Horizon**: Upon dispatch, calibrate the worker's step horizon based on task scope:
    - *Focused Edit / Fix*: ~5–10 tool calls horizon.
    - *Multi-File / Domain Audit*: ~15–25 tool calls horizon.
