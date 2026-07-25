@@ -263,5 +263,18 @@ When an agent updates an existing memory using `store_memory` with an explicit `
 
 ---
 
+---
+
+## 6. Self-Update Protocol (After a SALTMDB Version Upgrade)
+
+This section is for **you, the agent**, not just the human reading this file. If the user tells you SALTMDB has been updated (a `git pull`, a new release, "we updated SALTMDB, check the agent guide," etc.), do not assume your own configuration is still correct just because this repo's code and docs are current. Run this protocol:
+
+1. **Check what changed.** Read `MIGRATION.md`'s Version Schema Registry. Compare the current `pyproject.toml` version against the last version you have a memory of (search your long-term memory for prior SALTMDB version references). Note any entries marked with a required migration action, and any tool signature changes.
+2. **Diff the Core Operating Commandments.** Compare this file's §3 System Prompt Template (specifically the "Core Operating Commandments" list) against your own currently-loaded global/persistent instructions — for Claude Code that's `~/.claude/CLAUDE.md`; for other MCP clients, wherever your equivalent standing instructions live. If the count or content differs, **do not silently overwrite your global instruction file.** Show the user the specific diff and ask for confirmation before editing it — that file governs every project you use, not just SALTMDB.
+3. **Diff your bundled orchestration references.** If you maintain your own copies of `ORCHESTRATOR.md`, `MULTI_AGENT_ORCHESTRATION.md`, or `WORKER_TEMPLATE.md` outside this repo (for Claude Code: `~/.claude/skills/saltmdb-subagent-orchestration/references/`), these do **not** auto-sync with the repo copies — a real audit on 2026-07-25 found them independently drifted in both directions. Diff your copies against the repo's root-level files and reconcile.
+4. **Record the sync.** Once reconciled (or once you've confirmed nothing needed to change), store a memory noting the version you're now synced to, so a future session doesn't have to repeat this check from scratch.
+
+---
+
 > [!IMPORTANT]
 > **SQL Access Security:** Agents do not have raw SQL execution permissions. All actions must be performed using the predefined parameterized MCP tools. Do not expose a SQL client tool to agents, as this creates a major database integrity and credentials leak vulnerability.
