@@ -96,7 +96,7 @@ Global MCP config location: `~/.gemini/config/mcp_config.json` (Create this file
 Replace `C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe` with your own path from Step 1.
 Use double backslashes (`\\`) on Windows.
 
-**Alternative — point directly to the launch script** (avoids module resolution entirely):
+**Alternative — point directly to the launch script** (if running directly from source tree without package installation):
 ```json
 {
   "mcpServers": {

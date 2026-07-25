@@ -60,7 +60,7 @@ The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe conc
 ### 1. Hybrid FTS5 + Vector Search
 SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in parallel**, merging results via **Reciprocal Rank Fusion (RRF)**:
 * FTS5 uses SQLite's built-in `bm25` auxiliary function with a **10:1 title-to-content weight ratio**.
-* Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~130MB auto-downloaded) stored in a `sqlite-vec` `vec0` virtual table.
+* Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~66MB pre-bundled model weights) stored in a `sqlite-vec` `vec0` virtual table.
 * RRF merges on rank position (not raw scores), keeping the existing BM25 tuning intact.
 * Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search.
 
@@ -83,7 +83,7 @@ To prevent multiple parent processes from launching redundant garbage collection
 
 ## 🧹 The Librarian Process (Garbage Collection)
 
-Whenever the database is modified, the server asynchronously spawns a detached background instance of the server in Librarian mode (`python saltmdb_server.py --librarian`):
+Whenever the database is modified, the server asynchronously spawns a detached background instance of the server in Librarian mode (`python -m saltmdb --librarian`):
 * **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
 * **Unix Detachment:** Spawns with `start_new_session=True` so it survives parent process termination.
 
