@@ -121,7 +121,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
     * *Required Protocol*:
       1. **Initialize Thread**: Generate a descriptive `context_id` (e.g. `task_refactor_auth_01`) and log a start event via `log_event`.
       2. **Fixed Role ID**: Assign a fixed worker `owner_id` (e.g. `agent_docs`, `agent_qa`, `agent_security`) matching the domain.
-      3. **Construct Worker Prompt**: Adhere strictly to `WORKER_TEMPLATE.md` format including FastMCP schema rules (`kwargs={}`).
+      3. **Construct Worker Prompt**: Adhere strictly to `WORKER_TEMPLATE.md` format including FastMCP schema rules (`kwargs={}`), 2-attempt circuit breaker rule, anti-polling invariant, and task-calibrated action horizon (~5-10 tool calls for narrow fixes, ~15-25 for audits).
       4. **Cognitive Sweep**: Upon worker completion, run `search_memory(context_id=...)` to sweep findings and close thread.
 
 ---

@@ -77,3 +77,16 @@ Once you have synthesized the findings or resolved a conflict, you must explicit
 ### Step 4: Finalize
 
 Once the synthesis is stored, log a final `log_event` under your Orchestrator `owner_id` explicitly stating that the `context_id` thread has been closed and consolidated.
+
+---
+
+## 5. Subagent Loop Prevention & Action Horizon Calibration
+
+To prevent subagents from getting trapped in trial-and-error loops, polling background processes, or burning token budget, the Orchestrator must enforce the following guardrails during prompt construction and lifecycle monitoring:
+
+1. **2-Attempt Error Circuit Breaker**: Instruct every worker that if a tool call, script, or unit test fails 2 consecutive times, it MUST stop immediately, log an issue event (`log_event(type="issue")`), and notify the Orchestrator via `send_message`.
+2. **No-Polling Invariant**: Subagents must never enter `while true` status loops, sleep in loops, or poll `status` repeatedly. Subagents must rely on reactive system notifications.
+3. **Task-Calibrated Action Horizon**: Upon dispatch, calibrate the worker's step horizon based on task scope:
+   - *Focused Edit / Fix*: ~5–10 tool calls horizon.
+   - *Multi-File / Domain Audit*: ~15–25 tool calls horizon.
+4. **Objective Completion Triggers**: Workers must halt tool execution immediately upon satisfying their explicit objective criteria, regardless of remaining step budget.
