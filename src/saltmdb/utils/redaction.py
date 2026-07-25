@@ -13,7 +13,7 @@ SECRET_PATTERNS = [
     r"\bsk-proj-[a-zA-Z0-9_-]{20,}\b",           # OpenAI project key
     r"\b[a-zA-Z0-9_]{20,}:[a-zA-Z0-9_]{40,}\b",  # Generic API secret pattern (ID:Secret)
     r"\bAKIA[A-Z0-9]{16}\b",                     # AWS access key ID
-    r"\b[M-Q][a-zA-Z0-9_\-]{23}\.[a-zA-Z0-9_\-]{6}\.[a-zA-Z0-9_\-]{27}\b" # Discord token
+    r"\b[a-zA-Z0-9_-]{23,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38}\b" # Discord token
 ]
 
 _FAST_PATH_PREFIXES = ("ghp_", "github_pat_", "sk-ant-", "sk-proj-", "sk-", "AKIA")
@@ -51,9 +51,5 @@ load_custom_redact_patterns()
 def redact_secrets(text: str) -> str:
     """Scrub potential credentials and API keys from text using high-speed precompiled regex."""
     if not isinstance(text, str) or not text:
-        return text
-    # Only skip if BOTH standard prefixes AND custom patterns have no match candidates
-    has_standard_prefix = any(prefix in text for prefix in _FAST_PATH_PREFIXES)
-    if not has_standard_prefix and not CUSTOM_REDACT_PATTERNS:
         return text
     return _compiled_regex.sub("[REDACTED_SECRET]", text)

@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
+_search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-search")
 
 def validate_memory_input(title: str, content: str, metadata: dict) -> None:
     """Validates memory input to enforce title hygiene and relative path constraints."""
@@ -133,7 +134,7 @@ def store_memory(
         try:
             cursor = conn.execute("""
                 SELECT id FROM entities
-                WHERE content_hash = ? AND owner_id = ? AND status != 'archived'
+                WHERE content_hash = ? AND (owner_id = ? OR scope = 'shared') AND status != 'archived'
             """, (content_hash, owner_id))
             row = cursor.fetchone()
             if row:
@@ -260,17 +261,17 @@ def store_memory(
                         tag_id = row[1] if row[1] else row[0]
                         tag_lookup[norm_input] = tag_id
                     else:
-                        # Try normalized lookup for fuzzy match
+                        # Try indexed normalized lookup for fuzzy match
                         fuzzy_row = conn.execute(
-                            "SELECT id, canonical_id FROM tags WHERE lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
-                            (norm_input,)
+                            "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
+                            (norm_input, norm_input)
                         ).fetchone()
                         if fuzzy_row:
                             tag_id = fuzzy_row[1] if fuzzy_row[1] else fuzzy_row[0]
                             tag_lookup[norm_input] = tag_id
                         else:
                             tag_id = str(uuid.uuid4())
-                            conn.execute("INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)", (tag_id, tag_name))
+                            conn.execute("INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)", (tag_id, tag_name, norm_input))
                             tag_lookup[norm_input] = tag_id
 
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
@@ -467,48 +468,51 @@ def search_memory(
         if tags_filter:
             norm_tags = [t.strip() if t.strip().startswith('#') else '#' + t.strip() for t in tags_filter if t.strip()]
             if norm_tags:
-                expanded_tag_ids = set()
+                tag_groups = []
                 for tname in norm_tags:
-                    c = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (tname,))
-                    r = c.fetchone()
-                    if r:
-                        tid, tcanon = r
+                    grp = set()
+                    c = conn.execute("SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (tname,))
+                    for tid, tcanon in c.fetchall():
+                        grp.add(tid)
                         main_id = tcanon if tcanon else tid
-                        expanded_tag_ids.add(main_id)
+                        grp.add(main_id)
                         alias_c = conn.execute("SELECT id FROM tags WHERE canonical_id = ?", (main_id,))
                         for ar in alias_c.fetchall():
-                            expanded_tag_ids.add(ar[0])
-                    else:
-                        norm_input = tname.lower().lstrip('#')
-                        norm_input = re.sub(r'[-_\s]+', '', norm_input)
-                        alias_c = conn.execute("SELECT id, canonical_id FROM tags")
-                        for ar_id, ar_name, ar_canon in alias_c.fetchall():
-                            ar_norm = ar_name.lower().lstrip('#')
-                            ar_norm = re.sub(r'[-_\s]+', '', ar_norm)
-                            if ar_norm == norm_input:
-                                expanded_tag_ids.add(ar_canon if ar_canon else ar_id)
+                            grp.add(ar[0])
+                    tag_groups.append((tname, grp))
 
-                if expanded_tag_ids:
-                    tag_placeholders = ",".join("?" for _ in expanded_tag_ids)
-                    where_clauses.append(f"""
-                        e.id IN (
-                            SELECT et.entity_id 
-                            FROM entity_tags et
-                            WHERE et.tag_id IN ({tag_placeholders})
-                        )
-                    """)
-                    params.extend(list(expanded_tag_ids))
+                if tag_operator == "AND":
+                    for tname, grp in tag_groups:
+                        if grp:
+                            placeholders = ",".join("?" for _ in grp)
+                            where_clauses.append(f"e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({placeholders}))")
+                            params.extend(list(grp))
+                        else:
+                            where_clauses.append("e.id IN (SELECT et.entity_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE lower(t.name) = lower(?))")
+                            params.append(tname)
                 else:
-                    tag_placeholders = ",".join("?" for _ in norm_tags)
-                    where_clauses.append(f"""
-                        e.id IN (
-                            SELECT et.entity_id 
-                            FROM entity_tags et
-                            JOIN tags t ON et.tag_id = t.id
-                            WHERE t.name IN ({tag_placeholders})
-                        )
-                    """)
-                    params.extend(norm_tags)
+                    all_ids = set()
+                    missing_tnames = []
+                    for tname, grp in tag_groups:
+                        if grp:
+                            all_ids.update(grp)
+                        else:
+                            missing_tnames.append(tname)
+                    
+                    sub_clauses = []
+                    sub_params = []
+                    if all_ids:
+                        placeholders = ",".join("?" for _ in all_ids)
+                        sub_clauses.append(f"et.tag_id IN ({placeholders})")
+                        sub_params.extend(list(all_ids))
+                    if missing_tnames:
+                        placeholders = ",".join("?" for _ in missing_tnames)
+                        sub_clauses.append(f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})")
+                        sub_params.extend(missing_tnames)
+                    
+                    if sub_clauses:
+                        where_clauses.append(f"e.id IN (SELECT et.entity_id FROM entity_tags et LEFT JOIN tags t ON et.tag_id = t.id WHERE {' OR '.join(sub_clauses)})")
+                        params.extend(sub_params)
 
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
 
@@ -542,20 +546,18 @@ def search_memory(
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                    fts_future = executor.submit(
-                        _run_fts_search, conn, sanitized_query, where_clauses,
-                        params, limit, offset
-                    )
-                    # semantic_search gets db_path so it opens its OWN connection
-                    # — never share a connection across threads with sqlite_vec loaded
-                    semantic_future = executor.submit(
-                        semantic_search, query_keywords, where_clauses, params,
-                        limit, db_path
-                    )
-                    fts_rows = fts_future.result()
-                    semantic_rows = semantic_future.result()
+                fts_future = _search_pool.submit(
+                    _run_fts_search, conn, sanitized_query, where_clauses,
+                    params, limit, offset
+                )
+                # semantic_search gets db_path so it opens its OWN connection
+                # — never share a connection across threads with sqlite_vec loaded
+                semantic_future = _search_pool.submit(
+                    semantic_search, query_keywords, where_clauses, params,
+                    limit, db_path
+                )
+                fts_rows = fts_future.result()
+                semantic_rows = semantic_future.result()
 
                 rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, limit)
 

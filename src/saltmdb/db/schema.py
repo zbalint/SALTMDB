@@ -79,11 +79,19 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS tags (
             id TEXT PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
+            normalized_name TEXT,
             canonical_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (canonical_id) REFERENCES tags(id) ON DELETE SET NULL
         );
         """)
+        
+        try:
+            conn.execute("ALTER TABLE tags ADD COLUMN normalized_name TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_normalized_name ON tags(normalized_name);")
         
         # 4. Entity Tags Join Table
         conn.execute("""

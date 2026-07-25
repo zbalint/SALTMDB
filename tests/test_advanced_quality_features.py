@@ -33,8 +33,10 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
             title="Word Salad Test",
             owner_id="test_agent"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("Nonsensical word-salad sequence detected", res)
+        self.assertIn("Knowledge stored successfully", res)
+        # Verify quality score was penalized and flag added
+        q_res = nlp.evaluate_memory_quality(f"# Nonsensical Word Salad Test\n\n{word_salad}")
+        self.assertIn("WORD_SALAD_PERPLEXITY", q_res["quality_flags"])
 
     def test_tc_adv_02_prose_extraction_protects_technical_logs(self):
         """TC-ADV-02: Prose extraction strips inline code, paths, and URLs, preventing false quality rejections on technical logs"""

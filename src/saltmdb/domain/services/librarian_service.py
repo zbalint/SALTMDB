@@ -408,9 +408,13 @@ def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = N
 
         if decayed_ids:
             logger.info("Identified %d decayed low-quality raw memories for archiving.", len(decayed_ids))
+            now_iso = datetime.now(UTC).isoformat()
             with conn:
                 placeholders = ",".join("?" for _ in decayed_ids)
-                conn.execute(f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", decayed_ids)
+                conn.execute(
+                    f"UPDATE entities SET status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
+                    [now_iso, now_iso] + decayed_ids
+                )
     except Exception as e:
         logger.warning("Error in decay_low_quality_memories: %s", e)
     finally:

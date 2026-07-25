@@ -130,8 +130,8 @@ def calculate_coleman_liau_index(prose_text: str) -> float:
         return 0.0
     word_count = len(words)
     letter_count = sum(len(w) for w in words)
-    # Sentences delimited by ., !, or ?
-    sentences = [s for s in re.split(r"[.!?]+", prose_text) if s.strip()]
+    # Sentences delimited by ., !, ?, or newlines \n (for unpunctuated technical lists)
+    sentences = [s for s in re.split(r"[.!?\n]+", prose_text) if s.strip()]
     sentence_count = max(1, len(sentences))
     
     L = (letter_count / word_count) * 100.0
@@ -204,8 +204,8 @@ def validate_markdown_structure(text: str) -> dict:
     Validates Markdown syntax integrity, header hierarchy, code block annotations, and MSDI.
     """
     # 1. Syntax Integrity Checks
-    # Balanced code fences
-    fence_count = len(re.findall(r"^```", text, re.MULTILINE))
+    # Balanced code fences (allow optional leading whitespace)
+    fence_count = len(re.findall(r"^\s*```", text, re.MULTILINE))
     if fence_count % 2 != 0:
         return {
             "is_valid": False,
@@ -219,7 +219,7 @@ def validate_markdown_structure(text: str) -> dict:
         stripped = line.strip()
         if stripped.startswith("|") and stripped.endswith("|"):
             pipe_count = stripped.count("|")
-            if pipe_count < 3: # Must have at least start, divider, end
+            if pipe_count < 3: # Must have start, column divider(s), and end pipe
                 return {
                     "is_valid": False,
                     "error_flag": "BROKEN_MARKDOWN_SYNTAX",
@@ -235,8 +235,8 @@ def validate_markdown_structure(text: str) -> dict:
             has_skip = True
             break
 
-    # 3. Untyped Code Fences Check
-    code_fences = re.findall(r"^```(\w*)", text, re.MULTILINE)
+    # 3. Untyped Code Fences Check (allow leading whitespace and hyphenated language names e.g. docker-compose)
+    code_fences = re.findall(r"^\s*```([\w-]*)", text, re.MULTILINE)
     # Filter only opening fences (even index if formatted properly)
     untyped_blocks = 0
     for i in range(0, len(code_fences), 2):
@@ -369,17 +369,13 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     prose_content = extract_prose_content(text)
     prose_words = re.findall(r"\b[a-zA-Z0-9_-]+\b", prose_content)
 
-    # Bigram Transition Perplexity Gate (Word-Salad Protection)
+    # Bigram Transition Perplexity Gate (Word-Salad Protection as Quality Score Modifier)
+    perp_penalty = 0.0
     if len(prose_words) > 25:
         perp_res = calculate_transition_perplexity(prose_content)
         if perp_res["validity_ratio"] < 0.15:
             flags.append("WORD_SALAD_PERPLEXITY")
-            return {
-                "status": "REJECT",
-                "quality_score": 0.10,
-                "quality_flags": flags,
-                "reason": f"Nonsensical word-salad sequence detected (valid transition ratio {perp_res['validity_ratio']:.1%} < 15%)."
-            }
+            perp_penalty = 0.20
 
     # Coleman-Liau Syntactic Readability Bounds
     if len(prose_words) > 30:
@@ -434,7 +430,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             score -= 0.15
             flags.append("LOW_SPECIFICITY")
 
-    score = max(0.0, min(1.0, round(score, 2)))
+    score = max(0.0, min(1.0, round(score - perp_penalty, 2)))
     status = "WARN" if tier1_warn else "ACCEPT"
     
     return {

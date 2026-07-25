@@ -24,6 +24,7 @@ scratch/
 ISSUES*.md
 UPGRADE*.md
 TEXT_QUALITY_CHECK_DESIGN*.md
+BUG_REPORT*.md
 *.egg-info/
 
 # Test artifact databases
