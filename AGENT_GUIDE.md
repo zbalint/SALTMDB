@@ -116,6 +116,14 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
     * If you notice you are performing the same mechanical sequence of commands, queries, or file edits repeatedly within or across sessions, STOP doing it manually.
     * *Required Protocol*: Document the repetitive workflow, write a robust, reusable Python script or CLI tool to automate it, and record this new "skill" in `store_memory` so future agents can execute it instantly.
 
+14. **Delegate via Subagents (Multi-Agent Orchestration)**
+    * When encountering specialized, multi-step, or parallelizable sub-tasks (e.g. document updates, domain audits, refactoring, CSS optimizations), activate the `saltmdb-subagent-orchestration` skill to spawn task-scoped subagents.
+    * *Required Protocol*:
+      1. **Initialize Thread**: Generate a descriptive `context_id` (e.g. `task_refactor_auth_01`) and log a start event via `log_event`.
+      2. **Fixed Role ID**: Assign a fixed worker `owner_id` (e.g. `agent_docs`, `agent_qa`, `agent_security`) matching the domain.
+      3. **Construct Worker Prompt**: Adhere strictly to `WORKER_TEMPLATE.md` format including FastMCP schema rules (`kwargs={}`).
+      4. **Cognitive Sweep**: Upon worker completion, run `search_memory(context_id=...)` to sweep findings and close thread.
+
 ---
 
 ## 2. Available Tools Overview (10 Consolidated Tools)

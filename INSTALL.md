@@ -80,7 +80,7 @@ Copy the output path (e.g. `C:\Users\you\AppData\Local\Python\python.exe` or `/h
 ---
 
 ### A. Google Antigravity CLI (`agy`)
-Global MCP config location: `~/.gemini/config/mcp_config.json` (Create this file if it does not exist).
+MCP server configuration directory: `~/.gemini/antigravity-cli/mcp/saltmdb/` (or global `~/.gemini/antigravity-cli/settings.json`).
 
 ```json
 {
