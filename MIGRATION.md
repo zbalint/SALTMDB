@@ -49,6 +49,7 @@ This document tracks schema modifications across alpha versions and provides ins
 | `v0.1.0-alpha.44` | 7 | DB Viewer Pagination Release: added pagination control bars (item counters `Showing X–Y of Z`, page indicators `Page X of Y`, and Previous/Next navigation buttons) to Knowledge Entities (`view-entities`) and Operational Event Ledger (`view-events`) views; added event type and agent search filters to Event Ledger | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.45` | 7 | Package release: documentation alignment, pyproject.toml version sync, core flag persistence fix, and owner_id standardization | **No Action Required** (fully backward-compatible) |
 | `v0.1.0-alpha.46` | 7 | MCP Tool Consolidation Release: refactored MCP tool palette from 23 to 10 consolidated tools; added polymorphic string/list handling for `archive_memory`, `manage_relation`, and `commit_consolidation`; unified graph inspection into `inspect_graph`; unified events into `get_events`; unified volatile secret management into `ephemeral_memory`; moved viewer/snapshot management to CLI | **No Action Required** (fully backward-compatible) |
+| `v0.1.0-alpha.47` | 7 | Auto-Supersession & Duplicate Check Fix Release: upgraded candidate decision metric to ONNX embedding cosine distance; replaced unconfirmed write-time weight demotion and auto-linking with reviewable `supersession_candidate` event logging; enabled store-and-warn duplicate write handling with structured warning returns | **No Action Required** (fully backward-compatible) |
 
 ---
 

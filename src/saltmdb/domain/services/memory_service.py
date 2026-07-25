@@ -158,6 +158,10 @@ def store_memory(
             pass
 
     matched_supersession_id = None
+    matched_supersession_title = None
+    matched_sim_score = 0.0
+    duplicate_warning_str = None
+
     if not entity_id and not skip_duplicate_check:
         try:
             dup_check = check_duplicate_memories(
@@ -173,18 +177,19 @@ def store_memory(
                 sim_score = top.get("similarity_score", 0.0)
                 matched_owner = top.get("owner_id")
                 
-                # Calibrated Auto-Supersession: similarity >= 0.88 (Cosine Distance <= 0.12)
-                # Enforce owner_id namespace isolation: match caller_owner_id or 'shared'
-                if sim_score >= 0.88 and (matched_owner is None or matched_owner == owner_id or matched_owner == "shared" or owner_id == "shared"):
-                    matched_supersession_id = top["id"]
-                    logger.info("Calibrated Auto-Supersession: New memory '%s' supersedes existing memory '%s' (ID: %s, Similarity: %.2f)", title, top["title"], top["id"], sim_score)
-                else:
-                    if should_close:
-                        conn.close()
-                    return (f"Warning: Potential duplicate of existing memory '{top['title']}' "
-                            f"(ID: {top['id']}, similarity {top['similarity_score']}). "
-                            f"Call store_memory with entity_id='{top['id']}' to update it instead, "
-                            f"or set skip_duplicate_check=True to force a new entry.")
+                # Check namespace isolation: match caller_owner_id or 'shared'
+                if matched_owner is None or matched_owner == owner_id or matched_owner == "shared" or owner_id == "shared":
+                    # Calibrated Cosine Similarity Thresholds for bge-small-en-v1.5:
+                    # >= 0.75 triggers supersession_candidate event logging
+                    # >= 0.85 triggers duplicate store-and-warn response
+                    if sim_score >= 0.75:
+                        matched_supersession_id = top["id"]
+                        matched_supersession_title = top["title"]
+                        matched_sim_score = sim_score
+                        logger.info("Calibrated Cosine Supersession Candidate: New memory '%s' matches existing memory '%s' (ID: %s, Cosine Similarity: %.2f)", title, top["title"], top["id"], sim_score)
+                    
+                    if sim_score >= 0.85:
+                        duplicate_warning_str = f" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]"
         except Exception:
             pass
             
@@ -281,23 +286,29 @@ def store_memory(
 
                 conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
                 
-            # Stage 5: Calibrated Auto-Supersession Relation Edge Insertion & Weight Adjustment
+            # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
             if matched_supersession_id:
                 try:
-                    from saltmdb.domain.services.relation_service import store_relation
-                    store_relation(
-                        source_id=entity_id,
-                        target_id=matched_supersession_id,
-                        predicate="supersedes",
+                    from saltmdb.domain.services.event_service import log_event
+                    candidate_payload = json.dumps({
+                        "new_entity_id": entity_id,
+                        "target_entity_id": matched_supersession_id,
+                        "similarity_score": matched_sim_score,
+                        "target_title": matched_supersession_title
+                    })
+                    log_event(
+                        agent_id=owner_id or "system",
+                        type="supersession_candidate",
+                        content=candidate_payload,
+                        context_id=context_id,
                         db_connection=conn
                     )
-                    # Lower older superseded entity's weight to 1
-                    conn.execute("UPDATE entities SET weight = 1 WHERE id = ?", (matched_supersession_id,))
-                    logger.info("Auto-Supersession: Created 'supersedes' relation edge from %s -> %s and set older entity weight to 1", entity_id, matched_supersession_id)
+                    logger.info("Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s", entity_id, matched_supersession_id)
                 except Exception as ex:
-                    logger.warning("Failed to auto-store supersedes relation edge: %s", ex)
+                    logger.warning("Failed to log supersession_candidate event: %s", ex)
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
+
         trigger_librarian(db_path=db_path)
 
         target_db = db_path or get_db_path()
@@ -305,7 +316,10 @@ def store_memory(
             from saltmdb.domain.services import embedding_service
             _embed_pool.submit(embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db)
 
-        return f"Knowledge stored successfully with ID: {entity_id}"
+        res_msg = f"Knowledge stored successfully with ID: {entity_id}"
+        if duplicate_warning_str:
+            res_msg += duplicate_warning_str
+        return res_msg
     except Exception as e:
         logger.error("Error storing knowledge: %s", e)
         return f"Error storing knowledge: {e}"
@@ -833,10 +847,38 @@ def check_duplicate_memories(
             cursor = conn.execute(f"SELECT id, title, full_content, owner_id FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
             fts_candidates = cursor.fetchall()
         
+        from saltmdb.config import is_semantic_search_enabled
+        use_semantic = is_semantic_search_enabled()
+
+        query_vector = None
+        if use_semantic:
+            try:
+                from saltmdb.domain.services import embedding_service
+                query_vector = embedding_service.embed_text(input_text)
+            except Exception as ex:
+                logger.warning("Could not generate query embedding for duplicate check: %s", ex)
+
         for eid, etitle, econtent, eowner in fts_candidates:
             existing_text = f"{etitle} {econtent}"
-            sim = word_sim(input_text, existing_text)
-            if sim >= 0.25:
+            sim = 0.0
+            if use_semantic and query_vector is not None:
+                try:
+                    from saltmdb.domain.services import embedding_service
+                    cand_vec = embedding_service.embed_text(existing_text)
+                    # Cosine similarity = 1.0 - Cosine Distance
+                    import numpy as np
+                    dot_product = np.dot(query_vector, cand_vec)
+                    norm_a = np.linalg.norm(query_vector)
+                    norm_b = np.linalg.norm(cand_vec)
+                    if norm_a > 0 and norm_b > 0:
+                        sim = float(dot_product / (norm_a * norm_b))
+                except Exception as ex:
+                    sim = word_sim(input_text, existing_text)
+            else:
+                sim = word_sim(input_text, existing_text)
+
+            min_threshold = 0.75 if use_semantic else 0.40
+            if sim >= min_threshold:
                 duplicates.append({
                     "id": eid,
                     "title": etitle,
