@@ -18,10 +18,10 @@ init_ephemeral_db()
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Create a new per-request connection configured with optimized PRAGMAs."""
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10.0)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20.0)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA busy_timeout=20000;")
     conn.execute("PRAGMA cache_size=-64000;")
     conn.execute("PRAGMA mmap_size=268435456;")
     conn.execute("PRAGMA temp_store=MEMORY;")
