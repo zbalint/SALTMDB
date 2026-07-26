@@ -99,6 +99,62 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
         if should_close:
             conn.close()
 
+def _resolve_tag_id(conn: sqlite3.Connection, tag_name: str):
+    """Resolves a tag name to its canonical tag id (case-insensitive, '#'-prefix-tolerant)."""
+    if not tag_name:
+        return None
+    name = tag_name.strip()
+    if not name.startswith('#'):
+        name = '#' + name
+    row = conn.execute("SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (name,)).fetchone()
+    if not row:
+        return None
+    tag_id, canonical_id = row
+    return canonical_id if canonical_id else tag_id
+
+def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = None, db_path: str = None) -> str:
+    """Merges one or more tags into an explicitly chosen canonical tag, repointing entity_tags associations.
+
+    Unlike merge_tags_heuristics (which picks the canonical tag arbitrarily by SQL row order),
+    this lets the caller pick which tag name survives as canonical.
+    """
+    should_close = False
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    try:
+        canonical_id = _resolve_tag_id(conn, keep_tag)
+        if not canonical_id:
+            return f"Error: keep_tag '{keep_tag}' does not exist in the tags table."
+
+        merged = []
+        skipped = []
+        with conn:
+            for name in (tags_to_merge or []):
+                alias_id = _resolve_tag_id(conn, name)
+                if not alias_id:
+                    skipped.append({"tag": name, "reason": "not found"})
+                    continue
+                if alias_id == canonical_id:
+                    skipped.append({"tag": name, "reason": "already canonical"})
+                    continue
+
+                conn.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id))
+                conn.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                conn.execute(
+                    "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
+                    (alias_id, canonical_id)
+                )
+                conn.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                merged.append(name)
+
+        return f"Merged {len(merged)} tag(s) into canonical tag '{keep_tag}': {merged}. Skipped: {skipped}"
+    finally:
+        if should_close:
+            conn.close()
+
 def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = None):
     """Scans for tags with 5 or more raw entries per owner and logs a consolidation request event."""
     should_close = False

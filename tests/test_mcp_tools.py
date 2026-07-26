@@ -70,6 +70,37 @@ class TestMCPToolsWrapper(unittest.TestCase):
         tags = tools.get_canonical_tags(query="data")
         self.assertIsInstance(tags, list)
 
+    def _tag_count_for_entity(self, entity_id):
+        return self.conn.execute("SELECT COUNT(*) FROM entity_tags WHERE entity_id = ?", (entity_id,)).fetchone()[0]
+
+    def test_store_memory_update_preserves_tags_when_omitted(self):
+        res = tools.store_memory(content="Content for tag preservation test on update path", title="Tag Preservation Entity", tags=["#python", "#backend"], owner_id="user1", skip_duplicate_check=True)
+        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(self._tag_count_for_entity(entity_id), 2)
+
+        update_res = tools.store_memory(entity_id=entity_id, content="Content for tag preservation test on update path", title="Tag Preservation Entity", is_core=True, owner_id="user1", skip_duplicate_check=True)
+        self.assertIn("stored successfully", update_res)
+        self.assertEqual(self._tag_count_for_entity(entity_id), 2)
+
+    def test_store_memory_update_explicit_empty_tags_clears(self):
+        res = tools.store_memory(content="Content for explicit tag clearing test on update path", title="Tag Clearing Entity", tags=["#python"], owner_id="user1", skip_duplicate_check=True)
+        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(self._tag_count_for_entity(entity_id), 1)
+
+        tools.store_memory(entity_id=entity_id, content="Content for explicit tag clearing test on update path", title="Tag Clearing Entity", tags=[], owner_id="user1", skip_duplicate_check=True)
+        self.assertEqual(self._tag_count_for_entity(entity_id), 0)
+
+    def test_store_memory_update_explicit_tags_replaces(self):
+        res = tools.store_memory(content="Content for explicit tag replacement test on update path", title="Tag Replacement Entity", tags=["#alpha"], owner_id="user1", skip_duplicate_check=True)
+        entity_id = res.split("ID: ")[1].strip()
+
+        tools.store_memory(entity_id=entity_id, content="Content for explicit tag replacement test on update path", title="Tag Replacement Entity", tags=["#beta"], owner_id="user1", skip_duplicate_check=True)
+        self.assertEqual(self._tag_count_for_entity(entity_id), 1)
+        row = self.conn.execute("""
+            SELECT t.name FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE et.entity_id = ?
+        """, (entity_id,)).fetchone()
+        self.assertEqual(row[0], "#beta")
+
     def test_ephemeral_memory_tool(self):
         store_res = tools.ephemeral_memory(action="store", key="secret_token", value="super_secret_123")
         self.assertIn("stored successfully", store_res)

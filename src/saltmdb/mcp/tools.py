@@ -66,6 +66,17 @@ def get_canonical_tags(query: str = None, domain: str = None, **kwargs) -> list:
     return memory_service.get_canonical_tags(domain=query_)
 
 @mcp.tool()
+def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> str:
+    """Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all
+    affected entities' tag associations. Use to fix folksonomy fragmentation (e.g. keep_tag='#docs',
+    tags_to_merge=['#doc', '#documentation'])."""
+    kw = _unwrap_kwargs(kwargs)
+    keep_tag_ = _resolve(keep_tag, kw, kwargs, "keep_tag", "canonical_tag", "keep")
+    raw_merge = tags_to_merge if tags_to_merge is not None else _resolve(None, kw, kwargs, "tags_to_merge", "merge_tags", "aliases")
+    tags_to_merge_ = _normalize_list_or_str(raw_merge)
+    return librarian_service.merge_tags(keep_tag=keep_tag_, tags_to_merge=tags_to_merge_)
+
+@mcp.tool()
 def store_memory(
     content: str = None,
     title: str = None,
@@ -88,7 +99,7 @@ def store_memory(
     title_ = _resolve(title, kw, kwargs, "title")
 
     raw_tag = tags if tags is not None else _resolve(None, kw, kwargs, "tags", "tag")
-    tags_ = _normalize_list_or_str(raw_tag)
+    tags_ = _normalize_list_or_str(raw_tag) if raw_tag is not None else None
 
     raw_is_core = is_core if is_core is not None else _resolve(None, kw, kwargs, "is_core")
     if raw_is_core is not None:

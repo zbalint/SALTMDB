@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
 _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-search")
 
+TITLE_MIN_LENGTH = 5
+TITLE_MAX_LENGTH = 120
+
 def validate_memory_input(title: str, content: str, metadata: dict) -> None:
     """Validates memory input to enforce title hygiene and relative path constraints."""
     if title:
@@ -38,7 +41,19 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
             raise ValueError(
                 "Error: Title violates clean title guidelines. Do not prefix memory titles with file names or file extensions (e.g., use 'Language Rules' instead of 'CORE.md — Language Rules')."
             )
-            
+
+        stripped_title = title.strip()
+        if len(stripped_title) > TITLE_MAX_LENGTH:
+            raise ValueError(
+                f"Error: Title exceeds the maximum length of {TITLE_MAX_LENGTH} characters (got {len(stripped_title)}). "
+                "Titles must be a short canonical label in '[Domain] Topic' form, not the memory body. "
+                "Move the full text into the 'content' parameter."
+            )
+        if len(stripped_title) < TITLE_MIN_LENGTH:
+            raise ValueError(
+                f"Error: Title is too short (minimum {TITLE_MIN_LENGTH} characters). Provide a descriptive, canonical title."
+            )
+
     if metadata and isinstance(metadata, dict):
         source_path = metadata.get("source_path")
         if source_path:
@@ -220,8 +235,9 @@ def store_memory(
                      SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
                  """, (hist_id, entity_id))
                  
-            conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
-            
+            if tags is not None:
+                conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
+
             metadata_str = json.dumps(metadata) if metadata else None
             if is_core is None:
                 is_core_val = None
@@ -251,45 +267,45 @@ def store_memory(
                     quality_flags = excluded.quality_flags
             """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
             
-            tags = tags or []
-            tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
-            for tag_name in tags:
-                tag_name = tag_name.strip()
-                if not tag_name:
-                    continue
-                if not tag_name.startswith('#'):
-                    tag_name = '#' + tag_name
+            if tags is not None:
+                tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
+                for tag_name in tags:
+                    tag_name = tag_name.strip()
+                    if not tag_name:
+                        continue
+                    if not tag_name.startswith('#'):
+                        tag_name = '#' + tag_name
 
-                norm_input = tag_name.lower().lstrip('#')
-                norm_input = re.sub(r'[-_\s]+', '', norm_input)
+                    norm_input = tag_name.lower().lstrip('#')
+                    norm_input = re.sub(r'[-_\s]+', '', norm_input)
 
-                # Use cached result if we already resolved this tag
-                if norm_input in tag_lookup:
-                    tag_id = tag_lookup[norm_input]
-                else:
-                    # Targeted point query instead of full table scan
-                    row = conn.execute(
-                        "SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,)
-                    ).fetchone()
-                    if row:
-                        tag_id = row[1] if row[1] else row[0]
-                        tag_lookup[norm_input] = tag_id
+                    # Use cached result if we already resolved this tag
+                    if norm_input in tag_lookup:
+                        tag_id = tag_lookup[norm_input]
                     else:
-                        # Try indexed normalized lookup for fuzzy match
-                        fuzzy_row = conn.execute(
-                            "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
-                            (norm_input, norm_input)
+                        # Targeted point query instead of full table scan
+                        row = conn.execute(
+                            "SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,)
                         ).fetchone()
-                        if fuzzy_row:
-                            tag_id = fuzzy_row[1] if fuzzy_row[1] else fuzzy_row[0]
+                        if row:
+                            tag_id = row[1] if row[1] else row[0]
                             tag_lookup[norm_input] = tag_id
                         else:
-                            tag_id = str(uuid.uuid4())
-                            conn.execute("INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)", (tag_id, tag_name, norm_input))
-                            tag_lookup[norm_input] = tag_id
+                            # Try indexed normalized lookup for fuzzy match
+                            fuzzy_row = conn.execute(
+                                "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
+                                (norm_input, norm_input)
+                            ).fetchone()
+                            if fuzzy_row:
+                                tag_id = fuzzy_row[1] if fuzzy_row[1] else fuzzy_row[0]
+                                tag_lookup[norm_input] = tag_id
+                            else:
+                                tag_id = str(uuid.uuid4())
+                                conn.execute("INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)", (tag_id, tag_name, norm_input))
+                                tag_lookup[norm_input] = tag_id
 
-                conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
-                
+                    conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
+
             # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
             if matched_supersession_id:
                 try:
