@@ -1,5 +1,21 @@
 # SALTMDB Tag System: Research & Improvement Plan
 
+> **Status: Quick Wins implemented in v0.1.0-alpha.54** (2026-07-28). Items 1-4 of the
+> Quick Wins section below were implemented, tested (106/106 passing), and landed via the
+> same Architect → Developer → Tester subagent chain used for the SQLite work. A shared
+> `resolve_or_create_tag()`/`normalize_tag_name()` helper (in `memory_service.py`) now
+> replaces two independently-diverged tag-write code paths — implementation turned up a
+> real, confirmed bug along the way: `commit_consolidation()` had its own buggy inline tag
+> logic that ignored `canonical_id` entirely and never populated `normalized_name`,
+> meaning consolidated entities' tags could silently bypass existing alias merges. Also
+> shipped: a deterministic plural/suffix matching fallback (catches `#skill`/`#skills`
+> without needing embeddings) and soft write-time shape validation (sanitize + log, never
+> hard-reject). The Medium-Term embedding-based review queue and Larger-Bet faceted/
+> hierarchical model below are **not** implemented — scoped out for this round, still open
+> future work. See `MIGRATION.md`'s `v0.1.0-alpha.54` entry and SALTMDB's own memory
+> (context_id `task_tag_system_impl_20260728`) for the full decision trail. This file is
+> kept as the original historical research record — not edited further below this notice.
+
 ## Research Summary
 
 ### 1. Classic folksonomy governance (del.icio.us, Flickr, "tag gardening")

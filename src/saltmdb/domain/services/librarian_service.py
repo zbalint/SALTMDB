@@ -10,6 +10,7 @@ from datetime import datetime, UTC
 from saltmdb.config import get_db_path, LIBRARIAN_TRIGGER_COOLDOWN_S
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock
+from saltmdb.domain.services.memory_service import normalize_tag_name
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +113,7 @@ def _resolve_tag_id(conn: sqlite3.Connection, tag_name: str):
     """Resolves a tag name to its canonical tag id (case-insensitive, '#'-prefix-tolerant)."""
     if not tag_name:
         return None
-    name = tag_name.strip()
-    if not name.startswith('#'):
-        name = '#' + name
+    name = normalize_tag_name(tag_name)
     row = conn.execute("SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (name,)).fetchone()
     if not row:
         return None

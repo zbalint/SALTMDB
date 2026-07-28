@@ -8,7 +8,7 @@ from saltmdb.db.connection import get_connection, write_transaction_retrying, cl
 from saltmdb.utils.text import resolve_entity_id, extract_title_and_snippet, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
-from saltmdb.domain.services.memory_service import check_duplicate_memories
+from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
 
 logger = logging.getLogger(__name__)
 
@@ -334,18 +334,9 @@ def commit_consolidation(
 
             if tags:
                 for tag_name in tags:
-                    tag_name = tag_name.strip()
-                    if not tag_name:
+                    tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_val)
+                    if not tag_id:
                         continue
-                    if not tag_name.startswith('#'):
-                        tag_name = '#' + tag_name
-                    cursor = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,))
-                    row = cursor.fetchone()
-                    if row:
-                        tag_id = row[0]
-                    else:
-                        tag_id = str(uuid.uuid4())
-                        conn.execute("INSERT INTO tags (id, name) VALUES (?, ?)", (tag_id, tag_name))
                     conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (consolidated_id, tag_id))
 
             placeholders = ",".join("?" for _ in resolved_parents)

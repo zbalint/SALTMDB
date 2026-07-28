@@ -268,41 +268,25 @@ def store_memory(
             """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
             
             if tags is not None:
-                tag_lookup = {}  # norm -> canonical_or_tag_id, built lazily
+                tag_lookup = {}  # norm -> resolved tag_id, cached per-call to avoid
+                                 # re-resolving the same tag string twice within one store_memory
                 for tag_name in tags:
                     tag_name = tag_name.strip()
                     if not tag_name:
                         continue
-                    if not tag_name.startswith('#'):
-                        tag_name = '#' + tag_name
 
                     norm_input = tag_name.lower().lstrip('#')
                     norm_input = re.sub(r'[-_\s]+', '', norm_input)
 
-                    # Use cached result if we already resolved this tag
+                    # Use cached result if we already resolved an equivalent tag string
                     if norm_input in tag_lookup:
                         tag_id = tag_lookup[norm_input]
                     else:
-                        # Targeted point query instead of full table scan
-                        row = conn.execute(
-                            "SELECT id, canonical_id FROM tags WHERE name = ?", (tag_name,)
-                        ).fetchone()
-                        if row:
-                            tag_id = row[1] if row[1] else row[0]
-                            tag_lookup[norm_input] = tag_id
-                        else:
-                            # Try indexed normalized lookup for fuzzy match
-                            fuzzy_row = conn.execute(
-                                "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
-                                (norm_input, norm_input)
-                            ).fetchone()
-                            if fuzzy_row:
-                                tag_id = fuzzy_row[1] if fuzzy_row[1] else fuzzy_row[0]
-                                tag_lookup[norm_input] = tag_id
-                            else:
-                                tag_id = str(uuid.uuid4())
-                                conn.execute("INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)", (tag_id, tag_name, norm_input))
-                                tag_lookup[norm_input] = tag_id
+                        tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_id)
+                        tag_lookup[norm_input] = tag_id
+
+                    if not tag_id:
+                        continue
 
                     conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
 
@@ -505,7 +489,7 @@ def search_memory(
                 params.append(str(mv))
 
         if tags_filter:
-            norm_tags = [t.strip() if t.strip().startswith('#') else '#' + t.strip() for t in tags_filter if t.strip()]
+            norm_tags = [normalize_tag_name(t) for t in tags_filter if t.strip()]
             if norm_tags:
                 tag_groups = []
                 for tname in norm_tags:
@@ -565,7 +549,7 @@ def search_memory(
             invalid_tags = []
             if tags_filter:
                 for tf in tags_filter:
-                    tname = tf.strip() if tf.strip().startswith('#') else '#' + tf.strip()
+                    tname = normalize_tag_name(tf)
                     c = conn.execute("SELECT 1 FROM tags WHERE name = ?", (tname,)).fetchone()
                     if not c:
                         invalid_tags.append(tf)
@@ -1031,6 +1015,107 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
     finally:
         if should_close:
             close_connection(conn)
+
+_TAG_NAME_RE = re.compile(r'^#[a-z0-9][a-z0-9-]*$')
+
+
+def normalize_tag_name(tag_name: str) -> str:
+    """Ensures a bare or malformed tag string is '#'-prefixed. Pure syntactic helper,
+    reused by write paths and read-path tag filters alike (replaces duplicated
+    auto-prefix one-liners across the codebase)."""
+    name = (tag_name or "").strip()
+    if not name:
+        return name
+    if not name.startswith('#'):
+        name = '#' + name
+    return name
+
+
+def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | None:
+    """Single source of truth for tag write-time resolution.
+
+    Must be called with `conn` already inside an open write transaction (does not open
+    its own). Returns the resolved (canonical, if aliased) tag id, or None if the name is
+    empty/unsalvageable after sanitization.
+
+    Resolution order:
+      1. Shape-sanitize the name (lowercase, strip characters not in [a-z0-9-] after the
+         '#' prefix). If sanitization actually changed the string, fire a soft
+         log_event(type='issue') noting the before/after -- this never blocks resolution,
+         it's visibility only.
+      2. Exact `name` match.
+      3. The existing normalized_name / computed-normalization fallback (mirrors
+         store_memory's fuzzy lookup exactly).
+      4. A simple plural/suffix fallback: only when the normalized input is longer than 3
+         chars, full-scan `tags` and compare `norm_input.rstrip('s')` against each row's
+         normalized form (also only when that row's normalized form is longer than 3
+         chars) -- return on first match.
+      5. Otherwise, create a new tag row and return its new id.
+
+    At every step, if a row is found, return `canonical_id if canonical_id else id` --
+    respecting existing alias merges (the exact behavior gap commit_consolidation is
+    currently missing).
+    """
+    name = normalize_tag_name(tag_name)
+    if not name or name == '#':
+        return None
+
+    # Step 1: shape-sanitize -- lowercase, strip anything outside [a-z0-9-] after '#'.
+    raw_body = name[1:]
+    sanitized_body = re.sub(r'[^a-z0-9-]', '', raw_body.lower())
+    sanitized_name = ('#' + sanitized_body) if sanitized_body else name
+
+    if sanitized_name != name:
+        try:
+            from saltmdb.domain.services.event_service import log_event
+            log_event(
+                agent_id=agent_id or "system",
+                type="issue",
+                content=f"Tag name sanitized during resolve_or_create_tag: '{name}' -> '{sanitized_name}'",
+                db_connection=conn,
+                _in_transaction=True
+            )
+        except Exception as ex:
+            logger.warning("Failed to log tag sanitization event: %s", ex)
+        name = sanitized_name
+
+    if not name or name == '#':
+        return None
+
+    # Step 2: exact match
+    row = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (name,)).fetchone()
+    if row:
+        return row[1] if row[1] else row[0]
+
+    # Step 3: normalized_name / computed-normalization fallback (mirrors store_memory)
+    norm_input = name.lower().lstrip('#')
+    norm_input = re.sub(r'[-_\s]+', '', norm_input)
+
+    row = conn.execute(
+        "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
+        (norm_input, norm_input)
+    ).fetchone()
+    if row:
+        return row[1] if row[1] else row[0]
+
+    # Step 4: plural/suffix fallback -- full scan (small table, same cost model already
+    # accepted by merge_tags_heuristics()), only for norm_input longer than 3 chars.
+    if len(norm_input) > 3:
+        stripped_input = norm_input.rstrip('s')
+        all_rows = conn.execute("SELECT id, name, normalized_name, canonical_id FROM tags").fetchall()
+        for tid, tname, tnorm, tcanon in all_rows:
+            existing_norm = tnorm if tnorm else re.sub(r'[-_\s]+', '', tname.lower().lstrip('#'))
+            if len(existing_norm) > 3 and stripped_input == existing_norm:
+                return tcanon if tcanon else tid
+
+    # Step 5: create a new tag row
+    tag_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+        (tag_id, name, norm_input)
+    )
+    return tag_id
+
 
 def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = None) -> list:
     """Queries canonical tags."""

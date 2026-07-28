@@ -42,16 +42,47 @@ class TestTagMergeTool(unittest.TestCase):
         self.assertIsNotNone(remaining[1], "merged tag should have canonical_id set, not deleted")
 
     def test_merge_tags_idempotent_when_run_twice(self):
-        res1 = tools.store_memory(content="Content for entity tagged with the skills fragment", title="Skills Fragment Entity", tags=["#skill", "#skills"], owner_id="user1", skip_duplicate_check=True)
+        # NOTE: previously used #skill/#skills as the fixture pair, but those are now
+        # resolved onto the SAME tag row automatically at write time by
+        # resolve_or_create_tag()'s plural/suffix fallback (see
+        # test_plural_suffix_tags_auto_resolve_to_same_tag_at_write_time below) -- so they
+        # never land as two rows needing an explicit merge in the first place. #docs and
+        # #documentation are genuinely different-looking strings (not a simple '-s' suffix
+        # of each other), so they still land as two separate rows and this test continues
+        # to exercise a real, explicit merge_tags() call and its idempotency.
+        res1 = tools.store_memory(content="Content for entity tagged with the docs fragment", title="Docs Fragment Entity", tags=["#docs", "#documentation"], owner_id="user1", skip_duplicate_check=True)
         id1 = res1.split("ID: ")[1].strip()
 
-        first = tools.merge_tags(keep_tag="#skills", tags_to_merge=["#skill"])
+        first = tools.merge_tags(keep_tag="#documentation", tags_to_merge=["#docs"])
         self.assertIn("Merged 1 tag(s)", first)
-        self.assertEqual(self._tag_names_for_entity(id1), ["#skills"])
+        self.assertEqual(self._tag_names_for_entity(id1), ["#documentation"])
 
-        second = tools.merge_tags(keep_tag="#skills", tags_to_merge=["#skill"])
+        second = tools.merge_tags(keep_tag="#documentation", tags_to_merge=["#docs"])
         self.assertIn("Skipped", second)
-        self.assertEqual(self._tag_names_for_entity(id1), ["#skills"])
+        self.assertEqual(self._tag_names_for_entity(id1), ["#documentation"])
+
+    def test_plural_suffix_tags_auto_resolve_to_same_tag_at_write_time(self):
+        """New behavior: resolve_or_create_tag()'s plural/suffix fallback means #skill and
+        #skills now resolve to the SAME tag row automatically at write time, so they never
+        fragment into two rows needing a later merge_tags() call."""
+        res1 = tools.store_memory(content="Content for entity tagged with skill singular", title="Skill Singular Entity", tags=["#skill"], owner_id="user1", skip_duplicate_check=True)
+        id1 = res1.split("ID: ")[1].strip()
+
+        res2 = tools.store_memory(content="Content for entity tagged with skills plural", title="Skills Plural Entity", tags=["#skills"], owner_id="user1", skip_duplicate_check=True)
+        id2 = res2.split("ID: ")[1].strip()
+
+        tags1 = self._tag_names_for_entity(id1)
+        tags2 = self._tag_names_for_entity(id2)
+        self.assertEqual(len(tags1), 1)
+        self.assertEqual(tags1, tags2, "#skill and #skills should resolve to the same underlying tag row")
+
+        rows = self.conn.execute(
+            "SELECT id FROM tags WHERE lower(name) IN ('#skill', '#skills')"
+        ).fetchall()
+        self.assertEqual(
+            len(rows), 1,
+            "the plural fallback should prevent a second row from ever being created for this pair"
+        )
 
     def test_merge_tags_missing_keep_tag_errors(self):
         res = librarian_service.merge_tags(keep_tag="#does-not-exist", tags_to_merge=["#fix"], db_path=self.db_path)
