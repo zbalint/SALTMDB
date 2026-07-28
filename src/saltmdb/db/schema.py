@@ -81,7 +81,8 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "content_hash TEXT",
             "quality_score REAL",
             "quality_status TEXT",
-            "quality_flags TEXT"
+            "quality_flags TEXT",
+            "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'"
         ]:
             _add_column_if_missing(conn, "entities", col)
 
@@ -307,6 +308,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",

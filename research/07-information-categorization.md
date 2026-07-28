@@ -1,5 +1,14 @@
 # Information Categorization & Classification Schemes for SALTMDB
 
+> **Status: Quick Win implemented in v0.1.0-alpha.56** (2026-07-28). Shipped the additive
+> `memory_type` enum column (`fact`/`event`/`procedure`/`decision`/`preference`, CHECK-constrained,
+> `DEFAULT 'fact'`) on `entities`, plus `store_memory(memory_type=...)` and
+> `search_memory(memory_type_filter=...)` support in `memory_service.py` and the MCP tool layer.
+> This also resolved the Track 5 vs. Track 7 design collision noted in `research/README.md` in
+> favor of the column over a tag-namespace convention. **NOT implemented**: Phase 2 remains future
+> work — the `domain` column and embedding-cluster-assisted (UMAP/HDBSCAN) domain *suggestions* are
+> not built. See `MIGRATION.md`'s alpha.56 entry.
+
 > Scope note: this document is about structural **classification schemes and type systems** —
 > what *kind* of thing a memory is (episodic event vs. semantic fact vs. procedure vs. decision),
 > what *subject/domain* it belongs to, and whether that axis should be a first-class column vs.

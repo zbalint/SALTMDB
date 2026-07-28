@@ -162,6 +162,36 @@ class TestMCPToolsWrapper(unittest.TestCase):
         rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
         self.assertIn("already exists", rel_res2)
 
+    def test_store_memory_memory_type_round_trip(self):
+        res = tools.store_memory(content="Content for memory_type tool round trip test", title="Memory Type Tool Entity", owner_id="user1", memory_type="preference", skip_duplicate_check=True)
+        self.assertIn("stored successfully", res)
+        entity_id = res.split("ID: ")[1].strip()
+
+        row = self.conn.execute("SELECT memory_type FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        self.assertEqual(row[0], "preference")
+
+        # Confirm it also round-trips through search_memory's echoed field.
+        search_res = tools.search_memory(owner_id="user1", memory_type_filter="preference")
+        ids = {r["id"] for r in search_res}
+        self.assertIn(entity_id, ids)
+
+    def test_store_memory_type_alias_resolves_to_memory_type(self):
+        res = tools.store_memory(content="Content for the 'type' alias resolution test", title="Type Alias Entity", owner_id="user1", type="decision", skip_duplicate_check=True)
+        self.assertIn("stored successfully", res)
+        entity_id = res.split("ID: ")[1].strip()
+
+        row = self.conn.execute("SELECT memory_type FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        self.assertEqual(row[0], "decision")
+
+    def test_search_memory_memory_type_filter_round_trip(self):
+        tools.store_memory(content="Fact-typed content for the memory_type_filter tool test", title="Fact Typed Tool Entity", owner_id="user1", memory_type="fact", skip_duplicate_check=True)
+        tools.store_memory(content="Event-typed content for the memory_type_filter tool test", title="Event Typed Tool Entity", owner_id="user1", memory_type="event", skip_duplicate_check=True)
+
+        results = tools.search_memory(memory_type_filter="fact", owner_id="user1")
+        self.assertTrue(len(results) > 0)
+        for r in results:
+            self.assertEqual(r["memory_type"], "fact")
+
     def test_inspect_graph_modes(self):
         res1 = tools.store_memory(content="Root entity node title", title="Root Entity", owner_id="user1", skip_duplicate_check=True)
         id1 = res1.split("ID: ")[1].strip() if "ID: " in res1 else "Root Entity"

@@ -77,6 +77,7 @@ def store_memory(
     scope: Literal['private', 'shared'] = "shared",
     weight: int = 1,
     is_core: bool = None,
+    memory_type: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -98,7 +99,10 @@ def store_memory(
 
     if scope not in ('private', 'shared'):
         return "Error: scope must be either 'private' or 'shared'"
-        
+
+    if memory_type is not None and memory_type not in ('fact', 'event', 'procedure', 'decision', 'preference'):
+        return "Error: memory_type must be one of 'fact', 'event', 'procedure', 'decision', 'preference'"
+
     if relevance is not None or impact is not None or novelty is not None or actionability is not None:
         r = relevance if relevance is not None else 3
         im = impact if impact is not None else 3
@@ -225,8 +229,8 @@ def store_memory(
                  hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
                  
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  
@@ -245,8 +249,8 @@ def store_memory(
                 is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
 
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -264,8 +268,9 @@ def store_memory(
                     content_hash = excluded.content_hash,
                     quality_score = excluded.quality_score,
                     quality_status = excluded.quality_status,
-                    quality_flags = excluded.quality_flags
-            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, is_core_val))
+                    quality_flags = excluded.quality_flags,
+                    memory_type = COALESCE(?, entities.memory_type)
+            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, memory_type, is_core_val, memory_type))
             
             if tags is not None:
                 tag_lookup = {}  # norm -> resolved tag_id, cached per-call to avoid
@@ -357,7 +362,7 @@ def _run_fts_search(
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                bm25(entities_fts, {bm25_weights}) as rank_score,
-               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
+               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id, e.memory_type,
                (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id
                 AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
         FROM entities_fts fts
@@ -446,6 +451,7 @@ def search_memory(
     limit: int = 5,
     context_id: str = None,
     is_core: bool = None,
+    memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
     include_related: bool = True,
@@ -482,6 +488,10 @@ def search_memory(
         if is_core is not None:
             where_clauses.append("e.is_core = ?")
             params.append(1 if is_core else 0)
+
+        if memory_type_filter is not None:
+            where_clauses.append("e.memory_type = ?")
+            params.append(memory_type_filter)
 
         if metadata_filter and isinstance(metadata_filter, dict):
             for mk, mv in metadata_filter.items():
@@ -592,7 +602,7 @@ def search_memory(
                         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                                0.0 as rank_score,
                                e.created_at, e.updated_at, e.owner_id, e.scope,
-                               e.metadata, e.context_id, 0 as rel_count
+                               e.metadata, e.context_id, e.memory_type, 0 as rel_count
                         FROM entities e
                         WHERE e.id IN ({placeholders})
                     """
@@ -612,7 +622,7 @@ def search_memory(
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
                        e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
-                       0 as rel_count
+                       e.memory_type, 0 as rel_count
                 FROM entities e
                 WHERE {" AND ".join(where_clauses)}
                 ORDER BY e.is_core DESC, e.updated_at DESC
@@ -643,9 +653,9 @@ def search_memory(
 
         results = []
         for r in rows:
-            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, rel_c = r
+            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, rel_c = r
             _, snippet = extract_title_and_snippet(econtent)
-            
+
             item = {
                 "id": eid,
                 "title": etitle,
@@ -653,6 +663,7 @@ def search_memory(
                 "score": round(abs(score), 6),
                 "weight": eweight,
                 "is_core": bool(eis_core),
+                "memory_type": ememory_type,
                 "cursor": f"offset:{offset + limit}"
             }
             if include_related:
@@ -954,13 +965,13 @@ def scan_memories(
             
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         cursor_obj = conn.execute(f"""
-            SELECT id, title, owner_id, status, weight, is_core, updated_at
+            SELECT id, title, owner_id, status, weight, is_core, updated_at, memory_type
             FROM entities
             {where_sql}
             ORDER BY updated_at DESC
             LIMIT ? OFFSET ?
         """, params + [limit, offset])
-        
+
         rows = cursor_obj.fetchall()
         return [{
             "id": r[0],
@@ -970,6 +981,7 @@ def scan_memories(
             "weight": r[4],
             "is_core": bool(r[5]),
             "updated_at": r[6],
+            "memory_type": r[7],
             "cursor": f"offset:{offset + limit}"
         } for r in rows]
     except Exception as e:

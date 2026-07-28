@@ -90,6 +90,7 @@ def store_memory(
     title: str = None,
     tags: list = None,
     is_core: bool = None,
+    memory_type: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
     owner_id: str = None,
     context_id: str = None,
     scope: Literal['private', 'shared'] = "shared",
@@ -97,6 +98,14 @@ def store_memory(
     **kwargs
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as long-term memory.
+
+    memory_type classifies the memory into one of five fixed kinds (default 'fact' on a new
+    memory; omitting it on an update preserves the existing value, same as is_core):
+      - fact: semantic, durable, generalized knowledge.
+      - event: episodic, something that happened, ideally timestamped.
+      - procedure: how-to / runbook / skill.
+      - decision: ADR-style rationale record (what was chosen and why).
+      - preference: durable user/agent preference statement.
 
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
     """
@@ -114,6 +123,8 @@ def store_memory(
         is_core_ = raw_is_core in (True, 1, "true", "1", "True")
     else:
         is_core_ = None
+
+    memory_type_ = _resolve(memory_type, kw, kwargs, "memory_type", "type", "kind")
 
     if check_duplicates_only or kw.get("check_duplicates_only"):
         return memory_service.check_duplicate_memories(title=title_, content=content_, owner_id=owner_id_, tags=tags_, context_id=context_id_)
@@ -134,6 +145,7 @@ def store_memory(
         scope=scope,
         weight=weight,
         is_core=is_core_,
+        memory_type=memory_type_,
         title=title_,
         entity_id=entity_id,
         relevance=relevance,
@@ -155,6 +167,7 @@ def search_memory(
     limit: int = 5,
     context_id: str = None,
     is_core: bool = None,
+    memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
     cursor: str = None,
     include_related: bool = True,
     **kwargs
@@ -162,6 +175,10 @@ def search_memory(
     """Performs full-text keyword & dense vector hybrid search in long-term memory.
 
     If entity_id or fetch_full is specified, retrieves full Markdown text chunk directly.
+
+    memory_type_filter optionally restricts results to one of the five fixed memory_type
+    values ('fact', 'event', 'procedure', 'decision', 'preference'); every result item also
+    echoes its 'memory_type'.
     """
     kw = _unwrap_kwargs(kwargs)
     entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "id")
@@ -177,6 +194,7 @@ def search_memory(
     metadata_filter_ = _resolve(None, kw, kwargs, "metadata_filter")
     explain_mode = kwargs.get("explain_mode", False) or kw.get("explain_mode", False)
     tag_operator = kwargs.get("tag_operator", "AND") or kw.get("tag_operator", "AND")
+    memory_type_filter_ = _resolve(memory_type_filter, kw, kwargs, "memory_type_filter", "memory_type", "type_filter")
 
     return memory_service.search_memory(
         owner_id=owner_id_,
@@ -187,6 +205,7 @@ def search_memory(
         limit=limit,
         context_id=context_id_,
         is_core=is_core,
+        memory_type_filter=memory_type_filter_,
         tag_operator=tag_operator,
         cursor=cursor,
         include_related=include_related

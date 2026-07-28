@@ -19,7 +19,7 @@ commitment to build all of it.
 | 4 | [`04-adjacent-projects-lessons.md`](./04-adjacent-projects-lessons.md) | Broader PKM/graph-DB/ontology/decay survey (Obsidian, Roam, GraphRAG, SKOS, LanceDB, Ebbinghaus/SM-2/FSRS). Cleanest gap: SALTMDB already tracks `weight` and `last_accessed_at` but neither feeds a decay function — free-standing infrastructure with no consumer. |
 | 5 | [`05-tag-system.md`](./05-tag-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.54** (2026-07-28). Diagnosed *why* fragmentation still happened: `get_canonical_tags` was advisory not enforced, and heuristic merging was lexical-only. Fixed via a shared `resolve_or_create_tag()` helper (exact → normalized → new plural/suffix fallback → create) now used by both write paths — which turned up a bonus bug: `commit_consolidation()` had its own divergent, buggier tag logic ignoring `canonical_id` entirely. Medium-Term embedding-based review queue and the faceted/hierarchy model remain future work. See `MIGRATION.md`'s alpha.54 entry. |
 | 6 | [`06-relation-system.md`](./06-relation-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.55** (2026-07-28). Added a `UNIQUE(source_id, target_id, predicate)` index on `relations` (with a one-time dedup backfill) and a new standalone `predicates` canonicalization table (not a reuse of tags' machinery — that turned out to be tag-specific, not generic) via `resolve_or_create_predicate()`, wired into `store_relation`/`bulk_store_relations`. The `valid_from`/`valid_to` columns are still functionally dead — Graphiti's "expire, never mutate" pattern for `commit_consolidation`, and `parent_ids`/`relations` redundancy resolution, remain Medium-Term future work. See `MIGRATION.md`'s alpha.55 entry. |
-| 7 | [`07-information-categorization.md`](./07-information-categorization.md) | Everything is one flat entity type today. Proposes an additive `memory_type` enum (fact/event/procedure/decision, CoALA-style episodic/semantic/procedural) as a quick win, embedding-cluster-assisted domain *suggestions* (never silent auto-tagging) as medium-term, explicitly designed to not become "tag-fragmentation-2.0." |
+| 7 | [`07-information-categorization.md`](./07-information-categorization.md) | **✅ Quick Win implemented in v0.1.0-alpha.56** (2026-07-28). Shipped an additive `memory_type` enum column (`fact`/`event`/`procedure`/`decision`/`preference`, CoALA-style episodic/semantic/procedural plus decision/preference, CHECK-constrained, `DEFAULT 'fact'`) on `entities`, wired into `store_memory`/`search_memory` and the MCP tool layer. Phase 2 (embedding-cluster-assisted `domain` suggestions, never silent auto-tagging) remains future work. See `MIGRATION.md`'s alpha.56 entry. |
 
 ## Cross-cutting findings worth noting before picking what to build
 
@@ -31,18 +31,20 @@ UPDATE-in-place) as the fix. Two unrelated research passes landing on the same s
 is a stronger signal than either alone — this is probably the single best-supported "Larger Bet"
 across the whole research set.
 
-**One real design collision needs a decision, not two implementations.** Track 5 (tags) proposes a
-`type:value` / `component:value` *facet convention inside the tag namespace* (e.g. `type:fix`,
-`type:feature`) to stop categorical concepts from colliding with descriptive tags. Track 7
-(categorization) independently proposes a dedicated `memory_type` *enum column* on `entities`
-(fact/event/procedure/decision) for the same underlying need — distinguishing what *kind* of memory
-something is. These are two different mechanisms for overlapping intent. Building both would
-recreate exactly the fragmentation-surface problem both documents separately warn about (two ways
-to say the same thing). **Pick one**: a first-class `memory_type` column (Track 7's proposal) is
-probably the better fit since it's queryable/indexable and closed-vocabulary by construction,
-versus a tag-namespace convention that still lives in the same free-text tag table everything else
-does — but this is exactly the kind of call that belongs to zbalint, not to be silently resolved by
-whichever track gets implemented first.
+**One real design collision needed a decision, not two implementations — resolved in v0.1.0-alpha.56.**
+Track 5 (tags) proposed a `type:value` / `component:value` *facet convention inside the tag
+namespace* (e.g. `type:fix`, `type:feature`) to stop categorical concepts from colliding with
+descriptive tags. Track 7 (categorization) independently proposed a dedicated `memory_type` *enum
+column* on `entities` (fact/event/procedure/decision) for the same underlying need —
+distinguishing what *kind* of memory something is. These were two different mechanisms for
+overlapping intent, and building both would have recreated exactly the fragmentation-surface
+problem both documents separately warn about (two ways to say the same thing). **Resolved in
+favor of the column**: shipped in v0.1.0-alpha.56 as a first-class, CHECK-constrained
+`memory_type` column (`fact`/`event`/`procedure`/`decision`/`preference`, `DEFAULT 'fact'`) —
+queryable/indexable and closed-vocabulary by construction, versus a tag-namespace convention that
+would still live in the same free-text tag table everything else does. Track 7's Phase 2 (a
+`domain` column + embedding-cluster-assisted UMAP/HDBSCAN suggestions) remains open. See
+`MIGRATION.md`'s alpha.56 entry.
 
 **Two tracks agree the current SQLite/schema-versioning choices are already good, not just
 tolerated.** Track 2 explicitly concludes the current WAL setup doesn't need a writer-queue/MVCC
@@ -64,15 +66,16 @@ Roughly cheapest-and-highest-value first, pooling all seven tracks' own phase la
 2. **Quick Wins, low-risk, additive-only, from Tracks 1/2/5/6/7:** dashboard token/CSS pass
    (Track 1), `PRAGMA optimize` + retry/backoff (Track 2), tag write-time validation + mandatory
    canonical-lookup (Track 5), relation dedup + unique index (Track 6 — **✅ done, alpha.55**), additive `memory_type`
-   column (Track 7, pending the collision decision above).
+   column (Track 7 — **✅ done, alpha.56**).
 3. **Medium-term, needs a design pass but no irreversible schema break:** embedding-based tag
    merge-candidate queue (Track 5), Graphiti-style `valid_from`/`valid_to` wiring for consolidation
    (Tracks 3 + 6, converging recommendation), `parent_ids`/`relations` redundancy resolution
    (Track 6), decay function consuming `weight`/`last_accessed_at` (Track 4).
 4. **Larger bets needing explicit buy-in:** vendoring `d3-force` for the graph view (Track 1, the
    one dependency-boundary exception), confidence/provenance fields on relations (Track 6),
-   community/cluster detection over the relation graph (Track 4), faceted/hierarchical tag or
-   memory-type model (Tracks 5 + 7, contingent on the collision decision above).
+   community/cluster detection over the relation graph (Track 4), faceted/hierarchical tag model
+   (Track 5) and Track 7's Phase 2 `domain` column + embedding-cluster-assisted suggestions (now
+   that the memory_type-vs-tag-facet collision is resolved in favor of the column, alpha.56).
 
 ## Next step
 
