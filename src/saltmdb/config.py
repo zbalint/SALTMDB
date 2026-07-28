@@ -45,3 +45,13 @@ QG_CLI_MIN = 2.0
 QG_CLI_MAX = 26.0
 QG_PERPLEXITY_VALIDITY_MIN = 0.15
 
+# SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
+# Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"
+RETRY_MAX_ATTEMPTS = 3          # up to 3 retries beyond the first attempt (4 tries total)
+RETRY_BASE_DELAY_S = 0.05       # base backoff, doubled per attempt, before jitter
+RETRY_JITTER_S = 0.05           # uniform random jitter added to each backoff, avoids thundering herd
+
+# Librarian leader-election lock (src/saltmdb/db/locks.py, src/saltmdb/domain/services/librarian_service.py)
+LIBRARIAN_LOCK_STALE_MINUTES = 10   # promoted from a hardcoded "-10 minutes" literal in locks.py
+LIBRARIAN_TRIGGER_COOLDOWN_S = 300  # promoted from a hardcoded 300 literal in librarian_service.py's trigger_librarian()
+

@@ -14,7 +14,7 @@ from saltmdb.config import (
     BM25_ALIAS_WEIGHT,
     RELATION_COUNT_PENALTY,
 )
-from saltmdb.db.connection import get_connection
+from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import (
     resolve_entity_id,
     extract_title_and_snippet,
@@ -128,7 +128,7 @@ def store_memory(
         validate_memory_input(title, redacted_content, metadata)
     except ValueError as e:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return str(e)
         
     # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
@@ -142,7 +142,7 @@ def store_memory(
     quality_res = evaluate_memory_quality(redacted_content, title)
     if quality_res["status"] == "REJECT":
         if should_close:
-            conn.close()
+            close_connection(conn)
         return f"Error: Memory quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
 
     content_hash = compute_content_hash(redacted_content)
@@ -160,7 +160,7 @@ def store_memory(
             row = cursor.fetchone()
             if row:
                 if should_close:
-                    conn.close()
+                    close_connection(conn)
                 return f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}"
         except Exception:
             pass
@@ -217,7 +217,7 @@ def store_memory(
         entity_id = str(uuid.uuid4())
         
     try:
-        with conn:
+        with write_transaction_retrying(conn):
             cursor = conn.execute("SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,))
             existing = cursor.fetchone()
             if existing:
@@ -321,7 +321,8 @@ def store_memory(
                         type="supersession_candidate",
                         content=candidate_payload,
                         context_id=context_id,
-                        db_connection=conn
+                        db_connection=conn,
+                        _in_transaction=True
                     )
                     logger.info("Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s", entity_id, matched_supersession_id)
                 except Exception as ex:
@@ -345,7 +346,7 @@ def store_memory(
         return f"Error storing knowledge: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is", "it", "its",
@@ -432,7 +433,7 @@ def semantic_search(
         return []
     finally:
         if conn:
-            conn.close()
+            close_connection(conn)
 
 
 def reciprocal_rank_fusion(
@@ -681,7 +682,7 @@ def search_memory(
         return [{"error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def fetch_memory_chunk(entity_id: str = None, db_connection = None, db_path: str = None) -> str:
     """Returns full markdown text of a memory."""
@@ -715,10 +716,15 @@ def fetch_memory_chunk(entity_id: str = None, db_connection = None, db_path: str
         return f"Error fetching memory chunk: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
-def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = None, db_path: str = None) -> str:
-    """Explicitly archives (retires) a long-term memory."""
+def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = None, db_path: str = None, _in_transaction: bool = False) -> str:
+    """Explicitly archives (retires) a long-term memory.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
+    bulk_archive_memory, whose caller already holds an open write transaction around the
+    whole batch (so the single-item write here must not open/commit its own nested transaction).
+    """
     if not entity_id:
         return "Error: entity_id parameter is mandatory."
     should_close = False
@@ -727,38 +733,45 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         resolved_id = resolve_entity_id(conn, entity_id)
         if not resolved_id:
             return f"Error: Could not resolve entity '{entity_id}'"
-            
+
         cursor = conn.execute("SELECT owner_id, scope, status FROM entities WHERE id = ?", (resolved_id,))
         row = cursor.fetchone()
         if not row:
             return f"Error: Memory '{resolved_id}' not found."
-            
+
         existing_owner, scope, status = row
         if status == "archived":
             return f"Error: Memory '{resolved_id}' is already archived."
         if owner_id and existing_owner and existing_owner != owner_id:
             return f"Error: Memory '{resolved_id}' owner mismatch."
-            
+
         now = datetime.now(UTC).isoformat()
-        with conn:
+
+        def _do_archive():
             conn.execute("""
                 UPDATE entities
                 SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id = ? AND status != 'archived'
             """, (now, now, resolved_id))
-            
+
+        if _in_transaction:
+            _do_archive()
+        else:
+            with write_transaction_retrying(conn):
+                _do_archive()
+
         return f"Memory '{resolved_id}' was successfully archived."
     except Exception as e:
         logger.error("Error archiving memory: %s", e)
         return f"Error archiving memory: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path: str = None) -> dict:
     """Identifies active memories with zero relationship links."""
@@ -799,7 +812,7 @@ def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path
         return {"error": str(e)}
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def check_duplicate_memories(
     title: str = None,
@@ -916,7 +929,7 @@ def check_duplicate_memories(
         return {"error": str(e)}
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def scan_memories(
     owner_id: str = None,
@@ -980,10 +993,18 @@ def scan_memories(
         return [{"error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: str = None) -> list:
-    """Bulk archives memories atomically."""
+    """Bulk archives memories atomically -- all-or-nothing.
+
+    The entire batch runs inside a single write_transaction_retrying transaction. If any
+    item raises (or would otherwise be reported as an error), the whole transaction rolls
+    back, so no partial set of archives is ever left committed. Because a single failure
+    unwinds every prior "successful" item in the same batch, a mixed per-item success/error
+    list would misrepresent the outcome -- so on failure this returns a single top-level
+    error result instead of claiming any individual items succeeded.
+    """
     if not archive_requests or not isinstance(archive_requests, list):
         return [{"status": "error", "error": "archive_requests must be a non-empty list"}]
     should_close = False
@@ -992,25 +1013,24 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     results = []
     try:
-        with conn:
+        with write_transaction_retrying(conn):
             for req in archive_requests:
                 eid = req if isinstance(req, str) else req.get("entity_id")
                 owner = req.get("owner_id") if isinstance(req, dict) else None
-                res = archive_memory(entity_id=eid, owner_id=owner, db_connection=conn)
+                res = archive_memory(entity_id=eid, owner_id=owner, db_connection=conn, _in_transaction=True)
                 if res.startswith("Error"):
-                    results.append({"status": "error", "entity_id": eid, "result": res})
-                else:
-                    results.append({"status": "success", "entity_id": eid, "result": res})
+                    raise RuntimeError(f"Bulk archive aborted (all-or-nothing): {res}")
+                results.append({"status": "success", "entity_id": eid, "result": res})
         return results
     except Exception as e:
-        logger.error("Error in bulk archive memory: %s", e)
+        logger.error("Error in bulk archive memory (batch rolled back, no items archived): %s", e)
         return [{"status": "error", "error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = None) -> list:
     """Queries canonical tags."""
@@ -1039,4 +1059,4 @@ def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = 
         return [{"error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)

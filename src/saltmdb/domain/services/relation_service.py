@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, UTC
 from typing import Literal
 from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection
+from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import resolve_entity_id, extract_title_and_snippet, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
@@ -17,47 +17,59 @@ def store_relation(
     target_id: str = None,
     predicate: str = None,
     db_connection = None,
-    db_path: str = None
+    db_path: str = None,
+    _in_transaction: bool = False
 ) -> str:
-    """Stores a directional relationship edge between two knowledge entities."""
+    """Stores a directional relationship edge between two knowledge entities.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
+    bulk_store_relations, whose caller already holds an open write transaction around the
+    whole batch (so the single-item write here must not open/commit its own nested transaction).
+    """
     if not source_id or not target_id or not predicate:
         return "Error: source_id, target_id, and predicate are mandatory parameters."
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     resolved_source = resolve_entity_id(conn, source_id)
     resolved_target = resolve_entity_id(conn, target_id)
-    
+
     if not resolved_source or not resolved_target:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return "Error: Could not resolve target entity IDs."
-        
+
     if resolved_source == resolved_target:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return "Error: Self-referential relations (source_id == target_id) are forbidden."
-        
+
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     try:
-        with conn:
+        def _do_store():
             conn.execute("""
                 INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (relation_id, resolved_source, resolved_target, predicate, now, now))
+
+        if _in_transaction:
+            _do_store()
+        else:
+            with write_transaction_retrying(conn):
+                _do_store()
         return f"Relation successfully stored: '{predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id})"
     except Exception as e:
         logger.error("Error storing relation: %s", e)
         return f"Error storing relation: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def analyze_dependencies(
     root_entity_id: str = None,
@@ -79,7 +91,7 @@ def analyze_dependencies(
     root_id = resolve_entity_id(conn, root_entity_id)
     if not root_id:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return {"error": f"Could not resolve entity '{root_entity_id}'"}
         
     try:
@@ -159,7 +171,7 @@ def analyze_dependencies(
         return {"error": str(e)}
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def analyze_lineage(entity_id: str = None, db_connection = None, db_path: str = None) -> dict:
     """Traverses full multi-generation consolidation and derivation ancestry."""
@@ -176,7 +188,7 @@ def analyze_lineage(entity_id: str = None, db_connection = None, db_path: str = 
     target_id = resolve_entity_id(conn, entity_id)
     if not target_id:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return {"error": f"Could not resolve entity '{entity_id}'"}
         
     try:
@@ -218,7 +230,7 @@ def analyze_lineage(entity_id: str = None, db_connection = None, db_path: str = 
         return {"error": str(e)}
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def commit_consolidation(
     parent_ids: list[str],
@@ -230,30 +242,36 @@ def commit_consolidation(
     owner_id: str = None,
     context_id: str = None,
     db_connection = None,
-    db_path: str = None
+    db_path: str = None,
+    _in_transaction: bool = False
 ) -> str:
-    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations."""
+    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
+    bulk_commit_consolidation, whose caller already holds an open write transaction around the
+    whole batch (so the single-item write here must not open/commit its own nested transaction).
+    """
     if not parent_ids or not isinstance(parent_ids, list):
         return "Error: parent_ids must be a non-empty list of UUID strings."
     if not title or not content:
         return "Error: title and content are mandatory."
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     resolved_parents = []
     for p in parent_ids:
         res = resolve_entity_id(conn, str(p))
         if res:
             resolved_parents.append(res)
-            
+
     if not resolved_parents:
         if should_close:
-            conn.close()
+            close_connection(conn)
         return "Error: None of the provided parent_ids could be resolved."
         
     redacted_content = redact_secrets(content)
@@ -264,7 +282,7 @@ def commit_consolidation(
     quality_res = evaluate_memory_quality(redacted_content, clean_title)
     if quality_res["status"] == "REJECT":
         if should_close:
-            conn.close()
+            close_connection(conn)
         return f"Error: Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
 
     content_hash = compute_content_hash(redacted_content)
@@ -284,7 +302,7 @@ def commit_consolidation(
         row = cursor.fetchone()
         if row:
             if should_close:
-                conn.close()
+                close_connection(conn)
             return f"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}"
     except Exception:
         pass
@@ -308,12 +326,12 @@ def commit_consolidation(
     now = datetime.now(UTC).isoformat()
     
     try:
-        with conn:
+        def _do_commit():
             conn.execute("""
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str))
-            
+
             if tags:
                 for tag_name in tags:
                     tag_name = tag_name.strip()
@@ -329,23 +347,29 @@ def commit_consolidation(
                         tag_id = str(uuid.uuid4())
                         conn.execute("INSERT INTO tags (id, name) VALUES (?, ?)", (tag_id, tag_name))
                     conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (consolidated_id, tag_id))
-                    
+
             placeholders = ",".join("?" for _ in resolved_parents)
             conn.execute(f"""
-                UPDATE entities 
-                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? 
+                UPDATE entities
+                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id IN ({placeholders})
             """, [now, now] + resolved_parents)
-            
+
             conn.execute(f"UPDATE relations SET source_id = ? WHERE source_id IN ({placeholders})", [consolidated_id] + resolved_parents)
             conn.execute(f"UPDATE relations SET target_id = ? WHERE target_id IN ({placeholders})", [consolidated_id] + resolved_parents)
-            
+
             for parent_id in resolved_parents:
                 rel_id = str(uuid.uuid4())
                 conn.execute("""
                     INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                     VALUES (?, ?, ?, 'consolidated_from', ?, ?)
                 """, (rel_id, consolidated_id, parent_id, now, now))
+
+        if _in_transaction:
+            _do_commit()
+        else:
+            with write_transaction_retrying(conn):
+                _do_commit()
 
         try:
             target_db = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -362,10 +386,17 @@ def commit_consolidation(
         return f"Error committing consolidation: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def bulk_commit_consolidation(consolidations: list, db_connection = None, db_path: str = None) -> list:
-    """Executes multiple consolidation commits atomically in a single transaction."""
+    """Executes multiple consolidation commits atomically in a single transaction -- all-or-nothing.
+
+    If any item raises (or would otherwise be reported as an error), the whole batch rolls
+    back, so no partial set of consolidations is ever left committed. Because a single
+    failure unwinds every prior "successful" item in the same batch, a mixed per-item
+    success/error list would misrepresent the outcome -- so on failure this returns a
+    single top-level error result instead of claiming any individual items succeeded.
+    """
     if not consolidations or not isinstance(consolidations, list):
         return [{"status": "error", "error": "consolidations must be a non-empty array of objects"}]
     should_close = False
@@ -374,10 +405,10 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     results = []
     try:
-        with conn:
+        with write_transaction_retrying(conn):
             for item in consolidations:
                 p_ids = item.get("parent_ids", [])
                 t = item.get("title")
@@ -385,23 +416,29 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
                 tags = item.get("tags", [])
                 scope = item.get("scope", "shared")
                 w = item.get("weight", 1)
-                
-                res = commit_consolidation(parent_ids=p_ids, title=t, content=c, tags=tags, scope=scope, weight=w, db_connection=conn)
+
+                res = commit_consolidation(parent_ids=p_ids, title=t, content=c, tags=tags, scope=scope, weight=w, db_connection=conn, _in_transaction=True)
                 if res.startswith("Error"):
-                    results.append({"status": "error", "title": t, "result": res})
-                else:
-                    new_id = res.split("ID: ")[-1].strip()
-                    results.append({"status": "success", "entity_id": new_id, "title": t, "result": res})
+                    raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")
+                new_id = res.split("ID: ")[-1].strip()
+                results.append({"status": "success", "entity_id": new_id, "title": t, "result": res})
         return results
     except Exception as e:
-        logger.error("Bulk commit consolidation error: %s", e)
+        logger.error("Bulk commit consolidation error (batch rolled back, no items consolidated): %s", e)
         return [{"status": "error", "error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def bulk_store_relations(relations: list, db_connection = None, db_path: str = None) -> list:
-    """Executes multiple relation insertions atomically in a single transaction."""
+    """Executes multiple relation insertions atomically in a single transaction -- all-or-nothing.
+
+    If any item raises (or would otherwise be reported as an error), the whole batch rolls
+    back, so no partial set of relations is ever left committed. Because a single failure
+    unwinds every prior "successful" item in the same batch, a mixed per-item success/error
+    list would misrepresent the outcome -- so on failure this returns a single top-level
+    error result instead of claiming any individual items succeeded.
+    """
     if not relations or not isinstance(relations, list):
         return [{"status": "error", "error": "relations must be a non-empty array of objects"}]
     should_close = False
@@ -410,23 +447,22 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     results = []
     try:
-        with conn:
+        with write_transaction_retrying(conn):
             for r in relations:
                 src = r.get("source_id")
                 tgt = r.get("target_id")
                 pred = r.get("predicate")
-                res = store_relation(source_id=src, target_id=tgt, predicate=pred, db_connection=conn)
+                res = store_relation(source_id=src, target_id=tgt, predicate=pred, db_connection=conn, _in_transaction=True)
                 if res.startswith("Error"):
-                    results.append({"status": "error", "source": src, "target": tgt, "predicate": pred, "result": res})
-                else:
-                    results.append({"status": "success", "source": src, "target": tgt, "predicate": pred, "result": res})
+                    raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
+                results.append({"status": "success", "source": src, "target": tgt, "predicate": pred, "result": res})
         return results
     except Exception as e:
-        logger.error("Bulk store relations error: %s", e)
+        logger.error("Bulk store relations error (batch rolled back, no items stored): %s", e)
         return [{"status": "error", "error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)

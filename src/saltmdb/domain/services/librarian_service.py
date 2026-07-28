@@ -7,8 +7,8 @@ import uuid
 import math
 import logging
 from datetime import datetime, UTC
-from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection
+from saltmdb.config import get_db_path, LIBRARIAN_TRIGGER_COOLDOWN_S
+from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock
 
 logger = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ def trigger_librarian(db_path: str = None):
             cursor = conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'raw'")
             raw_count = cursor.fetchone()[0]
             if raw_count < 2:
-                conn.close()
+                close_connection(conn)
                 return
-                
+
             cursor = conn.execute("SELECT last_run_at FROM _system_locks WHERE task_name = 'librarian_consolidation'")
             row = cursor.fetchone()
             if row and row[0]:
@@ -36,16 +36,16 @@ def trigger_librarian(db_path: str = None):
                     last_run_str = last_run_str.split("+")[0]
                 last_run = datetime.fromisoformat(last_run_str)
                 elapsed = (datetime.now(UTC).replace(tzinfo=None) - last_run).total_seconds()
-                if elapsed < 300:
-                    conn.close()
+                if elapsed < LIBRARIAN_TRIGGER_COOLDOWN_S:
+                    close_connection(conn)
                     return
-                    
+
             if not acquire_librarian_lock(conn):
                 return
-                
+
             release_librarian_lock(conn)
         finally:
-            conn.close()
+            close_connection(conn)
     except Exception as e:
         logger.debug("Cooldown/lock check exception in trigger_librarian: %s", e)
         return
@@ -54,13 +54,22 @@ def trigger_librarian(db_path: str = None):
         creationflags = 0
         if sys.platform == "win32":
             creationflags = 0x08000000  # CREATE_NO_WINDOW
-            
-        subprocess.Popen(
-            [sys.executable, "-m", "saltmdb", "--librarian"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags
-        )
+
+        # Redirect stdout/stderr to librarian.log (same directory as the DB) instead of DEVNULL
+        # so Librarian subprocess output/errors are actually visible for debugging, matching the
+        # viewer.log redirection precedent in saltmdb/viewer/server.py. Uses the already-resolved
+        # local `db_path` (set above via `db_path = db_path or get_db_path()`), NOT a fresh
+        # get_db_path() call -- calling get_db_path() again here would silently ignore a caller-
+        # supplied non-default db_path and always point at the default ~/.saltmdb directory
+        # regardless of which database this invocation is actually operating on.
+        log_path = os.path.join(os.path.dirname(db_path), "librarian.log")
+        with open(log_path, "a", encoding="utf-8") as log_f:
+            subprocess.Popen(
+                [sys.executable, "-m", "saltmdb", "--librarian"],
+                stdout=log_f,
+                stderr=log_f,
+                creationflags=creationflags
+            )
     except Exception as e:
         logger.warning("Failed to spawn librarian subprocess: %s", e)
 
@@ -74,7 +83,7 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
         
     try:
         logger.info("Running Tag Merging...")
-        with conn:
+        with write_transaction_retrying(conn):
             cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
             tags = cursor.fetchall()
             
@@ -97,7 +106,7 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
                         conn.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def _resolve_tag_id(conn: sqlite3.Connection, tag_name: str):
     """Resolves a tag name to its canonical tag id (case-insensitive, '#'-prefix-tolerant)."""
@@ -131,7 +140,7 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
 
         merged = []
         skipped = []
-        with conn:
+        with write_transaction_retrying(conn):
             for name in (tags_to_merge or []):
                 alias_id = _resolve_tag_id(conn, name)
                 if not alias_id:
@@ -153,7 +162,7 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
         return f"Merged {len(merged)} tag(s) into canonical tag '{keep_tag}': {merged}. Skipped: {skipped}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = None):
     """Scans for tags with 5 or more raw entries per owner and logs a consolidation request event."""
@@ -198,7 +207,7 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
             })
             
             target_agent = owner_id if owner_id else "librarian"
-            with conn:
+            with write_transaction_retrying(conn):
                 conn.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
@@ -206,7 +215,7 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
             logger.info("Logged consolidation request for tag '%s' (Owner: %s, Threshold: %d, Entity IDs: %s)", tag_name, target_agent, threshold, raw_ids)
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
     """General consolidator that groups raw memories by owner/scope and logs general consolidation request events."""
@@ -248,7 +257,7 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
                 "entity_ids": entity_ids
             })
             target_agent = owner_id if owner_id else "librarian"
-            with conn:
+            with write_transaction_retrying(conn):
                 conn.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
@@ -256,7 +265,7 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
             logger.info("Logged general consolidation request for %s/%s (Entity IDs: %s)", owner_id, scope, entity_ids)
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):
     """Discovers topically related raw memories via vector embeddings and logs consolidation request events."""
@@ -330,7 +339,7 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
                 "owner_id": primary_owner,
                 "entity_ids": cluster
             })
-            with conn:
+            with write_transaction_retrying(conn):
                 conn.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
@@ -340,7 +349,7 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
         logger.warning("Error in consolidate_vector_clusters: %s", e)
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):
     """Scouts for consolidated entities that may be outdated due to new raw memories."""
@@ -396,7 +405,7 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
                     "consolidated_title": ctitle,
                     "new_raw_entity_ids": overlapping_new_raw
                 })
-                with conn:
+                with write_transaction_retrying(conn):
                     conn.execute("""
                         INSERT INTO events (id, timestamp, agent_id, type, content)
                         VALUES (?, ?, ?, 'consolidation_request', ?)
@@ -406,7 +415,7 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
         logger.warning("Error in scout_consolidated_supersessions: %s", e)
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = None):
     """
@@ -465,7 +474,7 @@ def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = N
         if decayed_ids:
             logger.info("Identified %d decayed low-quality raw memories for archiving.", len(decayed_ids))
             now_iso = datetime.now(UTC).isoformat()
-            with conn:
+            with write_transaction_retrying(conn):
                 placeholders = ",".join("?" for _ in decayed_ids)
                 conn.execute(
                     f"UPDATE entities SET status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
@@ -475,5 +484,22 @@ def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = N
         logger.warning("Error in decay_low_quality_memories: %s", e)
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
+
+def _run_librarian_maintenance(conn) -> None:
+    """Checkpoint + optimize maintenance duty. Runs once per Librarian invocation,
+    only while the leader lock is held."""
+    try:
+        cursor = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        row = cursor.fetchone()
+        if row:
+            busy, log_pages, checkpointed_pages = row
+            logger.info("Librarian WAL checkpoint (TRUNCATE): busy=%d, wal_pages=%d, checkpointed_pages=%d", busy, log_pages, checkpointed_pages)
+    except Exception as e:
+        logger.warning("Librarian WAL checkpoint failed: %s", e)
+    try:
+        conn.execute("PRAGMA optimize=0x10002;")
+        logger.info("Librarian PRAGMA optimize=0x10002 completed.")
+    except Exception as e:
+        logger.warning("Librarian PRAGMA optimize failed: %s", e)

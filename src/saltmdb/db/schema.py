@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection
+from saltmdb.db.connection import get_connection, write_transaction_retrying
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,22 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         db_path = get_db_path()
         
     conn = get_connection(db_path)
-    
-    with conn:
+
+    # Wrapped in write_transaction_retrying (BEGIN IMMEDIATE + retry/backoff) rather than left
+    # as a bare `with conn:`. Since get_connection() sets isolation_level=None, a bare `with conn:`
+    # on this connection no longer groups these statements into one transaction at all (no implicit
+    # BEGIN happens under isolation_level=None, so each statement autocommits individually) --
+    # that's a real atomicity regression versus the pre-isolation_level=None behavior, not just a
+    # cosmetic difference. Wrapping restores single-transaction atomicity for the whole schema init.
+    # This is safe to retry-from-scratch on "database is locked": every statement in this block is
+    # idempotent (CREATE TABLE IF NOT EXISTS, guarded ALTER TABLE, idempotent UPDATE backfills,
+    # INSERT OR IGNORE, CREATE INDEX/TRIGGER IF NOT EXISTS), and BEGIN IMMEDIATE acquires the write
+    # lock up front, so a retry either fails at the BEGIN itself (nothing applied yet) or succeeds
+    # and runs the full idempotent block to completion -- there is no partially-applied state that
+    # a retry could see or corrupt. This also directly helps the multi-agent concurrent-startup
+    # contention that motivated the busy_timeout bump (commit 548d170), since concurrent init_db()
+    # calls are exactly where BEGIN IMMEDIATE + retry pays off most.
+    with write_transaction_retrying(conn):
         # 1. Events Table (Short-Term append-only ledger)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS events (

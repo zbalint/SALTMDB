@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime, UTC
 from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection
+from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -16,35 +16,51 @@ def log_event(
     session_id: str = None,
     context_id: str = None,
     db_connection = None,
-    db_path: str = None
+    db_path: str = None,
+    _in_transaction: bool = False
 ) -> str:
-    """Appends an event to the append-only events ledger."""
+    """Appends an event to the append-only events ledger.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper (and defers
+    the trigger_librarian call to the caller) -- used when a caller (e.g. store_memory's
+    supersession_candidate logging) already holds an open write transaction on the same
+    connection. SQLite raises "cannot start a transaction within a transaction" on a nested
+    BEGIN IMMEDIATE against the same connection, so this must not open its own transaction
+    in that case.
+    """
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     event_id = str(uuid.uuid4())
     redacted_content = redact_secrets(content)
     now = datetime.now(UTC).isoformat()
     try:
-        with conn:
+        def _do_insert():
             conn.execute("""
                 INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id, context_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (event_id, now, agent_id, type, redacted_content, error_code, session_id, context_id))
-            
-        from saltmdb.domain.services.librarian_service import trigger_librarian
-        trigger_librarian(db_path=db_path)
+
+        if _in_transaction:
+            _do_insert()
+        else:
+            with write_transaction_retrying(conn):
+                _do_insert()
+
+        if not _in_transaction:
+            from saltmdb.domain.services.librarian_service import trigger_librarian
+            trigger_librarian(db_path=db_path)
         return f"Event logged successfully with ID: {event_id}"
     except Exception as e:
         logger.error("Error logging event: %s", e)
         return f"Error logging event: {e}"
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def get_recent_events(
     agent_id: str = None,
@@ -125,7 +141,7 @@ def get_recent_events(
         return [{"error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)
 
 def get_session_summary(session_id: str, db_connection = None, db_path: str = None) -> list:
     """Retrieves all event logs associated with a specific session ID."""
@@ -160,4 +176,4 @@ def get_session_summary(session_id: str, db_connection = None, db_path: str = No
         return [{"error": str(e)}]
     finally:
         if should_close:
-            conn.close()
+            close_connection(conn)

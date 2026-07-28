@@ -4,7 +4,7 @@ import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory
-from saltmdb.domain.services.relation_service import commit_consolidation
+from saltmdb.domain.services.relation_service import commit_consolidation, bulk_commit_consolidation
 
 class TestLibrarianService(unittest.TestCase):
     def setUp(self):
@@ -40,6 +40,57 @@ class TestLibrarianService(unittest.TestCase):
         self.assertEqual(p1[1], "archived")
         self.assertEqual(p2[0], "archived")
         self.assertEqual(p2[1], "archived")
+
+    def test_bulk_commit_consolidation_is_all_or_nothing(self):
+        # Regression test for the bulk-atomicity fix: bulk_commit_consolidation wraps its
+        # whole loop in ONE write_transaction_retrying block, so a failure on a later item
+        # must roll back an earlier item's would-be-successful insert too -- previously each
+        # item committed individually despite the function's docstring claiming atomicity.
+        res1 = store_memory(
+            title="Bulk Atomicity Parent A",
+            content="Detailed description of a parent fact used for the bulk atomicity regression test",
+            owner_id="agent1",
+            skip_duplicate_check=True,
+            db_path=self.db_path,
+        )
+        id1 = res1.split("ID: ")[1]
+
+        results = bulk_commit_consolidation(
+            consolidations=[
+                {
+                    "parent_ids": [id1],
+                    "title": "Would-Be Valid Consolidation",
+                    "content": "This item is valid on its own and would succeed in isolation",
+                },
+                {
+                    # Deliberately malformed: commit_consolidation already validates and
+                    # rejects an empty parent_ids list with "Error: parent_ids must be a
+                    # non-empty list of UUID strings."
+                    "parent_ids": [],
+                    "title": "Malformed Second Item",
+                    "content": "This item is deliberately invalid to trigger a batch rollback",
+                },
+            ],
+            db_connection=self.conn,
+        )
+
+        # Whole batch reports as a single top-level error, not a mixed success/error list.
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "error")
+
+        # The first item's consolidated entity must NOT exist -- proving the whole batch
+        # rolled back rather than item 1 silently committing while item 2 failed.
+        row = self.conn.execute(
+            "SELECT id FROM entities WHERE title = ?", ("Would-Be Valid Consolidation",)
+        ).fetchone()
+        self.assertIsNone(row)
+
+        # Parent A must still be 'raw' (not archived), since the archiving UPDATE that
+        # commit_consolidation performs for item 1 must also have been rolled back.
+        p1_status = self.conn.execute(
+            "SELECT status FROM entities WHERE id = ?", (id1,)
+        ).fetchone()[0]
+        self.assertEqual(p1_status, "raw")
 
 if __name__ == "__main__":
     unittest.main()
