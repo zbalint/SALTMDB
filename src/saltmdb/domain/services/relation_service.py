@@ -1,6 +1,7 @@
 import uuid
 import json
 import logging
+import re
 from datetime import datetime, UTC
 from typing import Literal
 from saltmdb.config import get_db_path
@@ -11,6 +12,71 @@ from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
 
 logger = logging.getLogger(__name__)
+
+def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None) -> str | None:
+    """Write-time predicate canonicalization. Must be called inside an open write transaction
+    (mirrors resolve_or_create_tag's contract). Returns the resolved CANONICAL NAME STRING to
+    store directly in relations.predicate (not a row id -- predicate is free text, no FK).
+
+    Non-blocking: an unrecognized predicate is always auto-created and returned, never rejected.
+    Returns None only when input has no salvageable characters after normalization -- caller
+    falls back to the raw input string.
+
+    Simpler than resolve_or_create_tag: no '#'-prefix handling, no plural/suffix fallback (seed
+    vocabulary is short and already snake_case; a suffix heuristic risks false merges like
+    resolves/resolved with no observed drift evidence to justify it).
+    """
+    raw = (predicate_name or "").strip()
+    if not raw:
+        return None
+    normalized = re.sub(r'[^a-z0-9]+', '_', raw.lower()).strip('_')
+    if not normalized:
+        return None
+
+    row = conn.execute(
+        "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
+        "WHERE p.name = ?", (normalized,)
+    ).fetchone()
+    if row:
+        return row[1] if row[1] else row[0]
+
+    row = conn.execute(
+        "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
+        "WHERE p.normalized_name = ?", (normalized,)
+    ).fetchone()
+    if row:
+        return row[1] if row[1] else row[0]
+
+    conn.execute(
+        "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+        (str(uuid.uuid4()), normalized, normalized)
+    )
+    return normalized
+
+
+def get_canonical_predicates(query: str = None, db_connection = None, db_path: str = None) -> list:
+    """Mirrors memory_service.get_canonical_tags for the predicates table."""
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+    try:
+        if query:
+            cursor = conn.execute(
+                "SELECT id, name FROM predicates WHERE canonical_id IS NULL AND name LIKE ?",
+                (f"%{query}%",)
+            )
+        else:
+            cursor = conn.execute("SELECT id, name FROM predicates WHERE canonical_id IS NULL")
+        return [{"id": r[0], "name": r[1]} for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error("Error fetching canonical predicates: %s", e)
+        return [{"error": str(e)}]
+    finally:
+        if should_close:
+            close_connection(conn)
 
 def store_relation(
     source_id: str = None,
@@ -53,17 +119,27 @@ def store_relation(
     now = datetime.now(UTC).isoformat()
     try:
         def _do_store():
-            conn.execute("""
+            canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+            cursor = conn.execute("""
                 INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (relation_id, resolved_source, resolved_target, predicate, now, now))
+                ON CONFLICT(source_id, target_id, predicate) DO NOTHING
+            """, (relation_id, resolved_source, resolved_target, canonical_predicate, now, now))
+            if cursor.rowcount == 0:
+                existing = conn.execute(
+                    "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
+                    (resolved_source, resolved_target, canonical_predicate)
+                ).fetchone()
+                existing_id = existing[0] if existing else relation_id
+                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_id})"
+            return f"Relation successfully stored: '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id})"
 
         if _in_transaction:
-            _do_store()
+            result_msg = _do_store()
         else:
             with write_transaction_retrying(conn):
-                _do_store()
-        return f"Relation successfully stored: '{predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id})"
+                result_msg = _do_store()
+        return result_msg
     except Exception as e:
         logger.error("Error storing relation: %s", e)
         return f"Error storing relation: {e}"
@@ -449,7 +525,8 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
                 res = store_relation(source_id=src, target_id=tgt, predicate=pred, db_connection=conn, _in_transaction=True)
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
-                results.append({"status": "success", "source": src, "target": tgt, "predicate": pred, "result": res})
+                status = "duplicate" if res.startswith("Relation already exists") else "success"
+                results.append({"status": status, "source": src, "target": tgt, "predicate": pred, "result": res})
         return results
     except Exception as e:
         logger.error("Bulk store relations error (batch rolled back, no items stored): %s", e)

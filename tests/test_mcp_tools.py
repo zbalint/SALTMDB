@@ -136,6 +136,32 @@ class TestMCPToolsWrapper(unittest.TestCase):
         bulk_rel_res = tools.manage_relation(relations=[{"source_id": id1, "target_id": id2, "predicate": "links_to"}])
         self.assertIsInstance(bulk_rel_res, list)
 
+    def test_get_canonical_predicates_tool(self):
+        results = tools.get_canonical_predicates(query="elaborates")
+        names = {r["name"] for r in results}
+        self.assertIn("elaborates_on", names)
+
+    def test_manage_relation_predicate_canonicalization(self):
+        res1 = tools.store_memory(content="Source entity for predicate canonicalization test", title="Predicate Canon Source", owner_id="user1", skip_duplicate_check=True)
+        res2 = tools.store_memory(content="Target entity for predicate canonicalization test", title="Predicate Canon Target", owner_id="user1", skip_duplicate_check=True)
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        self.assertIn("Relation successfully stored", rel_res)
+
+        row = self.conn.execute(
+            "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(
+            row[0], "depends_on",
+            "manage_relation must persist the CANONICALIZED predicate, not the raw 'Depends-On' input"
+        )
+
+        rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        self.assertIn("already exists", rel_res2)
+
     def test_inspect_graph_modes(self):
         res1 = tools.store_memory(content="Root entity node title", title="Root Entity", owner_id="user1", skip_duplicate_check=True)
         id1 = res1.split("ID: ")[1].strip() if "ID: " in res1 else "Root Entity"

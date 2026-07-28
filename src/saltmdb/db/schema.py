@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import uuid
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying
 
@@ -142,7 +143,48 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
         );
         """)
-        
+
+        # One-time dedup backfill: collapse pre-existing duplicate (source_id, target_id, predicate)
+        # rows to the earliest-inserted one before the UNIQUE index below is created (a raw
+        # CREATE UNIQUE INDEX would otherwise fail at startup on any DB with existing dupes).
+        # Uses rowid (monotonic insertion order) not MIN(id) -- id is a random UUID with no
+        # relationship to insertion order. Idempotent: matches zero rows on every run after the first.
+        try:
+            conn.execute("""
+                DELETE FROM relations
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM relations GROUP BY source_id, target_id, predicate
+                );
+            """)
+        except sqlite3.OperationalError as e:
+            logger.warning("Relations dedup backfill skipped/failed: %s", e)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS predicates (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            normalized_name TEXT,
+            canonical_id TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (canonical_id) REFERENCES predicates(id) ON DELETE SET NULL
+        );
+        """)
+        for _pred_name in ("resolves", "depends_on", "references", "elaborates_on",
+                            "consolidated_from", "supersedes", "relates_to"):
+            conn.execute(
+                "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (str(uuid.uuid4()), _pred_name, _pred_name)
+            )
+        # Pre-alias observed drift (relates_to/references used interchangeably with elaborates_on)
+        # onto elaborates_on as canonical. Guarded by canonical_id IS NULL so a future manual
+        # re-merge tool's decision is never silently clobbered on restart.
+        _canon_row = conn.execute("SELECT id FROM predicates WHERE name = 'elaborates_on'").fetchone()
+        if _canon_row:
+            conn.execute(
+                "UPDATE predicates SET canonical_id = ? WHERE name IN ('relates_to', 'references') AND canonical_id IS NULL AND id != ?",
+                (_canon_row[0], _canon_row[0])
+            )
+
         # 5. Virtual FTS5 Table with Porter Tokenizer & Search Aliases
         try:
             cursor = conn.execute("PRAGMA table_info(entities_fts)")
@@ -270,7 +312,10 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_unique_edge ON relations(source_id, target_id, predicate)",
             "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
+            "CREATE INDEX IF NOT EXISTS idx_predicates_normalized_name ON predicates(normalized_name)",
+            "CREATE INDEX IF NOT EXISTS idx_predicates_canonical ON predicates(canonical_id)",
         ]:
             try:
                 conn.execute(index_sql)

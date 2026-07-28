@@ -1,5 +1,7 @@
 # SALTMDB Relation/Graph System — Research & Improvement Plan
 
+> **Status: Quick Wins implemented in v0.1.0-alpha.55** (2026-07-28). Shipped: a `UNIQUE(source_id, target_id, predicate)` index on `relations` (preceded by a one-time dedup backfill), and a new standalone `predicates` canonicalization table (mirroring tags' `canonical_id`-alias shape, seeded with `resolves`/`depends_on`/`references`/`elaborates_on`/`consolidated_from`/`supersedes`/`relates_to`, with `relates_to`/`references` pre-aliased to `elaborates_on`) via `resolve_or_create_predicate()` in `relation_service.py`, wired into `store_relation`/`bulk_store_relations` (an `ON CONFLICT DO NOTHING` no-op on duplicate edges instead of inserting a second identical row). New `get_canonical_predicates` MCP tool mirrors `get_canonical_tags`. Medium-Term (Graphiti-style `valid_to` versioning in `commit_consolidation`, `parent_ids`/`relations` redundancy resolution) and Larger Bets (confidence/provenance fields) remain future work — see `MIGRATION.md`'s alpha.55 entry.
+
 *Scope: the typed directional knowledge-graph layer (`relations` table, `relation_service.py`, `manage_relation`/`inspect_graph` MCP tools). Web research only — no SALTMDB source was re-read for this document; findings and the plan below reason from the grounding description supplied in the task brief.*
 
 ---

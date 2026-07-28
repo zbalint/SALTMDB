@@ -66,6 +66,14 @@ def get_canonical_tags(query: str = None, domain: str = None, **kwargs) -> list:
     return memory_service.get_canonical_tags(domain=query_)
 
 @mcp.tool()
+def get_canonical_predicates(query: str = None, **kwargs) -> list:
+    """Queries existing canonical relation predicates matching a search substring, to reduce
+    predicate drift (e.g. elaborates_on vs relates_to vs references)."""
+    kw = _unwrap_kwargs(kwargs)
+    query_ = _resolve(query, kw, kwargs, "query", "predicate_filter", "substring")
+    return relation_service.get_canonical_predicates(query=query_)
+
+@mcp.tool()
 def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> str:
     """Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all
     affected entities' tag associations. Use to fix folksonomy fragmentation (e.g. keep_tag='#docs',

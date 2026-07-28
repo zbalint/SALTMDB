@@ -18,7 +18,7 @@ commitment to build all of it.
 | 3 | [`03-agent-memory-systems-survey.md`](./03-agent-memory-systems-survey.md) | Architecture comparison of mem0, Letta, Zep/Graphiti, Cognee, ChatGPT memory, Anthropic's memory tool, txtai, LangMem/LlamaIndex. Biggest gap: no true bi-temporal fact model (conflates "when true" with "when recorded") — Graphiti's `created_at/expired_at` + `valid_at/invalid_at` split is the concrete fix. |
 | 4 | [`04-adjacent-projects-lessons.md`](./04-adjacent-projects-lessons.md) | Broader PKM/graph-DB/ontology/decay survey (Obsidian, Roam, GraphRAG, SKOS, LanceDB, Ebbinghaus/SM-2/FSRS). Cleanest gap: SALTMDB already tracks `weight` and `last_accessed_at` but neither feeds a decay function — free-standing infrastructure with no consumer. |
 | 5 | [`05-tag-system.md`](./05-tag-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.54** (2026-07-28). Diagnosed *why* fragmentation still happened: `get_canonical_tags` was advisory not enforced, and heuristic merging was lexical-only. Fixed via a shared `resolve_or_create_tag()` helper (exact → normalized → new plural/suffix fallback → create) now used by both write paths — which turned up a bonus bug: `commit_consolidation()` had its own divergent, buggier tag logic ignoring `canonical_id` entirely. Medium-Term embedding-based review queue and the faceted/hierarchy model remain future work. See `MIGRATION.md`'s alpha.54 entry. |
-| 6 | [`06-relation-system.md`](./06-relation-system.md) | The `valid_from`/`valid_to` columns exist but are functionally dead (nothing ever sets `valid_to`). Adopt Graphiti's "expire, never mutate" pattern for `commit_consolidation` instead of its current row-`UPDATE` behavior; extend the tag-canonicalization machinery to predicates instead of a hard enum; add a real unique index + confidence/provenance fields. |
+| 6 | [`06-relation-system.md`](./06-relation-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.55** (2026-07-28). Added a `UNIQUE(source_id, target_id, predicate)` index on `relations` (with a one-time dedup backfill) and a new standalone `predicates` canonicalization table (not a reuse of tags' machinery — that turned out to be tag-specific, not generic) via `resolve_or_create_predicate()`, wired into `store_relation`/`bulk_store_relations`. The `valid_from`/`valid_to` columns are still functionally dead — Graphiti's "expire, never mutate" pattern for `commit_consolidation`, and `parent_ids`/`relations` redundancy resolution, remain Medium-Term future work. See `MIGRATION.md`'s alpha.55 entry. |
 | 7 | [`07-information-categorization.md`](./07-information-categorization.md) | Everything is one flat entity type today. Proposes an additive `memory_type` enum (fact/event/procedure/decision, CoALA-style episodic/semantic/procedural) as a quick win, embedding-cluster-assisted domain *suggestions* (never silent auto-tagging) as medium-term, explicitly designed to not become "tag-fragmentation-2.0." |
 
 ## Cross-cutting findings worth noting before picking what to build
@@ -52,11 +52,7 @@ versioning both validate SALTMDB's existing SCD-Type-2 approach rather than sugg
 replacement. Worth reading both as "this part of SALTMDB is in reasonably good shape" rather than
 assuming every track found a pile of problems.
 
-**The tag and relation tracks each reference the other's machinery.** Track 6 explicitly recommends
-*not* building a separate predicate-canonicalization system, but reusing/extending Track 5's
-existing tag-alias infrastructure (parameterized by a `kind` column, or a sibling table) for
-predicates. If both tag and relation work land, this reuse should happen — don't build two parallel
-alias-resolution systems.
+**The tag and relation tracks each reference the other's machinery — resolved in favor of separate tables.** Track 6's research suggested reusing/extending Track 5's tag-alias infrastructure (parameterized by a `kind` column) for predicates. When Track 6 was implemented (v0.1.0-alpha.55), grounding exploration found `resolve_or_create_tag()`/the `tags` table are not actually generic (no `kind` column, tag-specific `#`-prefix/sanitization logic baked in) — parameterizing them would have meant reworking code that had just shipped in Track 5. Shipped a standalone `predicates` table mirroring the same `canonical_id`-alias *shape* instead of literally sharing the table — same pattern, deliberately not the same rows.
 
 ## Suggested cross-cutting priority order
 
@@ -67,7 +63,7 @@ Roughly cheapest-and-highest-value first, pooling all seven tracks' own phase la
    `busy_timeout` bump is even doing its job.
 2. **Quick Wins, low-risk, additive-only, from Tracks 1/2/5/6/7:** dashboard token/CSS pass
    (Track 1), `PRAGMA optimize` + retry/backoff (Track 2), tag write-time validation + mandatory
-   canonical-lookup (Track 5), relation dedup + unique index (Track 6), additive `memory_type`
+   canonical-lookup (Track 5), relation dedup + unique index (Track 6 — **✅ done, alpha.55**), additive `memory_type`
    column (Track 7, pending the collision decision above).
 3. **Medium-term, needs a design pass but no irreversible schema break:** embedding-based tag
    merge-candidate queue (Track 5), Graphiti-style `valid_from`/`valid_to` wiring for consolidation
