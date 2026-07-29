@@ -13,6 +13,10 @@ from saltmdb.config import (
     BM25_CONTENT_WEIGHT,
     BM25_ALIAS_WEIGHT,
     RELATION_COUNT_PENALTY,
+    SNIPPET_MAX_TOKENS,
+    SNIPPET_MATCH_START,
+    SNIPPET_MATCH_END,
+    SNIPPET_ELLIPSIS,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import (
@@ -364,7 +368,12 @@ def _run_fts_search(
     conn, sanitized_query: str, where_clauses: list, params: list,
     limit: int, offset: int
 ) -> list:
-    """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list."""
+    """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list.
+
+    Each row's last column, fts_snippet, is a query-centered excerpt of full_content
+    (FTS5 snippet(), column index 2) -- populated because this row genuinely matched via
+    FTS5 MATCH in this query, distinct from rows that only surface via semantic_search().
+    """
     raw_terms = sanitized_query.split()
     terms = [t for t in raw_terms if t.lower() not in STOP_WORDS]
     if not terms:
@@ -376,12 +385,20 @@ def _run_fts_search(
     fts_query_str = " ".join(f'"{t}"*' for t in terms)
     where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
     bm25_weights = f"{BM25_TITLE_WEIGHT}, {BM25_CONTENT_WEIGHT}, {BM25_ALIAS_WEIGHT}"
+    # full_content is column index 2 in entities_fts (id=0 UNINDEXED, title=1, full_content=2,
+    # search_aliases=3 -- see db/schema.py). Markers/ellipsis/budget are static config
+    # constants inlined as literals (not `?` params) to avoid disturbing exec_params ordering.
+    snippet_sql = (
+        f"snippet(entities_fts, 2, '{SNIPPET_MATCH_START}', '{SNIPPET_MATCH_END}', "
+        f"'{SNIPPET_ELLIPSIS}', {SNIPPET_MAX_TOKENS})"
+    )
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                bm25(entities_fts, {bm25_weights}) as rank_score,
                e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id, e.memory_type, e.domain,
                (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id
-                AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count
+                AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count,
+               {snippet_sql} as fts_snippet
         FROM entities_fts fts
         JOIN entities e ON fts.id = e.id
         WHERE fts.entities_fts MATCH ?{where_sql}
@@ -627,16 +644,23 @@ def search_memory(
                         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                                0.0 as rank_score,
                                e.created_at, e.updated_at, e.owner_id, e.scope,
-                               e.metadata, e.context_id, e.memory_type, e.domain, 0 as rel_count
+                               e.metadata, e.context_id, e.memory_type, e.domain, 0 as rel_count,
+                               NULL as fts_snippet
                         FROM entities e
                         WHERE e.id IN ({placeholders})
                     """
                     fetched = conn.execute(fetch_sql, merged_ids).fetchall()
                     sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                    # Rows that matched via FTS5 already carry a real query-centered excerpt in
+                    # fts_rows (computed in the same query as bm25()); rows that only surfaced via
+                    # semantic_search() never went through entities_fts MATCH at all, so they keep
+                    # fts_snippet = None here and fall back to the heuristic extractor below.
+                    fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
                     rows = []
                     for r in sorted_fetched:
                         r_list = list(r)
                         r_list[5] = rrf_score_map.get(r[0], 0.0)
+                        r_list[-1] = fts_snippet_map.get(r[0])
                         rows.append(r_list)
                 else:
                     rows = fts_rows
@@ -647,7 +671,7 @@ def search_memory(
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
                        e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
-                       e.memory_type, e.domain, 0 as rel_count
+                       e.memory_type, e.domain, 0 as rel_count, NULL as fts_snippet
                 FROM entities e
                 WHERE {" AND ".join(where_clauses)}
                 ORDER BY e.is_core DESC, e.updated_at DESC
@@ -679,8 +703,11 @@ def search_memory(
 
         results = []
         for r in rows:
-            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, edomain, rel_c = r
-            _, snippet = extract_title_and_snippet(econtent)
+            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, edomain, rel_c, fts_snippet_raw = r
+            if fts_snippet_raw:
+                snippet = fts_snippet_raw
+            else:
+                _, snippet = extract_title_and_snippet(econtent)
 
             item = {
                 "id": eid,

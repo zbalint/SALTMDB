@@ -33,6 +33,19 @@ BM25_CONTENT_WEIGHT = 1.0
 BM25_ALIAS_WEIGHT = 5.0
 RELATION_COUNT_PENALTY = 0.1
 
+# FTS5 query-centered snippet generation (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
+# max_tokens must be in FTS5's valid range 1-64. Comparable to the retired top-of-doc
+# heuristic's ~150 chars / ~25-30 words, a bit more generous since a centered excerpt is
+# denser signal per token than an arbitrary opening line.
+SNIPPET_MAX_TOKENS = 32
+# Markers wrapped around each matched token so the excerpt visually shows why it matched.
+# Deliberately not markdown "**" -- full_content is itself markdown, so "**" could
+# nest/collide with real emphasis already in the source text. Set both to "" to disable
+# highlighting and get a plain excerpt.
+SNIPPET_MATCH_START = "<mark>"
+SNIPPET_MATCH_END = "</mark>"
+SNIPPET_ELLIPSIS = " ... "
+
 # Quality gate thresholds (src/saltmdb/utils/nlp.py:evaluate_memory_quality)
 QG_MIN_LENGTH = 20
 QG_MAX_SYMBOL_RATIO = 0.35
