@@ -333,8 +333,9 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
     def _resolve(self, predicate_name, agent_id=None):
         # resolve_or_create_predicate's contract requires an open write transaction around it
         # (mirrors how store_relation actually invokes it).
-        with write_transaction_retrying(self.conn):
-            return resolve_or_create_predicate(self.conn, predicate_name, agent_id=agent_id)
+        def _write(c):
+            return resolve_or_create_predicate(c, predicate_name, agent_id=agent_id)
+        return write_transaction_retrying(self.conn, _write)
 
     def test_all_seed_predicates_exist_after_init_db(self):
         rows = self.conn.execute("SELECT name FROM predicates").fetchall()
@@ -383,11 +384,12 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
     def test_normalized_name_fallback_preserves_original_row_name(self):
         # Manually insert a dirty legacy row whose 'name' column was never normalized to
         # snake_case, only its 'normalized_name' column was.
-        with write_transaction_retrying(self.conn):
-            self.conn.execute(
+        def _write(c):
+            c.execute(
                 "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, 'Old Legacy Name', 'old_legacy_name', NULL)",
                 (str(uuid.uuid4()),)
             )
+        write_transaction_retrying(self.conn, _write)
 
         resolved = self._resolve("OLD LEGACY NAME")
         self.assertEqual(

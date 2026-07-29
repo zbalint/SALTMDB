@@ -72,11 +72,13 @@ class TestWriteTransactionCommitRollback(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_commit_persists_row_visible_to_second_connection(self):
-        with write_transaction_retrying(self.conn):
-            self.conn.execute(
+        write_transaction_retrying(
+            self.conn,
+            lambda c: c.execute(
                 "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
                 ("evt-commit-1", "agent_qa", "test", "commit-test"),
             )
+        )
 
         # Open a second, independent connection to the same file and confirm the row
         # is actually durable, not just visible within the first connection's own cache.
@@ -94,13 +96,15 @@ class TestWriteTransactionCommitRollback(unittest.TestCase):
         class _Boom(Exception):
             pass
 
+        def _write(c):
+            c.execute(
+                "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
+                ("evt-rollback-1", "agent_qa", "test", "rollback-test"),
+            )
+            raise _Boom("simulated failure inside transaction")
+
         with self.assertRaises(_Boom):
-            with write_transaction_retrying(self.conn):
-                self.conn.execute(
-                    "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
-                    ("evt-rollback-1", "agent_qa", "test", "rollback-test"),
-                )
-                raise _Boom("simulated failure inside transaction")
+            write_transaction_retrying(self.conn, _write)
 
         row = self.conn.execute(
             "SELECT id FROM events WHERE id = ?", ("evt-rollback-1",)
@@ -133,8 +137,8 @@ class TestBeginImmediateContention(unittest.TestCase):
 
         def hold_lock_on_conn_a():
             try:
-                with write_transaction_retrying(self.conn_a):
-                    self.conn_a.execute(
+                def _write(c):
+                    c.execute(
                         "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
                         ("evt-holder", "agent_qa", "test", "held-by-thread-a"),
                     )
@@ -142,6 +146,7 @@ class TestBeginImmediateContention(unittest.TestCase):
                     # (i.e. after BEGIN IMMEDIATE + the INSERT have both succeeded).
                     lock_held_event.set()
                     time.sleep(HOLD_SECONDS)
+                write_transaction_retrying(self.conn_a, _write)
             except Exception as e:  # pragma: no cover - defensive, surfaced via thread_error
                 thread_error.append(e)
 
@@ -152,11 +157,13 @@ class TestBeginImmediateContention(unittest.TestCase):
         self.assertTrue(acquired, "background thread never signaled that it holds the write lock")
 
         start = time.monotonic()
-        with write_transaction_retrying(self.conn_b):
-            self.conn_b.execute(
+        write_transaction_retrying(
+            self.conn_b,
+            lambda c: c.execute(
                 "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
                 ("evt-waiter", "agent_qa", "test", "written-by-main-thread"),
             )
+        )
         elapsed = time.monotonic() - start
 
         t.join(timeout=5.0)
@@ -200,8 +207,7 @@ class TestWriteTransactionRetryingRetryBehavior(unittest.TestCase):
         real_conn.execute("CREATE TABLE t (x INTEGER)")
         wrapper = _FlakyConnWrapper(real_conn, n_failures=RETRY_MAX_ATTEMPTS)
 
-        with write_transaction_retrying(wrapper):
-            wrapper.execute("INSERT INTO t VALUES (1)")
+        write_transaction_retrying(wrapper, lambda c: c.execute("INSERT INTO t VALUES (1)"))
 
         row = real_conn.execute("SELECT COUNT(*) FROM t").fetchone()
         self.assertEqual(row[0], 1)
@@ -216,8 +222,7 @@ class TestWriteTransactionRetryingRetryBehavior(unittest.TestCase):
         wrapper = _FlakyConnWrapper(real_conn, n_failures=RETRY_MAX_ATTEMPTS + 1)
 
         with self.assertRaises(sqlite3.OperationalError) as ctx:
-            with write_transaction_retrying(wrapper):
-                wrapper.execute("INSERT INTO t VALUES (1)")
+            write_transaction_retrying(wrapper, lambda c: c.execute("INSERT INTO t VALUES (1)"))
         self.assertIn("database is locked", str(ctx.exception).lower())
 
         # Exactly RETRY_MAX_ATTEMPTS + 1 BEGIN IMMEDIATE attempts should have been made
@@ -236,12 +241,36 @@ class TestWriteTransactionRetryingRetryBehavior(unittest.TestCase):
         )
 
         with self.assertRaises(sqlite3.OperationalError) as ctx:
-            with write_transaction_retrying(wrapper):
-                wrapper.execute("INSERT INTO ghost_table VALUES (1)")
+            write_transaction_retrying(wrapper, lambda c: c.execute("INSERT INTO ghost_table VALUES (1)"))
         self.assertIn("no such table", str(ctx.exception).lower())
 
         # Only the single, non-retried attempt should have touched BEGIN IMMEDIATE.
         self.assertEqual(wrapper._remaining_failures, 0)
+        real_conn.close()
+
+    def test_retries_operational_error_raised_inside_callback(self):
+        """Regression test: proves write_transaction_retrying correctly retries when
+        OperationalError('database is locked') is raised inside the callback (after BEGIN IMMEDIATE)
+        via a fresh BEGIN IMMEDIATE, succeeding on retry instead of raising RuntimeError.
+        """
+        real_conn = sqlite3.connect(":memory:", isolation_level=None)
+        real_conn.execute("CREATE TABLE t (x INTEGER)")
+        wrapper = _FlakyConnWrapper(real_conn, n_failures=1, error_message="database is locked", fail_on_substring="INSERT")
+
+        invocations = 0
+
+        def _write(c):
+            nonlocal invocations
+            invocations += 1
+            c.execute("INSERT INTO t VALUES (1)")
+            return "success_val"
+
+        result = write_transaction_retrying(wrapper, _write)
+
+        self.assertEqual(result, "success_val")
+        self.assertEqual(invocations, 2)
+        row = real_conn.execute("SELECT COUNT(*) FROM t").fetchone()
+        self.assertEqual(row[0], 1)
         real_conn.close()
 
 

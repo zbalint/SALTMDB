@@ -48,8 +48,9 @@ def log_event(
         if _in_transaction:
             _do_insert()
         else:
-            with write_transaction_retrying(conn):
+            def _write(c):
                 _do_insert()
+            write_transaction_retrying(conn, _write)
 
         if not _in_transaction:
             from saltmdb.domain.services.librarian_service import trigger_librarian

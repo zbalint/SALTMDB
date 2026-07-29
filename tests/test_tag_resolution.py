@@ -33,8 +33,9 @@ class TestResolveOrCreateTag(unittest.TestCase):
     def _resolve(self, tag_name, agent_id=None):
         # resolve_or_create_tag's contract requires an open write transaction around it
         # (mirrors how store_memory/commit_consolidation actually invoke it).
-        with write_transaction_retrying(self.conn):
-            return resolve_or_create_tag(self.conn, tag_name, agent_id=agent_id)
+        def _write(c):
+            return resolve_or_create_tag(c, tag_name, agent_id=agent_id)
+        return write_transaction_retrying(self.conn, _write)
 
     def test_exact_match_resolves_to_same_id_on_repeated_calls(self):
         id1 = self._resolve("#exactmatch")
@@ -68,10 +69,11 @@ class TestResolveOrCreateTag(unittest.TestCase):
 
         # Simulate a prior merge_tags() call by manually pointing the alias's canonical_id
         # at the canonical tag's id.
-        with write_transaction_retrying(self.conn):
-            self.conn.execute(
+        def _write(c):
+            c.execute(
                 "UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id)
             )
+        write_transaction_retrying(self.conn, _write)
 
         resolved = self._resolve("#aliastag")
         self.assertEqual(

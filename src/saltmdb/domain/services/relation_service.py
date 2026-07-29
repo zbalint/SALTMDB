@@ -139,8 +139,9 @@ def store_relation(
         if _in_transaction:
             result_msg = _do_store()
         else:
-            with write_transaction_retrying(conn):
-                result_msg = _do_store()
+            def _write(c):
+                return _do_store()
+            result_msg = write_transaction_retrying(conn, _write)
         return result_msg
     except Exception as e:
         logger.error("Error storing relation: %s", e)
@@ -189,6 +190,11 @@ def invalidate_relation(
                 (resolved_source, resolved_target, canonical_predicate)
             ).fetchone()
             if not existing:
+                existing = conn.execute(
+                    "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND invalid_at IS NOT NULL ORDER BY rowid DESC",
+                    (resolved_source, resolved_target, canonical_predicate)
+                ).fetchone()
+            if not existing:
                 return "Error: relation not found"
 
             rel_id, existing_invalid_at = existing
@@ -197,16 +203,17 @@ def invalidate_relation(
 
             effective_invalid_at = invalid_at or now
             conn.execute(
-                "UPDATE relations SET invalid_at = ? WHERE id = ?",
-                (effective_invalid_at, rel_id)
+                "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+                (effective_invalid_at, effective_invalid_at, rel_id)
             )
             return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id})"
 
         if _in_transaction:
             result_msg = _do_invalidate()
         else:
-            with write_transaction_retrying(conn):
-                result_msg = _do_invalidate()
+            def _write(c):
+                return _do_invalidate()
+            result_msg = write_transaction_retrying(conn, _write)
         return result_msg
     except Exception as e:
         logger.error("Error invalidating relation: %s", e)
@@ -252,6 +259,7 @@ def analyze_dependencies(
             FROM relations r
             WHERE r.source_id = ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
 
             UNION ALL
 
@@ -260,6 +268,7 @@ def analyze_dependencies(
             JOIN dependency_tree dt ON r.source_id = dt.target_id
             WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
               AND dt.path NOT LIKE '%' || r.target_id || '%'
         )
         SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
@@ -268,7 +277,7 @@ def analyze_dependencies(
         JOIN entities e2 ON dt.target_id = e2.id
         ORDER BY dt.depth ASC;
         """
-        cursor = conn.execute(query, (root_id, pit, pit, max_depth, pit, pit))
+        cursor = conn.execute(query, (root_id, pit, pit, pit, max_depth, pit, pit, pit))
         rows = cursor.fetchall()
         
         id_to_title = {root_id: root_info.get("title", root_id)}
@@ -362,6 +371,7 @@ def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connect
             WHERE r.source_id = ? AND r.predicate = 'consolidated_from'
               AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
             UNION ALL
             SELECT r.id, r.source_id, r.target_id, l.depth + 1, l.path || '->' || r.target_id
             FROM relations r
@@ -369,13 +379,14 @@ def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connect
             WHERE r.predicate = 'consolidated_from' AND l.depth < 10
               AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
               AND l.path NOT LIKE '%' || r.target_id || '%'
         )
         SELECT l.target_id, e.title, e.status, e.owner_id, e.updated_at, l.depth
         FROM lineage l JOIN entities e ON l.target_id = e.id
         ORDER BY l.depth ASC;
         """
-        cursor = conn.execute(query, (target_id, pit, pit, pit, pit))
+        cursor = conn.execute(query, (target_id, pit, pit, pit, pit, pit, pit))
         rows = cursor.fetchall()
 
         ancestry = [root_info]
@@ -555,8 +566,9 @@ def commit_consolidation(
         if _in_transaction:
             _do_commit()
         else:
-            with write_transaction_retrying(conn):
+            def _write(c):
                 _do_commit()
+            write_transaction_retrying(conn, _write)
 
         try:
             target_db = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -595,7 +607,7 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
 
     results = []
     try:
-        with write_transaction_retrying(conn):
+        def _write(conn_arg):
             for item in consolidations:
                 p_ids = item.get("parent_ids", [])
                 t = item.get("title")
@@ -609,6 +621,7 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
                     raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")
                 new_id = res.split("ID: ")[-1].strip()
                 results.append({"status": "success", "entity_id": new_id, "title": t, "result": res})
+        write_transaction_retrying(conn, _write)
         return results
     except Exception as e:
         logger.error("Bulk commit consolidation error (batch rolled back, no items consolidated): %s", e)
@@ -637,7 +650,7 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
 
     results = []
     try:
-        with write_transaction_retrying(conn):
+        def _write(c):
             for r in relations:
                 src = r.get("source_id")
                 tgt = r.get("target_id")
@@ -648,6 +661,7 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
                     raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
                 status = "duplicate" if res.startswith("Relation already exists") else "success"
                 results.append({"status": status, "source": src, "target": tgt, "predicate": pred, "result": res})
+        write_transaction_retrying(conn, _write)
         return results
     except Exception as e:
         logger.error("Bulk store relations error (batch rolled back, no items stored): %s", e)

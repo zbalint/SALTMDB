@@ -7,6 +7,8 @@ from saltmdb.db.schema import init_db
 from saltmdb.domain.services.relation_service import (
     store_relation,
     invalidate_relation,
+    analyze_dependencies,
+    analyze_lineage,
 )
 from saltmdb.domain.services.memory_service import store_memory
 
@@ -104,7 +106,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], custom_time)
 
-    def test_invalidate_relation_sets_invalid_at_leaves_valid_to_null(self):
+    def test_invalidate_relation_sets_invalid_at_and_valid_to(self):
         res_store = store_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
@@ -126,7 +128,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             "SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)
         ).fetchone()
         self.assertIsNotNone(row[0])  # invalid_at set
-        self.assertIsNone(row[1])     # valid_to stays NULL
+        self.assertIsNotNone(row[1])  # valid_to set to effective_invalid_at
+        self.assertEqual(row[0], row[1])
 
     def test_invalidate_relation_explicit_invalid_at(self):
         store_relation(
@@ -256,6 +259,143 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             (self.id_alpha, self.id_beta, "elaborates_on")
         ).fetchone()
         self.assertIsNotNone(row[0])
+
+    def test_invalidated_edge_excluded_from_traversal_after_invalidation_timestamp(self):
+        store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            valid_at="2025-01-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        invalidate_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            invalid_at="2025-06-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+
+        res_dep = analyze_dependencies(
+            root_entity_id=self.id_alpha,
+            point_in_time="2025-07-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.assertEqual(res_dep["total_dependencies_found"], 0)
+        self.assertEqual(len(res_dep["dependencies"]), 1)
+
+        store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="consolidated_from",
+            valid_at="2025-01-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        invalidate_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="consolidated_from",
+            invalid_at="2025-06-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        res_lin = analyze_lineage(
+            entity_id=self.id_alpha,
+            point_in_time="2025-07-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.assertEqual(len(res_lin["ancestors"]), 1)
+
+    def test_invalidated_edge_included_in_traversal_before_invalidation_timestamp(self):
+        store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            valid_at="2025-01-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.conn.execute(
+            "UPDATE relations SET valid_from = '2025-01-01T00:00:00+00:00' WHERE source_id = ? AND target_id = ?",
+            (self.id_alpha, self.id_beta)
+        )
+        invalidate_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            invalid_at="2025-06-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+
+        res_dep = analyze_dependencies(
+            root_entity_id=self.id_alpha,
+            point_in_time="2025-03-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.assertEqual(res_dep["total_dependencies_found"], 1)
+        self.assertEqual(len(res_dep["dependencies"]), 2)
+        dep_ids = {d["id"] for d in res_dep["dependencies"]}
+        self.assertIn(self.id_beta, dep_ids)
+
+        store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="consolidated_from",
+            valid_at="2025-01-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.conn.execute(
+            "UPDATE relations SET valid_from = '2025-01-01T00:00:00+00:00' WHERE source_id = ? AND target_id = ? AND predicate = 'consolidated_from'",
+            (self.id_alpha, self.id_beta)
+        )
+        invalidate_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="consolidated_from",
+            invalid_at="2025-06-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        res_lin = analyze_lineage(
+            entity_id=self.id_alpha,
+            point_in_time="2025-03-01T00:00:00+00:00",
+            db_connection=self.conn
+        )
+        self.assertEqual(len(res_lin["ancestors"]), 2)
+        ancestry_ids = {a["id"] for a in res_lin["ancestors"]}
+        self.assertIn(self.id_beta, ancestry_ids)
+
+    def test_invalidate_relation_allows_recreating_same_edge(self):
+        res1 = store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            db_connection=self.conn
+        )
+        self.assertTrue(res1.startswith("Relation successfully stored"))
+
+        res_inv = invalidate_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            db_connection=self.conn
+        )
+        self.assertTrue(res_inv.startswith("Relation invalidated"))
+
+        res2 = store_relation(
+            source_id=self.id_alpha,
+            target_id=self.id_beta,
+            predicate="depends_on",
+            db_connection=self.conn
+        )
+        self.assertTrue(res2.startswith("Relation successfully stored"))
+
+        rows = self.conn.execute(
+            "SELECT id, valid_to, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
+            (self.id_alpha, self.id_beta, "depends_on")
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        active_rows = [r for r in rows if r[1] is None]
+        invalid_rows = [r for r in rows if r[1] is not None]
+        self.assertEqual(len(active_rows), 1)
+        self.assertEqual(len(invalid_rows), 1)
 
     def test_canonical_tags_seeded_post_init_db(self):
         rows = self.conn.execute(

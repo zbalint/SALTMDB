@@ -224,6 +224,29 @@ class TestDomainSearchAndScan(unittest.TestCase):
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["domain"], "Business")
 
+    def test_search_memory_invalid_domain_filter_returns_error(self):
+        self._store("Business Entity", domain="Business")
+        res = search_memory(
+            owner_id="tester",
+            domain_filter="business",
+            db_connection=self.conn,
+        )
+        self.assertIsInstance(res, str)
+        self.assertTrue(res.startswith("Error"))
+        self.assertIn("domain must be one of", res)
+
+    def test_search_memory_valid_exact_case_domain_filter_returns_results(self):
+        bus_id = self._store("Business Entity Valid Case", domain="Business")
+        results = search_memory(
+            owner_id="tester",
+            domain_filter="Business",
+            db_connection=self.conn,
+        )
+        self.assertIsInstance(results, list)
+        self.assertTrue(len(results) > 0)
+        ids = {r["id"] for r in results}
+        self.assertIn(bus_id, ids)
+
 
 class TestDomainBackwardCompatAndSchema(unittest.TestCase):
     def setUp(self):

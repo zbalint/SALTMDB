@@ -231,7 +231,7 @@ def store_memory(
         entity_id = str(uuid.uuid4())
         
     try:
-        with write_transaction_retrying(conn):
+        def _write(c):
             cursor = conn.execute("SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,))
             existing = cursor.fetchone()
             if existing:
@@ -327,6 +327,10 @@ def store_memory(
                     logger.info("Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s", entity_id, matched_supersession_id)
                 except Exception as ex:
                     logger.warning("Failed to log supersession_candidate event: %s", ex)
+
+            return existing
+
+        existing = write_transaction_retrying(conn, _write)
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
@@ -473,6 +477,9 @@ def search_memory(
     db_path: str = None
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory."""
+    if domain_filter is not None and domain_filter not in VALID_DOMAINS:
+        return f"Error: domain must be one of {', '.join(repr(d) for d in VALID_DOMAINS)}"
+
     should_close = False
     conn = db_connection
     if not conn:
@@ -777,8 +784,9 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         if _in_transaction:
             _do_archive()
         else:
-            with write_transaction_retrying(conn):
+            def _write(c):
                 _do_archive()
+            write_transaction_retrying(conn, _write)
 
         return f"Memory '{resolved_id}' was successfully archived."
     except Exception as e:
@@ -1033,7 +1041,7 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
 
     results = []
     try:
-        with write_transaction_retrying(conn):
+        def _write(c):
             for req in archive_requests:
                 eid = req if isinstance(req, str) else req.get("entity_id")
                 owner = req.get("owner_id") if isinstance(req, dict) else None
@@ -1041,6 +1049,7 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk archive aborted (all-or-nothing): {res}")
                 results.append({"status": "success", "entity_id": eid, "result": res})
+        write_transaction_retrying(conn, _write)
         return results
     except Exception as e:
         logger.error("Error in bulk archive memory (batch rolled back, no items archived): %s", e)

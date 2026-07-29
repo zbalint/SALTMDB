@@ -296,7 +296,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         row = self.conn.execute("SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)).fetchone()
         self.assertIsNotNone(row[0])
-        self.assertIsNone(row[1])
+        self.assertIsNotNone(row[1])
+        self.assertEqual(row[0], row[1])
 
     def test_manage_relation_valid_at_and_invalid_at_passthrough(self):
         res1 = tools.store_memory(content="Source entity for valid_at passthrough", title="ValidAt Source", owner_id="user1", skip_duplicate_check=True)

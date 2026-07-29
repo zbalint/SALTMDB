@@ -69,9 +69,8 @@ def write_transaction(conn: sqlite3.Connection):
         raise
 
 
-@contextmanager
-def write_transaction_retrying(conn: sqlite3.Connection):
-    """Context manager wrapping write_transaction with retry/backoff on lock contention.
+def write_transaction_retrying(conn: sqlite3.Connection, fn):
+    """Executes a callable inside write_transaction with retry/backoff on lock contention.
 
     Only retries sqlite3.OperationalError whose message contains
     "database is locked" (case-insensitive) -- any other OperationalError
@@ -79,16 +78,22 @@ def write_transaction_retrying(conn: sqlite3.Connection):
     RETRY_MAX_ATTEMPTS times beyond the first attempt, with exponential
     backoff plus jitter between attempts, so total attempts = 1 + RETRY_MAX_ATTEMPTS.
 
-    The retry loop lives OUTSIDE the `with write_transaction(conn):` block so
-    that each retry re-issues a fresh BEGIN IMMEDIATE (re-executing the
-    caller's body from scratch) rather than resuming a stale transaction.
+    Requires conn to have isolation_level=None so BEGIN IMMEDIATE front-loads
+    lock acquisition. Retries the entire transaction (fresh BEGIN IMMEDIATE +
+    re-invoking fn(c)) on lock contention.
+
+    Note: fn may be invoked more than once if lock contention occurs, so it must
+    be safe to re-run (its writes roll back automatically via write_transaction on
+    failure, so this is safe as long as fn has no side effects beyond writing to conn).
+
+    Returns:
+        The return value of fn(c).
     """
     attempt = 0
     while True:
         try:
             with write_transaction(conn) as c:
-                yield c
-                return
+                return fn(c)
         except sqlite3.OperationalError as e:
             if "database is locked" not in str(e).lower() or attempt >= RETRY_MAX_ATTEMPTS:
                 raise

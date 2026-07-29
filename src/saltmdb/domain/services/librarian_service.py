@@ -84,8 +84,8 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
         
     try:
         logger.info("Running Tag Merging...")
-        with write_transaction_retrying(conn):
-            cursor = conn.execute("SELECT id, name, canonical_id FROM tags")
+        def _write(c):
+            cursor = c.execute("SELECT id, name, canonical_id FROM tags")
             tags = cursor.fetchall()
             
             grouped = {}
@@ -101,10 +101,11 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
                     logger.info("Merging tags into canonical tag: '%s' (%s)", canonical_name, canonical_id)
                     for tag_id, name in tag_list[1:]:
                         logger.info("  - Marking alias tag: '%s' (%s)", name, tag_id)
-                        conn.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id))
-                        conn.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
-                        conn.execute("DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)", (tag_id, canonical_id))
-                        conn.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
+                        c.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id))
+                        c.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
+                        c.execute("DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)", (tag_id, canonical_id))
+                        c.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
+        write_transaction_retrying(conn, _write)
     finally:
         if should_close:
             close_connection(conn)
@@ -139,9 +140,9 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
 
         merged = []
         skipped = []
-        with write_transaction_retrying(conn):
+        def _write(c):
             for name in (tags_to_merge or []):
-                alias_id = _resolve_tag_id(conn, name)
+                alias_id = _resolve_tag_id(c, name)
                 if not alias_id:
                     skipped.append({"tag": name, "reason": "not found"})
                     continue
@@ -149,14 +150,15 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
                     skipped.append({"tag": name, "reason": "already canonical"})
                     continue
 
-                conn.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id))
-                conn.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
-                conn.execute(
+                c.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id))
+                c.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                c.execute(
                     "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
                     (alias_id, canonical_id)
                 )
-                conn.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                c.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
                 merged.append(name)
+        write_transaction_retrying(conn, _write)
 
         return f"Merged {len(merged)} tag(s) into canonical tag '{keep_tag}': {merged}. Skipped: {skipped}"
     finally:
@@ -206,11 +208,12 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
             })
             
             target_agent = owner_id if owner_id else "librarian"
-            with write_transaction_retrying(conn):
-                conn.execute("""
+            def _write(c):
+                c.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
                 """, (event_id, now, target_agent, content))
+            write_transaction_retrying(conn, _write)
             logger.info("Logged consolidation request for tag '%s' (Owner: %s, Threshold: %d, Entity IDs: %s)", tag_name, target_agent, threshold, raw_ids)
     finally:
         if should_close:
@@ -256,11 +259,12 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
                 "entity_ids": entity_ids
             })
             target_agent = owner_id if owner_id else "librarian"
-            with write_transaction_retrying(conn):
-                conn.execute("""
+            def _write(c):
+                c.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
                 """, (event_id, now, target_agent, content))
+            write_transaction_retrying(conn, _write)
             logger.info("Logged general consolidation request for %s/%s (Entity IDs: %s)", owner_id, scope, entity_ids)
     finally:
         if should_close:
@@ -338,11 +342,12 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
                 "owner_id": primary_owner,
                 "entity_ids": cluster
             })
-            with write_transaction_retrying(conn):
-                conn.execute("""
+            def _write(c):
+                c.execute("""
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
                 """, (event_id, now, primary_owner, content))
+            write_transaction_retrying(conn, _write)
             logger.info("Logged vector cluster consolidation request for Owner '%s' (Entity IDs: %s)", primary_owner, cluster)
     except Exception as e:
         logger.warning("Error in consolidate_vector_clusters: %s", e)
@@ -404,11 +409,12 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
                     "consolidated_title": ctitle,
                     "new_raw_entity_ids": overlapping_new_raw
                 })
-                with write_transaction_retrying(conn):
-                    conn.execute("""
+                def _write(c):
+                    c.execute("""
                         INSERT INTO events (id, timestamp, agent_id, type, content)
                         VALUES (?, ?, ?, 'consolidation_request', ?)
                     """, (event_id, now, target_agent, content))
+                write_transaction_retrying(conn, _write)
                 logger.info("Logged supersession candidate request for consolidated memory '%s' (ID: %s)", ctitle, cid)
     except Exception as e:
         logger.warning("Error in scout_consolidated_supersessions: %s", e)
@@ -473,12 +479,13 @@ def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = N
         if decayed_ids:
             logger.info("Identified %d decayed low-quality raw memories for archiving.", len(decayed_ids))
             now_iso = datetime.now(UTC).isoformat()
-            with write_transaction_retrying(conn):
+            def _write(c):
                 placeholders = ",".join("?" for _ in decayed_ids)
-                conn.execute(
+                c.execute(
                     f"UPDATE entities SET status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
                     [now_iso, now_iso] + decayed_ids
                 )
+            write_transaction_retrying(conn, _write)
     except Exception as e:
         logger.warning("Error in decay_low_quality_memories: %s", e)
     finally:

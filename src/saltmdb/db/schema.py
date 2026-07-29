@@ -36,7 +36,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
     # a retry could see or corrupt. This also directly helps the multi-agent concurrent-startup
     # contention that motivated the busy_timeout bump (commit 548d170), since concurrent init_db()
     # calls are exactly where BEGIN IMMEDIATE + retry pays off most.
-    with write_transaction_retrying(conn):
+    def _write(c):
         # 1. Events Table (Short-Term append-only ledger)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -360,5 +360,6 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
                 msg = str(e).lower()
                 if "already exists" not in msg and "already an index" not in msg:
                     logger.error("Failed to create index (%s): %s", index_sql, e)
-        
+
+    write_transaction_retrying(conn, _write)
     return conn
