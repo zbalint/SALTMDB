@@ -263,9 +263,10 @@ def manage_relation(
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
+    invalidate: bool = False,
     **kwargs
 ) -> str | list:
-    """Stores one or multiple directional semantic relationship edges between memory nodes."""
+    """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True)."""
     kw = _unwrap_kwargs(kwargs)
     relations_ = _resolve(relations, kw, kwargs, "relations")
     if relations_:
@@ -276,7 +277,17 @@ def manage_relation(
     source_id_ = _resolve(source_id, kw, kwargs, "source_id", "source")
     target_id_ = _resolve(target_id, kw, kwargs, "target_id", "target")
     predicate_ = _resolve(predicate, kw, kwargs, "predicate", "relation")
-    return relation_service.store_relation(source_id=source_id_, target_id=target_id_, predicate=predicate_)
+
+    if invalidate:
+        invalid_at_ = kwargs.get("invalid_at")
+        return relation_service.invalidate_relation(
+            source_id=source_id_, target_id=target_id_, predicate=predicate_, invalid_at=invalid_at_
+        )
+
+    valid_at_ = kwargs.get("valid_at")
+    return relation_service.store_relation(
+        source_id=source_id_, target_id=target_id_, predicate=predicate_, valid_at=valid_at_
+    )
 
 @mcp.tool()
 def commit_consolidation(

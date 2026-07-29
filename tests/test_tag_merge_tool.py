@@ -27,10 +27,10 @@ class TestTagMergeTool(unittest.TestCase):
 
     def test_merge_tags_repoints_entity_tags_to_canonical(self):
         res1 = tools.store_memory(content="Content for entity tagged with the fix fragment", title="Fix Fragment Entity", tags=["#fix"], owner_id="user1", skip_duplicate_check=True)
-        id1 = res1.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
 
         res2 = tools.store_memory(content="Content for entity tagged with the bugfix fragment", title="Bugfix Fragment Entity", tags=["#bugfix"], owner_id="user1", skip_duplicate_check=True)
-        id2 = res2.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].split()[0]
 
         merge_res = tools.merge_tags(keep_tag="#fix", tags_to_merge=["#bugfix"])
         self.assertIn("Merged 1 tag(s)", merge_res)
@@ -51,7 +51,7 @@ class TestTagMergeTool(unittest.TestCase):
         # of each other), so they still land as two separate rows and this test continues
         # to exercise a real, explicit merge_tags() call and its idempotency.
         res1 = tools.store_memory(content="Content for entity tagged with the docs fragment", title="Docs Fragment Entity", tags=["#docs", "#documentation"], owner_id="user1", skip_duplicate_check=True)
-        id1 = res1.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
 
         first = tools.merge_tags(keep_tag="#documentation", tags_to_merge=["#docs"])
         self.assertIn("Merged 1 tag(s)", first)
@@ -66,10 +66,10 @@ class TestTagMergeTool(unittest.TestCase):
         #skills now resolve to the SAME tag row automatically at write time, so they never
         fragment into two rows needing a later merge_tags() call."""
         res1 = tools.store_memory(content="Content for entity tagged with skill singular", title="Skill Singular Entity", tags=["#skill"], owner_id="user1", skip_duplicate_check=True)
-        id1 = res1.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
 
         res2 = tools.store_memory(content="Content for entity tagged with skills plural", title="Skills Plural Entity", tags=["#skills"], owner_id="user1", skip_duplicate_check=True)
-        id2 = res2.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].split()[0]
 
         tags1 = self._tag_names_for_entity(id1)
         tags2 = self._tag_names_for_entity(id2)

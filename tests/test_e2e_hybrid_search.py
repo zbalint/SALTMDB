@@ -28,7 +28,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             skip_duplicate_check=True,
             db_path=self.db_path
         )
-        id1 = res1.split("ID: ")[1]
+        id1 = res1.split("ID: ")[1].split()[0]
 
         res2 = store_memory(
             title="Grover Database Search",
@@ -39,7 +39,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             skip_duplicate_check=True,
             db_path=self.db_path
         )
-        id2 = res2.split("ID: ")[1]
+        id2 = res2.split("ID: ")[1].split()[0]
 
         # Link id1 -> id2
         store_relation(source_id=id1, target_id=id2, predicate="complements", db_connection=self.conn)

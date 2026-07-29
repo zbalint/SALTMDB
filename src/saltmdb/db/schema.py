@@ -125,6 +125,15 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_normalized_name ON tags(normalized_name);")
         
+        # Schema migration (alpha.60): seed canonical top-level tags (episodic/semantic/procedural),
+        # independent of each other -- no aliasing needed. Mirrors predicates' alpha.55 seeding
+        # idempotency (INSERT OR IGNORE); canonical_id stays NULL, these ARE the canonical rows.
+        for _seed_tag_name in ("episodic", "semantic", "procedural"):
+            conn.execute(
+                "INSERT OR IGNORE INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (str(uuid.uuid4()), _seed_tag_name, _seed_tag_name)
+            )
+
         # 4. Entity Tags Join Table
         conn.execute("""
         CREATE TABLE IF NOT EXISTS entity_tags (
@@ -180,6 +189,11 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             )
         except sqlite3.OperationalError as e:
             logger.warning("Relations partial unique index migration skipped/failed: %s", e)
+
+        # Schema migration (alpha.60 / Schema Version 12): bi-temporal event/world-time axis for
+        # relations, independent of valid_from/valid_to (system/transaction time, consolidation-only).
+        for col in ["valid_at DATETIME", "invalid_at DATETIME"]:
+            _add_column_if_missing(conn, "relations", col)
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS predicates (

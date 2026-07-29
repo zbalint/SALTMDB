@@ -340,6 +340,8 @@ def store_memory(
         res_msg = f"Knowledge stored successfully with ID: {entity_id}"
         if duplicate_warning_str:
             res_msg += duplicate_warning_str
+        if not existing and tags:
+            res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"
         return res_msg
     except Exception as e:
         logger.error("Error storing knowledge: %s", e)

@@ -82,6 +82,7 @@ def store_relation(
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
+    valid_at: str | None = None,
     db_connection = None,
     db_path: str = None,
     _in_transaction: bool = False
@@ -120,11 +121,12 @@ def store_relation(
     try:
         def _do_store():
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+            effective_valid_at = valid_at or now
             cursor = conn.execute("""
-                INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-            """, (relation_id, resolved_source, resolved_target, canonical_predicate, now, now))
+            """, (relation_id, resolved_source, resolved_target, canonical_predicate, now, now, effective_valid_at))
             if cursor.rowcount == 0:
                 existing = conn.execute(
                     "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
@@ -143,6 +145,72 @@ def store_relation(
     except Exception as e:
         logger.error("Error storing relation: %s", e)
         return f"Error storing relation: {e}"
+    finally:
+        if should_close:
+            close_connection(conn)
+
+def invalidate_relation(
+    source_id: str = None,
+    target_id: str = None,
+    predicate: str = None,
+    invalid_at: str | None = None,
+    db_connection = None,
+    db_path: str = None,
+    _in_transaction: bool = False
+) -> str:
+    """Invalidates an active relationship edge on the event/world-time axis (invalid_at).
+
+    Does NOT touch valid_to (system/transaction time, driven by commit_consolidation).
+    """
+    if not source_id or not target_id or not predicate:
+        return "Error: source_id, target_id, and predicate are mandatory parameters."
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    resolved_source = resolve_entity_id(conn, source_id)
+    resolved_target = resolve_entity_id(conn, target_id)
+
+    if not resolved_source or not resolved_target:
+        if should_close:
+            close_connection(conn)
+        return "Error: Could not resolve target entity IDs."
+
+    now = datetime.now(UTC).isoformat()
+    try:
+        def _do_invalidate():
+            canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+            existing = conn.execute(
+                "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
+                (resolved_source, resolved_target, canonical_predicate)
+            ).fetchone()
+            if not existing:
+                return "Error: relation not found"
+
+            rel_id, existing_invalid_at = existing
+            if existing_invalid_at is not None:
+                return f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
+
+            effective_invalid_at = invalid_at or now
+            conn.execute(
+                "UPDATE relations SET invalid_at = ? WHERE id = ?",
+                (effective_invalid_at, rel_id)
+            )
+            return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id})"
+
+        if _in_transaction:
+            result_msg = _do_invalidate()
+        else:
+            with write_transaction_retrying(conn):
+                result_msg = _do_invalidate()
+        return result_msg
+    except Exception as e:
+        logger.error("Error invalidating relation: %s", e)
+        return f"Error invalidating relation: {e}"
     finally:
         if should_close:
             close_connection(conn)
@@ -574,7 +642,8 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
                 src = r.get("source_id")
                 tgt = r.get("target_id")
                 pred = r.get("predicate")
-                res = store_relation(source_id=src, target_id=tgt, predicate=pred, db_connection=conn, _in_transaction=True)
+                valid_at = r.get("valid_at")
+                res = store_relation(source_id=src, target_id=tgt, predicate=pred, valid_at=valid_at, db_connection=conn, _in_transaction=True)
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
                 status = "duplicate" if res.startswith("Relation already exists") else "success"

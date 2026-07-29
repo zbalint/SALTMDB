@@ -75,7 +75,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_store_memory_update_preserves_tags_when_omitted(self):
         res = tools.store_memory(content="Content for tag preservation test on update path", title="Tag Preservation Entity", tags=["#python", "#backend"], owner_id="user1", skip_duplicate_check=True)
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res.split("ID: ")[1].split()[0]
         self.assertEqual(self._tag_count_for_entity(entity_id), 2)
 
         update_res = tools.store_memory(entity_id=entity_id, content="Content for tag preservation test on update path", title="Tag Preservation Entity", is_core=True, owner_id="user1", skip_duplicate_check=True)
@@ -84,7 +84,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_store_memory_update_explicit_empty_tags_clears(self):
         res = tools.store_memory(content="Content for explicit tag clearing test on update path", title="Tag Clearing Entity", tags=["#python"], owner_id="user1", skip_duplicate_check=True)
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res.split("ID: ")[1].split()[0]
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
 
         tools.store_memory(entity_id=entity_id, content="Content for explicit tag clearing test on update path", title="Tag Clearing Entity", tags=[], owner_id="user1", skip_duplicate_check=True)
@@ -92,7 +92,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_store_memory_update_explicit_tags_replaces(self):
         res = tools.store_memory(content="Content for explicit tag replacement test on update path", title="Tag Replacement Entity", tags=["#alpha"], owner_id="user1", skip_duplicate_check=True)
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res.split("ID: ")[1].split()[0]
 
         tools.store_memory(entity_id=entity_id, content="Content for explicit tag replacement test on update path", title="Tag Replacement Entity", tags=["#beta"], owner_id="user1", skip_duplicate_check=True)
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
@@ -280,6 +280,48 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         lineage_now = tools.inspect_graph(entity_id=c_id, mode="lineage")
         self.assertEqual(lineage_now["total_ancestors"], 2)
+
+    def test_manage_relation_invalidate_mode(self):
+        res1 = tools.store_memory(content="Source entity for relation invalidation test", title="Invalidate MCP Source", owner_id="user1", skip_duplicate_check=True)
+        res2 = tools.store_memory(content="Target entity for relation invalidation test", title="Invalidate MCP Target", owner_id="user1", skip_duplicate_check=True)
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        self.assertIn("Relation successfully stored", rel_res)
+        rel_id = rel_res.split("ID: ")[1].rstrip(")")
+
+        inv_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on", invalidate=True)
+        self.assertIn("Relation invalidated", inv_res)
+
+        row = self.conn.execute("SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)).fetchone()
+        self.assertIsNotNone(row[0])
+        self.assertIsNone(row[1])
+
+    def test_manage_relation_valid_at_and_invalid_at_passthrough(self):
+        res1 = tools.store_memory(content="Source entity for valid_at passthrough", title="ValidAt Source", owner_id="user1", skip_duplicate_check=True)
+        res2 = tools.store_memory(content="Target entity for valid_at passthrough", title="ValidAt Target", owner_id="user1", skip_duplicate_check=True)
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        custom_valid_at = "2025-02-01T00:00:00+00:00"
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on", valid_at=custom_valid_at)
+        self.assertIn("Relation successfully stored", rel_res)
+        rel_id = rel_res.split("ID: ")[1].rstrip(")")
+
+        row = self.conn.execute("SELECT valid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
+        self.assertEqual(row[0], custom_valid_at)
+
+        custom_invalid_at = "2025-03-01T00:00:00+00:00"
+        inv_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on", invalidate=True, invalid_at=custom_invalid_at)
+        self.assertIn("Relation invalidated", inv_res)
+
+        row2 = self.conn.execute("SELECT invalid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
+        self.assertEqual(row2[0], custom_invalid_at)
+
+    def test_mcp_tool_count_regression_guard(self):
+        registered_count = len(tools.mcp._tool_manager._tools)
+        self.assertEqual(registered_count, 12, f"MCP server tool count must be exactly 12, got {registered_count}")
 
 if __name__ == "__main__":
     unittest.main()
