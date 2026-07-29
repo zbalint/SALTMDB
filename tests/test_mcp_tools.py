@@ -192,6 +192,36 @@ class TestMCPToolsWrapper(unittest.TestCase):
         for r in results:
             self.assertEqual(r["memory_type"], "fact")
 
+    def test_store_memory_domain_round_trip(self):
+        res = tools.store_memory(content="Content for domain tool round trip test", title="Domain Tool Entity", owner_id="user1", domain="CADET", skip_duplicate_check=True)
+        self.assertIn("stored successfully", res)
+        entity_id = res.split("ID: ")[1].strip()
+
+        row = self.conn.execute("SELECT domain FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        self.assertEqual(row[0], "CADET")
+
+        # Confirm it also round-trips through search_memory's echoed field.
+        search_res = tools.search_memory(owner_id="user1", domain_filter="CADET")
+        ids = {r["id"] for r in search_res}
+        self.assertIn(entity_id, ids)
+
+    def test_store_memory_area_alias_resolves_to_domain(self):
+        res = tools.store_memory(content="Content for the 'area' alias resolution test", title="Area Alias Entity", owner_id="user1", area="Homelab", skip_duplicate_check=True)
+        self.assertIn("stored successfully", res)
+        entity_id = res.split("ID: ")[1].strip()
+
+        row = self.conn.execute("SELECT domain FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        self.assertEqual(row[0], "Homelab")
+
+    def test_search_memory_domain_filter_round_trip(self):
+        tools.store_memory(content="SALTMDB-domain content for the domain_filter tool test", title="SALTMDB Domain Tool Entity", owner_id="user1", domain="SALTMDB", skip_duplicate_check=True)
+        tools.store_memory(content="Business-domain content for the domain_filter tool test", title="Business Domain Tool Entity", owner_id="user1", domain="Business", skip_duplicate_check=True)
+
+        results = tools.search_memory(domain_filter="SALTMDB", owner_id="user1")
+        self.assertTrue(len(results) > 0)
+        for r in results:
+            self.assertEqual(r["domain"], "SALTMDB")
+
     def test_inspect_graph_modes(self):
         res1 = tools.store_memory(content="Root entity node title", title="Root Entity", owner_id="user1", skip_duplicate_check=True)
         id1 = res1.split("ID: ")[1].strip() if "ID: " in res1 else "Root Entity"

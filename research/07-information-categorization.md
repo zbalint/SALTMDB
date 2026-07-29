@@ -1,13 +1,20 @@
 # Information Categorization & Classification Schemes for SALTMDB
 
-> **Status: Quick Win implemented in v0.1.0-alpha.56** (2026-07-28). Shipped the additive
+> **Status: Quick Win (`memory_type`) implemented in v0.1.0-alpha.56** (2026-07-28); **Phase 2
+> manual `domain` column implemented in v0.1.0-alpha.58** (2026-07-29). Shipped the additive
 > `memory_type` enum column (`fact`/`event`/`procedure`/`decision`/`preference`, CHECK-constrained,
 > `DEFAULT 'fact'`) on `entities`, plus `store_memory(memory_type=...)` and
 > `search_memory(memory_type_filter=...)` support in `memory_service.py` and the MCP tool layer.
 > This also resolved the Track 5 vs. Track 7 design collision noted in `research/README.md` in
-> favor of the column over a tag-namespace convention. **NOT implemented**: Phase 2 remains future
-> work — the `domain` column and embedding-cluster-assisted (UMAP/HDBSCAN) domain *suggestions* are
-> not built. See `MIGRATION.md`'s alpha.56 entry.
+> favor of the column over a tag-namespace convention. Later shipped a `domain TEXT` column —
+> deliberately shaped differently from `memory_type` (no `DEFAULT`, no DB-level `CHECK`; enforced
+> instead at the service layer via a `VALID_DOMAINS` allow-list, since this vocabulary is expected
+> to grow as new projects/life-areas appear), currently `('SALTMDB', 'CADET', 'Business',
+> 'Homelab', 'General')` — plus `store_memory(domain=...)` and `search_memory(domain_filter=...)`
+> support. **NOT implemented**: the embedding-cluster-assisted (UMAP/HDBSCAN) domain *suggestion*
+> pipeline originally scoped as part of Phase 2 remains future work and out of scope — what shipped
+> is a simpler, manually-set domain column only, never silent/automatic tagging. See
+> `MIGRATION.md`'s alpha.56 and alpha.58 entries.
 
 > Scope note: this document is about structural **classification schemes and type systems** —
 > what *kind* of thing a memory is (episodic event vs. semantic fact vs. procedure vs. decision),

@@ -82,7 +82,13 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "quality_score REAL",
             "quality_status TEXT",
             "quality_flags TEXT",
-            "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'"
+            "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'",
+            # Deliberately NOT modeled like memory_type above: no CHECK constraint, no DEFAULT.
+            # domain's vocabulary (projects/life-areas) is expected to grow over time as new
+            # projects start, and SQLite cannot ALTER a CHECK constraint in place (would require
+            # a full table rebuild) -- so enforcement instead lives in memory_service.py's
+            # VALID_DOMAINS constant at the service layer, which is trivial to extend.
+            "domain TEXT"
         ]:
             _add_column_if_missing(conn, "entities", col)
 
@@ -324,6 +330,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_domain ON entities(domain) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
