@@ -644,6 +644,7 @@ def search_memory(
                 WHERE (r.source_id IN ({placeholders_r}) OR r.target_id IN ({placeholders_r}))
                   AND e.id NOT IN ({placeholders_r})
                   AND e.status != 'archived'
+                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
             """, all_eids * 3)
             for bsrc, btgt, bpred, beid, betitle in batch_rel_cursor.fetchall():
                 anchor = bsrc if bsrc in all_eids else btgt
@@ -781,7 +782,7 @@ def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path
         query = """
         SELECT e.id, e.title, e.owner_id
         FROM entities e
-        LEFT JOIN relations r ON (e.id = r.source_id OR e.id = r.target_id)
+        LEFT JOIN relations r ON (e.id = r.source_id OR e.id = r.target_id) AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
         WHERE e.status = 'raw' AND r.id IS NULL
         """
         params = []

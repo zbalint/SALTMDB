@@ -61,7 +61,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             is_core BOOLEAN DEFAULT 0,
             weight INTEGER DEFAULT 1,
             status TEXT CHECK(status IN ('raw', 'consolidated', 'archived')) DEFAULT 'raw',
-            parent_ids TEXT, -- JSON array of ancestor IDs
+            parent_ids TEXT, -- JSON array of ancestor IDs (derived/display-only; not authoritative for lineage traversal, which uses the relations table)
             title TEXT NOT NULL,
             full_content TEXT NOT NULL,
             valid_from DATETIME,
@@ -159,6 +159,21 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             """)
         except sqlite3.OperationalError as e:
             logger.warning("Relations dedup backfill skipped/failed: %s", e)
+
+        # Schema migration (alpha.57 / Schema Version 10): the UNIQUE index on relations must become
+        # a PARTIAL index (WHERE valid_to IS NULL) now that commit_consolidation starts populating
+        # valid_to via expire-then-insert repointing. SQLite has no ALTER INDEX, and CREATE UNIQUE
+        # INDEX IF NOT EXISTS is a silent no-op against an already-existing same-named index even when
+        # its definition differs -- so this must unconditionally DROP + recreate to actually replace
+        # the old (Quick Wins round) non-partial index. Idempotent: cheap no-op once already migrated.
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_relations_unique_edge")
+            conn.execute(
+                "CREATE UNIQUE INDEX idx_relations_unique_edge "
+                "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
+            )
+        except sqlite3.OperationalError as e:
+            logger.warning("Relations partial unique index migration skipped/failed: %s", e)
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS predicates (
@@ -314,7 +329,6 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_unique_edge ON relations(source_id, target_id, predicate)",
             "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
             "CREATE INDEX IF NOT EXISTS idx_predicates_normalized_name ON predicates(normalized_name)",
             "CREATE INDEX IF NOT EXISTS idx_predicates_canonical ON predicates(canonical_id)",

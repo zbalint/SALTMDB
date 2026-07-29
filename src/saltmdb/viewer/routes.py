@@ -6,6 +6,7 @@ import urllib.parse
 import sys
 import logging
 from saltmdb.config import get_db_path
+from saltmdb.domain.services import relation_service
 
 logger = logging.getLogger(__name__)
 from saltmdb.viewer.templates import get_frontend_html
@@ -201,7 +202,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "is_core": bool(r[6]),
                     "weight": r[7],
                     "status": r[8],
-                    "parent_ids": json.loads(r[9]) if r[9] else [],
+                    "parent_ids": json.loads(r["parent_ids"]) if r["parent_ids"] else [],
                     "title": r[10],
                     "context_id": r[11],
                     "embedding_status": "archived" if r[8] == "archived" else (r[12] or "pending"),
@@ -577,56 +578,24 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 return
             entity_id, root_title, root_status = row[0], row[1], row[2]
 
-            cur = conn.execute("""
-                WITH RECURSIVE lineage(entity_id, depth, path) AS (
-                    SELECT ?, 0, ''
-                    UNION ALL
-                    SELECT r.target_id, l.depth + 1, l.path || '/' || l.entity_id
-                    FROM relations r
-                    JOIN lineage l ON r.source_id = l.entity_id
-                    WHERE r.predicate = 'consolidated_from' AND l.depth < 10
-                )
-                SELECT DISTINCT l.entity_id, l.depth, e.title, e.status, e.owner_id, e.updated_at
-                FROM lineage l
-                JOIN entities e ON l.entity_id = e.id
-                ORDER BY l.depth ASC
-            """, (entity_id,))
+            lineage_result = relation_service.analyze_lineage(entity_id=entity_id, db_connection=conn)
+            if lineage_result.get("error"):
+                self.send_json({"error": lineage_result["error"]}, 404)
+                return
             nodes = [{
-                "id": r[0],
-                "depth": r[1],
-                "title": r[2],
-                "status": r[3],
-                "owner_id": r[4],
-                "updated_at": r[5],
-                "generation_depth": r[1]
-            } for r in cur.fetchall()]
-
-            cur = conn.execute("""
-                SELECT r.source_id, r.target_id, r.predicate
-                FROM relations r
-                WHERE r.predicate = 'consolidated_from'
-                AND (r.source_id IN (SELECT entity_id FROM (WITH RECURSIVE l(entity_id, depth) AS (
-                    SELECT ?, 0
-                    UNION ALL SELECT r2.target_id, l.depth+1 FROM relations r2 JOIN l ON r2.source_id = l.entity_id WHERE r2.predicate = 'consolidated_from' AND l.depth < 10
-                ) SELECT entity_id FROM l))
-                OR r.target_id IN (SELECT entity_id FROM (WITH RECURSIVE l(entity_id, depth) AS (
-                    SELECT ?, 0
-                    UNION ALL SELECT r2.target_id, l.depth+1 FROM relations r2 JOIN l ON r2.source_id = l.entity_id WHERE r2.predicate = 'consolidated_from' AND l.depth < 10
-                ) SELECT entity_id FROM l)))
-            """, (entity_id, entity_id))
-            edges = [{
-                "source": r[0],
-                "target": r[1],
-                "predicate": r[2]
-            } for r in cur.fetchall()]
-
+                "id": a["id"],
+                "depth": a["generation_depth"],
+                "generation_depth": a["generation_depth"],
+                "title": a["title"],
+                "status": a["status"],
+                "owner_id": a.get("owner_id"),
+                "updated_at": a.get("updated_at"),
+            } for a in lineage_result.get("ancestors", [])]
             self.send_json({
                 "root_id": entity_id,
                 "root_title": root_title,
                 "root_status": root_status,
                 "nodes": nodes,
-                "edges": edges,
-                "ancestry_tree": nodes
             })
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
@@ -691,7 +660,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "is_core": bool(row[6]),
                 "weight": row[7],
                 "status": row[8],
-                "parent_ids": json.loads(row[9]) if row[9] else [],
+                "parent_ids": json.loads(row["parent_ids"]) if row["parent_ids"] else [],
                 "title": row[10],
                 "full_content": row[11],
                 "valid_from": row[12],

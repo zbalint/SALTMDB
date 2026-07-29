@@ -307,24 +307,28 @@ def inspect_graph(
     mode: Literal['dependencies', 'lineage', 'orphans'] = "dependencies",
     max_depth: int = 5,
     owner_id: str = None,
+    point_in_time: str = None,
     **kwargs
 ) -> dict:
     """Inspects memory graph structure (dependencies, consolidation lineage, or orphaned nodes).
 
     entity_id is optional when mode='orphans'.
+    point_in_time (aliases: as_of, at) restricts 'dependencies'/'lineage' traversal to relation
+    edges valid as of that ISO timestamp (defaults to now). Ignored for mode='orphans'.
     """
     kw = _unwrap_kwargs(kwargs)
     entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "root_entity_id", "root_id", "id")
     mode_ = _resolve(mode, kw, kwargs, "mode") or "dependencies"
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    point_in_time_ = _resolve(point_in_time, kw, kwargs, "point_in_time", "as_of", "at")
 
     if mode_ == "lineage":
-        return relation_service.analyze_lineage(entity_id=entity_id_)
+        return relation_service.analyze_lineage(entity_id=entity_id_, point_in_time=point_in_time_)
     elif mode_ == "orphans":
         return memory_service.detect_orphaned_memories(owner_id=owner_id_)
     else:
         max_depth_ = _resolve(max_depth, kw, kwargs, "max_depth") or 5
-        return relation_service.analyze_dependencies(root_entity_id=entity_id_, max_depth=max_depth_)
+        return relation_service.analyze_dependencies(root_entity_id=entity_id_, max_depth=max_depth_, point_in_time=point_in_time_)
 
 @mcp.tool()
 def get_events(

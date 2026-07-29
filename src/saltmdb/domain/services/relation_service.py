@@ -123,11 +123,11 @@ def store_relation(
             cursor = conn.execute("""
                 INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_id, target_id, predicate) DO NOTHING
+                ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
             """, (relation_id, resolved_source, resolved_target, canonical_predicate, now, now))
             if cursor.rowcount == 0:
                 existing = conn.execute(
-                    "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
+                    "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
                     (resolved_source, resolved_target, canonical_predicate)
                 ).fetchone()
                 existing_id = existing[0] if existing else relation_id
@@ -150,43 +150,48 @@ def store_relation(
 def analyze_dependencies(
     root_entity_id: str = None,
     max_depth: int = 5,
+    point_in_time: str = None,
     db_connection = None,
     db_path: str = None
 ) -> dict:
     """Recursively traces downstream relational paths using SQL CTEs."""
     if not root_entity_id:
         return {"error": "root_entity_id is mandatory"}
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     root_id = resolve_entity_id(conn, root_entity_id)
     if not root_id:
         if should_close:
             close_connection(conn)
         return {"error": f"Could not resolve entity '{root_entity_id}'"}
-        
+
+    pit = point_in_time or datetime.now(UTC).isoformat()
+
     try:
         cursor = conn.execute("SELECT id, title, status FROM entities WHERE id = ?", (root_id,))
         root_row = cursor.fetchone()
         root_info = {"id": root_row[0], "title": root_row[1], "status": root_row[2]} if root_row else {"id": root_id, "title": "Root", "status": "raw"}
-        
+
         query = """
         WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
             SELECT r.id, r.source_id, r.target_id, r.predicate, 1, r.source_id || '->' || r.target_id
             FROM relations r
-            WHERE r.source_id = ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
-            
+            WHERE r.source_id = ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+
             UNION ALL
-            
+
             SELECT r.id, r.source_id, r.target_id, r.predicate, dt.depth + 1, dt.path || '->' || r.target_id
             FROM relations r
             JOIN dependency_tree dt ON r.source_id = dt.target_id
-            WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
+            WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
               AND dt.path NOT LIKE '%' || r.target_id || '%'
         )
         SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
@@ -195,7 +200,7 @@ def analyze_dependencies(
         JOIN entities e2 ON dt.target_id = e2.id
         ORDER BY dt.depth ASC;
         """
-        cursor = conn.execute(query, (root_id, max_depth))
+        cursor = conn.execute(query, (root_id, pit, pit, max_depth, pit, pit))
         rows = cursor.fetchall()
         
         id_to_title = {root_id: root_info.get("title", root_id)}
@@ -240,7 +245,8 @@ def analyze_dependencies(
             "root": root_info,
             "total_dependencies_found": len(edges),
             "graph_exhausted": len(edges) == 0 or max([e["depth"] for e in edges], default=0) < max_depth,
-            "dependencies": nodes
+            "dependencies": nodes,
+            "point_in_time": pit
         }
     except Exception as e:
         logger.error("Error analyzing dependencies: %s", e)
@@ -249,57 +255,83 @@ def analyze_dependencies(
         if should_close:
             close_connection(conn)
 
-def analyze_lineage(entity_id: str = None, db_connection = None, db_path: str = None) -> dict:
-    """Traverses full multi-generation consolidation and derivation ancestry."""
+def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connection = None, db_path: str = None) -> dict:
+    """Traverses full multi-generation consolidation and derivation ancestry.
+
+    Note: `parent_ids` on entities is now derived/display-only -- the `relations` table's
+    `consolidated_from` edges are the authoritative lineage source used for traversal here.
+    """
     if not entity_id:
         return {"error": "entity_id is mandatory"}
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     target_id = resolve_entity_id(conn, entity_id)
     if not target_id:
         if should_close:
             close_connection(conn)
         return {"error": f"Could not resolve entity '{entity_id}'"}
-        
+
+    pit = point_in_time or datetime.now(UTC).isoformat()
+
     try:
-        query = """
-        WITH RECURSIVE lineage(id, title, status, parent_ids, depth) AS (
-            SELECT id, title, status, parent_ids, 0
-            FROM entities WHERE id = ?
-            
-            UNION ALL
-            
-            SELECT e.id, e.title, e.status, e.parent_ids, l.depth + 1
-            FROM entities e
-            JOIN lineage l ON l.parent_ids LIKE '%' || e.id || '%'
-            WHERE l.depth < 10
+        cursor = conn.execute("SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?", (target_id,))
+        root_row = cursor.fetchone()
+        root_info = (
+            {"id": root_row[0], "title": root_row[1], "status": root_row[2], "owner_id": root_row[3], "updated_at": root_row[4], "generation_depth": 0}
+            if root_row else {"id": target_id, "title": "Root", "status": "raw", "owner_id": None, "updated_at": None, "generation_depth": 0}
         )
-        SELECT id, title, status, parent_ids, depth FROM lineage ORDER BY depth ASC;
+
+        query = """
+        WITH RECURSIVE lineage(id, source_id, target_id, depth, path) AS (
+            SELECT r.id, r.source_id, r.target_id, 1, r.source_id || '->' || r.target_id
+            FROM relations r
+            WHERE r.source_id = ? AND r.predicate = 'consolidated_from'
+              AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+            UNION ALL
+            SELECT r.id, r.source_id, r.target_id, l.depth + 1, l.path || '->' || r.target_id
+            FROM relations r
+            JOIN lineage l ON r.source_id = l.target_id
+            WHERE r.predicate = 'consolidated_from' AND l.depth < 10
+              AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+              AND l.path NOT LIKE '%' || r.target_id || '%'
+        )
+        SELECT l.target_id, e.title, e.status, e.owner_id, e.updated_at, l.depth
+        FROM lineage l JOIN entities e ON l.target_id = e.id
+        ORDER BY l.depth ASC;
         """
-        cursor = conn.execute(query, (target_id,))
+        cursor = conn.execute(query, (target_id, pit, pit, pit, pit))
         rows = cursor.fetchall()
-        
-        ancestry = []
+
+        ancestry = [root_info]
+        seen_nodes = {target_id}
         for r in rows:
+            aid = r[0]
+            if aid in seen_nodes:
+                continue
+            seen_nodes.add(aid)
             ancestry.append({
-                "id": r[0],
+                "id": aid,
                 "title": r[1],
                 "status": r[2],
-                "parent_ids": json.loads(r[3]) if r[3] else [],
-                "generation_depth": r[4]
+                "owner_id": r[3],
+                "updated_at": r[4],
+                "generation_depth": r[5]
             })
-            
+
         return {
             "entity_id": target_id,
             "total_ancestors": max(len(ancestry) - 1, 0),
             "ancestry_tree": ancestry,
-            "ancestors": ancestry
+            "ancestors": ancestry,
+            "point_in_time": pit
         }
     except Exception as e:
         logger.error("Error analyzing lineage: %s", e)
@@ -422,8 +454,28 @@ def commit_consolidation(
                 WHERE id IN ({placeholders})
             """, [now, now] + resolved_parents)
 
-            conn.execute(f"UPDATE relations SET source_id = ? WHERE source_id IN ({placeholders})", [consolidated_id] + resolved_parents)
-            conn.execute(f"UPDATE relations SET target_id = ? WHERE target_id IN ({placeholders})", [consolidated_id] + resolved_parents)
+            parent_set = set(resolved_parents)
+            active_touching_rows = conn.execute(f"""
+                SELECT id, source_id, target_id, predicate
+                FROM relations
+                WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
+                  AND valid_to IS NULL
+                  AND predicate != 'consolidated_from'
+            """, resolved_parents + resolved_parents).fetchall()
+
+            for rel_id, src, tgt, pred in active_touching_rows:
+                conn.execute("UPDATE relations SET valid_to = ? WHERE id = ?", (now, rel_id))
+
+                new_src = consolidated_id if src in parent_set else src
+                new_tgt = consolidated_id if tgt in parent_set else tgt
+                if new_src == new_tgt:
+                    continue  # self-loop guard: edge was directly between two parents in this batch
+
+                conn.execute("""
+                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
+                """, (str(uuid.uuid4()), new_src, new_tgt, pred, now, now))
 
             for parent_id in resolved_parents:
                 rel_id = str(uuid.uuid4())

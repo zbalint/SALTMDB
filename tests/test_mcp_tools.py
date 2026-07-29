@@ -205,5 +205,51 @@ class TestMCPToolsWrapper(unittest.TestCase):
         orphans = tools.inspect_graph(mode="orphans")
         self.assertIsInstance(orphans, dict)
 
+    def test_inspect_graph_point_in_time_threads_through_dependencies_and_lineage(self):
+        import time
+        from datetime import datetime, UTC
+
+        res1 = tools.store_memory(content="PIT MCP dependency source content", title="PIT MCP Source", owner_id="user1", skip_duplicate_check=True)
+        id1 = res1.split("ID: ")[1].strip()
+        res2 = tools.store_memory(content="PIT MCP dependency target content", title="PIT MCP Target", owner_id="user1", skip_duplicate_check=True)
+        id2 = res2.split("ID: ")[1].strip()
+
+        pit_before = datetime.now(UTC).isoformat()
+        time.sleep(1.1)
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        self.assertIn("successfully stored", rel_res)
+
+        deps_before = tools.inspect_graph(entity_id=id1, mode="dependencies", point_in_time=pit_before)
+        self.assertIsInstance(deps_before, dict)
+        self.assertEqual(deps_before["total_dependencies_found"], 0, "edge created after pit_before must not appear")
+
+        deps_now = tools.inspect_graph(entity_id=id1, mode="dependencies")
+        self.assertEqual(deps_now["total_dependencies_found"], 1)
+
+        # Lineage threading: consolidate two memories and confirm point_in_time excludes the
+        # brand-new consolidated_from ancestry while an unrestricted (now) call includes it.
+        res3 = tools.store_memory(content="PIT MCP lineage parent A content", title="PIT MCP Lineage A", owner_id="user1", skip_duplicate_check=True)
+        a_id = res3.split("ID: ")[1].strip()
+        res4 = tools.store_memory(content="PIT MCP lineage parent B content", title="PIT MCP Lineage B", owner_id="user1", skip_duplicate_check=True)
+        b_id = res4.split("ID: ")[1].strip()
+
+        pit_before_lineage = datetime.now(UTC).isoformat()
+        time.sleep(1.1)
+        cons_content = (
+            "# PIT MCP Consolidated Lineage\n\n"
+            "Synthesized summary combining PIT MCP lineage parent facts for point-in-time threading.\n"
+            "- Detail alpha\n- Detail beta"
+        )
+        cons_res = tools.commit_consolidation(parent_ids=[a_id, b_id], title="PIT MCP Consolidated Lineage Entity", content=cons_content, owner_id="user1")
+        self.assertIn("Successfully committed", cons_res)
+        c_id = cons_res.split("ID: ")[1].strip()
+
+        lineage_before = tools.inspect_graph(entity_id=c_id, mode="lineage", point_in_time=pit_before_lineage)
+        self.assertIsInstance(lineage_before, dict)
+        self.assertEqual(lineage_before["total_ancestors"], 0)
+
+        lineage_now = tools.inspect_graph(entity_id=c_id, mode="lineage")
+        self.assertEqual(lineage_now["total_ancestors"], 2)
+
 if __name__ == "__main__":
     unittest.main()
