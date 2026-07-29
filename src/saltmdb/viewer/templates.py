@@ -10,12 +10,13 @@ def get_frontend_html(db_path: str = None) -> str:
         :root {
             --bg-primary:    #080c14;
             --bg-secondary:  #0f172a;
-            --bg-card:       rgba(18, 26, 42, 0.7);
-            --bg-card-hover: rgba(30, 41, 59, 0.85);
+            --bg-card:       #121a2b;
+            --bg-card-hover: #1a2333;
             --bg-solid:      #1e293b;
             --accent:        #38bdf8;
             --accent-glow:   rgba(56, 189, 248, 0.25);
             --accent-dark:   #0284c7;
+            /* categorical badge color only (predicate/event-type badges) — NOT a second accent. Never use for CTA/focus-ring/active-nav/link-emphasis. */
             --purple:        #c084fc;
             --purple-glow:   rgba(192, 132, 252, 0.25);
             --text-primary:  #f8fafc;
@@ -23,6 +24,7 @@ def get_frontend_html(db_path: str = None) -> str:
             --text-muted:    #64748b;
             --border:        rgba(255, 255, 255, 0.08);
             --border-light:  rgba(255, 255, 255, 0.15);
+            /* reserved for entity/embedding lifecycle STATUS (raw/consolidated/archived, ready/pending/failed) — NOTE: getEventBadgeClass()/getPredicateBadgeClass() in <script> currently reuse these same hues (plus --accent via badge-blue) for unrelated categorical badges (event type, predicate type). Known semantic/categorical collision, NOT resolved in Phase 1 — deferred to a future round. */
             --green:         #34d399;
             --green-glow:    rgba(52, 211, 153, 0.2);
             --yellow:        #fbbf24;
@@ -30,8 +32,22 @@ def get_frontend_html(db_path: str = None) -> str:
             --red:           #f87171;
             --red-glow:      rgba(248, 113, 113, 0.2);
             --blue:          #60a5fa;
-            --radius:        12px;
+            --radius:        var(--radius-xl);
+            --space-1: 4px;
+            --space-2: 8px;
+            --space-3: 12px;
+            --space-4: 16px;
+            --space-5: 24px;
+            --space-6: 32px;
+            --space-7: 48px;
+            --space-8: 96px;
+            --radius-sm: 4px;
+            --radius-md: 6px;
+            --radius-lg: 8px;
+            --radius-xl: 12px;
+            --radius-2xl: 16px;
             --shadow:        0 8px 32px rgba(0, 0, 0, 0.6);
+            /* pure 1px hairline border — never blurred/translucent-fill. Legacy name kept unchanged (referenced in 8 inline HTML style attributes outside <style>). */
             --glass-border:  1px solid rgba(255, 255, 255, 0.08);
         }
 
@@ -43,9 +59,6 @@ def get_frontend_html(db_path: str = None) -> str:
 
         body {
             background: var(--bg-primary);
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.08) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(192, 132, 252, 0.08) 0px, transparent 50%);
             color: var(--text-primary);
             font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
             font-size: 14px;
@@ -74,8 +87,7 @@ def get_frontend_html(db_path: str = None) -> str:
         /* ── Sidebar ─────────────────────────────────── */
         .sidebar {
             width: 250px;
-            background: rgba(15, 23, 42, 0.85);
-            backdrop-filter: blur(20px);
+            background: var(--bg-secondary);
             border-right: var(--glass-border);
             display: flex;
             flex-direction: column;
@@ -209,8 +221,7 @@ def get_frontend_html(db_path: str = None) -> str:
 
         .topbar {
             height: 60px;
-            background: rgba(15, 23, 42, 0.7);
-            backdrop-filter: blur(20px);
+            background: var(--bg-secondary);
             border-bottom: var(--glass-border);
             padding: 0 24px;
             display: flex;
@@ -267,41 +278,27 @@ def get_frontend_html(db_path: str = None) -> str:
         .bento-grid {
             display: grid;
             grid-template-columns: repeat(12, 1fr);
-            gap: 18px;
-            margin-bottom: 24px;
+            gap: var(--space-4);
+            margin-bottom: var(--space-5);
         }
 
         .bento-card {
             background: var(--bg-card);
-            backdrop-filter: blur(16px);
             border: var(--glass-border);
             border-radius: var(--radius);
-            padding: 20px;
+            padding: var(--space-4);
             box-shadow: var(--shadow);
             transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
             position: relative;
             overflow: hidden;
         }
 
-        .bento-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--accent), transparent);
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-
         .bento-card:hover {
+            background: var(--bg-card-hover);
             border-color: var(--border-light);
             transform: translateY(-2px);
             box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
         }
-
-        .bento-card:hover::before { opacity: 1; }
 
         .col-3 { grid-column: span 3; }
         .col-4 { grid-column: span 4; }
@@ -336,6 +333,7 @@ def get_frontend_html(db_path: str = None) -> str:
             letter-spacing: -0.03em;
             line-height: 1;
             margin-bottom: 6px;
+            font-variant-numeric: tabular-nums;
         }
 
         .stat-desc {
@@ -364,10 +362,11 @@ def get_frontend_html(db_path: str = None) -> str:
         .badge-blue   { background: rgba(56, 189, 248, 0.15); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.3); }
         .badge-purple { background: var(--purple-glow); color: var(--purple); border: 1px solid rgba(192, 132, 252, 0.3); }
 
+        .tabular-num { font-variant-numeric: tabular-nums; }
+
         /* ── Table Styling ───────────────────────────── */
         .data-table-container {
             background: var(--bg-card);
-            backdrop-filter: blur(16px);
             border: var(--glass-border);
             border-radius: var(--radius);
             overflow: hidden;
@@ -447,7 +446,7 @@ def get_frontend_html(db_path: str = None) -> str:
             background: rgba(255, 255, 255, 0.06);
             border: var(--glass-border);
             color: var(--text-primary);
-            padding: 8px 16px;
+            padding: var(--space-2) var(--space-4);
             border-radius: 8px;
             font-size: 0.825rem;
             font-weight: 600;
@@ -493,7 +492,7 @@ def get_frontend_html(db_path: str = None) -> str:
         .modal-overlay.active { display: flex; }
 
         .modal-card {
-            background: #0f172a;
+            background: var(--bg-solid);
             border: var(--glass-border);
             border-radius: 16px;
             width: 100%;
@@ -543,25 +542,14 @@ def get_frontend_html(db_path: str = None) -> str:
         }
 
         /* ── Donut Chart ─────────────────────────────── */
-        .donut-chart-container {
+        .dist-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
             display: flex;
-            align-items: center;
-            justify-content: space-around;
-            gap: 20px;
-            padding: 10px 0;
         }
-
-        .donut-chart {
-            width: 130px;
-            height: 130px;
-            transform: rotate(-90deg);
-        }
-
-        .donut-segment {
-            fill: transparent;
-            stroke-width: 16;
-            transition: stroke-dasharray 0.5s ease;
-        }
+        .dist-bar-seg { transition: width 0.5s ease; }
 
         /* ── SVG Graph Topology ───────────────────────── */
         #graph-canvas {
@@ -715,20 +703,20 @@ def get_frontend_html(db_path: str = None) -> str:
 
                 <!-- Bento Donut Chart Card -->
                 <div class="bento-card col-6">
-                    <div class="stat-label">Memory Status & Scope Distribution</div>
-                    <div class="donut-chart-container">
-                        <svg class="donut-chart" viewBox="0 0 100 100">
-                            <circle class="donut-segment" cx="50" cy="50" r="38" stroke="#34d399" stroke-dasharray="70 100" stroke-dashoffset="0"></circle>
-                            <circle class="donut-segment" cx="50" cy="50" r="38" stroke="#fbbf24" stroke-dasharray="20 100" stroke-dashoffset="-70"></circle>
-                            <circle class="donut-segment" cx="50" cy="50" r="38" stroke="#f87171" stroke-dasharray="10 100" stroke-dashoffset="-90"></circle>
-                        </svg>
-                        <div style="display:flex; flex-direction:column; gap:8px;">
-                            <div class="stat-desc"><span class="badge badge-green">Raw</span> <span id="donut-raw-val">0</span></div>
-                            <div class="stat-desc"><span class="badge badge-yellow">Consolidated</span> <span id="donut-cons-val">0</span></div>
-                            <div class="stat-desc"><span class="badge badge-red">Archived</span> <span id="donut-arch-val">0</span></div>
-                            <div style="margin-top:8px;" class="stat-desc"><span class="badge badge-blue">Shared</span> <span id="donut-shared-val">0</span></div>
-                        </div>
-                    </div>
+    <div class="stat-label">Memory Status &amp; Scope Distribution</div>
+    <div style="margin: 14px 0;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.8rem;">
+            <span>Raw: <strong class="tabular-num" id="donut-raw-val">0</strong></span>
+            <span>Consolidated: <strong class="tabular-num" id="donut-cons-val">0</strong></span>
+            <span>Archived: <strong class="tabular-num" id="donut-arch-val">0</strong></span>
+        </div>
+        <div class="dist-bar">
+            <div id="status-bar-raw"  class="dist-bar-seg" style="width:0%; background:var(--green);"></div>
+            <div id="status-bar-cons" class="dist-bar-seg" style="width:0%; background:var(--yellow);"></div>
+            <div id="status-bar-arch" class="dist-bar-seg" style="width:0%; background:var(--red);"></div>
+        </div>
+    </div>
+    <div class="stat-desc"><span class="badge badge-blue">Shared Scope</span> <span class="tabular-num" id="donut-shared-val">0</span></div>
                 </div>
 
                 <!-- Embedding Health Widget -->
@@ -736,14 +724,14 @@ def get_frontend_html(db_path: str = None) -> str:
                     <div class="stat-label">Vector Embedding Pipeline Health</div>
                     <div style="margin: 14px 0;">
                         <div style="display:flex; justify-content:space-between; margin-bottom:6px; font-size:0.8rem;">
-                            <span>Ready: <strong id="emb-ready-count">0</strong></span>
-                            <span>Pending: <strong id="emb-pending-count">0</strong></span>
-                            <span>Failed: <strong id="emb-failed-count">0</strong></span>
+                            <span>Ready: <strong class="tabular-num" id="emb-ready-count">0</strong></span>
+                            <span>Pending: <strong class="tabular-num" id="emb-pending-count">0</strong></span>
+                            <span>Failed: <strong class="tabular-num" id="emb-failed-count">0</strong></span>
                         </div>
-                        <div style="height:8px; background:rgba(255,255,255,0.06); border-radius:4px; overflow:hidden; display:flex;">
-                            <div id="emb-bar-ready" style="width:0%; background:var(--green); transition:width 0.5s ease;"></div>
-                            <div id="emb-bar-pending" style="width:0%; background:var(--yellow); transition:width 0.5s ease;"></div>
-                            <div id="emb-bar-failed" style="width:0%; background:var(--red); transition:width 0.5s ease;"></div>
+                        <div class="dist-bar">
+                            <div id="emb-bar-ready" class="dist-bar-seg" style="width:0%; background:var(--green);"></div>
+                            <div id="emb-bar-pending" class="dist-bar-seg" style="width:0%; background:var(--yellow);"></div>
+                            <div id="emb-bar-failed" class="dist-bar-seg" style="width:0%; background:var(--red);"></div>
                         </div>
                     </div>
                     <button class="btn btn-primary" style="width:100%; justify-content:center;" onclick="triggerEmbeddingBackfill()">
@@ -1043,6 +1031,14 @@ def get_frontend_html(db_path: str = None) -> str:
                 document.getElementById('donut-cons-val').innerText = data.consolidated_count || 0;
                 document.getElementById('donut-arch-val').innerText = data.archived_count || 0;
                 document.getElementById('donut-shared-val').innerText = data.scope_shared || 0;
+
+                const rawCount = data.raw_count || 0;
+                const consCount = data.consolidated_count || 0;
+                const archCount = data.archived_count || 0;
+                const statusSum = Math.max(1, rawCount + consCount + archCount);
+                document.getElementById('status-bar-raw').style.width  = (rawCount  / statusSum * 100) + '%';
+                document.getElementById('status-bar-cons').style.width = (consCount / statusSum * 100) + '%';
+                document.getElementById('status-bar-arch').style.width = (archCount / statusSum * 100) + '%';
 
                 const pending = data.embeddings_pending || 0;
                 const failed = data.embeddings_failed || 0;
