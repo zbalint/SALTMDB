@@ -168,10 +168,10 @@ def auto_format_markdown(text: str) -> str:
     block_buffer = []
     
     for line in lines:
-        if line.startswith("```"):
+        if line.strip().startswith("```"):
             if not in_code_block:
                 in_code_block = True
-                block_lang = line[3:].strip()
+                block_lang = line.strip()[3:].strip()
                 block_buffer = [("fence", block_lang)]
             else:
                 in_code_block = False

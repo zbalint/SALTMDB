@@ -48,9 +48,15 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
         return row[1] if row[1] else row[0]
 
     conn.execute(
-        "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+        "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
         (str(uuid.uuid4()), normalized, normalized)
     )
+    row = conn.execute(
+        "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
+        "WHERE p.name = ?", (normalized,)
+    ).fetchone()
+    if row:
+        return row[1] if row[1] else row[0]
     return normalized
 
 
@@ -514,10 +520,18 @@ def commit_consolidation(
     
     try:
         def _do_commit():
+            placeholders_p = ",".join("?" for _ in resolved_parents)
+            domain_rows = conn.execute(
+                f"SELECT DISTINCT domain FROM entities WHERE id IN ({placeholders_p}) AND domain IS NOT NULL",
+                resolved_parents
+            ).fetchall()
+            distinct_domains = {r[0] for r in domain_rows if r[0]}
+            inherited_domain = next(iter(distinct_domains)) if len(distinct_domains) == 1 else None
+
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, domain)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str, inherited_domain))
 
             if tags:
                 for tag_name in tags:
@@ -608,6 +622,7 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
     results = []
     try:
         def _write(conn_arg):
+            results.clear()
             for item in consolidations:
                 p_ids = item.get("parent_ids", [])
                 t = item.get("title")
@@ -651,6 +666,7 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
     results = []
     try:
         def _write(c):
+            results.clear()
             for r in relations:
                 src = r.get("source_id")
                 tgt = r.get("target_id")

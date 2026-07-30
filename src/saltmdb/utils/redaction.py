@@ -7,16 +7,20 @@ logger = logging.getLogger(__name__)
 SECRET_PATTERNS = [
     r"\bghp_[a-zA-Z0-9]{36,}\b",                # GitHub personal access token (classic)
     r"\bgithub_pat_[a-zA-Z0-9_]{82,}\b",         # GitHub fine-grained token
+    r"\bgh[ousr]_[a-zA-Z0-9]{36,}\b",            # GitHub OAuth/user/server/refresh token
     r"\bsk-ant-sid01-[a-zA-Z0-9_-]{20,}\b",     # Anthropic session key
     r"\bsk-ant-[a-zA-Z0-9_-]{20,}\b",            # Anthropic API key
     r"\bsk-[a-zA-Z0-9_-]{48,}\b",                # OpenAI API key
     r"\bsk-proj-[a-zA-Z0-9_-]{20,}\b",           # OpenAI project key
+    r"\bsk_live_[a-zA-Z0-9]{20,}\b",             # Stripe secret key (live)
+    r"\bsk_test_[a-zA-Z0-9]{20,}\b",             # Stripe secret key (test)
+    r"\brk_(live|test)_[a-zA-Z0-9]{20,}\b",       # Stripe restricted key
+    r"\bxox[baprs]-[a-zA-Z0-9-]{10,}\b",         # Slack token
+    r"\bAIza[0-9A-Za-z_-]{35}\b",                # Google API key
     r"\b[a-zA-Z0-9_]{20,}:[a-zA-Z0-9_]{40,}\b",  # Generic API secret pattern (ID:Secret)
     r"\bAKIA[A-Z0-9]{16}\b",                     # AWS access key ID
     r"\b[a-zA-Z0-9_-]{23,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38}\b" # Discord token
 ]
-
-_FAST_PATH_PREFIXES = ("ghp_", "github_pat_", "sk-ant-", "sk-proj-", "sk-", "AKIA")
 
 CUSTOM_REDACT_PATTERNS: list[str] = []
 _compiled_regex: re.Pattern | None = None

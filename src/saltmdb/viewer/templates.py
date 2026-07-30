@@ -1119,7 +1119,7 @@ def get_frontend_html(db_path: str = None) -> str:
             const search = document.getElementById('entity-search-input').value;
             let url = `/api/entities?page=${page}`;
             if (status) url += `&status=${status}`;
-            if (search) url += `&tag=${encodeURIComponent(search)}`;
+            if (search) url += `&q=${encodeURIComponent(search)}`;
 
             try {
                 const res = await fetch(url);
@@ -1134,7 +1134,7 @@ def get_frontend_html(db_path: str = None) -> str:
                     return;
                 }
                 tbody.innerHTML = data.entities.map(e => `
-                    <tr onclick="openEntityDetail('${e.id}')">
+                    <tr onclick="openEntityDetail('${escapeHtml(e.id)}')">
                         <td><strong>${escapeHtml(e.title || 'Untitled')}</strong></td>
                         <td><span class="badge ${e.status==='raw'?'badge-green':(e.status==='consolidated'?'badge-yellow':'badge-red')}">${e.status}</span></td>
                         <td><span class="badge ${e.embedding_status==='ready'?'badge-green':'badge-yellow'}">${e.embedding_status}</span></td>
@@ -1166,7 +1166,7 @@ def get_frontend_html(db_path: str = None) -> str:
 
         async function openEntityDetail(id) {
             try {
-                const res = await fetch(`/api/entities/${id}`);
+                const res = await fetch(`/api/entities/${encodeURIComponent(id)}`);
                 const data = await res.json();
                 if (data.error) {
                     alert("Error: " + data.error);
@@ -1206,9 +1206,9 @@ def get_frontend_html(db_path: str = None) -> str:
                                 ${data.relations.all.map(r => `
                                     <div style="font-size:0.8rem; display:flex; align-items:center; gap:8px;">
                                         <span class="badge ${getPredicateBadgeClass(r.predicate)}">${escapeHtml(r.predicate)}</span>
-                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${r.source_id}')">${escapeHtml(r.source_title)}</span>
+                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${escapeHtml(r.source_id)}')">${escapeHtml(r.source_title)}</span>
                                         <span>➔</span>
-                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${r.target_id}')">${escapeHtml(r.target_title)}</span>
+                                        <span style="color:var(--text-secondary); cursor:pointer; text-decoration:underline;" onclick="openEntityDetail('${escapeHtml(r.target_id)}')">${escapeHtml(r.target_title)}</span>
                                     </div>
                                 `).join('')}
                             </div>
@@ -1288,7 +1288,7 @@ def get_frontend_html(db_path: str = None) -> str:
                             </div>
                             <div style="display:flex; flex-wrap:wrap; gap:10px;">
                                 ${levelNodes.map(n => `
-                                    <div class="bento-card" style="padding:10px 14px; cursor:pointer;" onclick="openEntityDetail('${n.id}')">
+                                    <div class="bento-card" style="padding:10px 14px; cursor:pointer;" onclick="openEntityDetail('${escapeHtml(n.id)}')">
                                         <div style="font-weight:700; color:var(--text-primary); margin-bottom:4px;">${escapeHtml(n.title)}</div>
                                         <div style="display:flex; gap:6px; font-size:0.75rem;">
                                             <span class="badge ${n.status==='raw'?'badge-green':(n.status==='consolidated'?'badge-yellow':'badge-red')}">${n.status}</span>
@@ -1336,7 +1336,7 @@ def get_frontend_html(db_path: str = None) -> str:
                         </thead>
                         <tbody>
                             ${data.results.map((r, i) => `
-                                <tr onclick="openEntityDetail('${r.id}')">
+                                <tr onclick="openEntityDetail('${escapeHtml(r.id)}')">
                                     <td>#${i+1}</td>
                                     <td><strong>${escapeHtml(r.title)}</strong></td>
                                     <td><span class="badge badge-green">${r.score}</span></td>
@@ -1594,7 +1594,7 @@ def get_frontend_html(db_path: str = None) -> str:
 
             let url = `/api/events?page=${page}`;
             if (type) url += `&type=${encodeURIComponent(type)}`;
-            if (search) url += `&agent_id=${encodeURIComponent(search)}`;
+            if (search) url += `&q=${encodeURIComponent(search)}`;
 
             try {
                 const res = await fetch(url);
@@ -1695,7 +1695,7 @@ def get_frontend_html(db_path: str = None) -> str:
 
         function escapeHtml(str) {
             if (!str) return '';
-            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         // Global Keyboard Shortcuts

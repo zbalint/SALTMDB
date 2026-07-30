@@ -64,6 +64,11 @@ def trigger_librarian(db_path: str = None):
         # supplied non-default db_path and always point at the default ~/.saltmdb directory
         # regardless of which database this invocation is actually operating on.
         log_path = os.path.join(os.path.dirname(db_path), "librarian.log")
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 5 * 1024 * 1024:
+            try:
+                os.replace(log_path, f"{log_path}.1")
+            except OSError:
+                pass
         with open(log_path, "a", encoding="utf-8") as log_f:
             subprocess.Popen(
                 [sys.executable, "-m", "saltmdb", "--librarian"],

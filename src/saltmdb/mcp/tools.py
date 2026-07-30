@@ -136,13 +136,13 @@ def store_memory(
         return memory_service.check_duplicate_memories(title=title_, content=content_, owner_id=owner_id_, tags=tags_, context_id=context_id_)
 
     entity_id = _resolve(None, kw, kwargs, "entity_id", "id")
-    weight = kwargs.get("weight", 1)
+    weight = _resolve(None, kw, kwargs, "weight") or 1
     relevance = _resolve(None, kw, kwargs, "relevance")
     impact = _resolve(None, kw, kwargs, "impact")
     novelty = _resolve(None, kw, kwargs, "novelty")
     actionability = _resolve(None, kw, kwargs, "actionability")
     metadata = _resolve(None, kw, kwargs, "metadata")
-    skip_duplicate_check = kwargs.get("skip_duplicate_check", False) or kw.get("skip_duplicate_check", False)
+    skip_duplicate_check = _resolve(None, kw, kwargs, "skip_duplicate_check") or False
 
     return memory_service.store_memory(
         content=content_,
@@ -202,8 +202,8 @@ def search_memory(
     raw_tags = tags_filter or _resolve(None, kw, kwargs, "tags_filter", "tags")
     tags_filter_ = _normalize_list_or_str(raw_tags) if raw_tags else None
     metadata_filter_ = _resolve(None, kw, kwargs, "metadata_filter")
-    explain_mode = kwargs.get("explain_mode", False) or kw.get("explain_mode", False)
-    tag_operator = kwargs.get("tag_operator", "AND") or kw.get("tag_operator", "AND")
+    explain_mode = _resolve(None, kw, kwargs, "explain_mode") or False
+    tag_operator = _resolve(None, kw, kwargs, "tag_operator") or "AND"
     memory_type_filter_ = _resolve(memory_type_filter, kw, kwargs, "memory_type_filter", "memory_type", "type_filter")
     domain_filter_ = _resolve(domain_filter, kw, kwargs, "domain_filter", "domain", "area_filter")
 
@@ -279,12 +279,12 @@ def manage_relation(
     predicate_ = _resolve(predicate, kw, kwargs, "predicate", "relation")
 
     if invalidate:
-        invalid_at_ = kwargs.get("invalid_at")
+        invalid_at_ = _resolve(None, kw, kwargs, "invalid_at")
         return relation_service.invalidate_relation(
             source_id=source_id_, target_id=target_id_, predicate=predicate_, invalid_at=invalid_at_
         )
 
-    valid_at_ = kwargs.get("valid_at")
+    valid_at_ = _resolve(None, kw, kwargs, "valid_at")
     return relation_service.store_relation(
         source_id=source_id_, target_id=target_id_, predicate=predicate_, valid_at=valid_at_
     )
@@ -316,8 +316,8 @@ def commit_consolidation(
     tags_ = _normalize_list_or_str(raw_tags)
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id")
-    scope = kwargs.get("scope", "shared")
-    weight = kwargs.get("weight", 1)
+    scope = _resolve(None, kw, kwargs, "scope") or "shared"
+    weight = _resolve(None, kw, kwargs, "weight") or 1
 
     return relation_service.commit_consolidation(
         parent_ids=parent_ids_, title=title_, content=content_, tags=tags_,

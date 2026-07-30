@@ -37,13 +37,15 @@ def log_event(
 
     event_id = str(uuid.uuid4())
     redacted_content = redact_secrets(content)
+    redacted_error_code = redact_secrets(error_code)
+    redacted_context_id = redact_secrets(context_id)
     now = datetime.now(UTC).isoformat()
     try:
         def _do_insert():
             conn.execute("""
                 INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id, context_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (event_id, now, agent_id, type, redacted_content, error_code, session_id, context_id))
+            """, (event_id, now, agent_id, type, redacted_content, redacted_error_code, session_id, redacted_context_id))
 
         if _in_transaction:
             _do_insert()

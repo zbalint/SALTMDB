@@ -421,6 +421,7 @@ def semantic_search(
     params: list,
     limit: int,
     db_path: str,
+    offset: int = 0,
 ) -> list[tuple[str, float]]:
     """Return [(entity_id, cosine_distance), ...] ascending by distance.
     
@@ -446,9 +447,9 @@ def semantic_search(
             JOIN entities e ON ee.entity_id = e.id
             WHERE e.embedding_status = 'ready' AND {where_sql}
             ORDER BY distance ASC
-            LIMIT ?
+            LIMIT ? OFFSET ?
         """
-        exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit]
+        exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit, offset]
         rows = conn.execute(sql, exec_params).fetchall()
         return [(row[0], row[1]) for row in rows]
     except Exception as e:
@@ -495,7 +496,7 @@ def search_memory(
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory."""
     if domain_filter is not None and domain_filter not in VALID_DOMAINS:
-        return f"Error: domain must be one of {', '.join(repr(d) for d in VALID_DOMAINS)}"
+        return [{"error": f"Error: domain must be one of {', '.join(repr(d) for d in VALID_DOMAINS)}"}]
 
     should_close = False
     conn = db_connection
@@ -629,7 +630,7 @@ def search_memory(
                 # — never share a connection across threads with sqlite_vec loaded
                 semantic_future = _search_pool.submit(
                     semantic_search, query_keywords, where_clauses, params,
-                    limit, db_path
+                    limit, db_path, offset
                 )
                 fts_rows = fts_future.result()
                 semantic_rows = semantic_future.result()
@@ -887,6 +888,7 @@ def check_duplicate_memories(
         
     try:
         where = ["status != 'archived'"]
+        fts_where_clauses = ["e.status != 'archived'"]
         params = []
         
         if exclude_ids:
@@ -894,14 +896,17 @@ def check_duplicate_memories(
             if clean_excludes:
                 placeholders = ",".join("?" for _ in clean_excludes)
                 where.append(f"id NOT IN ({placeholders})")
+                fts_where_clauses.append(f"e.id NOT IN ({placeholders})")
                 params.extend(clean_excludes)
 
         if owner_id:
             where.append("(owner_id = ? OR owner_id IS NULL OR scope = 'shared')")
+            fts_where_clauses.append("(e.owner_id = ? OR e.owner_id IS NULL OR e.scope = 'shared')")
             params.append(owner_id)
             
         if context_id:
             where.append("(context_id IS NULL OR context_id = ?)")
+            fts_where_clauses.append("(e.context_id IS NULL OR e.context_id = ?)")
             params.append(context_id)
             
         from saltmdb.utils.text import sanitize_fts_query
@@ -913,7 +918,7 @@ def check_duplicate_memories(
         search_terms = sanitize_fts_query(title or content or "")
         if search_terms:
             try:
-                fts_where = " AND ".join(f"e.{c}" for c in where) if where else "1=1"
+                fts_where = " AND ".join(fts_where_clauses) if fts_where_clauses else "1=1"
                 fts_rows = conn.execute(
                     f"SELECT e.id, e.title, e.full_content, e.owner_id, e.scope FROM entities_fts fts "
                     f"JOIN entities e ON fts.id = e.id "
@@ -1069,6 +1074,7 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
     results = []
     try:
         def _write(c):
+            results.clear()
             for req in archive_requests:
                 eid = req if isinstance(req, str) else req.get("entity_id")
                 owner = req.get("owner_id") if isinstance(req, dict) else None

@@ -58,8 +58,13 @@ def get_model():
 
 def embed_text(text: str) -> list[float]:
     """Encode text to a 384-dim normalized float vector using fastembed."""
+    if not text or not text.strip():
+        return [0.0] * 384
     model = get_model()
-    return list(model.embed([text]))[0].tolist()
+    embeddings = list(model.embed([text]))
+    if not embeddings:
+        return [0.0] * 384
+    return embeddings[0].tolist()
 
 
 def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: str) -> None:

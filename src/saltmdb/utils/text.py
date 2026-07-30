@@ -68,8 +68,7 @@ def sanitize_fts_query(query: str) -> str:
     """Sanitizes raw query string for FTS5, escaping special characters and balancing quotes."""
     if not query:
         return ""
-    if query.count('"') % 2 != 0:
-        query = query.replace('"', ' ')
+    query = query.replace('"', ' ')
     cleaned = re.sub(r'[\-+<>:/*\\?^$|#@`~!%&(){}[\]]', ' ', query)
     return " ".join(cleaned.split())
 

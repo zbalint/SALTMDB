@@ -231,9 +231,11 @@ class TestDomainSearchAndScan(unittest.TestCase):
             domain_filter="business",
             db_connection=self.conn,
         )
-        self.assertIsInstance(res, str)
-        self.assertTrue(res.startswith("Error"))
-        self.assertIn("domain must be one of", res)
+        self.assertIsInstance(res, list)
+        self.assertEqual(len(res), 1)
+        self.assertIn("error", res[0])
+        self.assertTrue(res[0]["error"].startswith("Error"))
+        self.assertIn("domain must be one of", res[0]["error"])
 
     def test_search_memory_valid_exact_case_domain_filter_returns_results(self):
         bus_id = self._store("Business Entity Valid Case", domain="Business")

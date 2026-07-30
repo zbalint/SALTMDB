@@ -84,9 +84,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.get_search(query)
         elif path.startswith("/api/entities/") or path.startswith("/api/entity/"):
             prefix = "/api/entities/" if path.startswith("/api/entities/") else "/api/entity/"
-            entity_id = path.split(prefix)[1]
-            if "/lineage" in entity_id:
-                eid = entity_id.replace("/lineage", "")
+            entity_id = urllib.parse.unquote(path.split(prefix)[1])
+            if entity_id.endswith("/lineage"):
+                eid = entity_id[:-len("/lineage")]
                 self.get_lineage(eid)
             else:
                 self.get_entity_detail(entity_id)
@@ -138,6 +138,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             context_id_filter = query.get("context_id", [None])[0]
             is_core_filter = query.get("is_core", [None])[0]
             tag_filter = query.get("tag", [None])[0]
+            q_filter = query.get("q", [None])[0]
 
             where_clauses = []
             params = []
@@ -159,6 +160,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "JOIN tags t ON et.tag_id = t.id WHERE t.name = ?)"
                 )
                 params.append(tag_filter)
+            if q_filter:
+                where_clauses.append("(title LIKE ? OR full_content LIKE ?)")
+                params.extend([f"%{q_filter}%", f"%{q_filter}%"])
 
             where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -246,6 +250,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             agent_filter = query.get("agent_id", [None])[0]
             type_filter = query.get("type", [None])[0]
             context_filter = query.get("context_id", [None])[0]
+            q_filter = query.get("q", [None])[0]
 
             where = []
             params = []
@@ -258,6 +263,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if context_filter:
                 where.append("context_id = ?")
                 params.append(context_filter)
+            if q_filter:
+                where.append("content LIKE ?")
+                params.append(f"%{q_filter}%")
 
             where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
@@ -571,7 +579,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
-            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ? ORDER BY status ASC LIMIT 1", (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%"))
+            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ? ORDER BY CASE status WHEN 'raw' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'archived' THEN 2 ELSE 3 END ASC, updated_at DESC LIMIT 1", (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%"))
             row = cur.fetchone()
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)
