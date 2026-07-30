@@ -146,6 +146,8 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
         merged = []
         skipped = []
         def _write(c):
+            merged.clear()
+            skipped.clear()
             for name in (tags_to_merge or []):
                 alias_id = _resolve_tag_id(c, name)
                 if not alias_id:
@@ -331,7 +333,7 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             neighbors_cur = conn.execute(sql, [vec_blob] + raw_ids)
             cluster_members = []
             for nid, dist in neighbors_cur.fetchall():
-                if dist <= 0.25:  # Cosine distance <= 0.25 means cosine similarity >= 0.75
+                if dist <= 0.25 and nid not in visited:  # Cosine distance <= 0.25 means cosine similarity >= 0.75
                     cluster_members.append(nid)
 
             if len(cluster_members) >= 3:
@@ -487,7 +489,7 @@ def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = N
             def _write(c):
                 placeholders = ",".join("?" for _ in decayed_ids)
                 c.execute(
-                    f"UPDATE entities SET status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
+                    f"UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
                     [now_iso, now_iso] + decayed_ids
                 )
             write_transaction_retrying(conn, _write)

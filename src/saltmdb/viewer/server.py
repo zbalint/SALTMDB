@@ -77,7 +77,7 @@ def start_viewer(port: int = 8080) -> str:
 
         # Store PID for clean shutdown
         try:
-            pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), "viewer.pid")
+            pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), f"viewer_{port}.pid")
             with open(pid_file, "w") as pf:
                 pf.write(str(process.pid))
         except Exception:
@@ -122,30 +122,53 @@ def stop_viewer(port: int = 8080) -> str:
     
     # Try PID-based termination first (precise, no false positives)
     try:
-        pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), "viewer.pid")
+        pid_file = os.path.join(os.path.expanduser("~/.saltmdb"), f"viewer_{port}.pid")
         if os.path.exists(pid_file):
             with open(pid_file) as pf:
                 pid = int(pf.read().strip())
-            import signal
-            os.kill(pid, signal.SIGTERM)
+            
+            is_saltmdb_viewer = False
             try:
-                os.remove(pid_file)
+                if sys.platform == "win32":
+                    cmd = ["powershell", "-Command", f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                    if res.returncode == 0 and res.stdout and "saltmdb" in res.stdout.lower():
+                        is_saltmdb_viewer = True
+                else:
+                    proc_cmdline = f"/proc/{pid}/cmdline"
+                    if os.path.exists(proc_cmdline):
+                        with open(proc_cmdline, "rb") as f:
+                            cmdline_str = f.read().decode("utf-8", errors="ignore")
+                        if "saltmdb" in cmdline_str.lower():
+                            is_saltmdb_viewer = True
+                    else:
+                        res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5)
+                        if res.returncode == 0 and res.stdout and "saltmdb" in res.stdout.lower():
+                            is_saltmdb_viewer = True
             except Exception:
-                pass
-            return f"Database viewer stopped (PID {pid}) on port {port}."
+                is_saltmdb_viewer = False
+
+            if is_saltmdb_viewer:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                try:
+                    os.remove(pid_file)
+                except Exception:
+                    pass
+                return f"Database viewer stopped (PID {pid}) on port {port}."
     except Exception:
         pass
-    # Fallback: broad process name match
+    # Fallback: broad process name match filtered by port
     try:
         if sys.platform == "win32":
             subprocess.run(
-                ["powershell", "-Command", f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"],
+                ["powershell", "-Command", f"Get-CimInstance Win32_Process | Where-Object {{ ($_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*') -and $_.CommandLine -like '*--port {port}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
         else:
-            subprocess.run(["pkill", "-f", "saltmdb_viewer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-f", "saltmdb.viewer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", f"saltmdb_viewer.*--port {port}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", f"saltmdb.viewer.*--port {port}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return f"Database viewer stopped successfully on port {port} (or was not running)."
     except Exception as e:
         logger.error("Error stopping database viewer: %s", e)

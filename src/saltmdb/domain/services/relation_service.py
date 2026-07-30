@@ -266,6 +266,7 @@ def analyze_dependencies(
             WHERE r.source_id = ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
               AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+              AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
 
             UNION ALL
 
@@ -275,6 +276,7 @@ def analyze_dependencies(
             WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
               AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
               AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+              AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
               AND dt.path NOT LIKE '%' || r.target_id || '%'
         )
         SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
@@ -283,7 +285,7 @@ def analyze_dependencies(
         JOIN entities e2 ON dt.target_id = e2.id
         ORDER BY dt.depth ASC;
         """
-        cursor = conn.execute(query, (root_id, pit, pit, pit, max_depth, pit, pit, pit))
+        cursor = conn.execute(query, (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit))
         rows = cursor.fetchall()
         
         id_to_title = {root_id: root_info.get("title", root_id)}
@@ -457,10 +459,20 @@ def commit_consolidation(
         should_close = True
 
     resolved_parents = []
+    seen = set()
     for p in parent_ids:
         res = resolve_entity_id(conn, str(p))
-        if res:
+        if res and res not in seen:
+            seen.add(res)
             resolved_parents.append(res)
+
+    if resolved_parents:
+        placeholders_exist = ",".join("?" for _ in resolved_parents)
+        existing_rows = conn.execute(
+            f"SELECT id FROM entities WHERE id IN ({placeholders_exist})", resolved_parents
+        ).fetchall()
+        existing_set = {r[0] for r in existing_rows}
+        resolved_parents = [p for p in resolved_parents if p in existing_set]
 
     if not resolved_parents:
         if should_close:
@@ -549,14 +561,14 @@ def commit_consolidation(
 
             parent_set = set(resolved_parents)
             active_touching_rows = conn.execute(f"""
-                SELECT id, source_id, target_id, predicate
+                SELECT id, source_id, target_id, predicate, valid_at, invalid_at
                 FROM relations
                 WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
                   AND valid_to IS NULL
                   AND predicate != 'consolidated_from'
             """, resolved_parents + resolved_parents).fetchall()
 
-            for rel_id, src, tgt, pred in active_touching_rows:
+            for rel_id, src, tgt, pred, old_valid_at, old_invalid_at in active_touching_rows:
                 conn.execute("UPDATE relations SET valid_to = ? WHERE id = ?", (now, rel_id))
 
                 new_src = consolidated_id if src in parent_set else src
@@ -565,10 +577,10 @@ def commit_consolidation(
                     continue  # self-loop guard: edge was directly between two parents in this batch
 
                 conn.execute("""
-                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at, invalid_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-                """, (str(uuid.uuid4()), new_src, new_tgt, pred, now, now))
+                """, (str(uuid.uuid4()), new_src, new_tgt, pred, now, now, old_valid_at, old_invalid_at))
 
             for parent_id in resolved_parents:
                 rel_id = str(uuid.uuid4())

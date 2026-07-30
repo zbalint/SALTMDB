@@ -2,7 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, UTC
 from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection
+from saltmdb.db.connection import get_connection, close_connection
 
 def create_snapshot(db_path: str = None) -> str:
     """Safely creates a timestamped database backup snapshot in backups/ using SQLite's backup API."""
@@ -26,4 +26,4 @@ def create_snapshot(db_path: str = None) -> str:
     except Exception as e:
         return f"Error creating snapshot: {e}"
     finally:
-        src_conn.close()
+        close_connection(src_conn)

@@ -55,14 +55,14 @@ TOP_BIGRAM_TRANSITIONS = {
 def normalize_text_for_perplexity(text: str) -> list[str]:
     """
     Normalizes text into clean lowercase token array.
-    Strips non-alphanumeric punctuation except hyphens and underscores.
+    Strips non-alphanumeric punctuation except underscores.
     """
     if not text:
         return []
-    # Replace non-alphanumeric characters (except hyphens and underscores) with spaces
-    cleaned = re.sub(r"[^\w\s-]", " ", text.lower())
+    # Replace non-alphanumeric characters (except underscores) with spaces
+    cleaned = re.sub(r"[^\w\s]", " ", text.lower())
     # Split into words
-    words = re.findall(r"\b[a-z0-9_-]+\b", cleaned)
+    words = re.findall(r"\b[a-z0-9_]+\b", cleaned)
     return words
 
 def calculate_transition_perplexity(prose_text: str) -> dict:
@@ -88,10 +88,8 @@ def calculate_transition_perplexity(prose_text: str) -> dict:
             valid_bigrams += 1
         else:
             # Secondary check: if both words are known technical/structural tokens or share structural link
-            if len(w1) > 2 and len(w2) > 2 and (
-                w1 in {"the", "a", "an", "in", "on", "at", "for", "to", "of", "with", "by", "and", "or", "is", "are"} or
-                w2 in {"the", "a", "an", "in", "on", "at", "for", "to", "of", "with", "by", "and", "or", "is", "are"}
-            ):
+            stop_set = {"the", "a", "an", "in", "on", "at", "for", "to", "of", "with", "by", "and", "or", "is", "are"}
+            if (w1 in stop_set and len(w2) > 2) or (w2 in stop_set and len(w1) > 2):
                 valid_bigrams += 1
 
     validity_ratio = valid_bigrams / total_bigrams if total_bigrams > 0 else 1.0

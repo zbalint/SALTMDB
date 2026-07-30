@@ -1071,7 +1071,7 @@ def get_frontend_html(db_path: str = None) -> str:
                             <span style="font-weight:600;">${escapeHtml(ev.agent_id)}</span>
                             <span style="color:var(--text-secondary);">${escapeHtml(ev.content)}</span>
                         </div>
-                        <div style="font-size:0.75rem; color:var(--text-muted);">${ev.timestamp}</div>
+                        <div style="font-size:0.75rem; color:var(--text-muted);">${escapeHtml(ev.timestamp)}</div>
                     </div>
                 `).join('');
             } catch (err) {
@@ -1138,9 +1138,9 @@ def get_frontend_html(db_path: str = None) -> str:
                         <td><strong>${escapeHtml(e.title || 'Untitled')}</strong></td>
                         <td><span class="badge ${e.status==='raw'?'badge-green':(e.status==='consolidated'?'badge-yellow':'badge-red')}">${e.status}</span></td>
                         <td><span class="badge ${e.embedding_status==='ready'?'badge-green':'badge-yellow'}">${e.embedding_status}</span></td>
-                        <td><span class="badge badge-blue">${e.scope}</span></td>
+                        <td><span class="badge badge-blue">${escapeHtml(e.scope)}</span></td>
                         <td>${escapeHtml(e.owner_id || 'system')}</td>
-                        <td style="color:var(--text-muted); font-size:0.78rem;">${e.updated_at}</td>
+                        <td style="color:var(--text-muted); font-size:0.78rem;">${escapeHtml(e.updated_at)}</td>
                     </tr>
                 `).join('');
 
@@ -1178,14 +1178,14 @@ def get_frontend_html(db_path: str = None) -> str:
                     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px; background:rgba(255,255,255,0.03); padding:14px; border-radius:8px; border:var(--glass-border); font-size:0.8rem;">
                         <div><strong style="color:var(--text-muted);">Status:</strong> <span class="badge ${data.status==='raw'?'badge-green':(data.status==='consolidated'?'badge-yellow':'badge-red')}">${data.status}</span></div>
                         <div><strong style="color:var(--text-muted);">Embedding:</strong> <span class="badge ${data.embedding_status==='ready'?'badge-green':'badge-yellow'}">${data.embedding_status}</span></div>
-                        <div><strong style="color:var(--text-muted);">Scope:</strong> <span class="badge badge-blue">${data.scope}</span></div>
+                        <div><strong style="color:var(--text-muted);">Scope:</strong> <span class="badge badge-blue">${escapeHtml(data.scope)}</span></div>
                         <div><strong style="color:var(--text-muted);">Owner:</strong> ${escapeHtml(data.owner_id || 'system')}</div>
                         <div><strong style="color:var(--text-muted);">Weight:</strong> ${data.weight || 1.0}</div>
                         <div><strong style="color:var(--text-muted);">Is Core:</strong> ${data.is_core ? 'Yes (#core)' : 'No'}</div>
                         <div><strong style="color:var(--text-muted);">Created:</strong> ${data.created_at || 'N/A'}</div>
                         <div><strong style="color:var(--text-muted);">Updated:</strong> ${data.updated_at || 'N/A'}</div>
                         <div><strong style="color:var(--text-muted);">Last Accessed:</strong> ${data.last_accessed_at || 'N/A'}</div>
-                        <div style="grid-column: 1 / -1;"><strong style="color:var(--text-muted);">Entity ID:</strong> <code style="color:var(--accent);">${data.id}</code></div>
+                        <div style="grid-column: 1 / -1;"><strong style="color:var(--text-muted);">Entity ID:</strong> <code style="color:var(--accent);">${escapeHtml(data.id)}</code></div>
                         ${data.context_id ? `<div style="grid-column: 1 / -1;"><strong style="color:var(--text-muted);">Context ID:</strong> ${escapeHtml(data.context_id)}</div>` : ''}
                     </div>
                 `;
@@ -1390,6 +1390,7 @@ def get_frontend_html(db_path: str = None) -> str:
         }
 
         function getPredicateBadgeClass(pred) {
+            if (!pred) return 'badge-blue';
             if (pred === 'consolidated_from') return 'badge-purple';
             if (pred === 'derived_from') return 'badge-blue';
             if (pred === 'complements') return 'badge-green';
@@ -1428,7 +1429,7 @@ def get_frontend_html(db_path: str = None) -> str:
             const minDegree = parseInt(document.getElementById('graph-degree-filter').value || '1');
             const searchStr = (document.getElementById('graph-search-input').value || '').toLowerCase().trim();
 
-            let filteredNodes = rawGraphData.nodes.filter(n => n.degree >= minDegree);
+            let filteredNodes = rawGraphData.nodes.filter(n => (n.degree ?? 0) >= minDegree);
             const validNodeIds = new Set(filteredNodes.map(n => n.id));
             let filteredEdges = rawGraphData.edges.filter(e => validNodeIds.has(e.source) && validNodeIds.has(e.target));
 
@@ -1517,7 +1518,8 @@ def get_frontend_html(db_path: str = None) -> str:
                 circle.setAttribute('cy', n.y);
                 circle.setAttribute('r', nodeRadius);
 
-                const isMatch = searchStr && n.title.toLowerCase().includes(searchStr);
+                const nodeTitle = n.title || 'Untitled';
+                const isMatch = searchStr && nodeTitle.toLowerCase().includes(searchStr);
                 if (isMatch) {
                     circle.setAttribute('stroke', '#34d399');
                     circle.setAttribute('stroke-width', '3.5');
@@ -1527,7 +1529,7 @@ def get_frontend_html(db_path: str = None) -> str:
                 const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
                 text.setAttribute('x', n.x + nodeRadius + 4);
                 text.setAttribute('y', n.y + 4);
-                text.textContent = n.title.length > 22 ? n.title.substring(0, 22) + '...' : n.title;
+                text.textContent = nodeTitle.length > 22 ? nodeTitle.substring(0, 22) + '...' : nodeTitle;
 
                 g.appendChild(circle);
                 g.appendChild(text);
@@ -1610,7 +1612,7 @@ def get_frontend_html(db_path: str = None) -> str:
                 }
                 tbody.innerHTML = data.events.map(ev => `
                     <tr>
-                        <td style="color:var(--text-muted); font-size:0.78rem;">${ev.timestamp}</td>
+                        <td style="color:var(--text-muted); font-size:0.78rem;">${escapeHtml(ev.timestamp)}</td>
                         <td><strong>${escapeHtml(ev.agent_id)}</strong></td>
                         <td><span class="badge ${getEventBadgeClass(ev.type)}">${ev.type}</span></td>
                         <td style="color:var(--text-secondary);">${escapeHtml(ev.content)}</td>
@@ -1671,9 +1673,9 @@ def get_frontend_html(db_path: str = None) -> str:
                 tbody.innerHTML = data.locks.map(l => `
                     <tr>
                         <td><strong>${escapeHtml(l.task_name)}</strong></td>
-                        <td>${l.locked_at || 'N/A'}</td>
-                        <td>${l.locked_by_pid || 'N/A'}</td>
-                        <td>${l.last_run_at || 'N/A'}</td>
+                        <td>${escapeHtml(l.locked_at || 'N/A')}</td>
+                        <td>${escapeHtml(l.locked_by_pid || 'N/A')}</td>
+                        <td>${escapeHtml(l.last_run_at || 'N/A')}</td>
                     </tr>
                 `).join('');
             } catch (err) {

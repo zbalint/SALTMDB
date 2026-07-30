@@ -402,7 +402,7 @@ def _run_fts_search(
         FROM entities_fts fts
         JOIN entities e ON fts.id = e.id
         WHERE fts.entities_fts MATCH ?{where_sql}
-        ORDER BY (bm25(entities_fts, {bm25_weights}) * e.weight - (rel_count * {RELATION_COUNT_PENALTY})) ASC,
+        ORDER BY (bm25(entities_fts, {bm25_weights}) * e.weight + (rel_count * {RELATION_COUNT_PENALTY})) ASC,
                  e.updated_at DESC
         LIMIT ? OFFSET ?
     """
@@ -603,7 +603,7 @@ def search_memory(
             if tags_filter:
                 for tf in tags_filter:
                     tname = normalize_tag_name(tf)
-                    c = conn.execute("SELECT 1 FROM tags WHERE name = ?", (tname,)).fetchone()
+                    c = conn.execute("SELECT 1 FROM tags WHERE lower(name) = lower(?)", (tname,)).fetchone()
                     if not c:
                         invalid_tags.append(tf)
 
@@ -622,49 +622,53 @@ def search_memory(
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
+                candidate_window = offset + limit
                 fts_future = _search_pool.submit(
                     _run_fts_search, conn, sanitized_query, where_clauses,
-                    params, limit, offset
+                    params, candidate_window, 0
                 )
                 # semantic_search gets db_path so it opens its OWN connection
                 # — never share a connection across threads with sqlite_vec loaded
                 semantic_future = _search_pool.submit(
                     semantic_search, query_keywords, where_clauses, params,
-                    limit, db_path, offset
+                    candidate_window, db_path, 0
                 )
                 fts_rows = fts_future.result()
                 semantic_rows = semantic_future.result()
 
-                rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, limit)
+                rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, candidate_window)
 
                 if rrf_score_map:
-                    merged_ids = list(rrf_score_map.keys())
-                    placeholders = ",".join("?" for _ in merged_ids)
-                    id_order = {eid: i for i, eid in enumerate(merged_ids)}
-                    fetch_sql = f"""
-                        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                               0.0 as rank_score,
-                               e.created_at, e.updated_at, e.owner_id, e.scope,
-                               e.metadata, e.context_id, e.memory_type, e.domain, 0 as rel_count,
-                               NULL as fts_snippet
-                        FROM entities e
-                        WHERE e.id IN ({placeholders})
-                    """
-                    fetched = conn.execute(fetch_sql, merged_ids).fetchall()
-                    sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
-                    # Rows that matched via FTS5 already carry a real query-centered excerpt in
-                    # fts_rows (computed in the same query as bm25()); rows that only surfaced via
-                    # semantic_search() never went through entities_fts MATCH at all, so they keep
-                    # fts_snippet = None here and fall back to the heuristic extractor below.
-                    fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
-                    rows = []
-                    for r in sorted_fetched:
-                        r_list = list(r)
-                        r_list[5] = rrf_score_map.get(r[0], 0.0)
-                        r_list[-1] = fts_snippet_map.get(r[0])
-                        rows.append(r_list)
+                    merged_ids = list(rrf_score_map.keys())[offset:offset + limit]
+                    if merged_ids:
+                        placeholders = ",".join("?" for _ in merged_ids)
+                        id_order = {eid: i for i, eid in enumerate(merged_ids)}
+                        fetch_sql = f"""
+                            SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                                   0.0 as rank_score,
+                                   e.created_at, e.updated_at, e.owner_id, e.scope,
+                                   e.metadata, e.context_id, e.memory_type, e.domain, 0 as rel_count,
+                                   NULL as fts_snippet
+                            FROM entities e
+                            WHERE e.id IN ({placeholders})
+                        """
+                        fetched = conn.execute(fetch_sql, merged_ids).fetchall()
+                        sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                        # Rows that matched via FTS5 already carry a real query-centered excerpt in
+                        # fts_rows (computed in the same query as bm25()); rows that only surfaced via
+                        # semantic_search() never went through entities_fts MATCH at all, so they keep
+                        # fts_snippet = None here and fall back to the heuristic extractor below.
+                        fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
+                        rows = []
+                        for r in sorted_fetched:
+                            r_list = list(r)
+                            r_list[5] = rrf_score_map.get(r[0], 0.0)
+                            r_list[-1] = fts_snippet_map.get(r[0])
+                            rows.append(r_list)
+                    else:
+                        rows = []
                 else:
-                    rows = fts_rows
+                    rows = fts_rows[offset:offset + limit]
             else:
                 rows = _run_fts_search(conn, sanitized_query, where_clauses, params, limit, offset)
         else:
@@ -915,7 +919,7 @@ def check_duplicate_memories(
         
         # Pre-filter using FTS5 to reduce candidates from O(N) to ~30 max
         fts_candidates = []
-        search_terms = sanitize_fts_query(title or content or "")
+        search_terms = sanitize_fts_query(input_text)
         if search_terms:
             try:
                 fts_where = " AND ".join(fts_where_clauses) if fts_where_clauses else "1=1"
@@ -1180,7 +1184,7 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
         all_rows = conn.execute("SELECT id, name, normalized_name, canonical_id FROM tags").fetchall()
         for tid, tname, tnorm, tcanon in all_rows:
             existing_norm = tnorm if tnorm else re.sub(r'[-_\s]+', '', tname.lower().lstrip('#'))
-            if len(existing_norm) > 3 and stripped_input == existing_norm:
+            if len(existing_norm) > 3 and stripped_input == existing_norm.rstrip('s'):
                 return tcanon if tcanon else tid
 
     # Step 5: create a new tag row

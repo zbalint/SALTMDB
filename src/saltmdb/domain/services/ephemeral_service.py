@@ -28,8 +28,9 @@ def get_ephemeral_memory(key: str) -> str:
         return "Error: key is mandatory."
     try:
         with _ephemeral_lock:
-            cursor = EPHEMERAL_CONN.execute("SELECT value FROM ephemeral_memories WHERE key = ?", (key,))
-            row = cursor.fetchone()
+            with EPHEMERAL_CONN:
+                cursor = EPHEMERAL_CONN.execute("SELECT value FROM ephemeral_memories WHERE key = ?", (key,))
+                row = cursor.fetchone()
         if row:
             return row[0]
         return f"Key '{key}' not found in ephemeral memory."
