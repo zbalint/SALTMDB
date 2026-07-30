@@ -103,7 +103,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 10. **Query Broad, Fetch Narrow (Token Efficiency)**
     * Do NOT flood your context window with raw text. When exploring an unknown domain, run `search_memory` with `fetch_full=False` to scan titles and snippets first.
-    * Only fetch the complete markdown (`fetch_full=True` or `entity_id`) once you identify the exact entity required.
+    * Only fetch the complete markdown once you identify the exact entity required, by passing `entity_id` (`fetch_full=True` alone, without `entity_id`, has no effect and just runs a normal search).
 
 11. **Know Where Your Thoughts Belong (State Routing)**
     * **Long-Term Database (`store_memory`)**: Use ONLY for durable knowledge (architectural decisions, resolved bugs, rules, user preferences).
@@ -131,7 +131,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > [!NOTE]
 > **MCP Tool Schema Compliance**: FastMCP servers auto-generate a `kwargs` parameter in JSON schemas. If your MCP client validator enforces `required: ["kwargs"]`, include `kwargs={}` in your tool call payload to satisfy strict schema validation. `kwargs={}` also supports nesting parameter values (e.g. `kwargs={"context_id": "..."}`) for clients that require every argument inside a single object; a bare `kwargs=""` only satisfies the required-field check and cannot carry nested parameter values.
 
-* `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, memory_type_filter, domain_filter, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` or `fetch_full=True` retrieves full markdown text. `memory_type_filter` optionally restricts results to one of the five fixed `memory_type` values (`fact`/`event`/`procedure`/`decision`/`preference`); `domain_filter` restricts results to an exact `domain` value; every result item also echoes its `memory_type` and `domain`.
+* `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, memory_type_filter, domain_filter, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` retrieves full markdown text directly; `fetch_full=True` without an `entity_id` has no effect (falls through to a normal keyword search). `memory_type_filter` optionally restricts results to one of the five fixed `memory_type` values (`fact`/`event`/`procedure`/`decision`/`preference`); `domain_filter` restricts results to an exact `domain` value; every result item also echoes its `memory_type` and `domain`.
 * `store_memory(content, title, tags, is_core, memory_type, domain, owner_id, context_id, scope, check_duplicates_only)`: Save/upsert long-term knowledge with built-in quality gates, calibrated auto-supersession candidate logging ($\ge 0.75$ similarity), and Tier 4 technical quality scoring. Setting `check_duplicates_only=True` returns duplicate detection without writing to the DB. Supports parameter aliases (`text`, `tag`, `owner`). `memory_type` classifies the memory into one of five fixed values (`fact`/`event`/`procedure`/`decision`/`preference`) — omitting it defaults to `fact` on a new memory, or preserves the existing value on an update. `domain` optionally tags the memory with a project/life-area from a validated allow-list (`VALID_DOMAINS` in `memory_service.py`) — omitting it leaves the value unset (new memory) or unchanged (update).
 * `get_canonical_tags(query, domain)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (`query`, `substring`, `tag_filter`).
 * `get_canonical_predicates(query)`: Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`).
@@ -178,7 +178,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 Immediately upon initialization, before answering the user:
 1. Call `search_memory` filtering by `#core` tag (e.g., `tags_filter = ['#core']`). This loads your persona, behavioral constraints, and user rules.
 2. Run a keyword search matching the active repository, folder, or project name (e.g. `query_keywords = 'SALTMDB'`) and task domain (`context_id = 'my-task'`) to gather project intel, past decisions, and component constraints.
-3. Call `get_events` with `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. A consolidation request is considered **resolved** when all entity IDs listed in the event's `content.entity_ids` JSON field have a `status` of `'consolidated'` or `'archived'` (i.e., they are no longer `'raw'`). You can verify this by inspecting entity status or checking if a subsequent `commit_consolidation` was performed.
+3. Call `get_events` with `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. `get_events` already computes this for you: each `consolidation_request` event item carries a top-level `status` field (`'resolved'` once every entity ID in the event's `content.entity_ids` is no longer `'raw'`, `'pending'` otherwise) — no need to manually cross-check entity statuses yourself.
 4. **Think Before You Leap:** Before executing any sub-task, modifying a file, or running commands, call `search_memory` with keywords matching the target component, command, or error string. You must actively search for past constraints, bug fixes, or design parameters before writing code.
 
 ### Phase B: In-Session Logging & Active Memory Capture
@@ -246,10 +246,11 @@ lineage_info = inspect_graph(entity_id="Synthesized Summary Title", mode="lineag
 # Returns:
 # {
 #   "entity_id": "c-uuid-123",
-#   "lineage_depth": 2,
-#   "ancestors": [
-#     {"id": "c-uuid-123", "title": "Synthesized Summary Title", "status": "consolidated", "depth": 0, "path": "..."},
-#     {"id": "raw-uuid-456", "title": "Raw Source Fact 1", "status": "archived", "depth": 1, "path": "... <- Raw Source Fact 1"}
+#   "total_ancestors": 1,
+#   "point_in_time": "2026-07-30T12:00:00",
+#   "ancestors": [  # also duplicated under the "ancestry_tree" key
+#     {"id": "c-uuid-123", "title": "Synthesized Summary Title", "status": "consolidated", "owner_id": "...", "updated_at": "...", "generation_depth": 0},
+#     {"id": "raw-uuid-456", "title": "Raw Source Fact 1", "status": "archived", "owner_id": "...", "updated_at": "...", "generation_depth": 1}
 #   ]
 # }
 ```
@@ -259,8 +260,8 @@ lineage_info = inspect_graph(entity_id="Synthesized Summary Title", mode="lineag
 ## 5. Temporal Slowly Changing Dimensions (SCD Type 2)
 
 When an agent updates an existing memory using `store_memory` with an explicit `entity_id`:
-1. The server closes the active window of the old version: it sets `status = 'archived'` and `valid_to = now`.
-2. The server creates the new active fact under the original `entity_id` with `valid_from = now` and `valid_to = NULL`.
+1. The server clones the current row to a new derived history ID (`<entity_id>_h_<8-char-suffix>`), closing its window: `status = 'archived'`, `valid_to = now`.
+2. The server then overwrites the row under the *original* `entity_id` in place with the new content, `valid_from = now`, `valid_to = NULL` — so the original `entity_id` always keeps pointing at the current active version, while each prior version gets its own archived history ID.
 3. This allows the system to audit the lineage of how factoids, user instructions, or system architecture rules evolved over time.
 
 ---

@@ -49,6 +49,7 @@ The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe conc
 * **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects.
 * **`entity_tags`**: A mapping table linking knowledge entities to folksonomy tags.
 * **`relations`**: A typed directional edge table for the knowledge graph (`source_id → predicate → target_id`).
+* **`predicates`**: A canonical-predicate lookup table (mirrors `tags`' alias-resolution shape) reducing relation-predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`).
 * **`entities_fts`**: A virtual table using **SQLite FTS5** (Porter tokenizer) to index titles, full content, and search aliases for weighted keyword search.
 * **`entity_embeddings`**: A `sqlite-vec` `vec0` virtual table storing 384-dimensional ONNX embeddings for semantic vector search.
 * **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent processes.
