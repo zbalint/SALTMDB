@@ -93,7 +93,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 7. **Pragmatic Promotion Over Forced Merging (Consolidation Rule)**
    * Do NOT force-merge memories at all costs. Consolidation exists to elevate high-signal facts and reduce noise.
-   * If a raw memory is already complete, self-contained, and valuable on its own, promote it directly to consolidated status (passing its single ID to `commit_consolidation`) rather than combining it with loosely related notes.
+   * If a raw memory is already complete, self-contained, and valuable on its own, promote it directly to consolidated status via `commit_consolidation` (its single ID as `parent_ids`, plus `title`/`content` — both are mandatory on every call, even single-parent promotion; re-supply the source's own title/content verbatim if no rewording is needed) rather than combining it with loosely related notes.
 
 8. **Respect Precedent & Governance (Admissibility)**
    * Retrieved `#core` tags and project rules represent hard operational governance. If past memory explicitly restricts an approach (e.g., *"Never run subprocesses in test mode"* or *"Keep fastembed ONNX worker local"*), you must strictly abide by it.
@@ -140,7 +140,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `get_events(agent_id, type_filter, session_id, limit, offset, status_filter, owner_id, mode)`: Retrieve operational events (`mode='events'`), session summary events (`mode='session'`), or scan memory logs (`mode='memories'`).
 * `archive_memory(entity_id, owner_id)`: Polymorphic tool to archive (retire) one or multiple long-term memories. Accepts a single `entity_id` string OR a list of string IDs.
 * `manage_relation(relations, source_id, target_id, predicate, invalidate)`: Polymorphic tool to store single or multiple directional semantic relationship edges between memory nodes, or invalidate an existing edge (`invalidate=True`, matches on the currently-live edge and sets `invalid_at`).
-* `commit_consolidation(consolidations, parent_ids, title, content, tags, owner_id, context_id)`: Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parent raw nodes and creating `consolidated_from` lineage edges. Can accept a single parent ID to promote a self-contained raw node directly.
+* `commit_consolidation(consolidations, parent_ids, title, content, tags, owner_id, context_id)`: Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parent raw nodes and creating `consolidated_from` lineage edges. Can accept a single parent ID to promote a self-contained raw node directly — but `title` and `content` are mandatory on every call regardless of parent count; there is no ID-only shortcut, so re-supply the source's own title/content verbatim when promoting without rewording.
 * `inspect_graph(entity_id, mode, max_depth, owner_id, point_in_time)`: Unifies graph inspection (`mode='dependencies'`, `mode='lineage'`, or `mode='orphans'`). `entity_id` is optional when `mode='orphans'`. `point_in_time` (aliases `as_of`, `at`) restricts `dependencies`/`lineage` traversal to relation edges valid as of a past ISO timestamp; ignored for `mode='orphans'`.
 * `ephemeral_memory(action, key, value)`: Unified volatile in-memory secret manager (`action='get'` or `action='store'`).
 
@@ -168,7 +168,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
   - Automatically returns 1-hop knowledge graph relations when `include_related=True` (default).
   - Parameter aliases (`query`, `q`, `keywords`) are auto-resolved by the MCP wrapper.
 - **Smart Tool Chaining**: `manage_relation` accepts status output strings directly (e.g., `source_id="Knowledge stored successfully with ID: <uuid>"`) or exact entity titles without manual regex parsing.
-- **Lossless Cognitive Consolidation (`commit_consolidation`)**: Rephrase and synthesize multiple raw memories into a single consolidated memory. If an individual raw memory is already comprehensive and self-contained, call `commit_consolidation` with a single parent ID to promote it directly. Source nodes are soft-archived (`status='archived'`) and auto-linked via `consolidated_from` lineage edges, keeping full ancestry auditable via `inspect_graph(mode='lineage')`.
+- **Lossless Cognitive Consolidation (`commit_consolidation`)**: Rephrase and synthesize multiple raw memories into a single consolidated memory. If an individual raw memory is already comprehensive and self-contained, call `commit_consolidation` with a single parent ID to promote it directly — `title` and `content` are still mandatory in this case (the tool rejects a call with `parent_ids` alone), so pass the source's own title/content verbatim if no rewording is needed. Source nodes are soft-archived (`status='archived'`) and auto-linked via `consolidated_from` lineage edges, keeping full ancestry auditable via `inspect_graph(mode='lineage')`.
 
 ---
 
@@ -200,7 +200,7 @@ If you find pending `consolidation_request` events targeting your active domain 
 2. **Evaluate for Merging vs. Direct Promotion:**
    * **Multi-Node Synthesis**: If multiple raw entities contain complementary, overlapping, or partial details on the same domain, synthesize them into a single high-quality markdown document.
    * **Single-Node Promotion**: If a raw entity is already comprehensive, well-structured, and self-contained, do NOT force-merge it with unrelated notes. Promote it directly as a standalone consolidated memory.
-3. Call `commit_consolidation` with `parent_ids` (accepts a list of multiple IDs OR a single ID for direct promotion) and the consolidated markdown. The server archives the source raw logs (`status = 'archived'`) and auto-creates `consolidated_from` lineage edges. Source nodes remain retrievable via `search_memory(entity_id=parent_id)` or `inspect_graph(mode='lineage')` for auditing.
+3. Call `commit_consolidation` with `parent_ids` (accepts a list of multiple IDs OR a single ID for direct promotion) plus `title` and `content` — both are mandatory even for single-ID direct promotion (there is no ID-only shortcut; re-supply the source's own title/content verbatim if no rewording is needed). The server archives the source raw logs (`status = 'archived'`) and auto-creates `consolidated_from` lineage edges. Source nodes remain retrievable via `search_memory(entity_id=parent_id)` or `inspect_graph(mode='lineage')` for auditing.
 ```
 
 ---
