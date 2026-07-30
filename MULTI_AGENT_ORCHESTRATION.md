@@ -5,7 +5,7 @@
 
 ## 1. The Two-Tier Architecture
 
-In a multi-agent workflow, you (the main orchestrating session, e.g. `owner_id="claude"` or `owner_id="antigravity"` depending on which assistant you are) act as the **Orchestrator**. You hold the global context and the 14 Core Commandments (see your own persistent global instruction file — for Claude Code that's `~/.claude/CLAUDE.md`). When you encounter a highly specialized or parallelizable task (e.g., writing tests, auditing security, optimizing CSS), you must spawn **Workers** using your runtime's sub-agent spawning mechanism (for Claude Code, the `Agent` tool).
+In a multi-agent workflow, you (the main orchestrating session, e.g. `owner_id="claude"` or `owner_id="antigravity"` depending on which assistant you are) act as the **Orchestrator**. You hold the global context and the 15 Core Commandments (numbered 0–14; see your own persistent global instruction file — for Claude Code that's `~/.claude/CLAUDE.md`). When you encounter a highly specialized or parallelizable task (e.g., writing tests, auditing security, optimizing CSS), you must spawn **Workers** using your runtime's sub-agent spawning mechanism (for Claude Code, the `Agent` tool).
 
 Workers are short-lived, task-scoped, and operate on a strict, token-efficient subset of rules defined in `WORKER_TEMPLATE.md`.
 

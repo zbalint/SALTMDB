@@ -1,5 +1,16 @@
 # SALTMDB Viewer UI — Design Research & Improvement Plan
 
+> **Status: Phase 1 (Quick Wins) implemented in v0.1.0-alpha.59** (2026-07-29). Killed glassmorphism
+> (`backdrop-filter` + translucent fills) and gradient accents, collapsed to a single reserved accent
+> color, adopted an opaque Linear/Raycast-style surface ladder, replaced the stale-bound SVG donut
+> with a real proportion bar, added spacing/radius token scales (partially retrofit). A
+> found-but-deferred gap: predicate/event-type badges still reuse the status-triad/accent hues
+> categorically, left unresolved. Phase 2 (`<template>`-partials split of the 1728-line template,
+> bento grid layout rework) and Phase 3 (vendoring `d3-force`) remain future work, not shipped. See
+> `MIGRATION.md`'s alpha.59 entry and `research/README.md` for current status of all seven tracks.
+> This file is kept as the original historical research record — it is intentionally not edited
+> further below this notice.
+
 Research date: 2026-07-27. Scope: web research only (no repo code was read to produce this document beyond the grounding brief supplied by the requester).
 
 ---

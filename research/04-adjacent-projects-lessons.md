@@ -1,5 +1,13 @@
 # Adjacent Fields & Transferable Ideas for SALTMDB
 
+> **Status: Not implemented.** None of this track's proposed transfers from PKM/graph-DB/decay
+> literature (e.g. a decay function driven by `weight`/`last_accessed_at`, GraphRAG-style Leiden
+> community detection, SKOS tag hierarchy, Obsidian MOC-style summary rollups) have shipped. The
+> cleanest gap this track identified — SALTMDB already tracks `weight` and `last_accessed_at` but
+> neither feeds a decay function — remains free-standing infrastructure with no consumer. See
+> `research/README.md` for current status of all seven tracks. This file is kept as the original
+> historical research record — it is intentionally not edited further below this notice.
+
 **Scope note:** this document deliberately stays outside the "AI agent memory system" niche (mem0,
 Letta/MemGPT, Zep/Graphiti, Cognee, ChatGPT memory — covered elsewhere). It surveys personal
 knowledge management (PKM) tools, general-purpose graph/vector databases, classical

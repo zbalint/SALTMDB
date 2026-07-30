@@ -1,5 +1,18 @@
 # Agent Memory Systems Survey: Architecture Comparison & SALTMDB Improvement Plan
 
+> **Status: Quick Wins (3 of 4 scoped items) implemented in v0.1.0-alpha.60** (2026-07-29). Shipped:
+> `relations` gained an independent `valid_at`/`invalid_at` event/world-time axis (alongside
+> alpha.57's `valid_from`/`valid_to` system/transaction-time pair) plus a new `invalidate_relation`
+> capability via `manage_relation(invalidate=True)`; `episodic`/`semantic`/`procedural` canonical
+> tags seeded additively alongside the existing `memory_type` column; `store_memory` nudges the
+> caller toward `manage_relation` on new tagged memories. A fourth scoped item (`is_core` forcing
+> `scope='shared'`) was dropped before implementation — it collided with `WORKER_TEMPLATE.md`'s
+> documented "Private Core Rule" for subagent workers. Deferred: wiring the new columns into
+> `point_in_time` traversal, automatic semantic-conflict auto-invalidation, contradiction
+> heuristics, community/summary layer, pluggable graph backend. See `MIGRATION.md`'s alpha.60 entry
+> and `research/README.md` for current status of all seven tracks. This file is kept as the
+> original historical research record — it is intentionally not edited further below this notice.
+
 Research date: 2026-07-27
 
 ## Research Summary

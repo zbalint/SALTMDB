@@ -35,7 +35,7 @@ graph TD
     end
 ```
 
-- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond 6-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, pure Python Bigram Perplexity word-salad filtering, Coleman-Liau readability bounds, and MSDI density scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Calibrated auto-supersession ($\ge 0.88$ similarity) auto-links updated facts while target exclusion prevents false deduplication warnings during parent memory consolidation.
+- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, pure Python Bigram Perplexity word-salad filtering, Coleman-Liau readability bounds, and MSDI density scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Calibrated auto-supersession ($\ge 0.88$ similarity) auto-links updated facts while target exclusion prevents false deduplication warnings during parent memory consolidation.
 - **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default.
 - **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
 - **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.
@@ -97,19 +97,21 @@ Once the background Librarian acquires the atomic lock, it runs the following ta
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 10 consolidated tools over standard I/O:
+The server exposes 12 consolidated tools over standard I/O:
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `entity_id`, `fetch_full`, `limit`, `context_id`, `is_core`, `cursor`, `include_related` | Hybrid FTS5 + vector RRF search. Setting `entity_id` or `fetch_full=True` retrieves full markdown text. |
-| `store_memory` | `content`, `title`, `tags`, `is_core`, `owner_id`, `context_id`, `scope`, `check_duplicates_only` | Stores/upserts facts in raw markdown. Enforces quality gates and auto-supersession. `check_duplicates_only=True` returns duplicate detection without writing to DB. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `entity_id`, `fetch_full`, `limit`, `context_id`, `is_core`, `memory_type_filter`, `domain_filter`, `cursor`, `include_related` | Hybrid FTS5 + vector RRF search. Setting `entity_id` or `fetch_full=True` retrieves full markdown text. |
+| `store_memory` | `content`, `title`, `tags`, `is_core`, `memory_type`, `domain`, `owner_id`, `context_id`, `scope`, `check_duplicates_only` | Stores/upserts facts in raw markdown. Enforces quality gates and auto-supersession. `check_duplicates_only=True` returns duplicate detection without writing to DB. |
 | `get_canonical_tags` | `query (alias: domain)` | Queries non-alias tags matching the search filter to prevent tag fragmentation. |
+| `get_canonical_predicates` | `query` | Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`). |
+| `merge_tags` | `keep_tag`, `tags_to_merge` (list) | Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all affected entities' tag associations. |
 | `log_event` | `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id` | Appends a scrubbed entry to the immutable short-term ledger. |
 | `get_events` | `agent_id`, `type_filter`, `session_id`, `limit`, `offset`, `status_filter`, `owner_id`, `mode` | Query events (`mode='events'`), session summaries (`mode='session'`), or scan memory logs (`mode='memories'`). |
 | `archive_memory` | `entity_id` (str \| list[str]), `owner_id` | Polymorphic tool to archive (retire) one or multiple long-term memories. |
-| `manage_relation` | `relations` (list), `source_id`, `target_id`, `predicate` | Polymorphic tool to store single or multiple directional semantic relationship edges. |
+| `manage_relation` | `relations` (list), `source_id`, `target_id`, `predicate`, `invalidate` | Polymorphic tool to store single or multiple directional semantic relationship edges, or invalidate an existing edge (`invalidate=True`). |
 | `commit_consolidation`| `consolidations` (list), `parent_ids`, `title`, `content`, `tags`, `owner_id`, `context_id` | Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parents and linking lineage. |
-| `inspect_graph` | `entity_id` (optional), `mode` (`dependencies` \| `lineage` \| `orphans`), `max_depth`, `owner_id` | Unifies dependency CTE traversals, consolidation lineage tracing, and orphan memory detection. |
+| `inspect_graph` | `entity_id` (optional), `mode` (`dependencies` \| `lineage` \| `orphans`), `max_depth`, `owner_id`, `point_in_time` | Unifies dependency CTE traversals, consolidation lineage tracing, and orphan memory detection. `point_in_time` (aliases `as_of`/`at`) restricts traversal to relation edges valid as of a past ISO timestamp. |
 | `ephemeral_memory` | `action` (`get` \| `store`), `key`, `value` | Unified volatile in-memory secret storage manager. |
 
 
@@ -153,6 +155,7 @@ SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events,
    # or if installed via pip install -e .:
    saltmdb-viewer
    ```
+   Override the default port with `--port <PORT>` or the `SALTMDB_VIEWER_PORT` environment variable.
 2. Open your web browser and navigate to:
    [http://localhost:8080](http://localhost:8080)
 

@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the **SALTMDB
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via 10 consolidated MCP tools exposed by the `saltmdb` package ([tools.py](file:///C:/Users/zbalint/Workspace/SALTMDB/src/saltmdb/mcp/tools.py)):
+Agents interface with SALTMDB via 12 consolidated MCP tools exposed by the `saltmdb` package ([tools.py](src/saltmdb/mcp/tools.py)):
 
 ```mermaid
 graph TD
@@ -126,20 +126,22 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 ---
 
-## 2. Available Tools Overview (10 Consolidated Tools)
+## 2. Available Tools Overview (12 Consolidated Tools)
 
 > [!NOTE]
-> **MCP Tool Schema Compliance**: FastMCP servers auto-generate a `kwargs` parameter in JSON schemas. If your MCP client validator enforces `required: ["kwargs"]`, simply include `kwargs=""` or `kwargs={}` in your tool call payload to satisfy strict schema validation.
+> **MCP Tool Schema Compliance**: FastMCP servers auto-generate a `kwargs` parameter in JSON schemas. If your MCP client validator enforces `required: ["kwargs"]`, include `kwargs={}` in your tool call payload to satisfy strict schema validation. `kwargs={}` also supports nesting parameter values (e.g. `kwargs={"context_id": "..."}`) for clients that require every argument inside a single object; a bare `kwargs=""` only satisfies the required-field check and cannot carry nested parameter values.
 
-* `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, memory_type_filter, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` or `fetch_full=True` retrieves full markdown text. `memory_type_filter` optionally restricts results to one of the five fixed `memory_type` values (`fact`/`event`/`procedure`/`decision`/`preference`); every result item also echoes its `memory_type`.
-* `store_memory(content, title, tags, is_core, memory_type, owner_id, context_id, scope, check_duplicates_only)`: Save/upsert long-term knowledge with built-in quality gates, calibrated auto-supersession candidate logging ($\ge 0.75$ similarity), and Tier 4 technical quality scoring. Setting `check_duplicates_only=True` returns duplicate detection without writing to the DB. Supports parameter aliases (`text`, `tag`, `owner`). `memory_type` classifies the memory into one of five fixed values (`fact`/`event`/`procedure`/`decision`/`preference`) — omitting it defaults to `fact` on a new memory, or preserves the existing value on an update.
+* `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, memory_type_filter, domain_filter, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` or `fetch_full=True` retrieves full markdown text. `memory_type_filter` optionally restricts results to one of the five fixed `memory_type` values (`fact`/`event`/`procedure`/`decision`/`preference`); `domain_filter` restricts results to an exact `domain` value; every result item also echoes its `memory_type` and `domain`.
+* `store_memory(content, title, tags, is_core, memory_type, domain, owner_id, context_id, scope, check_duplicates_only)`: Save/upsert long-term knowledge with built-in quality gates, calibrated auto-supersession candidate logging ($\ge 0.75$ similarity), and Tier 4 technical quality scoring. Setting `check_duplicates_only=True` returns duplicate detection without writing to the DB. Supports parameter aliases (`text`, `tag`, `owner`). `memory_type` classifies the memory into one of five fixed values (`fact`/`event`/`procedure`/`decision`/`preference`) — omitting it defaults to `fact` on a new memory, or preserves the existing value on an update. `domain` optionally tags the memory with a project/life-area from a validated allow-list (`VALID_DOMAINS` in `memory_service.py`) — omitting it leaves the value unset (new memory) or unchanged (update).
 * `get_canonical_tags(query, domain)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (`query`, `substring`, `tag_filter`).
+* `get_canonical_predicates(query)`: Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`).
+* `merge_tags(keep_tag, tags_to_merge)`: Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all affected entities' tag associations.
 * `log_event(agent_id, type, content, error_code, session_id, context_id)`: Log a short-term operational event. Accepts parameter aliases (`event_type`, `message`, `description`).
 * `get_events(agent_id, type_filter, session_id, limit, offset, status_filter, owner_id, mode)`: Retrieve operational events (`mode='events'`), session summary events (`mode='session'`), or scan memory logs (`mode='memories'`).
 * `archive_memory(entity_id, owner_id)`: Polymorphic tool to archive (retire) one or multiple long-term memories. Accepts a single `entity_id` string OR a list of string IDs.
-* `manage_relation(relations, source_id, target_id, predicate)`: Polymorphic tool to store single or multiple directional semantic relationship edges between memory nodes.
+* `manage_relation(relations, source_id, target_id, predicate, invalidate)`: Polymorphic tool to store single or multiple directional semantic relationship edges between memory nodes, or invalidate an existing edge (`invalidate=True`, matches on the currently-live edge and sets `invalid_at`).
 * `commit_consolidation(consolidations, parent_ids, title, content, tags, owner_id, context_id)`: Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parent raw nodes and creating `consolidated_from` lineage edges. Can accept a single parent ID to promote a self-contained raw node directly.
-* `inspect_graph(entity_id, mode, max_depth, owner_id)`: Unifies graph inspection (`mode='dependencies'`, `mode='lineage'`, or `mode='orphans'`). `entity_id` is optional when `mode='orphans'`.
+* `inspect_graph(entity_id, mode, max_depth, owner_id, point_in_time)`: Unifies graph inspection (`mode='dependencies'`, `mode='lineage'`, or `mode='orphans'`). `entity_id` is optional when `mode='orphans'`. `point_in_time` (aliases `as_of`, `at`) restricts `dependencies`/`lineage` traversal to relation edges valid as of a past ISO timestamp; ignored for `mode='orphans'`.
 * `ephemeral_memory(action, key, value)`: Unified volatile in-memory secret manager (`action='get'` or `action='store'`).
 
 ---

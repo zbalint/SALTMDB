@@ -13,5 +13,5 @@
 * **The #Core Pollution Rule:** Do NOT set `is_core=1` and `weight=5` when resolving an ordinary technical conflict or factual dispute. Only use those flags when you are establishing a permanent, behavioral project law (e.g., "Always use UUIDs").
 * **Global Laws:** As the Orchestrator, you are the ONLY entity allowed to save `#core` rules with `scope="shared"`.
 
-# 📜 The 14 Core Operating Commandments
-[PASTE FULL 14 RULES HERE]
+# 📜 The 15 Core Operating Commandments (0–14)
+See `AGENT_GUIDE.md` §1 "System Prompt Template" → "Core Operating Commandments" for the full, current list (numbered 0–14). Paste that section here verbatim when configuring an orchestrator's system prompt — do not hand-copy or re-derive it, since this file and `AGENT_GUIDE.md` are two independently-maintained copies with no auto-sync (see `CONTRIBUTING.md` §4).
