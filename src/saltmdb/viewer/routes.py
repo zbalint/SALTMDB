@@ -30,8 +30,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             headers = getattr(self, "headers", None)
             origin = headers.get("Origin", "") if headers else ""
-            if origin and (origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")):
-                self.send_header("Access-Control-Allow-Origin", origin)
+            if origin:
+                parsed_origin = urllib.parse.urlparse(origin)
+                if parsed_origin.hostname in ("localhost", "127.0.0.1"):
+                    self.send_header("Access-Control-Allow-Origin", origin)
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -51,8 +53,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             headers = getattr(self, "headers", None)
             origin = headers.get("Origin", "") if headers else ""
-            if origin and (origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")):
-                self.send_header("Access-Control-Allow-Origin", origin)
+            if origin:
+                parsed_origin = urllib.parse.urlparse(origin)
+                if parsed_origin.hostname in ("localhost", "127.0.0.1"):
+                    self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
@@ -84,11 +88,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.get_search(query)
         elif path.startswith("/api/entities/") or path.startswith("/api/entity/"):
             prefix = "/api/entities/" if path.startswith("/api/entities/") else "/api/entity/"
-            entity_id = urllib.parse.unquote(path.split(prefix)[1])
-            if entity_id.endswith("/lineage"):
-                eid = entity_id[:-len("/lineage")]
+            raw_subpath = path[len(prefix):]
+            if raw_subpath.endswith("/lineage"):
+                eid = urllib.parse.unquote(raw_subpath[:-len("/lineage")])
                 self.get_lineage(eid)
             else:
+                entity_id = urllib.parse.unquote(raw_subpath)
                 self.get_entity_detail(entity_id)
         elif path == "/" or path == "/index.html":
             self.send_html(get_frontend_html())
@@ -522,7 +527,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             # Database file size
             try:
-                db_path = get_db_path()
+                db_path = os.environ.get("SALTMDB_DB_PATH") or getattr(sys.modules.get("saltmdb_viewer"), "DB_PATH", None) or get_db_path()
                 if os.path.exists(db_path):
                     stats["db_size_mb"] = round(os.path.getsize(db_path) / (1024 * 1024), 2)
                 else:
@@ -557,12 +562,14 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         try:
             conn = self.get_db_connection()
             counts = {}
-            for emb_status in ['pending', 'ready', 'failed', 'archived']:
+            for emb_status in ['pending', 'ready', 'failed']:
                 cur = conn.execute(
-                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ?",
+                    "SELECT COUNT(*) FROM entities WHERE embedding_status = ? AND status != 'archived'",
                     (emb_status,)
                 )
                 counts[emb_status] = cur.fetchone()[0]
+            cur = conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'archived'")
+            counts['archived'] = cur.fetchone()[0]
             cur = conn.execute(
                 "SELECT COUNT(*) FROM entities WHERE (embedding_status IS NULL OR embedding_status = '') AND status != 'archived'"
             )
@@ -579,7 +586,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
-            cur = conn.execute("SELECT id, title, status FROM entities WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ? ORDER BY CASE status WHEN 'raw' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'archived' THEN 2 ELSE 3 END ASC, updated_at DESC LIMIT 1", (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%"))
+            cur = conn.execute("""
+                SELECT id, title, status FROM entities
+                WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ?
+                ORDER BY
+                    CASE WHEN id = ? THEN 0 WHEN title = ? THEN 1 ELSE 2 END ASC,
+                    CASE status WHEN 'raw' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'archived' THEN 2 ELSE 3 END ASC,
+                    updated_at DESC
+                LIMIT 1
+            """, (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%", entity_id, entity_id))
             row = cur.fetchone()
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)

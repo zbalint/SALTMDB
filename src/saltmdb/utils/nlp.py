@@ -85,9 +85,9 @@ def calculate_ttr(text: str) -> float:
 def calculate_symbol_ratio(text: str) -> float:
     """Calculate ratio of punctuation/symbols to alphanumeric characters."""
     alpha_count = sum(1 for c in text if c.isalnum())
-    if alpha_count == 0:
-        return 1.0 if text else 0.0
     symbol_count = sum(1 for c in text if not c.isalnum() and not c.isspace())
+    if alpha_count == 0:
+        return 1.0 if symbol_count > 0 else 0.0
     return symbol_count / alpha_count
 
 def calculate_technical_specificity(text: str) -> float:
@@ -120,7 +120,7 @@ def extract_prose_content(text: str) -> str:
     if not text:
         return ""
     # Strip triple-backtick code blocks
-    cleaned = re.sub(r"```[\s\S]*?```", " ", text)
+    cleaned = re.sub(r"```[\s\S]*?(?:```|\Z)", " ", text)
     # Strip inline backticks
     cleaned = re.sub(r"`[^`\n]+`", " ", cleaned)
     # Strip URLs
@@ -255,7 +255,8 @@ def validate_markdown_structure(text: str) -> dict:
         }
 
     # 2. Header Hierarchy & Progression Check
-    headers = re.findall(r"^(#{1,6})\s+(.+)$", text, re.MULTILINE)
+    text_no_code = re.sub(r"```[\s\S]*?```", "", text)
+    headers = re.findall(r"^(#{1,6})\s+(.+)$", text_no_code, re.MULTILINE)
     header_levels = [len(h[0]) for h in headers]
     has_skip = False
     for i in range(len(header_levels) - 1):
@@ -264,7 +265,7 @@ def validate_markdown_structure(text: str) -> dict:
             break
 
     # 3. Untyped Code Fences Check (allow leading whitespace and hyphenated language names e.g. docker-compose)
-    code_fences = re.findall(r"^\s*```([\w-]*)", text, re.MULTILINE)
+    code_fences = re.findall(r"^\s*```\s*(\S*)", text, re.MULTILINE)
     # Filter only opening fences (even index if formatted properly)
     untyped_blocks = 0
     for i in range(0, len(code_fences), 2):
@@ -277,7 +278,7 @@ def validate_markdown_structure(text: str) -> dict:
     
     header_words = sum(len(re.findall(r"\b\w+\b", h[1])) for h in headers)
     
-    list_items = re.findall(r"^\s*[\-\*\d\.]+\s+(.+)$", text, re.MULTILINE)
+    list_items = re.findall(r"^\s*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
     list_item_words = sum(len(re.findall(r"\b\w+\b", item)) for item in list_items)
     
     code_blocks = re.findall(r"```[\s\S]*?```", text)
@@ -427,7 +428,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
         score += 0.15
         flags.append("HAS_CODE")
         
-    if re.search(r"^\s*[\-\*\d\.]+\s+", text, re.MULTILINE):
+    if re.search(r"^\s*(?:[\-\*\+]|\d+\.)\s+", text, re.MULTILINE):
         score += 0.10
         flags.append("HAS_LIST")
         

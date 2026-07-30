@@ -31,9 +31,9 @@ init_ephemeral_db()
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Create a new per-request connection configured with optimized PRAGMAs."""
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20.0, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA cache_size=-8000;")
     conn.execute("PRAGMA mmap_size=67108864;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -73,7 +73,7 @@ def write_transaction_retrying(conn: sqlite3.Connection, fn):
     """Executes a callable inside write_transaction with retry/backoff on lock contention.
 
     Only retries sqlite3.OperationalError whose message contains
-    "database is locked" (case-insensitive) -- any other OperationalError
+    "database is locked" or "database is busy" (case-insensitive) -- any other OperationalError
     (or any other exception) propagates immediately. Retries up to
     RETRY_MAX_ATTEMPTS times beyond the first attempt, with exponential
     backoff plus jitter between attempts, so total attempts = 1 + RETRY_MAX_ATTEMPTS.
@@ -95,11 +95,12 @@ def write_transaction_retrying(conn: sqlite3.Connection, fn):
             with write_transaction(conn) as c:
                 return fn(c)
         except sqlite3.OperationalError as e:
-            if "database is locked" not in str(e).lower() or attempt >= RETRY_MAX_ATTEMPTS:
+            err_msg = str(e).lower()
+            if not any(m in err_msg for m in ("database is locked", "database is busy")) or attempt >= RETRY_MAX_ATTEMPTS:
                 raise
             delay = RETRY_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, RETRY_JITTER_S)
             logger.warning(
-                "Write transaction hit 'database is locked' on attempt %d/%d; retrying in %.3fs",
+                "Write transaction hit lock contention on attempt %d/%d; retrying in %.3fs",
                 attempt + 1,
                 RETRY_MAX_ATTEMPTS + 1,
                 delay,

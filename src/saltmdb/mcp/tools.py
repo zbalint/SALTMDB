@@ -110,7 +110,7 @@ def store_memory(
     domain: str = None,
     owner_id: str = None,
     context_id: str = None,
-    scope: Literal['private', 'shared'] = "shared",
+    scope: Literal['private', 'shared'] = None,
     check_duplicates_only: bool = False,
     **kwargs
 ) -> str | dict:
@@ -119,6 +119,7 @@ def store_memory(
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "context", "project")
     title_ = _resolve(title, kw, kwargs, "title")
+    scope_ = _resolve(scope, kw, kwargs, "scope") or "shared"
 
     raw_tag = tags if tags is not None else _resolve(None, kw, kwargs, "tags", "tag")
     tags_ = _normalize_list_or_str(raw_tag) if raw_tag is not None else None
@@ -148,7 +149,7 @@ def store_memory(
         content=content_,
         tags=tags_,
         owner_id=owner_id_,
-        scope=scope,
+        scope=scope_,
         weight=weight,
         is_core=is_core_,
         memory_type=memory_type_,
@@ -181,13 +182,13 @@ def search_memory(
     tags_filter: list = None,
     entity_id: str = None,
     fetch_full: bool = False,
-    limit: int = 5,
+    limit: int = None,
     context_id: str = None,
     is_core: bool = None,
     memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
     domain_filter: str = None,
     cursor: str = None,
-    include_related: bool = True,
+    include_related: bool = None,
     **kwargs
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
@@ -206,6 +207,11 @@ def search_memory(
     tag_operator = _resolve(None, kw, kwargs, "tag_operator") or "AND"
     memory_type_filter_ = _resolve(memory_type_filter, kw, kwargs, "memory_type_filter", "memory_type", "type_filter")
     domain_filter_ = _resolve(domain_filter, kw, kwargs, "domain_filter", "domain", "area_filter")
+    limit_ = _resolve(limit, kw, kwargs, "limit", "max_results", "top_k") or 5
+    is_core_ = _resolve(is_core, kw, kwargs, "is_core")
+    cursor_ = _resolve(cursor, kw, kwargs, "cursor")
+    include_related_ = _resolve(include_related, kw, kwargs, "include_related")
+    include_related_ = include_related_ if include_related_ is not None else True
 
     return memory_service.search_memory(
         owner_id=owner_id_,
@@ -213,19 +219,19 @@ def search_memory(
         tags_filter=tags_filter_,
         metadata_filter=metadata_filter_,
         explain_mode=explain_mode,
-        limit=limit,
+        limit=limit_,
         context_id=context_id_,
-        is_core=is_core,
+        is_core=is_core_,
         memory_type_filter=memory_type_filter_,
         domain_filter=domain_filter_,
         tag_operator=tag_operator,
-        cursor=cursor,
-        include_related=include_related
+        cursor=cursor_,
+        include_related=include_related_
     )
 
 @mcp.tool()
 def ephemeral_memory(
-    action: Literal['get', 'store'] = "get",
+    action: Literal['get', 'store'] = None,
     key: str = None,
     value: str = None,
     **kwargs
@@ -263,7 +269,7 @@ def manage_relation(
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
-    invalidate: bool = False,
+    invalidate: bool = None,
     **kwargs
 ) -> str | list:
     """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True)."""
@@ -277,8 +283,9 @@ def manage_relation(
     source_id_ = _resolve(source_id, kw, kwargs, "source_id", "source")
     target_id_ = _resolve(target_id, kw, kwargs, "target_id", "target")
     predicate_ = _resolve(predicate, kw, kwargs, "predicate", "relation")
+    invalidate_ = _resolve(invalidate, kw, kwargs, "invalidate") or False
 
-    if invalidate:
+    if invalidate_:
         invalid_at_ = _resolve(None, kw, kwargs, "invalid_at")
         return relation_service.invalidate_relation(
             source_id=source_id_, target_id=target_id_, predicate=predicate_, invalid_at=invalid_at_
@@ -327,8 +334,8 @@ def commit_consolidation(
 @mcp.tool()
 def inspect_graph(
     entity_id: str | None = None,
-    mode: Literal['dependencies', 'lineage', 'orphans'] = "dependencies",
-    max_depth: int = 5,
+    mode: Literal['dependencies', 'lineage', 'orphans'] = None,
+    max_depth: int = None,
     owner_id: str = None,
     point_in_time: str = None,
     **kwargs
@@ -358,16 +365,18 @@ def get_events(
     agent_id: str = None,
     type_filter: str = None,
     session_id: str = None,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = None,
+    offset: int = None,
     status_filter: str = None,
     owner_id: str = None,
-    mode: Literal['events', 'session', 'memories'] = "events",
+    mode: Literal['events', 'session', 'memories'] = None,
     **kwargs
 ) -> list:
     """Retrieves operational events, session summary events, or scans memory logs."""
     kw = _unwrap_kwargs(kwargs)
     mode_ = _resolve(mode, kw, kwargs, "mode") or "events"
+    limit_ = _resolve(limit, kw, kwargs, "limit") or 20
+    offset_ = _resolve(offset, kw, kwargs, "offset") or 0
     session_id_ = _resolve(session_id, kw, kwargs, "session_id")
 
     if session_id_ or mode_ == "session":
@@ -375,8 +384,8 @@ def get_events(
     elif mode_ == "memories":
         owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
         status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
-        return memory_service.scan_memories(owner_id=owner_id_, status_filter=status_filter_, limit=limit, offset=offset)
+        return memory_service.scan_memories(owner_id=owner_id_, status_filter=status_filter_, limit=limit_, offset=offset_)
     else:
         agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent")
         type_filter_ = _resolve(type_filter, kw, kwargs, "type_filter", "type")
-        return event_service.get_recent_events(agent_id=agent_id_, type_filter=type_filter_, limit=limit)
+        return event_service.get_recent_events(agent_id=agent_id_, type_filter=type_filter_, limit=limit_)

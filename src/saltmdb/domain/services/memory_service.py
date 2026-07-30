@@ -800,7 +800,7 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
 
         existing_owner, scope, status = row
         if status == "archived":
-            return f"Error: Memory '{resolved_id}' is already archived."
+            return f"Memory '{resolved_id}' is already archived."
         if owner_id and existing_owner and existing_owner != owner_id:
             return f"Error: Memory '{resolved_id}' owner mismatch."
 
@@ -812,6 +812,11 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
                 SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id = ? AND status != 'archived'
             """, (now, now, resolved_id))
+            conn.execute("""
+                UPDATE relations
+                SET valid_to = ?
+                WHERE (source_id = ? OR target_id = ?) AND valid_to IS NULL
+            """, (now, resolved_id, resolved_id))
 
         if _in_transaction:
             _do_archive()

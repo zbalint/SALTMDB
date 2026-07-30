@@ -351,6 +351,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
             "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
+            "CREATE INDEX IF NOT EXISTS idx_entity_tags_tag_id ON entity_tags(tag_id)",
             "CREATE INDEX IF NOT EXISTS idx_predicates_normalized_name ON predicates(normalized_name)",
             "CREATE INDEX IF NOT EXISTS idx_predicates_canonical ON predicates(canonical_id)",
         ]:

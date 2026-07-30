@@ -21,12 +21,13 @@ def acquire_librarian_lock(conn) -> bool:
     return write_transaction_retrying(conn, _write)
 
 def release_librarian_lock(conn):
-    """Releases the librarian leader lock and records the execution timestamp."""
+    """Releases the librarian leader lock (only if still owned by this process) and records the execution timestamp."""
+    pid = os.getpid()
     now = datetime.now(UTC).isoformat()
     def _write(c):
         c.execute("""
             UPDATE _system_locks
             SET locked_at = NULL, locked_by_pid = NULL, last_run_at = ?
-            WHERE task_name = 'librarian_consolidation'
-        """, (now,))
+            WHERE task_name = 'librarian_consolidation' AND locked_by_pid = ?
+        """, (now, pid))
     write_transaction_retrying(conn, _write)

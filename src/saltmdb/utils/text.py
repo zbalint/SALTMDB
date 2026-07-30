@@ -44,8 +44,10 @@ def extract_title_and_snippet(markdown_text: str):
     title = "Untitled"
     for line in lines:
         if line.startswith("#"):
-            title = line.lstrip("#").strip()
-            break
+            candidate = line.lstrip("#").strip()
+            if candidate:
+                title = candidate
+                break
             
     if title == "Untitled" and lines:
         title = lines[0]
@@ -87,5 +89,7 @@ def compute_content_hash(text: str) -> str:
     if not text:
         return ""
     normalized = text.strip().lower()
+    if not normalized:
+        return ""
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
