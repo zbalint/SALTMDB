@@ -37,12 +37,6 @@ _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-sea
 TITLE_MIN_LENGTH = 5
 TITLE_MAX_LENGTH = 120
 
-# entities.domain classification vocabulary (coarse project/life-area axis). NOT the same as
-# get_canonical_tags(domain=...)'s unrelated tag-name substring-filter param elsewhere in this
-# file, nor the `saltmdb.domain.services` package name (DDD layer naming) -- all three "domain"
-# usages coexist in this codebase; keep them conceptually separate.
-VALID_DOMAINS = ('SALTMDB', 'CADET', 'Business', 'Homelab', 'General')
-
 def validate_memory_input(title: str, content: str, metadata: dict) -> None:
     """Validates memory input to enforce title hygiene and relative path constraints."""
     if title:
@@ -88,7 +82,6 @@ def store_memory(
     weight: int = 1,
     is_core: bool = None,
     memory_type: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
-    domain: str = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -113,9 +106,6 @@ def store_memory(
 
     if memory_type is not None and memory_type not in ('fact', 'event', 'procedure', 'decision', 'preference'):
         return "Error: memory_type must be one of 'fact', 'event', 'procedure', 'decision', 'preference'"
-
-    if domain is not None and domain not in VALID_DOMAINS:
-        return f"Error: domain must be one of {', '.join(repr(d) for d in VALID_DOMAINS)}"
 
     if relevance is not None or impact is not None or novelty is not None or actionability is not None:
         r = relevance if relevance is not None else 3
@@ -243,8 +233,8 @@ def store_memory(
                  hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
                  
                  conn.execute("""
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, domain)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, domain
+                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
+                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
                      FROM entities WHERE id = ?
                  """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
                  
@@ -263,8 +253,8 @@ def store_memory(
                 is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
 
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type, domain)
-                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
                 ON CONFLICT(id) DO UPDATE SET
                     updated_at = excluded.updated_at,
                     last_accessed_at = excluded.last_accessed_at,
@@ -283,9 +273,8 @@ def store_memory(
                     quality_score = excluded.quality_score,
                     quality_status = excluded.quality_status,
                     quality_flags = excluded.quality_flags,
-                    memory_type = COALESCE(?, entities.memory_type),
-                    domain = COALESCE(?, entities.domain)
-            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, memory_type, domain, is_core_val, memory_type, domain))
+                    memory_type = COALESCE(?, entities.memory_type)
+            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, memory_type, is_core_val, memory_type))
             
             if tags is not None:
                 tag_lookup = {}  # norm -> resolved tag_id, cached per-call to avoid
@@ -395,7 +384,7 @@ def _run_fts_search(
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                bm25(entities_fts, {bm25_weights}) as rank_score,
-               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id, e.memory_type, e.domain,
+               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id, e.memory_type,
                (SELECT COUNT(*) FROM relations r WHERE r.target_id = e.id
                 AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))) as rel_count,
                {snippet_sql} as fts_snippet
@@ -487,7 +476,6 @@ def search_memory(
     context_id: str = None,
     is_core: bool = None,
     memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
-    domain_filter: str = None,
     tag_operator: Literal['AND', 'OR'] = "AND",
     cursor: str = None,
     include_related: bool = True,
@@ -495,9 +483,6 @@ def search_memory(
     db_path: str = None
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory."""
-    if domain_filter is not None and domain_filter not in VALID_DOMAINS:
-        return [{"error": f"Error: domain must be one of {', '.join(repr(d) for d in VALID_DOMAINS)}"}]
-
     should_close = False
     conn = db_connection
     if not conn:
@@ -531,10 +516,6 @@ def search_memory(
         if memory_type_filter is not None:
             where_clauses.append("e.memory_type = ?")
             params.append(memory_type_filter)
-
-        if domain_filter is not None:
-            where_clauses.append("e.domain = ?")
-            params.append(domain_filter)
 
         if metadata_filter and isinstance(metadata_filter, dict):
             for mk, mv in metadata_filter.items():
@@ -647,7 +628,7 @@ def search_memory(
                             SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                                    0.0 as rank_score,
                                    e.created_at, e.updated_at, e.owner_id, e.scope,
-                                   e.metadata, e.context_id, e.memory_type, e.domain, 0 as rel_count,
+                                   e.metadata, e.context_id, e.memory_type, 0 as rel_count,
                                    NULL as fts_snippet
                             FROM entities e
                             WHERE e.id IN ({placeholders})
@@ -676,7 +657,7 @@ def search_memory(
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
                        e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
-                       e.memory_type, e.domain, 0 as rel_count, NULL as fts_snippet
+                       e.memory_type, 0 as rel_count, NULL as fts_snippet
                 FROM entities e
                 WHERE {" AND ".join(where_clauses)}
                 ORDER BY e.is_core DESC, e.updated_at DESC
@@ -708,7 +689,7 @@ def search_memory(
 
         results = []
         for r in rows:
-            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, edomain, rel_c, fts_snippet_raw = r
+            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, rel_c, fts_snippet_raw = r
             if fts_snippet_raw:
                 snippet = fts_snippet_raw
             else:
@@ -722,7 +703,6 @@ def search_memory(
                 "weight": eweight,
                 "is_core": bool(eis_core),
                 "memory_type": ememory_type,
-                "domain": edomain,
                 "cursor": f"offset:{offset + limit}"
             }
             if include_related:
@@ -1034,7 +1014,7 @@ def scan_memories(
             
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         cursor_obj = conn.execute(f"""
-            SELECT id, title, owner_id, status, weight, is_core, updated_at, memory_type, domain
+            SELECT id, title, owner_id, status, weight, is_core, updated_at, memory_type
             FROM entities
             {where_sql}
             ORDER BY updated_at DESC
@@ -1051,7 +1031,6 @@ def scan_memories(
             "is_core": bool(r[5]),
             "updated_at": r[6],
             "memory_type": r[7],
-            "domain": r[8],
             "cursor": f"offset:{offset + limit}"
         } for r in rows]
     except Exception as e:
@@ -1201,7 +1180,7 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
     return tag_id
 
 
-# NOTE: this 'domain' param is an unrelated tag-name substring filter, not entities.domain (see VALID_DOMAINS above).
+# NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
 def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = None) -> list:
     """Queries canonical tags."""
     should_close = False

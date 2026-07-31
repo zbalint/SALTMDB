@@ -8,7 +8,6 @@ from saltmdb.domain.services import (
     ephemeral_service,
     librarian_service
 )
-from saltmdb.domain.services.memory_service import VALID_DOMAINS
 
 def _normalize_list_or_str(val) -> list:
     """Helper to convert stringified lists, comma-separated strings, or single string values into a Python list."""
@@ -95,10 +94,6 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
       - decision: ADR-style rationale record (what was chosen and why).
       - preference: durable user/agent preference statement.
 
-    domain classifies which top-level project/life-area the memory belongs to (one of:
-    {', '.join(VALID_DOMAINS)}). Optional; leave unset if no domain clearly applies. Omitting
-    it on an update preserves the existing value.
-
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
     """)
 def store_memory(
@@ -107,7 +102,6 @@ def store_memory(
     tags: list = None,
     is_core: bool = None,
     memory_type: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
-    domain: str = None,
     owner_id: str = None,
     context_id: str = None,
     scope: Literal['private', 'shared'] = None,
@@ -131,7 +125,6 @@ def store_memory(
         is_core_ = None
 
     memory_type_ = _resolve(memory_type, kw, kwargs, "memory_type", "type", "kind")
-    domain_ = _resolve(domain, kw, kwargs, "domain", "area", "category")
 
     if check_duplicates_only or kw.get("check_duplicates_only"):
         return memory_service.check_duplicate_memories(title=title_, content=content_, owner_id=owner_id_, tags=tags_, context_id=context_id_)
@@ -153,7 +146,6 @@ def store_memory(
         weight=weight,
         is_core=is_core_,
         memory_type=memory_type_,
-        domain=domain_,
         title=title_,
         entity_id=entity_id,
         relevance=relevance,
@@ -172,9 +164,6 @@ def store_memory(
     memory_type_filter optionally restricts results to one of the five fixed memory_type
     values ('fact', 'event', 'procedure', 'decision', 'preference'); every result item also
     echoes its 'memory_type'.
-
-    domain_filter optionally restricts results to one of the valid domains (one of:
-    {', '.join(VALID_DOMAINS)}); every result item also echoes a (possibly-null) 'domain' key.
     """)
 def search_memory(
     owner_id: str = None,
@@ -186,7 +175,6 @@ def search_memory(
     context_id: str = None,
     is_core: bool = None,
     memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
-    domain_filter: str = None,
     cursor: str = None,
     include_related: bool = None,
     **kwargs
@@ -206,7 +194,6 @@ def search_memory(
     explain_mode = _resolve(None, kw, kwargs, "explain_mode") or False
     tag_operator = _resolve(None, kw, kwargs, "tag_operator") or "AND"
     memory_type_filter_ = _resolve(memory_type_filter, kw, kwargs, "memory_type_filter", "memory_type", "type_filter")
-    domain_filter_ = _resolve(domain_filter, kw, kwargs, "domain_filter", "domain", "area_filter")
     limit_ = _resolve(limit, kw, kwargs, "limit", "max_results", "top_k") or 5
     is_core_ = _resolve(is_core, kw, kwargs, "is_core")
     cursor_ = _resolve(cursor, kw, kwargs, "cursor")
@@ -223,7 +210,6 @@ def search_memory(
         context_id=context_id_,
         is_core=is_core_,
         memory_type_filter=memory_type_filter_,
-        domain_filter=domain_filter_,
         tag_operator=tag_operator,
         cursor=cursor_,
         include_related=include_related_

@@ -532,18 +532,10 @@ def commit_consolidation(
     
     try:
         def _do_commit():
-            placeholders_p = ",".join("?" for _ in resolved_parents)
-            domain_rows = conn.execute(
-                f"SELECT DISTINCT domain FROM entities WHERE id IN ({placeholders_p}) AND domain IS NOT NULL",
-                resolved_parents
-            ).fetchall()
-            distinct_domains = {r[0] for r in domain_rows if r[0]}
-            inherited_domain = next(iter(distinct_domains)) if len(distinct_domains) == 1 else None
-
             conn.execute("""
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, domain)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str, inherited_domain))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str))
 
             if tags:
                 for tag_name in tags:
