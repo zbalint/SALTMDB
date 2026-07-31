@@ -53,8 +53,9 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > **FORBIDDEN ACTION: NO DIRECT SQL ACCESS**
 > You are strictly forbidden from running shell commands like `sqlite3` or using scripts to connect directly to the `saltmdb.db` file. Bypassing the MCP server skips the secrets redaction middleware and FTS5 search indexing triggers, corrupting the database state. All queries and updates must occur via MCP tool calls.
 
-> [!TIP]
-> **Deferred Tool Schemas**: Some MCP-client harnesses (e.g. Claude Code's `ToolSearch`, GitHub Copilot CLI's `search_tool`) lazy-load tool schemas to save context — on first turn, the `saltmdb` tools may be listed by name only, with no callable schema attached, until you run your harness's own tool-discovery/search step. If a `saltmdb` tool call is rejected as unknown or schema-less, run that discovery step first (at session start, before Phase A below) — do not conclude the tools are broken, missing, or unavailable.
+> [!CAUTION]
+> **MANDATORY: Deferred Tool Schemas**
+> Some MCP-client harnesses (e.g. Claude Code's `ToolSearch`, GitHub Copilot CLI's `search_tool`) lazy-load tool schemas to save context — on first turn, the `saltmdb` tools may be listed by name only, with no callable schema attached, until you run your harness's own tool-discovery/search step. This is not optional and not conditional on your own guess about whether your harness needs it: **if your available-tools list contains any tool-discovery/search mechanism of this kind, invoke it targeting `saltmdb` tools unconditionally, every session, before Phase A step 1 below** — never skip this because you assume schemas are already loaded, and never treat an unlisted or schema-less `saltmdb` tool as broken or unavailable without having run discovery first. If your harness has no such mechanism at all, this instruction does not apply and there is nothing to do.
 
 ---
 
@@ -183,7 +184,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 ### Phase A: Bootstrap (Session Start)
 Immediately upon initialization, before answering the user:
-0. **If your harness defers MCP tool schemas** (the `saltmdb` tools are listed by name only, with no callable schema, rather than loaded up front), run your harness's own tool-discovery/search mechanism now (e.g. Claude Code's `ToolSearch`, Copilot CLI's `search_tool`) to load the full `saltmdb` tool schemas before proceeding to step 1. Most harnesses load schemas eagerly and this step is a no-op — but don't skip checking.
+0. **MANDATORY, unconditional, every session — no self-judgment call**: check whether your available-tools list includes a tool-discovery/search mechanism (e.g. Claude Code's `ToolSearch`, Copilot CLI's `search_tool`). If it does, invoke it now targeting the `saltmdb` tools to load their full schemas, before proceeding to step 1 — do this even if you believe schemas are already loaded, since that belief is exactly what causes this step to get silently skipped. Only skip this step if no such discovery mechanism exists in your tool list at all.
 1. Call `search_memory` filtering by `#core` tag (e.g., `tags_filter = ['#core']`). This loads your persona, behavioral constraints, and user rules.
 2. Run a keyword search matching the active repository, folder, or project name (e.g. `query_keywords = 'SALTMDB'`) and task domain (`context_id = 'my-task'`) to gather project intel, past decisions, and component constraints.
 3. Call `get_events` with `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. `get_events` already computes this for you: each `consolidation_request` event item carries a top-level `status` field (`'resolved'` once every entity ID in the event's `content.entity_ids` is no longer `'raw'`, `'pending'` otherwise) — no need to manually cross-check entity statuses yourself.
