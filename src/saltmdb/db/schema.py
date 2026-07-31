@@ -22,6 +22,27 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
         
     conn = get_connection(db_path)
 
+    # Force sqlite_vec (and its numpy dependency, a large native extension) to finish
+    # importing BEFORE the write transaction below opens BEGIN IMMEDIATE. init_vector_schema()
+    # (called from inside _write, further down) also does `import sqlite_vec`, but Python
+    # caches successful imports in sys.modules -- so as long as the first import in this
+    # process happens here, unlocked, that later import is just a cache hit. Getting this
+    # backwards is not cosmetic: a plain module import can stall for a long time on a cold
+    # import cache (e.g. antivirus/EDR scanning the DLLs on first load, or OS-level
+    # contention if another process is importing the same native module at the same time),
+    # and if that stall happens *inside* BEGIN IMMEDIATE, the process is holding the real
+    # SQLite write lock for the entire stall -- turning an ordinary slow import into an
+    # indefinite lock hold that blocks every other writer against the database. This was
+    # confirmed live: a librarian subprocess's sqlite_vec/numpy import stalled for 9+ hours
+    # mid-transaction, and every other session's store_memory/log_event call failed with
+    # "database is locked" on every attempt for the entire time -- exactly matching the
+    # reported symptom of one session's activity permanently wedging another session, even
+    # after the first session goes idle (its background subprocess kept holding the lock).
+    try:
+        import sqlite_vec  # noqa: F401
+    except Exception as e:
+        logger.warning("sqlite_vec import failed (vector search will be unavailable): %s", e)
+
     # Wrapped in write_transaction_retrying (BEGIN IMMEDIATE + retry/backoff) rather than left
     # as a bare `with conn:`. Since get_connection() sets isolation_level=None, a bare `with conn:`
     # on this connection no longer groups these statements into one transaction at all (no implicit

@@ -68,9 +68,27 @@ def embed_text(text: str) -> list[float]:
 
 
 def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: str) -> None:
-    """Background thread target: generate and persist an embedding for one entity."""
+    """Background thread target: generate and persist an embedding for one entity.
+
+    Runs on memory_service._embed_pool, fed directly by every store_memory call -- a burst of
+    stores queues a backlog of these that keeps draining in the background long after the
+    triggering session goes quiet. Unlike every other write path in this codebase, this used
+    to issue three separate raw autocommit statements (no BEGIN IMMEDIATE, no
+    write_transaction_retrying) instead of one atomic, retried transaction. That was a real
+    correctness gap (a crash between DELETE and INSERT could drop an embedding), but it also
+    meant this was the one writer with no jittered backoff between attempts: a queued run of
+    these instantly retries via SQLite's own busy_timeout, with zero pause between jobs, while
+    every foreground caller backs off (write_transaction_retrying's exponential
+    backoff+jitter) between its own bounded retries. Under SQLite's non-FIFO lock queue, a
+    continuously-hammering non-backing-off writer systematically starves a writer that
+    politely waits between attempts -- so a long enough embedding backlog on one session could
+    make another session's store_memory calls fail with "database is locked" on every single
+    attempt, for as long as the backlog keeps feeding new jobs. Routing this through the same
+    write_transaction_retrying used everywhere else fixes both problems: atomic write, and
+    the same backoff/retry fairness as every other writer.
+    """
     import sqlite_vec
-    from saltmdb.db.connection import get_connection
+    from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 
     conn = get_connection(db_path)
     try:
@@ -80,29 +98,32 @@ def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: s
 
         text = f"{title}\n\n{full_content}"
         vector = embed_text(text)
-        conn.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (entity_id,))
-        conn.execute(
-            "INSERT INTO entity_embeddings(entity_id, embedding) VALUES (?, ?)",
-            (entity_id, sqlite_vec.serialize_float32(vector))
-        )
-        conn.execute(
-            "UPDATE entities SET embedding_status = 'ready' WHERE id = ?",
-            (entity_id,)
-        )
-        conn.commit()
+
+        def _write(c):
+            c.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (entity_id,))
+            c.execute(
+                "INSERT INTO entity_embeddings(entity_id, embedding) VALUES (?, ?)",
+                (entity_id, sqlite_vec.serialize_float32(vector))
+            )
+            c.execute(
+                "UPDATE entities SET embedding_status = 'ready' WHERE id = ?",
+                (entity_id,)
+            )
+        write_transaction_retrying(conn, _write)
         logger.debug("Embedding stored for entity %s", entity_id)
     except Exception as e:
         try:
-            conn.execute(
-                "UPDATE entities SET embedding_status = 'failed' WHERE id = ?",
-                (entity_id,)
-            )
-            conn.commit()
+            def _mark_failed(c):
+                c.execute(
+                    "UPDATE entities SET embedding_status = 'failed' WHERE id = ?",
+                    (entity_id,)
+                )
+            write_transaction_retrying(conn, _mark_failed)
         except Exception:
             pass
         logger.error("Embedding generation failed for %s: %s", entity_id, e)
     finally:
-        conn.close()
+        close_connection(conn)
 
 
 def backfill_pending_embeddings(db_path: str = None) -> int:
