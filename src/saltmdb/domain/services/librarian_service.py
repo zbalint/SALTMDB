@@ -4,7 +4,6 @@ import sqlite3
 import subprocess
 import json
 import uuid
-import math
 import logging
 from datetime import datetime, UTC
 from concurrent.futures import ThreadPoolExecutor
@@ -294,8 +293,7 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
 
         to_insert = []
         for tag_id, tag_name, owner_id, count in candidates:
-            is_high_hygiene = any(word in tag_name.lower() for word in ["runbook", "decision"])
-            threshold = 3 if is_high_hygiene else 5
+            threshold = 5
 
             if count < threshold:
                 continue
@@ -583,77 +581,6 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
     finally:
         if should_close:
             close_connection(conn)
-
-def decay_low_quality_memories(conn: sqlite3.Connection = None, db_path: str = None):
-    """
-    Applies quality-weighted LRU decay: Effective Weight = Base Weight * Quality Score * e^(-lambda * dt).
-    Exempts core memories (is_core = 1) and pinned memories (metadata.is_pinned = 1).
-    Log consolidation request or soft-archives stale low-quality clutter below threshold (< 0.15).
-    """
-    should_close = False
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
-    try:
-        logger.info("Running Quality-Weighted LRU Decay & Purging...")
-        cursor = conn.execute("""
-            SELECT id, title, weight, quality_score, updated_at, last_accessed_at, is_core, metadata
-            FROM entities
-            WHERE status = 'raw' AND (is_core IS NULL OR is_core = 0)
-        """)
-        rows = cursor.fetchall()
-        now_dt = datetime.now(UTC).replace(tzinfo=None)
-
-        decayed_ids = []
-        for eid, title, weight, q_score, updated_at, last_accessed, is_core, metadata_raw in rows:
-            # Check pinned metadata exemption
-            if metadata_raw:
-                try:
-                    meta = json.loads(metadata_raw)
-                    if isinstance(meta, dict) and meta.get("is_pinned"):
-                        continue
-                except Exception:
-                    pass
-
-            q_score = q_score if q_score is not None else 0.5
-            weight = weight if weight is not None else 1.0
-
-            ref_time_str = last_accessed or updated_at
-            if ref_time_str:
-                try:
-                    ref_str = ref_time_str.replace("Z", "").split("+")[0]
-                    ref_dt = datetime.fromisoformat(ref_str)
-                    days_elapsed = (now_dt - ref_dt).total_seconds() / 86400.0
-                except Exception:
-                    days_elapsed = 0.0
-            else:
-                days_elapsed = 0.0
-
-            # Lambda = 0.05 (decay rate per day)
-            decay_factor = math.exp(-0.05 * days_elapsed)
-            effective_weight = weight * q_score * decay_factor
-
-            if effective_weight < 0.15:
-                decayed_ids.append(eid)
-
-        if decayed_ids:
-            logger.info("Identified %d decayed low-quality raw memories for archiving.", len(decayed_ids))
-            now_iso = datetime.now(UTC).isoformat()
-            def _write(c):
-                placeholders = ",".join("?" for _ in decayed_ids)
-                c.execute(
-                    f"UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id IN ({placeholders})",
-                    [now_iso, now_iso] + decayed_ids
-                )
-            write_transaction_retrying(conn, _write)
-    except Exception as e:
-        logger.warning("Error in decay_low_quality_memories: %s", e)
-    finally:
-        if should_close:
-            close_connection(conn)
-
 
 def _run_librarian_maintenance(conn) -> None:
     """Checkpoint + optimize maintenance duty. Runs once per Librarian invocation,

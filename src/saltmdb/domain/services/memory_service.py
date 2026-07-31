@@ -38,14 +38,8 @@ TITLE_MIN_LENGTH = 5
 TITLE_MAX_LENGTH = 120
 
 def validate_memory_input(title: str, content: str, metadata: dict) -> None:
-    """Validates memory input to enforce title hygiene and relative path constraints."""
+    """Validates memory input to enforce title length bounds."""
     if title:
-        pattern = r"^[a-zA-Z0-9_\-\.]+\.(md|txt|json|yml|yaml)\s*[-—–:|]\s*"
-        if re.search(pattern, title, re.IGNORECASE):
-            raise ValueError(
-                "Error: Title violates clean title guidelines. Do not prefix memory titles with file names or file extensions (e.g., use 'Language Rules' instead of 'CORE.md — Language Rules')."
-            )
-
         stripped_title = title.strip()
         if len(stripped_title) > TITLE_MAX_LENGTH:
             raise ValueError(
@@ -57,22 +51,6 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
             raise ValueError(
                 f"Error: Title is too short (minimum {TITLE_MIN_LENGTH} characters). Provide a descriptive, canonical title."
             )
-
-    if metadata and isinstance(metadata, dict):
-        source_path = metadata.get("source_path")
-        if source_path:
-            is_absolute = (
-                re.match(r"^[a-zA-Z]:", source_path) or
-                source_path.startswith("/") or
-                source_path.startswith("\\") or
-                "/Users/" in source_path or
-                "\\Users\\" in source_path or
-                "/home/" in source_path
-            )
-            if is_absolute:
-                raise ValueError(
-                    "Error: 'source_path' must be a relative repository path (e.g., 'CORE.md' or 'notes.md'). Absolute system paths are forbidden."
-                )
 
 def store_memory(
     content: str = None,

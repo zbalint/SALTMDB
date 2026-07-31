@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-__version__ = "0.1.0-alpha.61"
+__version__ = "0.1.0-alpha.62"
 
 # Path to the root of the repository (3 levels up from src/saltmdb/config.py)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -56,7 +56,6 @@ QG_MAX_5GRAM_DUP = 0.20
 QG_MIN_TTR = 0.35
 QG_CLI_MIN = 2.0
 QG_CLI_MAX = 26.0
-QG_PERPLEXITY_VALIDITY_MIN = 0.15
 
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"

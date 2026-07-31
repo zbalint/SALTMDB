@@ -9,7 +9,6 @@ from saltmdb.config import (
     QG_MIN_TTR,
     QG_CLI_MIN,
     QG_CLI_MAX,
-    QG_PERPLEXITY_VALIDITY_MIN,
 )
 
 STOP_WORDS = {
@@ -90,14 +89,6 @@ def calculate_symbol_ratio(text: str) -> float:
         return 1.0 if symbol_count > 0 else 0.0
     return symbol_count / alpha_count
 
-def calculate_technical_specificity(text: str) -> float:
-    """Calculate ratio of specific technical identifiers to total word count."""
-    words = re.findall(r"\b\w+\b", text)
-    if not words:
-        return 0.0
-    tech_identifiers = re.findall(r"\b[a-z0-9_]+[A-Z0-9_\.][a-zA-Z0-9_]*\b|\b[A-Z0-9_]{2,}\b|\b\w+\.(py|js|ts|json|md|rs|go|c|cpp|h|yml|yaml|sql|sh|db)\b", text)
-    return len(tech_identifiers) / len(words)
-
 def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     """Calculate the ratio of duplicate word N-grams in text."""
     words = re.findall(r"\b\w+\b", text.lower())
@@ -110,12 +101,10 @@ def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     total_count = len(ngrams)
     return 1.0 - (unique_count / total_count)
 
-from saltmdb.utils.perplexity import calculate_transition_perplexity
-
 def extract_prose_content(text: str) -> str:
     """
     Strips code fences, inline backticks, file paths, and URLs to isolate pure prose text.
-    Prevents false readability or perplexity quality rejections on raw technical logs.
+    Prevents false readability quality rejections on raw technical logs.
     """
     if not text:
         return ""
@@ -394,17 +383,9 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "reason": f"Type-Token Ratio too low ({ttr:.2f}) - boilerplate repetition detected."
             }
 
-    # Extract pure prose content for Readability and Perplexity evaluation
+    # Extract pure prose content for Readability evaluation
     prose_content = extract_prose_content(text)
     prose_words = re.findall(r"\b[a-zA-Z0-9_-]+\b", prose_content)
-
-    # Bigram Transition Perplexity Gate (Word-Salad Protection as Quality Score Modifier)
-    perp_penalty = 0.0
-    if len(prose_words) > 25:
-        perp_res = calculate_transition_perplexity(prose_content)
-        if perp_res["validity_ratio"] < QG_PERPLEXITY_VALIDITY_MIN:
-            flags.append("WORD_SALAD_PERPLEXITY")
-            perp_penalty = 0.20
 
     # Coleman-Liau Syntactic Readability Bounds
     if len(prose_words) > 30:
@@ -418,23 +399,15 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [{QG_CLI_MIN}, {QG_CLI_MAX}]."
             }
 
-    # Tier 4: Technical Specificity & Structural Formatting Scoring
+    # Tier 4: Structural Formatting Scoring
     score = 0.50
     if md_res["header_count"] > 0:
         score += 0.15
         flags.append("HAS_HEADERS")
-        
-    if "`" in text:
-        score += 0.15
-        flags.append("HAS_CODE")
-        
+
     if re.search(r"^\s*(?:[\-\*\+]|\d+\.)\s+", text, re.MULTILINE):
         score += 0.10
         flags.append("HAS_LIST")
-        
-    if re.search(r"\b[\w/-]+\.(py|rs|js|ts|json|md|sql|yml|yaml|c|cpp|h|sh)\b|\b[a-z0-9_]+_[a-z0-9_]+\b", text):
-        score += 0.10
-        flags.append("HAS_PATHS_OR_IDENTIFIERS")
 
     # MSDI Structure Density Score
     msdi = md_res["msdi"]
@@ -452,14 +425,8 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     if md_res["has_header_skip"]:
         score -= 0.10
         flags.append("NON_HIERARCHICAL_HEADERS")
-        
-    if len(words) > 25:
-        spec_ratio = calculate_technical_specificity(text)
-        if spec_ratio < 0.02:
-            score -= 0.15
-            flags.append("LOW_SPECIFICITY")
 
-    score = max(0.0, min(1.0, round(score - perp_penalty, 2)))
+    score = max(0.0, min(1.0, round(score, 2)))
     status = "WARN" if tier1_warn else "ACCEPT"
     
     return {

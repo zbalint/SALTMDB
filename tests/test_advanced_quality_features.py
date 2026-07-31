@@ -3,11 +3,9 @@ import tempfile
 import os
 import shutil
 import time
-import json
-from datetime import datetime, UTC, timedelta
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services import memory_service, librarian_service
-from saltmdb.utils import nlp, perplexity
+from saltmdb.domain.services import memory_service
+from saltmdb.utils import nlp
 
 class TestAdvancedQualityFeatures(unittest.TestCase):
     def setUp(self):
@@ -21,22 +19,6 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_tc_adv_01_word_salad_perplexity_rejection(self):
-        """TC-ADV-01: Bigram Perplexity Gate catches nonsensical word salad (> 25 words)"""
-        word_salad = (
-            "Database connection orange algorithm table function system query matrix python binary network file "
-            "vector embedding metadata schema search index tag event owner lock scope weight history"
-        )
-        res = memory_service.store_memory(
-            content=f"# Nonsensical Word Salad Test\n\n{word_salad}",
-            title="Word Salad Test",
-            owner_id="test_agent"
-        )
-        self.assertIn("Knowledge stored successfully", res)
-        # Verify quality score was penalized and flag added
-        q_res = nlp.evaluate_memory_quality(f"# Nonsensical Word Salad Test\n\n{word_salad}")
-        self.assertIn("WORD_SALAD_PERPLEXITY", q_res["quality_flags"])
 
     def test_tc_adv_02_prose_extraction_protects_technical_logs(self):
         """TC-ADV-02: Prose extraction strips inline code, paths, and URLs, preventing false quality rejections on technical logs"""
@@ -97,43 +79,30 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         )
         self.assertIn("Knowledge stored successfully", res2)
 
-    def test_tc_adv_05_pinned_and_core_memory_decay_exemption(self):
-        """TC-ADV-05: Quality-weighted decay in Librarian exempts is_core=1 and metadata.is_pinned=1 memories"""
-        past_date = (datetime.now(UTC) - timedelta(days=100)).isoformat()
-
-        # 1. Stale unpinned low-quality memory (should decay)
-        self.conn.execute("""
-            INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, full_content, owner_id, scope, status, weight, quality_score, is_core)
-            VALUES ('stale_1', ?, ?, ?, 'Stale Note', 'Stale contents', 'agent1', 'shared', 'raw', 1.0, 0.20, 0)
-        """, (past_date, past_date, past_date))
-
-        # 2. Stale core memory (should BE EXEMPT from decay)
-        self.conn.execute("""
-            INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, full_content, owner_id, scope, status, weight, quality_score, is_core)
-            VALUES ('core_1', ?, ?, ?, 'Core Rule', 'Always use UTF-8 output format.', 'agent1', 'shared', 'raw', 1.0, 0.20, 1)
-        """, (past_date, past_date, past_date))
-
-        # 3. Stale pinned memory (should BE EXEMPT from decay)
-        self.conn.execute("""
-            INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, full_content, owner_id, scope, status, weight, quality_score, is_core, metadata)
-            VALUES ('pinned_1', ?, ?, ?, 'Pinned Rule', 'Strictly enforce JSON responses.', 'agent1', 'shared', 'raw', 1.0, 0.20, 0, ?)
-        """, (past_date, past_date, past_date, json.dumps({"is_pinned": True})))
-
-        self.conn.commit()
-
-        # Run Librarian decay
-        librarian_service.decay_low_quality_memories(conn=self.conn)
-
-        # Verify stale_1 is archived
-        s1_status = self.conn.execute("SELECT status FROM entities WHERE id = 'stale_1'").fetchone()[0]
-        self.assertEqual(s1_status, "archived")
-
-        # Verify core_1 and pinned_1 remain raw
-        c1_status = self.conn.execute("SELECT status FROM entities WHERE id = 'core_1'").fetchone()[0]
-        self.assertEqual(c1_status, "raw")
-
-        p1_status = self.conn.execute("SELECT status FROM entities WHERE id = 'pinned_1'").fetchone()[0]
-        self.assertEqual(p1_status, "raw")
+    def test_tc_adv_05_non_technical_prose_not_penalized(self):
+        """TC-ADV-05: Long, code-free narrative prose (e.g. a story/roleplay excerpt) is not
+        structurally disadvantaged by the quality gate relative to technical content — validates
+        the generalization fix that removed code-density/technical-vocabulary scoring bias."""
+        narrative = (
+            "# The Lighthouse Keeper's Daughter\n\n"
+            "Mira had lived beside the sea for as long as she could remember, and every evening "
+            "she climbed the spiral stairs to help her father light the lamp before the fog rolled "
+            "in from the northern cliffs. Tonight the wind carried a strange, low hum across the "
+            "water, unlike anything she had heard before, and the gulls that usually wheeled and "
+            "cried above the rocks had gone silent, perched in a long unmoving row along the "
+            "weathered fence as if waiting for something to arrive. Her father noticed it too, "
+            "pausing with his hand on the brass housing of the lamp, his eyes fixed on a point far "
+            "out where the horizon should have been but where instead a deeper darkness seemed to "
+            "be gathering itself, patient and enormous, just beneath the surface of the waves.\n\n"
+            "She wanted to ask him what it was, but something in his stillness told her the answer "
+            "would not be a comfortable one, so instead she simply stood beside him, matching his "
+            "silence, and watched the strange dark shape continue to grow at the edge of the world."
+        )
+        q_res = nlp.evaluate_memory_quality(narrative)
+        self.assertEqual(q_res["status"], "ACCEPT")
+        self.assertNotIn("LOW_SPECIFICITY", q_res["quality_flags"])
+        self.assertNotIn("HAS_CODE", q_res["quality_flags"])
+        self.assertGreaterEqual(q_res["quality_score"], 0.5)
 
 if __name__ == "__main__":
     unittest.main()

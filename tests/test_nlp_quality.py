@@ -115,7 +115,6 @@ class TestTextQualityGate(unittest.TestCase):
         self.assertGreaterEqual(q_score, 0.80)
         self.assertEqual(q_status, "ACCEPT")
         self.assertIn("HAS_HEADERS", q_flags)
-        self.assertIn("HAS_CODE", q_flags)
         self.assertIn("HAS_LIST", q_flags)
         self.assertEqual(c_hash, text.compute_content_hash(tech_markdown))
 

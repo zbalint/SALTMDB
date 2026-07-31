@@ -35,7 +35,7 @@ graph TD
     end
 ```
 
-- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, pure Python Bigram Perplexity word-salad filtering, Coleman-Liau readability bounds, and MSDI density scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Calibrated auto-supersession ($\ge 0.88$ similarity) auto-links updated facts while target exclusion prevents false deduplication warnings during parent memory consolidation.
+- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, Coleman-Liau readability bounds, and MSDI structural density scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Calibrated auto-supersession ($\ge 0.88$ similarity) auto-links updated facts while target exclusion prevents false deduplication warnings during parent memory consolidation.
 - **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default.
 - **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
 - **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.

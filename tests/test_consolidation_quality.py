@@ -142,7 +142,6 @@ class TestConsolidationQualityGate(unittest.TestCase):
         self.assertGreaterEqual(q_score, 0.80)
         self.assertEqual(q_status, "ACCEPT")
         self.assertIn("HAS_HEADERS", q_flags)
-        self.assertIn("HAS_CODE", q_flags)
         self.assertEqual(c_hash, text.compute_content_hash(consolidated_md))
 
 if __name__ == "__main__":

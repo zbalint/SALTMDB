@@ -8,7 +8,6 @@ from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality, calculate_coleman_liau_index, validate_markdown_structure
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory, search_memory
-from saltmdb.domain.services.librarian_service import decay_low_quality_memories
 
 
 class TestBugFixes(unittest.TestCase):
@@ -79,26 +78,6 @@ class TestBugFixes(unittest.TestCase):
 
         res2 = store_memory(shared_text, owner_id="AgentB", scope="shared", title="Policy Copy", db_path=self.db_path)
         self.assertIn("REJECT_EXACT_DUPLICATE", res2)
-
-    def test_p2_lru_decay_temporal_archival(self):
-        """P2-3 Fix Verification: Ensure decay_low_quality_memories populates valid_to and updated_at on archival."""
-        conn = sqlite3.connect(self.db_path)
-        old_time = "2020-01-01T00:00:00.000000+00:00"
-        conn.execute("""
-            INSERT INTO entities (id, title, full_content, status, scope, weight, quality_score, created_at, updated_at, last_accessed_at, is_core)
-            VALUES ('decay-target-1', 'Stale Clutter', 'Low quality note text', 'raw', 'private', 0.1, 0.1, ?, ?, ?, 0)
-        """, (old_time, old_time, old_time))
-        conn.commit()
-
-        decay_low_quality_memories(conn=conn)
-
-        row = conn.execute("SELECT status, updated_at, valid_to FROM entities WHERE id = 'decay-target-1'").fetchone()
-        conn.close()
-
-        self.assertEqual(row[0], "archived")
-        self.assertIsNotNone(row[1])
-        self.assertIsNotNone(row[2])
-        self.assertNotEqual(row[1], old_time)
 
     def test_is_core_flag_persistence(self):
         """Fix Verification: Ensure is_core=True sets is_core=1, and updating without specifying is_core preserves is_core=1."""

@@ -19,7 +19,7 @@ commitment to build all of it.
 | 4 | [`04-adjacent-projects-lessons.md`](./04-adjacent-projects-lessons.md) | Broader PKM/graph-DB/ontology/decay survey (Obsidian, Roam, GraphRAG, SKOS, LanceDB, Ebbinghaus/SM-2/FSRS). Cleanest gap: SALTMDB already tracks `weight` and `last_accessed_at` but neither feeds a decay function — free-standing infrastructure with no consumer. |
 | 5 | [`05-tag-system.md`](./05-tag-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.54** (2026-07-28). Diagnosed *why* fragmentation still happened: `get_canonical_tags` was advisory not enforced, and heuristic merging was lexical-only. Fixed via a shared `resolve_or_create_tag()` helper (exact → normalized → new plural/suffix fallback → create) now used by both write paths — which turned up a bonus bug: `commit_consolidation()` had its own divergent, buggier tag logic ignoring `canonical_id` entirely. Medium-Term embedding-based review queue and the faceted/hierarchy model remain future work. See `MIGRATION.md`'s alpha.54 entry. |
 | 6 | [`06-relation-system.md`](./06-relation-system.md) | **✅ Quick Wins implemented in v0.1.0-alpha.55; Medium-Term implemented in v0.1.0-alpha.57** (2026-07-29, Schema Version 10). Quick Wins: `UNIQUE(source_id, target_id, predicate)` index on `relations` + standalone `predicates` canonicalization table via `resolve_or_create_predicate()`. Medium-Term: `commit_consolidation` now expires old relation edges (`valid_to = now`) and inserts replacements instead of mutating rows in place (Graphiti's "expire, never mutate," consolidation-only trigger); the unique index became partial (`WHERE valid_to IS NULL`) to allow that; `analyze_lineage` now walks `relations` instead of `entities.parent_ids`, resolving the redundancy (`parent_ids` demoted to derived/display-only); `point_in_time` traversal added; the viewer's independently-duplicated lineage traversal now delegates to `analyze_lineage`. Larger Bets (confidence/provenance fields) remain future work. See `MIGRATION.md`'s alpha.57 entry. |
-| 7 | [`07-information-categorization.md`](./07-information-categorization.md) | **✅ Quick Win implemented in v0.1.0-alpha.56** (2026-07-28). Shipped an additive `memory_type` enum column (`fact`/`event`/`procedure`/`decision`/`preference`, CoALA-style episodic/semantic/procedural plus decision/preference, CHECK-constrained, `DEFAULT 'fact'`) on `entities`, wired into `store_memory`/`search_memory` and the MCP tool layer. Phase 2 (embedding-cluster-assisted `domain` suggestions, never silent auto-tagging) remains future work. See `MIGRATION.md`'s alpha.56 entry. |
+| 7 | [`07-information-categorization.md`](./07-information-categorization.md) | **✅ Quick Win implemented in v0.1.0-alpha.56** (2026-07-28). Shipped an additive `memory_type` enum column (`fact`/`event`/`procedure`/`decision`/`preference`, CoALA-style episodic/semantic/procedural plus decision/preference, CHECK-constrained, `DEFAULT 'fact'`) on `entities`, wired into `store_memory`/`search_memory` and the MCP tool layer. See `MIGRATION.md`'s alpha.56 entry. **Phase 2's manual-scope precursor was later shipped (a `domain TEXT` column + `VALID_DOMAINS` service-layer enum, alpha.58) then fully removed (alpha.61)** — an adoption audit found it was a closed vocabulary hardcoded to one operator's personal project split, near-zero real adoption, and redundant with `tags`; the embedding-cluster-assisted UMAP/HDBSCAN *suggestion* pipeline Phase 2 actually proposed was never built and is now moot. See `MIGRATION.md`'s alpha.58/alpha.61 entries. |
 
 ## Cross-cutting findings worth noting before picking what to build
 
@@ -44,9 +44,11 @@ problem both documents separately warn about (two ways to say the same thing). *
 favor of the column**: shipped in v0.1.0-alpha.56 as a first-class, CHECK-constrained
 `memory_type` column (`fact`/`event`/`procedure`/`decision`/`preference`, `DEFAULT 'fact'`) —
 queryable/indexable and closed-vocabulary by construction, versus a tag-namespace convention that
-would still live in the same free-text tag table everything else does. Track 7's Phase 2 (a
-`domain` column + embedding-cluster-assisted UMAP/HDBSCAN suggestions) remains open. See
-`MIGRATION.md`'s alpha.56 entry.
+would still live in the same free-text tag table everything else does. Track 7's Phase 2
+manual-scope precursor (a `domain` column) was later shipped in alpha.58, then fully removed in
+alpha.61 as a generalization fix (near-zero adoption, hardcoded to one operator's project split);
+the embedding-cluster-assisted UMAP/HDBSCAN *suggestion* pipeline Phase 2 actually proposed was
+never built and is now moot. See `MIGRATION.md`'s alpha.56/alpha.58/alpha.61 entries.
 
 **Two tracks agree the current SQLite/schema-versioning choices are already good, not just
 tolerated.** Track 2 explicitly concludes the current WAL setup doesn't need a writer-queue/MVCC
@@ -77,8 +79,10 @@ Roughly cheapest-and-highest-value first, pooling all seven tracks' own phase la
 4. **Larger bets needing explicit buy-in:** vendoring `d3-force` for the graph view (Track 1, the
    one dependency-boundary exception), confidence/provenance fields on relations (Track 6),
    community/cluster detection over the relation graph (Track 4), faceted/hierarchical tag model
-   (Track 5) and Track 7's Phase 2 `domain` column + embedding-cluster-assisted suggestions (now
-   that the memory_type-vs-tag-facet collision is resolved in favor of the column, alpha.56).
+   (Track 5). Track 7's Phase 2 embedding-cluster-assisted `domain`-suggestion pipeline is now moot
+   — its manual-scope precursor shipped (alpha.58) and was later removed as a generalization fix
+   (alpha.61); building the suggestion layer on top of a column that no longer exists isn't a live
+   option without redesigning from scratch.
 
 ## Next step
 
