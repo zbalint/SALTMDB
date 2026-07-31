@@ -61,7 +61,11 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 > Adhere to these behavioral rules during all stages of execution to preserve token budget, prevent loops, and maintain memory integrity.
 
 0. **Owner Identifier**
-   * Use the default zbalint identifier as owner_id if i don't say to use something else in the session. 
+   * `owner_id` identifies the calling agent, not the human operator. Use a stable identifier for
+     yourself (e.g. `claude`, `gemini`, `assistant`) as `owner_id` for the session, unless the human
+     operator instructs otherwise. Worker subagents use their own fixed role id (e.g. `agent_docs`,
+     `agent_qa`). Never stamp the human operator's own name/identity as `owner_id` — that string is
+     reserved for referring to them as content/provenance context, not as an agent's own author tag.
 
 1. **Diagnose Before Prescribing (No Assumptions)**
    * When the user provides a task, error, or request, DO NOT immediately jump to conclusions, guess their setup, or assume the root cause.
