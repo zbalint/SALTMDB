@@ -46,7 +46,9 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
         return res.split("ID: ")[1].split()[0]
 
     def _consolidation_request_count(self, target=None):
-        rows = self.conn.execute("SELECT content FROM events WHERE type = 'consolidation_request'").fetchall()
+        rows = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'consolidation_request'"
+        ).fetchall()
         if target is None:
             return len(rows)
         return sum(1 for (c,) in rows if json.loads(c).get("target") == target)
@@ -70,7 +72,7 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
         self.assertEqual(self._consolidation_request_count("tag"), 1)
 
         # Resolve the backlog the first request was waiting on.
-        now = datetime.now(UTC).isoformat()
+        datetime.now(UTC).isoformat()
         placeholders = ",".join("?" for _ in ids)
         self.conn.execute(
             f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", ids
@@ -107,7 +109,9 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
         )
 
         placeholders = ",".join("?" for _ in ids)
-        self.conn.execute(f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", ids)
+        self.conn.execute(
+            f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", ids
+        )
         self.conn.commit()
 
         self.assertFalse(

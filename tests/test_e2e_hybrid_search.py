@@ -7,6 +7,7 @@ from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory, search_memory
 from saltmdb.domain.services.relation_service import store_relation
 
+
 class TestE2EHybridSearch(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -26,7 +27,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             owner_id="user1",
             context_id="ctx_quantum",
             skip_duplicate_check=True,
-            db_path=self.db_path
+            db_path=self.db_path,
         )
         id1 = res1.split("ID: ")[1].split()[0]
 
@@ -37,12 +38,14 @@ class TestE2EHybridSearch(unittest.TestCase):
             owner_id="user1",
             context_id="ctx_quantum",
             skip_duplicate_check=True,
-            db_path=self.db_path
+            db_path=self.db_path,
         )
         id2 = res2.split("ID: ")[1].split()[0]
 
         # Link id1 -> id2
-        store_relation(source_id=id1, target_id=id2, predicate="complements", db_connection=self.conn)
+        store_relation(
+            source_id=id1, target_id=id2, predicate="complements", db_connection=self.conn
+        )
 
         # Wait for background embedding generation
         time.sleep(0.5)
@@ -53,7 +56,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             owner_id="user1",
             context_id="ctx_quantum",
             include_related=True,
-            db_path=self.db_path
+            db_path=self.db_path,
         )
 
         self.assertTrue(len(results) > 0)
@@ -63,10 +66,19 @@ class TestE2EHybridSearch(unittest.TestCase):
         self.assertIn("related_entities", top)
 
     def test_explain_mode(self):
-        store_memory(title="Explain Test", content="Content for explain mode test", owner_id="user1", skip_duplicate_check=True, db_path=self.db_path)
-        explain_res = search_memory(query_keywords="content explain", explain_mode=True, db_path=self.db_path)
+        store_memory(
+            title="Explain Test",
+            content="Content for explain mode test",
+            owner_id="user1",
+            skip_duplicate_check=True,
+            db_path=self.db_path,
+        )
+        explain_res = search_memory(
+            query_keywords="content explain", explain_mode=True, db_path=self.db_path
+        )
         self.assertIn("explain", explain_res)
         self.assertIn("searched_terms_found", explain_res["explain"])
+
 
 if __name__ == "__main__":
     unittest.main()

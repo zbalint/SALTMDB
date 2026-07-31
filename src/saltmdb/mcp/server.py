@@ -10,9 +10,10 @@ from saltmdb.db.schema import init_db
 logging.basicConfig(
     stream=sys.stderr,
     level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
@@ -23,5 +24,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     conn.close()
     yield {}
     logger.info("SALTMDB server shutting down.")
+
 
 mcp = FastMCP("SALTMDB", lifespan=server_lifespan)

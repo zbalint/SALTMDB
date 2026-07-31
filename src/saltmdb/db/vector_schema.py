@@ -18,6 +18,7 @@ def init_vector_schema(conn: sqlite3.Connection) -> None:
     """
     conn.enable_load_extension(True)
     import sqlite_vec
+
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
 

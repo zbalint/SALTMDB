@@ -2,10 +2,10 @@ import unittest
 import tempfile
 import os
 import shutil
-import time
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 from saltmdb.utils import nlp
+
 
 class TestAdvancedQualityFeatures(unittest.TestCase):
     def setUp(self):
@@ -32,50 +32,40 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
             content=tech_log_payload,
             title="Technical Log Report",
             owner_id="test_agent",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res)
 
     def test_tc_adv_03_idempotent_auto_formatting(self):
         """TC-ADV-03: auto_format_markdown auto-annotates untyped code blocks and is idempotent f(f(x)) = f(x)"""
-        untyped_md = (
-            "# Code Block Test\n\n"
-            "```\n"
-            "def calculate_total(a, b):\n"
-            "    return a + b\n"
-            "```"
-        )
+        untyped_md = "# Code Block Test\n\n```\ndef calculate_total(a, b):\n    return a + b\n```"
         formatted_once = nlp.auto_format_markdown(untyped_md)
         self.assertIn("```python", formatted_once)
-        
+
         formatted_twice = nlp.auto_format_markdown(formatted_once)
         self.assertEqual(formatted_once, formatted_twice)
 
     def test_tc_adv_04_calibrated_auto_supersession(self):
         """TC-ADV-04: Calibrated Auto-Supersession (similarity >= 0.88) auto-stores 'supersedes' relation edge and lowers old weight"""
-        original_content = (
-            "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings."
-        )
+        original_content = "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings."
         res1 = memory_service.store_memory(
             content=original_content,
             title="SALTMDB Core Architecture Spec",
             owner_id="test_agent",
             weight=5.0,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res1)
-        orig_id = res1.split("ID: ")[1].strip()
+        res1.split("ID: ")[1].strip()
 
         # Near duplicate text with 1 word added out of 10 stemmed tokens (Jaccard sim = 9/10 = 0.90 >= 0.88)
-        updated_content = (
-            "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings extra."
-        )
+        updated_content = "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings extra."
         res2 = memory_service.store_memory(
             content=updated_content,
             title="SALTMDB Core Architecture Spec Revision",
             owner_id="test_agent",
             skip_duplicate_check=False,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res2)
 
@@ -103,6 +93,7 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         self.assertNotIn("LOW_SPECIFICITY", q_res["quality_flags"])
         self.assertNotIn("HAS_CODE", q_res["quality_flags"])
         self.assertGreaterEqual(q_res["quality_score"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

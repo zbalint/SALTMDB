@@ -1,0 +1,31 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.2
+    hooks:
+      - id: mypy
+        files: ^src/
+        args: [--config-file=pyproject.toml]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.0
+    hooks:
+      - id: gitleaks
+
+  # bandit runs as a local hook (not the upstream mirror) so it shares this repo's exact
+  # dev environment/config and honors .bandit-baseline.json (pre-existing, reviewed findings —
+  # see CONTRIBUTING.md §6). uv sync --extra dev must have been run at least once.
+  - repo: local
+    hooks:
+      - id: bandit
+        name: bandit (security scan, baselined)
+        entry: uv run bandit -c pyproject.toml -r src -b .bandit-baseline.json -q
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.py$

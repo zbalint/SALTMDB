@@ -2,26 +2,33 @@ import unittest
 import tempfile
 import os
 import shutil
-import json
 from saltmdb.db.schema import init_db
 from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.domain.services import relation_service
 from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
 
+
 class DummyRequest:
     def __init__(self, headers=None):
         self.headers = headers or {}
+
     def makefile(self, *args, **kwargs):
         import io
+
         return io.BytesIO(b"")
+
 
 class DummyServer:
     pass
 
+
 class BrokenWFile:
     def write(self, b):
-        raise ConnectionAbortedError(10053, "An established connection was aborted by the software in your host machine")
+        raise ConnectionAbortedError(
+            10053, "An established connection was aborted by the software in your host machine"
+        )
+
 
 class TestViewerRoutes(unittest.TestCase):
     def setUp(self):
@@ -97,14 +104,19 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             "- Detail alpha\n- Detail beta"
         )
         res = commit_consolidation(
-            parent_ids=[a, b], title=cons_title, content=content,
-            owner_id="viewer_tester", db_connection=self.conn
+            parent_ids=[a, b],
+            title=cons_title,
+            content=content,
+            owner_id="viewer_tester",
+            db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res)
         return a, b, res.split("ID: ")[1].strip()
 
     def test_get_lineage_delegates_and_matches_relation_service_directly(self):
-        a, b, c1 = self._consolidate_two("Viewer Lineage A", "Viewer Lineage B", "Viewer Lineage C1", "delegate-match")
+        a, b, c1 = self._consolidate_two(
+            "Viewer Lineage A", "Viewer Lineage B", "Viewer Lineage C1", "delegate-match"
+        )
 
         handler = self._handler()
         captured = self._capture_json(handler)
@@ -117,7 +129,11 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
 
         direct_ids = {n["id"] for n in direct["ancestors"]}
         payload_ids = {n["id"] for n in payload["nodes"]}
-        self.assertEqual(direct_ids, payload_ids, "handler's nodes list must match relation_service.analyze_lineage() directly")
+        self.assertEqual(
+            direct_ids,
+            payload_ids,
+            "handler's nodes list must match relation_service.analyze_lineage() directly",
+        )
 
         direct_by_id = {n["id"]: n for n in direct["ancestors"]}
         for node in payload["nodes"]:
@@ -127,7 +143,9 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             self.assertEqual(node["status"], d["status"])
 
     def test_get_lineage_nodes_have_depth_and_generation_depth_equal_and_expected_keys(self):
-        a, b, c1 = self._consolidate_two("Viewer Depth A", "Viewer Depth B", "Viewer Depth C1", "depth-keys")
+        a, b, c1 = self._consolidate_two(
+            "Viewer Depth A", "Viewer Depth B", "Viewer Depth C1", "depth-keys"
+        )
 
         handler = self._handler()
         captured = self._capture_json(handler)
@@ -139,8 +157,9 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             self.assertIn("depth", node)
             self.assertIn("generation_depth", node)
             self.assertEqual(
-                node["depth"], node["generation_depth"],
-                "the frontend's loadLineage() reads n.depth -- it must equal generation_depth"
+                node["depth"],
+                node["generation_depth"],
+                "the frontend's loadLineage() reads n.depth -- it must equal generation_depth",
             )
             self.assertIn("owner_id", node)
             self.assertIn("title", node)
@@ -154,7 +173,9 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         self.assertIn("error", captured["data"])
 
     def test_get_entities_and_entity_detail_parent_ids_populated_correctly(self):
-        a, b, c1 = self._consolidate_two("Viewer ParentIds A", "Viewer ParentIds B", "Viewer ParentIds C1", "parent-ids-pin")
+        a, b, c1 = self._consolidate_two(
+            "Viewer ParentIds A", "Viewer ParentIds B", "Viewer ParentIds C1", "parent-ids-pin"
+        )
 
         handler = self._handler()
         captured = self._capture_json(handler)
@@ -162,15 +183,17 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         entities_by_id = {e["id"]: e for e in captured["data"]["entities"]}
         self.assertIn(c1, entities_by_id, "consolidated entity must appear in get_entities results")
         self.assertEqual(
-            set(entities_by_id[c1]["parent_ids"]), {a, b},
-            "get_entities must correctly populate parent_ids via row['parent_ids'] key access"
+            set(entities_by_id[c1]["parent_ids"]),
+            {a, b},
+            "get_entities must correctly populate parent_ids via row['parent_ids'] key access",
         )
 
         captured2 = self._capture_json(handler)
         handler.get_entity_detail(c1)
         self.assertEqual(
-            set(captured2["data"]["parent_ids"]), {a, b},
-            "get_entity_detail must correctly populate parent_ids via row['parent_ids'] key access"
+            set(captured2["data"]["parent_ids"]),
+            {a, b},
+            "get_entity_detail must correctly populate parent_ids via row['parent_ids'] key access",
         )
 
 

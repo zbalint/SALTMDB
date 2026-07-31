@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Module-level ephemeral in-memory connection (singleton)
 EPHEMERAL_CONN = sqlite3.connect(":memory:", check_same_thread=False, timeout=10.0)
 
+
 def init_ephemeral_db():
     with EPHEMERAL_CONN:
         EPHEMERAL_CONN.execute("""
@@ -25,8 +26,10 @@ def init_ephemeral_db():
         );
         """)
 
+
 # Initialize the ephemeral database immediately upon module load
 init_ephemeral_db()
+
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     """Create a new per-request connection configured with optimized PRAGMAs."""
@@ -96,9 +99,12 @@ def write_transaction_retrying(conn: sqlite3.Connection, fn):
                 return fn(c)
         except sqlite3.OperationalError as e:
             err_msg = str(e).lower()
-            if not any(m in err_msg for m in ("database is locked", "database is busy")) or attempt >= RETRY_MAX_ATTEMPTS:
+            if (
+                not any(m in err_msg for m in ("database is locked", "database is busy"))
+                or attempt >= RETRY_MAX_ATTEMPTS
+            ):
                 raise
-            delay = RETRY_BASE_DELAY_S * (2 ** attempt) + random.uniform(0, RETRY_JITTER_S)
+            delay = RETRY_BASE_DELAY_S * (2**attempt) + random.uniform(0, RETRY_JITTER_S)
             logger.warning(
                 "Write transaction hit lock contention on attempt %d/%d; retrying in %.3fs",
                 attempt + 1,
@@ -145,6 +151,7 @@ def close_connection(conn: sqlite3.Connection) -> None:
 def managed_connection(db_connection=None, db_path=None):
     """Context manager that acquires a connection if not provided, and closes it on exit."""
     from saltmdb.config import get_db_path as _get_db_path
+
     should_close = db_connection is None
     conn = db_connection if db_connection is not None else get_connection(db_path or _get_db_path())
     try:

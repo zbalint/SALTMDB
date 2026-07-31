@@ -22,8 +22,10 @@ scratch*/
 
 # Excluded example memory dataset
 example_data/
-scratch/
 .claude*/
+tmp/
+*.lock
+!uv.lock
 
 ISSUES*.md
 UPGRADE*.md

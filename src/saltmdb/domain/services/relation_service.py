@@ -3,15 +3,16 @@ import json
 import logging
 import re
 from datetime import datetime, UTC
-from typing import Literal
+from typing import Any, Literal
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
-from saltmdb.utils.text import resolve_entity_id, extract_title_and_snippet, compute_content_hash
+from saltmdb.utils.text import resolve_entity_id, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
 
 logger = logging.getLogger(__name__)
+
 
 def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None) -> str | None:
     """Write-time predicate canonicalization. Must be called inside an open write transaction
@@ -29,38 +30,41 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
     raw = (predicate_name or "").strip()
     if not raw:
         return None
-    normalized = re.sub(r'[^a-z0-9]+', '_', raw.lower()).strip('_')
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
     if not normalized:
         return None
 
     row = conn.execute(
         "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
-        "WHERE p.name = ?", (normalized,)
+        "WHERE p.name = ?",
+        (normalized,),
     ).fetchone()
     if row:
         return row[1] if row[1] else row[0]
 
     row = conn.execute(
         "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
-        "WHERE p.normalized_name = ?", (normalized,)
+        "WHERE p.normalized_name = ?",
+        (normalized,),
     ).fetchone()
     if row:
         return row[1] if row[1] else row[0]
 
     conn.execute(
         "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-        (str(uuid.uuid4()), normalized, normalized)
+        (str(uuid.uuid4()), normalized, normalized),
     )
     row = conn.execute(
         "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
-        "WHERE p.name = ?", (normalized,)
+        "WHERE p.name = ?",
+        (normalized,),
     ).fetchone()
     if row:
         return row[1] if row[1] else row[0]
     return normalized
 
 
-def get_canonical_predicates(query: str = None, db_connection = None, db_path: str = None) -> list:
+def get_canonical_predicates(query: str = None, db_connection=None, db_path: str = None) -> list:
     """Mirrors memory_service.get_canonical_tags for the predicates table."""
     should_close = False
     conn = db_connection
@@ -72,7 +76,7 @@ def get_canonical_predicates(query: str = None, db_connection = None, db_path: s
         if query:
             cursor = conn.execute(
                 "SELECT id, name FROM predicates WHERE canonical_id IS NULL AND name LIKE ?",
-                (f"%{query}%",)
+                (f"%{query}%",),
             )
         else:
             cursor = conn.execute("SELECT id, name FROM predicates WHERE canonical_id IS NULL")
@@ -84,14 +88,15 @@ def get_canonical_predicates(query: str = None, db_connection = None, db_path: s
         if should_close:
             close_connection(conn)
 
-def store_relation(
+
+def store_relation(  # noqa: C901
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
     valid_at: str | None = None,
-    db_connection = None,
+    db_connection=None,
     db_path: str = None,
-    _in_transaction: bool = False
+    _in_transaction: bool = False,
 ) -> str:
     """Stores a directional relationship edge between two knowledge entities.
 
@@ -125,18 +130,30 @@ def store_relation(
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     try:
+
         def _do_store():
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
             effective_valid_at = valid_at or now
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-            """, (relation_id, resolved_source, resolved_target, canonical_predicate, now, now, effective_valid_at))
+            """,
+                (
+                    relation_id,
+                    resolved_source,
+                    resolved_target,
+                    canonical_predicate,
+                    now,
+                    now,
+                    effective_valid_at,
+                ),
+            )
             if cursor.rowcount == 0:
                 existing = conn.execute(
                     "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-                    (resolved_source, resolved_target, canonical_predicate)
+                    (resolved_source, resolved_target, canonical_predicate),
                 ).fetchone()
                 existing_id = existing[0] if existing else relation_id
                 return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_id})"
@@ -145,8 +162,10 @@ def store_relation(
         if _in_transaction:
             result_msg = _do_store()
         else:
+
             def _write(c):
                 return _do_store()
+
             result_msg = write_transaction_retrying(conn, _write)
         return result_msg
     except Exception as e:
@@ -156,14 +175,15 @@ def store_relation(
         if should_close:
             close_connection(conn)
 
-def invalidate_relation(
+
+def invalidate_relation(  # noqa: C901
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
     invalid_at: str | None = None,
-    db_connection = None,
+    db_connection=None,
     db_path: str = None,
-    _in_transaction: bool = False
+    _in_transaction: bool = False,
 ) -> str:
     """Invalidates an active relationship edge on the event/world-time axis (invalid_at).
 
@@ -189,36 +209,41 @@ def invalidate_relation(
 
     now = datetime.now(UTC).isoformat()
     try:
+
         def _do_invalidate():
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
             existing = conn.execute(
                 "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-                (resolved_source, resolved_target, canonical_predicate)
+                (resolved_source, resolved_target, canonical_predicate),
             ).fetchone()
             if not existing:
                 existing = conn.execute(
                     "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND invalid_at IS NOT NULL ORDER BY rowid DESC",
-                    (resolved_source, resolved_target, canonical_predicate)
+                    (resolved_source, resolved_target, canonical_predicate),
                 ).fetchone()
             if not existing:
                 return "Error: relation not found"
 
             rel_id, existing_invalid_at = existing
             if existing_invalid_at is not None:
-                return f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
+                return (
+                    f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
+                )
 
             effective_invalid_at = invalid_at or now
             conn.execute(
                 "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
-                (effective_invalid_at, effective_invalid_at, rel_id)
+                (effective_invalid_at, effective_invalid_at, rel_id),
             )
             return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id})"
 
         if _in_transaction:
             result_msg = _do_invalidate()
         else:
+
             def _write(c):
                 return _do_invalidate()
+
             result_msg = write_transaction_retrying(conn, _write)
         return result_msg
     except Exception as e:
@@ -228,12 +253,13 @@ def invalidate_relation(
         if should_close:
             close_connection(conn)
 
+
 def analyze_dependencies(
     root_entity_id: str = None,
     max_depth: int = 5,
     point_in_time: str = None,
-    db_connection = None,
-    db_path: str = None
+    db_connection=None,
+    db_path: str = None,
 ) -> dict:
     """Recursively traces downstream relational paths using SQL CTEs."""
     if not root_entity_id:
@@ -257,7 +283,11 @@ def analyze_dependencies(
     try:
         cursor = conn.execute("SELECT id, title, status FROM entities WHERE id = ?", (root_id,))
         root_row = cursor.fetchone()
-        root_info = {"id": root_row[0], "title": root_row[1], "status": root_row[2]} if root_row else {"id": root_id, "title": "Root", "status": "raw"}
+        root_info = (
+            {"id": root_row[0], "title": root_row[1], "status": root_row[2]}
+            if root_row
+            else {"id": root_id, "title": "Root", "status": "raw"}
+        )
 
         query = """
         WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
@@ -287,51 +317,55 @@ def analyze_dependencies(
         """
         cursor = conn.execute(query, (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit))
         rows = cursor.fetchall()
-        
+
         id_to_title = {root_id: root_info.get("title", root_id)}
         for r in rows:
             id_to_title[r[1]] = r[2]
             id_to_title[r[3]] = r[4]
-            
-        nodes = [{
-            "id": root_id,
-            "title": root_info.get("title"),
-            "depth": 0,
-            "path": root_info.get("title", root_id)
-        }]
+
+        nodes = [
+            {
+                "id": root_id,
+                "title": root_info.get("title"),
+                "depth": 0,
+                "path": root_info.get("title", root_id),
+            }
+        ]
         seen_nodes = {root_id}
-        
+
         edges = []
         for r in rows:
             rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, raw_path = r
-            formatted_path = " -> ".join(id_to_title.get(part, part) for part in raw_path.split("->"))
-            
+            formatted_path = " -> ".join(
+                id_to_title.get(part, part) for part in raw_path.split("->")
+            )
+
             if tgt_id not in seen_nodes:
-                nodes.append({
-                    "id": tgt_id,
-                    "title": tgt_title,
-                    "depth": depth,
-                    "path": formatted_path
-                })
+                nodes.append(
+                    {"id": tgt_id, "title": tgt_title, "depth": depth, "path": formatted_path}
+                )
                 seen_nodes.add(tgt_id)
-                
-            edges.append({
-                "relation_id": rel_id,
-                "source_id": src_id,
-                "source_title": src_title,
-                "target_id": tgt_id,
-                "target_title": tgt_title,
-                "predicate": pred,
-                "depth": depth,
-                "path": formatted_path
-            })
-            
+
+            edges.append(
+                {
+                    "relation_id": rel_id,
+                    "source_id": src_id,
+                    "source_title": src_title,
+                    "target_id": tgt_id,
+                    "target_title": tgt_title,
+                    "predicate": pred,
+                    "depth": depth,
+                    "path": formatted_path,
+                }
+            )
+
         return {
             "root": root_info,
             "total_dependencies_found": len(edges),
-            "graph_exhausted": len(edges) == 0 or max([e["depth"] for e in edges], default=0) < max_depth,
+            "graph_exhausted": len(edges) == 0
+            or max([e["depth"] for e in edges], default=0) < max_depth,
             "dependencies": nodes,
-            "point_in_time": pit
+            "point_in_time": pit,
         }
     except Exception as e:
         logger.error("Error analyzing dependencies: %s", e)
@@ -340,7 +374,10 @@ def analyze_dependencies(
         if should_close:
             close_connection(conn)
 
-def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connection = None, db_path: str = None) -> dict:
+
+def analyze_lineage(
+    entity_id: str = None, point_in_time: str = None, db_connection=None, db_path: str = None
+) -> dict:
     """Traverses full multi-generation consolidation and derivation ancestry.
 
     Note: `parent_ids` on entities is now derived/display-only -- the `relations` table's
@@ -365,11 +402,29 @@ def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connect
     pit = point_in_time or datetime.now(UTC).isoformat()
 
     try:
-        cursor = conn.execute("SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?", (target_id,))
+        cursor = conn.execute(
+            "SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?",
+            (target_id,),
+        )
         root_row = cursor.fetchone()
         root_info = (
-            {"id": root_row[0], "title": root_row[1], "status": root_row[2], "owner_id": root_row[3], "updated_at": root_row[4], "generation_depth": 0}
-            if root_row else {"id": target_id, "title": "Root", "status": "raw", "owner_id": None, "updated_at": None, "generation_depth": 0}
+            {
+                "id": root_row[0],
+                "title": root_row[1],
+                "status": root_row[2],
+                "owner_id": root_row[3],
+                "updated_at": root_row[4],
+                "generation_depth": 0,
+            }
+            if root_row
+            else {
+                "id": target_id,
+                "title": "Root",
+                "status": "raw",
+                "owner_id": None,
+                "updated_at": None,
+                "generation_depth": 0,
+            }
         )
 
         query = """
@@ -404,21 +459,23 @@ def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connect
             if aid in seen_nodes:
                 continue
             seen_nodes.add(aid)
-            ancestry.append({
-                "id": aid,
-                "title": r[1],
-                "status": r[2],
-                "owner_id": r[3],
-                "updated_at": r[4],
-                "generation_depth": r[5]
-            })
+            ancestry.append(
+                {
+                    "id": aid,
+                    "title": r[1],
+                    "status": r[2],
+                    "owner_id": r[3],
+                    "updated_at": r[4],
+                    "generation_depth": r[5],
+                }
+            )
 
         return {
             "entity_id": target_id,
             "total_ancestors": max(len(ancestry) - 1, 0),
             "ancestry_tree": ancestry,
             "ancestors": ancestry,
-            "point_in_time": pit
+            "point_in_time": pit,
         }
     except Exception as e:
         logger.error("Error analyzing lineage: %s", e)
@@ -427,18 +484,19 @@ def analyze_lineage(entity_id: str = None, point_in_time: str = None, db_connect
         if should_close:
             close_connection(conn)
 
-def commit_consolidation(
+
+def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     parent_ids: list[str],
     title: str,
     content: str,
     tags: list[str] = None,
-    scope: Literal['private', 'shared'] = "shared",
+    scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
     owner_id: str = None,
     context_id: str = None,
-    db_connection = None,
+    db_connection=None,
     db_path: str = None,
-    _in_transaction: bool = False
+    _in_transaction: bool = False,
 ) -> str:
     """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations.
 
@@ -478,10 +536,10 @@ def commit_consolidation(
         if should_close:
             close_connection(conn)
         return "Error: None of the provided parent_ids could be resolved."
-        
+
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
-    owner_val = owner_id or 'system'
+    owner_val = owner_id or "system"
 
     # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
     quality_res = evaluate_memory_quality(redacted_content, clean_title)
@@ -519,46 +577,80 @@ def commit_consolidation(
             content=redacted_content,
             owner_id=owner_val,
             exclude_ids=resolved_parents,
-            db_connection=conn
+            db_connection=conn,
         )
         if dup_check.get("duplicate_found") and "error" not in dup_check:
             top = dup_check["potential_duplicates"][0]
-            logger.warning("Consolidation potential near-duplicate detected against unrelated memory '%s' (ID: %s)", top['title'], top['id'])
+            logger.warning(
+                "Consolidation potential near-duplicate detected against unrelated memory '%s' (ID: %s)",
+                top["title"],
+                top["id"],
+            )
     except Exception:
         pass
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
-    
+
     try:
+
         def _do_commit():
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (consolidated_id, now, now, now, owner_val, scope, weight, json.dumps(resolved_parents), clean_title, redacted_content, now, context_id, content_hash, quality_score, quality_status, quality_flags_str))
+            """,
+                (
+                    consolidated_id,
+                    now,
+                    now,
+                    now,
+                    owner_val,
+                    scope,
+                    weight,
+                    json.dumps(resolved_parents),
+                    clean_title,
+                    redacted_content,
+                    now,
+                    context_id,
+                    content_hash,
+                    quality_score,
+                    quality_status,
+                    quality_flags_str,
+                ),
+            )
 
             if tags:
                 for tag_name in tags:
                     tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_val)
                     if not tag_id:
                         continue
-                    conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (consolidated_id, tag_id))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                        (consolidated_id, tag_id),
+                    )
 
             placeholders = ",".join("?" for _ in resolved_parents)
-            conn.execute(f"""
+            conn.execute(
+                f"""
                 UPDATE entities
                 SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id IN ({placeholders})
-            """, [now, now] + resolved_parents)
+            """,
+                [now, now] + resolved_parents,
+            )
 
             parent_set = set(resolved_parents)
-            active_touching_rows = conn.execute(f"""
+            active_touching_rows = conn.execute(
+                f"""
                 SELECT id, source_id, target_id, predicate, valid_at, invalid_at
                 FROM relations
                 WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
                   AND valid_to IS NULL
                   AND predicate != 'consolidated_from'
-            """, resolved_parents + resolved_parents).fetchall()
+            """,
+                resolved_parents + resolved_parents,
+            ).fetchall()
 
             for rel_id, src, tgt, pred, old_valid_at, old_invalid_at in active_touching_rows:
                 conn.execute("UPDATE relations SET valid_to = ? WHERE id = ?", (now, rel_id))
@@ -568,24 +660,41 @@ def commit_consolidation(
                 if new_src == new_tgt:
                     continue  # self-loop guard: edge was directly between two parents in this batch
 
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at, invalid_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-                """, (str(uuid.uuid4()), new_src, new_tgt, pred, now, now, old_valid_at, old_invalid_at))
+                """,
+                    (
+                        str(uuid.uuid4()),
+                        new_src,
+                        new_tgt,
+                        pred,
+                        now,
+                        now,
+                        old_valid_at,
+                        old_invalid_at,
+                    ),
+                )
 
             for parent_id in resolved_parents:
                 rel_id = str(uuid.uuid4())
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
                     VALUES (?, ?, ?, 'consolidated_from', ?, ?)
-                """, (rel_id, consolidated_id, parent_id, now, now))
+                """,
+                    (rel_id, consolidated_id, parent_id, now, now),
+                )
 
         if _in_transaction:
             _do_commit()
         else:
+
             def _write(c):
                 _do_commit()
+
             write_transaction_retrying(conn, _write)
 
         try:
@@ -595,7 +704,14 @@ def commit_consolidation(
         if target_db:
             from saltmdb.domain.services import embedding_service
             from saltmdb.domain.services.memory_service import _embed_pool
-            _embed_pool.submit(embedding_service.embed_entity_async, consolidated_id, clean_title, redacted_content, target_db)
+
+            _embed_pool.submit(
+                embedding_service.embed_entity_async,
+                consolidated_id,
+                clean_title,
+                redacted_content,
+                target_db,
+            )
 
         return f"Successfully committed consolidated memory with ID: {consolidated_id}"
     except Exception as e:
@@ -605,7 +721,10 @@ def commit_consolidation(
         if should_close:
             close_connection(conn)
 
-def bulk_commit_consolidation(consolidations: list, db_connection = None, db_path: str = None) -> list:
+
+def bulk_commit_consolidation(
+    consolidations: list, db_connection=None, db_path: str = None
+) -> list:
     """Executes multiple consolidation commits atomically in a single transaction -- all-or-nothing.
 
     If any item raises (or would otherwise be reported as an error), the whole batch rolls
@@ -623,8 +742,9 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
         conn = get_connection(db_path)
         should_close = True
 
-    results = []
+    results: list[Any] = []
     try:
+
         def _write(conn_arg):
             results.clear()
             for item in consolidations:
@@ -635,21 +755,36 @@ def bulk_commit_consolidation(consolidations: list, db_connection = None, db_pat
                 scope = item.get("scope", "shared")
                 w = item.get("weight", 1)
 
-                res = commit_consolidation(parent_ids=p_ids, title=t, content=c, tags=tags, scope=scope, weight=w, db_connection=conn, _in_transaction=True)
+                res = commit_consolidation(
+                    parent_ids=p_ids,
+                    title=t,
+                    content=c,
+                    tags=tags,
+                    scope=scope,
+                    weight=w,
+                    db_connection=conn,
+                    _in_transaction=True,
+                )
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")
                 new_id = res.split("ID: ")[-1].strip()
-                results.append({"status": "success", "entity_id": new_id, "title": t, "result": res})
+                results.append(
+                    {"status": "success", "entity_id": new_id, "title": t, "result": res}
+                )
+
         write_transaction_retrying(conn, _write)
         return results
     except Exception as e:
-        logger.error("Bulk commit consolidation error (batch rolled back, no items consolidated): %s", e)
+        logger.error(
+            "Bulk commit consolidation error (batch rolled back, no items consolidated): %s", e
+        )
         return [{"status": "error", "error": str(e)}]
     finally:
         if should_close:
             close_connection(conn)
 
-def bulk_store_relations(relations: list, db_connection = None, db_path: str = None) -> list:
+
+def bulk_store_relations(relations: list, db_connection=None, db_path: str = None) -> list:
     """Executes multiple relation insertions atomically in a single transaction -- all-or-nothing.
 
     If any item raises (or would otherwise be reported as an error), the whole batch rolls
@@ -667,8 +802,9 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
         conn = get_connection(db_path)
         should_close = True
 
-    results = []
+    results: list[Any] = []
     try:
+
         def _write(c):
             results.clear()
             for r in relations:
@@ -676,11 +812,27 @@ def bulk_store_relations(relations: list, db_connection = None, db_path: str = N
                 tgt = r.get("target_id")
                 pred = r.get("predicate")
                 valid_at = r.get("valid_at")
-                res = store_relation(source_id=src, target_id=tgt, predicate=pred, valid_at=valid_at, db_connection=conn, _in_transaction=True)
+                res = store_relation(
+                    source_id=src,
+                    target_id=tgt,
+                    predicate=pred,
+                    valid_at=valid_at,
+                    db_connection=conn,
+                    _in_transaction=True,
+                )
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
                 status = "duplicate" if res.startswith("Relation already exists") else "success"
-                results.append({"status": status, "source": src, "target": tgt, "predicate": pred, "result": res})
+                results.append(
+                    {
+                        "status": status,
+                        "source": src,
+                        "target": tgt,
+                        "predicate": pred,
+                        "result": res,
+                    }
+                )
+
         write_transaction_retrying(conn, _write)
         return results
     except Exception as e:

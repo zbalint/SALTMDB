@@ -5,12 +5,10 @@ import shutil
 import sqlite3
 import threading
 import time
-import logging
 
 from saltmdb.config import RETRY_MAX_ATTEMPTS
 from saltmdb.db.connection import (
     get_connection,
-    write_transaction,
     write_transaction_retrying,
     close_connection,
 )
@@ -26,7 +24,13 @@ class _FlakyConnWrapper:
     directly -- see test comments below for why this wrapper approach is used instead).
     """
 
-    def __init__(self, real_conn, n_failures, error_message="database is locked", fail_on_substring="BEGIN IMMEDIATE"):
+    def __init__(
+        self,
+        real_conn,
+        n_failures,
+        error_message="database is locked",
+        fail_on_substring="BEGIN IMMEDIATE",
+    ):
         self._real = real_conn
         self._remaining_failures = n_failures
         self._error_message = error_message
@@ -77,7 +81,7 @@ class TestWriteTransactionCommitRollback(unittest.TestCase):
             lambda c: c.execute(
                 "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
                 ("evt-commit-1", "agent_qa", "test", "commit-test"),
-            )
+            ),
         )
 
         # Open a second, independent connection to the same file and confirm the row
@@ -137,6 +141,7 @@ class TestBeginImmediateContention(unittest.TestCase):
 
         def hold_lock_on_conn_a():
             try:
+
                 def _write(c):
                     c.execute(
                         "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
@@ -146,6 +151,7 @@ class TestBeginImmediateContention(unittest.TestCase):
                     # (i.e. after BEGIN IMMEDIATE + the INSERT have both succeeded).
                     lock_held_event.set()
                     time.sleep(HOLD_SECONDS)
+
                 write_transaction_retrying(self.conn_a, _write)
             except Exception as e:  # pragma: no cover - defensive, surfaced via thread_error
                 thread_error.append(e)
@@ -162,7 +168,7 @@ class TestBeginImmediateContention(unittest.TestCase):
             lambda c: c.execute(
                 "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
                 ("evt-waiter", "agent_qa", "test", "written-by-main-thread"),
-            )
+            ),
         )
         elapsed = time.monotonic() - start
 
@@ -175,15 +181,17 @@ class TestBeginImmediateContention(unittest.TestCase):
         # fraction of HOLD_SECONDS -- an instantaneous success would indicate the write lock
         # was never actually contended (i.e. BEGIN IMMEDIATE silently not taking effect).
         self.assertGreater(
-            elapsed, HOLD_SECONDS * 0.5,
+            elapsed,
+            HOLD_SECONDS * 0.5,
             f"second writer succeeded too quickly ({elapsed:.3f}s) -- BEGIN IMMEDIATE "
-            "may not actually be blocking on the held write lock"
+            "may not actually be blocking on the held write lock",
         )
 
         # Both rows must be present -- the holder's write committed, and the waiter's
         # write succeeded after the wait rather than being silently dropped.
         rows = {
-            r[0] for r in self.conn_b.execute(
+            r[0]
+            for r in self.conn_b.execute(
                 "SELECT id FROM events WHERE id IN ('evt-holder', 'evt-waiter')"
             ).fetchall()
         }
@@ -241,7 +249,9 @@ class TestWriteTransactionRetryingRetryBehavior(unittest.TestCase):
         )
 
         with self.assertRaises(sqlite3.OperationalError) as ctx:
-            write_transaction_retrying(wrapper, lambda c: c.execute("INSERT INTO ghost_table VALUES (1)"))
+            write_transaction_retrying(
+                wrapper, lambda c: c.execute("INSERT INTO ghost_table VALUES (1)")
+            )
         self.assertIn("no such table", str(ctx.exception).lower())
 
         # Only the single, non-retried attempt should have touched BEGIN IMMEDIATE.
@@ -255,7 +265,9 @@ class TestWriteTransactionRetryingRetryBehavior(unittest.TestCase):
         """
         real_conn = sqlite3.connect(":memory:", isolation_level=None)
         real_conn.execute("CREATE TABLE t (x INTEGER)")
-        wrapper = _FlakyConnWrapper(real_conn, n_failures=1, error_message="database is locked", fail_on_substring="INSERT")
+        wrapper = _FlakyConnWrapper(
+            real_conn, n_failures=1, error_message="database is locked", fail_on_substring="INSERT"
+        )
 
         invocations = 0
 

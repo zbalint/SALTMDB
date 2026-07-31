@@ -13,9 +13,20 @@ authors = [
 license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=0.1.0",
-    "sqlite-vec>=0.1.0",
-    "fastembed>=0.3.0"
+    "mcp>=1.28.1,<2.0.0",
+    "sqlite-vec>=0.1.9,<0.2.0",
+    "fastembed>=0.8.0,<0.9.0",
+    "numpy>=1.26.0,<3.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.14.0,<0.15.0",
+    "mypy>=1.14.0,<2.0.0",
+    "bandit>=1.8.0,<2.0.0",
+    "pip-audit>=2.9.0,<3.0.0",
+    "deptry>=0.23.0,<0.24.0",
+    "pre-commit>=4.0.0,<5.0.0"
 ]
 
 [project.urls]
@@ -30,3 +41,52 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "C90", "PLR"]
+# E501: ruff format already wraps executable code to `line-length`; remaining long lines are
+# string/comment literals the formatter won't split, not a code-quality signal worth blocking on.
+ignore = ["E501", "PLR0913", "PLR2004"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.mypy]
+# Set above requires-python's 3.10 floor: the installed numpy>=2.5 stub uses PEP 695 `type`
+# statements unconditionally, which mypy can only parse when python_version >= 3.12. This only
+# affects how mypy reads dependency stubs, not a runtime requirement for this project.
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# This is a first-time mypy adoption pass (2026-07-31) on a codebase with no prior type-check
+# baseline. The public MCP tool signatures in mcp/tools.py pervasively use `param: str = None`
+# (relying on the pre-PEP-484-strict implicit-Optional reading) for FastMCP's schema generation —
+# rewriting ~60 of those call signatures to `str | None = None` is a real, separately-reviewable
+# change to a documented public API surface (CONTRIBUTING.md's Doc Sync Checklist requires an
+# AGENT_GUIDE.md update for any public tool signature change), not something to do as a drive-by
+# part of wiring up a linter. Restoring the legacy implicit-Optional reading here unblocks mypy
+# without that rewrite; revisit if/when tools.py signatures get modernized on their own.
+implicit_optional = true
+exclude = ["tests/"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+# B608 (hardcoded_sql_expressions) is a systemic false positive here: verified by sampling every
+# call site across viewer/routes.py, domain/services/{memory,relation,librarian,event}_service.py,
+# and db/locks.py (2026-07-31 tool-adoption pass) — all f-string SQL interpolation is either a
+# dynamically-sized `?` placeholder run (`",".join("?" for _ in ids)`) or an internal config
+# constant (weights/cooldowns/snippet markers), never attacker-controlled text; every actual value
+# is bound via `?` parameters. Real SQL-injection risk would still be a `bandit` rule, just not
+# this one — B608 can't distinguish identifier/placeholder interpolation from unsafe value
+# interpolation, so it's disabled at the project level instead of ~30 near-duplicate `# nosec`s.
+skips = ["B608"]
+
+[tool.deptry]
+exclude = ["tests", ".venv"]
+pep621_dev_dependency_groups = ["dev"]

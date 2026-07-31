@@ -975,7 +975,7 @@ def get_frontend_html(db_path: str = None) -> str:
             currentView = viewId;
             document.querySelectorAll('.view-container').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-            
+
             const targetView = document.getElementById('view-' + viewId);
             const targetNav = document.getElementById('nav-' + viewId);
             if (targetView) targetView.classList.add('active');
@@ -1013,18 +1013,18 @@ def get_frontend_html(db_path: str = None) -> str:
             try {
                 const res = await fetch('/api/stats');
                 const data = await res.json();
-                
+
                 document.getElementById('dash-stat-entities').innerText = data.total_entities || 0;
                 document.getElementById('dash-stat-events').innerText = data.total_events || 0;
                 document.getElementById('dash-stat-relations').innerText = data.total_relations || 0;
-                
+
                 const ready = data.embeddings_ready || 0;
                 const active = data.active_entities || (data.raw_count || 0) + (data.consolidated_count || 0);
                 const readyPct = Math.round((ready / Math.max(1, active)) * 100);
                 document.getElementById('dash-stat-embeddings').innerText = readyPct + '%';
                 const descEl = document.getElementById('dash-stat-embeddings-desc');
                 if (descEl) descEl.innerText = `${ready} / ${active} active memories indexed`;
-                
+
                 document.getElementById('db-size-label').innerText = 'Database Size: ' + (data.db_size_mb || 0) + ' MB';
 
                 document.getElementById('donut-raw-val').innerText = data.raw_count || 0;
@@ -1173,7 +1173,7 @@ def get_frontend_html(db_path: str = None) -> str:
                     return;
                 }
                 document.getElementById('modal-entity-title').innerText = data.title || 'Entity Detail';
-                
+
                 const metaHtml = `
                     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:16px; background:rgba(255,255,255,0.03); padding:14px; border-radius:8px; border:var(--glass-border); font-size:0.8rem;">
                         <div><strong style="color:var(--text-muted);">Status:</strong> <span class="badge ${data.status==='raw'?'badge-green':(data.status==='consolidated'?'badge-yellow':'badge-red')}">${data.status}</span></div>
@@ -1380,7 +1380,7 @@ def get_frontend_html(db_path: str = None) -> str:
         function updateDynamicPredicateDropdown(currentSelected) {
             const select = document.getElementById('graph-predicate-filter');
             const sortedPredicates = Array.from(knownPredicates).sort();
-            
+
             let html = '<option value="">All Predicates (' + sortedPredicates.length + ' types)</option>';
             sortedPredicates.forEach(p => {
                 const sel = (p === currentSelected) ? 'selected' : '';
@@ -1395,7 +1395,7 @@ def get_frontend_html(db_path: str = None) -> str:
             if (pred === 'derived_from') return 'badge-blue';
             if (pred === 'complements') return 'badge-green';
             if (pred === 'resolves') return 'badge-yellow';
-            
+
             const badgeClasses = ['badge-purple', 'badge-blue', 'badge-green', 'badge-yellow', 'badge-red'];
             let hash = 0;
             for (let i = 0; i < pred.length; i++) hash = pred.charCodeAt(i) + ((hash << 5) - hash);

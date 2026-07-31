@@ -7,6 +7,7 @@ from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
 from saltmdb.utils import text
 
+
 class TestConsolidationQualityGate(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -26,14 +27,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Raw Fact Alpha",
             content="Detailed raw fact content alpha for consolidation testing",
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         ).split("ID: ")[1]
 
         p2 = store_memory(
             title="Raw Fact Beta",
             content="Detailed raw fact content beta for consolidation testing",
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         ).split("ID: ")[1]
 
         res = commit_consolidation(
@@ -41,7 +42,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Consolidation Test",
             content="consolidated these files.",
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Error: Consolidation quality check rejected", res)
 
@@ -58,7 +59,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             content=parent_content,
             owner_id="agent_c",
             db_connection=self.conn,
-            skip_duplicate_check=True
+            skip_duplicate_check=True,
         ).split("ID: ")[1]
 
         # Consolidate with identical content as parent_content
@@ -67,7 +68,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Consolidated Memory Arch Spec",
             content=parent_content,
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
 
@@ -82,14 +83,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Unrelated Module",
             content=existing_markdown,
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
         p1 = store_memory(
             title="Raw Fact Gamma",
             content="Detailed raw fact content gamma for consolidation testing",
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         ).split("ID: ")[1]
 
         # Attempt to consolidate p1 using content that matches the unrelated existing memory
@@ -98,7 +99,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Consolidated Attempt",
             content=existing_markdown,
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("REJECT_EXACT_DUPLICATE", res)
 
@@ -108,7 +109,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Raw Fact Delta",
             content="Detailed raw fact content delta for consolidation testing",
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         ).split("ID: ")[1]
 
         consolidated_md = (
@@ -127,14 +128,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Consolidated Overview",
             content=consolidated_md,
             owner_id="agent_c",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
         c_id = res.split("ID: ")[1].strip()
 
         cursor = self.conn.execute(
             "SELECT quality_score, quality_status, quality_flags, content_hash FROM entities WHERE id = ?",
-            (c_id,)
+            (c_id,),
         )
         row = cursor.fetchone()
         self.assertIsNotNone(row)
@@ -143,6 +144,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
         self.assertEqual(q_status, "ACCEPT")
         self.assertIn("HAS_HEADERS", q_flags)
         self.assertEqual(c_hash, text.compute_content_hash(consolidated_md))
+
 
 if __name__ == "__main__":
     unittest.main()

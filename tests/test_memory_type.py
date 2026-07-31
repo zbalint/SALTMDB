@@ -37,7 +37,9 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
                 skip_duplicate_check=True,
                 db_connection=self.conn,
             )
-            self.assertFalse(res.startswith("Error"), f"store_memory failed for memory_type={mt}: {res}")
+            self.assertFalse(
+                res.startswith("Error"), f"store_memory failed for memory_type={mt}: {res}"
+            )
             entity_id = res.split("ID: ")[1].strip()
             self.assertEqual(self._memory_type_of(entity_id), mt)
 
@@ -89,8 +91,9 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         )
         self.assertFalse(update_res.startswith("Error"))
         self.assertEqual(
-            self._memory_type_of(entity_id), "decision",
-            "omitting memory_type on an update must preserve the existing DB value, not reset to 'fact'"
+            self._memory_type_of(entity_id),
+            "decision",
+            "omitting memory_type on an update must preserve the existing DB value, not reset to 'fact'",
         )
 
     def test_update_with_explicit_new_memory_type_changes_stored_value(self):
@@ -117,8 +120,9 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         )
         self.assertFalse(update_res.startswith("Error"))
         self.assertEqual(
-            self._memory_type_of(entity_id), "event",
-            "an update explicitly supplying a new memory_type must overwrite the old value"
+            self._memory_type_of(entity_id),
+            "event",
+            "an update explicitly supplying a new memory_type must overwrite the old value",
         )
 
 
@@ -204,7 +208,9 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         self.assertTrue(len(results) >= 3)
         for r in results:
             self.assertIn("memory_type", r)
-            self.assertIn(r["memory_type"], ("fact", "event", "procedure", "decision", "preference"))
+            self.assertIn(
+                r["memory_type"], ("fact", "event", "procedure", "decision", "preference")
+            )
 
     def test_scan_memories_includes_correct_memory_type(self):
         entity_id = self._store("Scan Memory Type Entity", "preference")
@@ -227,11 +233,25 @@ class TestMemoryTypeBackwardCompatAndSchema(unittest.TestCase):
 
     def _insert_raw_entity_without_memory_type(self, entity_id, title="Raw Legacy Entity"):
         now = datetime.now(UTC).isoformat()
-        self.conn.execute("""
+        self.conn.execute(
+            """
             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope,
                                    is_core, weight, status, parent_ids, title, full_content, context_id)
             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 'raw', ?, ?, ?, ?)
-        """, (entity_id, now, now, now, "tester", "shared", "[]", title, f"Full content for {title}", None))
+        """,
+            (
+                entity_id,
+                now,
+                now,
+                now,
+                "tester",
+                "shared",
+                "[]",
+                title,
+                f"Full content for {title}",
+                None,
+            ),
+        )
         self.conn.commit()
 
     def test_raw_insert_without_memory_type_defaults_to_fact_at_db_level(self):
@@ -241,7 +261,11 @@ class TestMemoryTypeBackwardCompatAndSchema(unittest.TestCase):
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
-        self.assertEqual(row[0], "fact", "DB-level DEFAULT 'fact' must apply even when memory_type is omitted from the INSERT column list")
+        self.assertEqual(
+            row[0],
+            "fact",
+            "DB-level DEFAULT 'fact' must apply even when memory_type is omitted from the INSERT column list",
+        )
 
     def test_search_and_scan_do_not_error_on_legacy_row(self):
         entity_id = str(uuid.uuid4())
@@ -263,8 +287,7 @@ class TestMemoryTypeBackwardCompatAndSchema(unittest.TestCase):
 
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute(
-                "UPDATE entities SET memory_type = 'not_a_real_value' WHERE id = ?",
-                (entity_id,)
+                "UPDATE entities SET memory_type = 'not_a_real_value' WHERE id = ?", (entity_id,)
             )
 
     def test_init_db_second_call_with_existing_memory_type_column_does_not_raise(self):

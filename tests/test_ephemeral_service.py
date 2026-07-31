@@ -1,6 +1,7 @@
 import unittest
 from saltmdb.domain.services import ephemeral_service
 
+
 class TestEphemeralService(unittest.TestCase):
     def test_store_and_get_roundtrip(self):
         res = ephemeral_service.store_ephemeral_memory(key="probe_key_1", value="probe_value_1")
@@ -30,6 +31,7 @@ class TestEphemeralService(unittest.TestCase):
     def test_get_missing_key_returns_error(self):
         res = ephemeral_service.get_ephemeral_memory(key=None)
         self.assertIn("Error", res)
+
 
 if __name__ == "__main__":
     unittest.main()

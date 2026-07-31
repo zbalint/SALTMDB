@@ -3,7 +3,7 @@ import json
 import re
 import logging
 from datetime import datetime, UTC
-from typing import Literal
+from typing import Any, Literal
 from saltmdb.config import (
     get_db_path,
     DEDUP_SUPERSESSION_THRESHOLD,
@@ -23,8 +23,7 @@ from saltmdb.utils.text import (
     resolve_entity_id,
     extract_title_and_snippet,
     sanitize_fts_query,
-    normalize_search_query,
-    compute_content_hash
+    compute_content_hash,
 )
 from saltmdb.utils.nlp import word_sim, evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
@@ -37,7 +36,8 @@ _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-sea
 TITLE_MIN_LENGTH = 5
 TITLE_MAX_LENGTH = 120
 
-def validate_memory_input(title: str, content: str, metadata: dict) -> None:
+
+def validate_memory_input(title: str, content: str, metadata: dict | None) -> None:
     """Validates memory input to enforce title length bounds."""
     if title:
         stripped_title = title.strip()
@@ -52,14 +52,15 @@ def validate_memory_input(title: str, content: str, metadata: dict) -> None:
                 f"Error: Title is too short (minimum {TITLE_MIN_LENGTH} characters). Provide a descriptive, canonical title."
             )
 
-def store_memory(
+
+def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     content: str = None,
     tags: list = None,
     owner_id: str = None,
-    scope: Literal['private', 'shared'] = "shared",
+    scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
     is_core: bool = None,
-    memory_type: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] = None,
     title: str = None,
     entity_id: str = None,
     relevance: int = None,
@@ -69,36 +70,47 @@ def store_memory(
     metadata: dict = None,
     skip_duplicate_check: bool = False,
     context_id: str = None,
-    db_connection = None,
-    db_path: str = None
+    db_connection=None,
+    db_path: str = None,
 ) -> str:
     """Stores a consolidated Markdown fact chunk as a long-term memory."""
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
-        
+
     if not content or not content.strip():
         return "Error: content is mandatory and cannot be empty."
 
-    if scope not in ('private', 'shared'):
+    if scope not in ("private", "shared"):
         return "Error: scope must be either 'private' or 'shared'"
 
-    if memory_type is not None and memory_type not in ('fact', 'event', 'procedure', 'decision', 'preference'):
+    if memory_type is not None and memory_type not in (
+        "fact",
+        "event",
+        "procedure",
+        "decision",
+        "preference",
+    ):
         return "Error: memory_type must be one of 'fact', 'event', 'procedure', 'decision', 'preference'"
 
-    if relevance is not None or impact is not None or novelty is not None or actionability is not None:
+    if (
+        relevance is not None
+        or impact is not None
+        or novelty is not None
+        or actionability is not None
+    ):
         r = relevance if relevance is not None else 3
         im = impact if impact is not None else 3
         n = novelty if novelty is not None else 3
         a = actionability if actionability is not None else 3
         weight = max(1, min(5, (r + im + n + a) // 4))
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     redacted_content = redact_secrets(content)
     now = datetime.now(UTC).isoformat()
 
@@ -109,16 +121,17 @@ def store_memory(
 
     if not title or not title.strip():
         return "Error: title is mandatory and cannot be empty."
-        
+
     try:
         validate_memory_input(title, redacted_content, metadata)
     except ValueError as e:
         if should_close:
             close_connection(conn)
         return str(e)
-        
+
     # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
     from saltmdb.utils.nlp import auto_format_markdown
+
     redacted_content = auto_format_markdown(redacted_content)
 
     if not context_id and metadata and isinstance(metadata, dict):
@@ -139,10 +152,13 @@ def store_memory(
     # Stage 4: Stage A Exact Hash Collision Lookup
     if not entity_id:
         try:
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT id FROM entities
                 WHERE content_hash = ? AND (owner_id = ? OR scope = 'shared') AND status != 'archived'
-            """, (content_hash, owner_id))
+            """,
+                (content_hash, owner_id),
+            )
             row = cursor.fetchone()
             if row:
                 if should_close:
@@ -153,14 +169,21 @@ def store_memory(
 
     if not entity_id:
         try:
-            cursor = conn.execute("""
-                SELECT id FROM entities 
+            cursor = conn.execute(
+                """
+                SELECT id FROM entities
                 WHERE title = ? AND owner_id = ? AND scope = ? AND status != 'archived'
-            """, (title, owner_id, scope))
+            """,
+                (title, owner_id, scope),
+            )
             row = cursor.fetchone()
             if row:
                 entity_id = row[0]
-                logger.debug("Deduplication: Matched existing memory '%s' (ID: %s). Routing to temporal upsert.", title, entity_id)
+                logger.debug(
+                    "Deduplication: Matched existing memory '%s' (ID: %s). Routing to temporal upsert.",
+                    title,
+                    entity_id,
+                )
         except Exception:
             pass
 
@@ -177,13 +200,13 @@ def store_memory(
                 owner_id=owner_id,
                 tags=tags,
                 context_id=context_id,
-                db_connection=conn
+                db_connection=conn,
             )
             if dup_check.get("duplicate_found") and "error" not in dup_check:
                 top = dup_check["potential_duplicates"][0]
                 sim_score = top.get("similarity_score", 0.0)
                 matched_owner = top.get("owner_id")
-                
+
                 # Check namespace isolation: candidate must be ownerless, owned by the caller,
                 # or itself scope='shared' (visible to any owner) - not a literal owner_id match on "shared".
                 matched_scope = top.get("scope")
@@ -192,35 +215,50 @@ def store_memory(
                         matched_supersession_id = top["id"]
                         matched_supersession_title = top["title"]
                         matched_sim_score = sim_score
-                        logger.info("Calibrated Cosine Supersession Candidate: New memory '%s' matches existing memory '%s' (ID: %s, Cosine Similarity: %.2f)", title, top["title"], top["id"], sim_score)
+                        logger.info(
+                            "Calibrated Cosine Supersession Candidate: New memory '%s' matches existing memory '%s' (ID: %s, Cosine Similarity: %.2f)",
+                            title,
+                            top["title"],
+                            top["id"],
+                            sim_score,
+                        )
 
                     if sim_score >= DEDUP_DUPLICATE_THRESHOLD:
                         duplicate_warning_str = f" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]"
         except Exception:
             pass
-            
+
     if not entity_id:
         entity_id = str(uuid.uuid4())
-        
+
     try:
-        def _write(c):
-            cursor = conn.execute("SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,))
+
+        def _write(c):  # noqa: PLR0912
+            cursor = conn.execute(
+                "SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,)
+            )
             existing = cursor.fetchone()
             if existing:
-                 created_at, owner, valid_from = existing
-                 hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
-                 
-                 conn.execute("""
+                created_at, owner, valid_from = existing
+                hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
+
+                conn.execute(
+                    """
                      INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
                      SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
                      FROM entities WHERE id = ?
-                 """, (hist_id, valid_from if valid_from else created_at, now, entity_id))
-                 
-                 conn.execute("""
+                 """,
+                    (hist_id, valid_from if valid_from else created_at, now, entity_id),
+                )
+
+                conn.execute(
+                    """
                      INSERT INTO entity_tags (entity_id, tag_id)
                      SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
-                 """, (hist_id, entity_id))
-                 
+                 """,
+                    (hist_id, entity_id),
+                )
+
             if tags is not None:
                 conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
 
@@ -230,7 +268,8 @@ def store_memory(
             else:
                 is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
 
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
                 VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
                 ON CONFLICT(id) DO UPDATE SET
@@ -252,50 +291,86 @@ def store_memory(
                     quality_status = excluded.quality_status,
                     quality_flags = excluded.quality_flags,
                     memory_type = COALESCE(?, entities.memory_type)
-            """, (entity_id, now, now, now, owner_id, scope, is_core_val, weight, json.dumps([]), title, redacted_content, now, metadata_str, context_id, content_hash, quality_score, quality_status, quality_flags_str, memory_type, is_core_val, memory_type))
-            
+            """,
+                (
+                    entity_id,
+                    now,
+                    now,
+                    now,
+                    owner_id,
+                    scope,
+                    is_core_val,
+                    weight,
+                    json.dumps([]),
+                    title,
+                    redacted_content,
+                    now,
+                    metadata_str,
+                    context_id,
+                    content_hash,
+                    quality_score,
+                    quality_status,
+                    quality_flags_str,
+                    memory_type,
+                    is_core_val,
+                    memory_type,
+                ),
+            )
+
             if tags is not None:
-                tag_lookup = {}  # norm -> resolved tag_id, cached per-call to avoid
-                                 # re-resolving the same tag string twice within one store_memory
+                tag_lookup: dict[str, str] = {}  # norm -> resolved tag_id, cached per-call to avoid
+                # re-resolving the same tag string twice within one store_memory
                 for tag_name in tags:
                     tag_name = tag_name.strip()
                     if not tag_name:
                         continue
 
-                    norm_input = tag_name.lower().lstrip('#')
-                    norm_input = re.sub(r'[-_\s]+', '', norm_input)
+                    norm_input = tag_name.lower().lstrip("#")
+                    norm_input = re.sub(r"[-_\s]+", "", norm_input)
 
                     # Use cached result if we already resolved an equivalent tag string
+                    tag_id: str | None
                     if norm_input in tag_lookup:
                         tag_id = tag_lookup[norm_input]
                     else:
                         tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_id)
-                        tag_lookup[norm_input] = tag_id
+                        if tag_id:
+                            tag_lookup[norm_input] = tag_id
 
                     if not tag_id:
                         continue
 
-                    conn.execute("INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)", (entity_id, tag_id))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                        (entity_id, tag_id),
+                    )
 
             # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
             if matched_supersession_id:
                 try:
                     from saltmdb.domain.services.event_service import log_event
-                    candidate_payload = json.dumps({
-                        "new_entity_id": entity_id,
-                        "target_entity_id": matched_supersession_id,
-                        "similarity_score": matched_sim_score,
-                        "target_title": matched_supersession_title
-                    })
+
+                    candidate_payload = json.dumps(
+                        {
+                            "new_entity_id": entity_id,
+                            "target_entity_id": matched_supersession_id,
+                            "similarity_score": matched_sim_score,
+                            "target_title": matched_supersession_title,
+                        }
+                    )
                     log_event(
                         agent_id=owner_id or "system",
                         type="supersession_candidate",
                         content=candidate_payload,
                         context_id=context_id,
                         db_connection=conn,
-                        _in_transaction=True
+                        _in_transaction=True,
                     )
-                    logger.info("Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s", entity_id, matched_supersession_id)
+                    logger.info(
+                        "Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s",
+                        entity_id,
+                        matched_supersession_id,
+                    )
                 except Exception as ex:
                     logger.warning("Failed to log supersession_candidate event: %s", ex)
 
@@ -310,7 +385,10 @@ def store_memory(
         target_db = db_path or get_db_path()
         if target_db:
             from saltmdb.domain.services import embedding_service
-            _embed_pool.submit(embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db)
+
+            _embed_pool.submit(
+                embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db
+            )
 
         res_msg = f"Knowledge stored successfully with ID: {entity_id}"
         if duplicate_warning_str:
@@ -325,15 +403,53 @@ def store_memory(
         if should_close:
             close_connection(conn)
 
+
 STOP_WORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is", "it", "its",
-    "of", "on", "that", "the", "to", "was", "were", "will", "with", "what", "my", "when", "i", "type", "did",
-    "how", "does", "or", "which", "who", "whom", "this", "these", "those"
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "he",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "that",
+    "the",
+    "to",
+    "was",
+    "were",
+    "will",
+    "with",
+    "what",
+    "my",
+    "when",
+    "i",
+    "type",
+    "did",
+    "how",
+    "does",
+    "or",
+    "which",
+    "who",
+    "whom",
+    "this",
+    "these",
+    "those",
 }
 
+
 def _run_fts_search(
-    conn, sanitized_query: str, where_clauses: list, params: list,
-    limit: int, offset: int
+    conn, sanitized_query: str, where_clauses: list, params: list, limit: int, offset: int
 ) -> list:
     """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list.
 
@@ -391,7 +507,7 @@ def semantic_search(
     offset: int = 0,
 ) -> list[tuple[str, float]]:
     """Return [(entity_id, cosine_distance), ...] ascending by distance.
-    
+
     Opens its own dedicated connection so it can safely load the sqlite_vec
     extension without conflicting with a concurrent FTS search on a shared conn.
     """
@@ -444,7 +560,7 @@ def reciprocal_rank_fusion(
     return dict(ranked[:limit])
 
 
-def search_memory(
+def search_memory(  # noqa: C901, PLR0912, PLR0915
     owner_id: str = None,
     query_keywords: str = None,
     tags_filter: list = None,
@@ -453,12 +569,12 @@ def search_memory(
     limit: int = 5,
     context_id: str = None,
     is_core: bool = None,
-    memory_type_filter: Literal['fact', 'event', 'procedure', 'decision', 'preference'] = None,
-    tag_operator: Literal['AND', 'OR'] = "AND",
+    memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"] = None,
+    tag_operator: Literal["AND", "OR"] = "AND",
     cursor: str = None,
     include_related: bool = True,
-    db_connection = None,
-    db_path: str = None
+    db_connection=None,
+    db_path: str = None,
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory."""
     should_close = False
@@ -467,7 +583,7 @@ def search_memory(
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     offset = 0
     if cursor and cursor.startswith("offset:"):
         try:
@@ -477,14 +593,16 @@ def search_memory(
 
     try:
         where_clauses = ["e.status != 'archived'"]
-        params = []
+        params: list[Any] = []  # mixed str/int SQL bind values (e.g. is_core -> 0/1)
 
         if owner_id:
             where_clauses.append("(e.owner_id = ? OR e.scope = 'shared')")
             params.append(owner_id)
 
         if context_id:
-            where_clauses.append("(e.context_id = ? OR json_extract(e.metadata, '$.project') = ? OR json_extract(e.metadata, '$.project_id') = ?)")
+            where_clauses.append(
+                "(e.context_id = ? OR json_extract(e.metadata, '$.project') = ? OR json_extract(e.metadata, '$.project_id') = ?)"
+            )
             params.extend([context_id, context_id, context_id])
 
         if is_core is not None:
@@ -506,12 +624,16 @@ def search_memory(
                 tag_groups = []
                 for tname in norm_tags:
                     grp = set()
-                    c = conn.execute("SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (tname,))
+                    c = conn.execute(
+                        "SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (tname,)
+                    )
                     for tid, tcanon in c.fetchall():
                         grp.add(tid)
                         main_id = tcanon if tcanon else tid
                         grp.add(main_id)
-                        alias_c = conn.execute("SELECT id FROM tags WHERE canonical_id = ?", (main_id,))
+                        alias_c = conn.execute(
+                            "SELECT id FROM tags WHERE canonical_id = ?", (main_id,)
+                        )
                         for ar in alias_c.fetchall():
                             grp.add(ar[0])
                     tag_groups.append((tname, grp))
@@ -520,10 +642,14 @@ def search_memory(
                     for tname, grp in tag_groups:
                         if grp:
                             placeholders = ",".join("?" for _ in grp)
-                            where_clauses.append(f"e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({placeholders}))")
+                            where_clauses.append(
+                                f"e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({placeholders}))"
+                            )
                             params.extend(list(grp))
                         else:
-                            where_clauses.append("e.id IN (SELECT et.entity_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE lower(t.name) = lower(?))")
+                            where_clauses.append(
+                                "e.id IN (SELECT et.entity_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE lower(t.name) = lower(?))"
+                            )
                             params.append(tname)
                 else:
                     all_ids = set()
@@ -533,7 +659,7 @@ def search_memory(
                             all_ids.update(grp)
                         else:
                             missing_tnames.append(tname)
-                    
+
                     sub_clauses = []
                     sub_params = []
                     if all_ids:
@@ -542,11 +668,15 @@ def search_memory(
                         sub_params.extend(list(all_ids))
                     if missing_tnames:
                         placeholders = ",".join("?" for _ in missing_tnames)
-                        sub_clauses.append(f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})")
+                        sub_clauses.append(
+                            f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})"
+                        )
                         sub_params.extend(missing_tnames)
-                    
+
                     if sub_clauses:
-                        where_clauses.append(f"e.id IN (SELECT et.entity_id FROM entity_tags et LEFT JOIN tags t ON et.tag_id = t.id WHERE {' OR '.join(sub_clauses)})")
+                        where_clauses.append(
+                            f"e.id IN (SELECT et.entity_id FROM entity_tags et LEFT JOIN tags t ON et.tag_id = t.id WHERE {' OR '.join(sub_clauses)})"
+                        )
                         params.extend(sub_params)
 
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
@@ -555,14 +685,18 @@ def search_memory(
             terms = sanitized_query.split() if sanitized_query else []
             searched_terms = {}
             for t in terms:
-                c = conn.execute("SELECT 1 FROM entities_fts WHERE entities_fts MATCH ?", (f'"{t}"*',)).fetchone()
+                c = conn.execute(
+                    "SELECT 1 FROM entities_fts WHERE entities_fts MATCH ?", (f'"{t}"*',)
+                ).fetchone()
                 searched_terms[t] = bool(c)
-                
+
             invalid_tags = []
             if tags_filter:
                 for tf in tags_filter:
                     tname = normalize_tag_name(tf)
-                    c = conn.execute("SELECT 1 FROM tags WHERE lower(name) = lower(?)", (tname,)).fetchone()
+                    c = conn.execute(
+                        "SELECT 1 FROM tags WHERE lower(name) = lower(?)", (tname,)
+                    ).fetchone()
                     if not c:
                         invalid_tags.append(tf)
 
@@ -571,26 +705,38 @@ def search_memory(
                     "searched_terms_found": searched_terms,
                     "invalid_tags_suggestions": invalid_tags,
                     "sanitized_query": sanitized_query,
-                    "where_clauses": where_clauses
+                    "where_clauses": where_clauses,
                 }
             }
 
-        rows = []
+        rows: list[Any] = []
         if sanitized_query:
+            assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
             from saltmdb.config import is_semantic_search_enabled
+
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
                 candidate_window = offset + limit
                 fts_future = _search_pool.submit(
-                    _run_fts_search, conn, sanitized_query, where_clauses,
-                    params, candidate_window, 0
+                    _run_fts_search,
+                    conn,
+                    sanitized_query,
+                    where_clauses,
+                    params,
+                    candidate_window,
+                    0,
                 )
                 # semantic_search gets db_path so it opens its OWN connection
                 # — never share a connection across threads with sqlite_vec loaded
                 semantic_future = _search_pool.submit(
-                    semantic_search, query_keywords, where_clauses, params,
-                    candidate_window, db_path, 0
+                    semantic_search,
+                    query_keywords,
+                    where_clauses,
+                    params,
+                    candidate_window,
+                    db_path,
+                    0,
                 )
                 fts_rows = fts_future.result()
                 semantic_rows = semantic_future.result()
@@ -598,7 +744,7 @@ def search_memory(
                 rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, candidate_window)
 
                 if rrf_score_map:
-                    merged_ids = list(rrf_score_map.keys())[offset:offset + limit]
+                    merged_ids = list(rrf_score_map.keys())[offset : offset + limit]
                     if merged_ids:
                         placeholders = ",".join("?" for _ in merged_ids)
                         id_order = {eid: i for i, eid in enumerate(merged_ids)}
@@ -627,7 +773,7 @@ def search_memory(
                     else:
                         rows = []
                 else:
-                    rows = fts_rows[offset:offset + limit]
+                    rows = fts_rows[offset : offset + limit]
             else:
                 rows = _run_fts_search(conn, sanitized_query, where_clauses, params, limit, offset)
         else:
@@ -646,11 +792,12 @@ def search_memory(
             rows = cursor_obj.fetchall()
 
         # Batch-fetch all related entities in a single query to avoid N+1
-        related_map = {}  # {entity_id: [related items]}
+        related_map: dict[str, list[Any]] = {}  # {entity_id: [related items]}
         if include_related and rows:
             all_eids = [r[0] for r in rows]
             placeholders_r = ",".join("?" for _ in all_eids)
-            batch_rel_cursor = conn.execute(f"""
+            batch_rel_cursor = conn.execute(
+                f"""
                 SELECT r.source_id, r.target_id, r.predicate, e.id, e.title
                 FROM relations r
                 JOIN entities e ON (r.target_id = e.id OR r.source_id = e.id)
@@ -658,16 +805,36 @@ def search_memory(
                   AND e.id NOT IN ({placeholders_r})
                   AND e.status != 'archived'
                   AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
-            """, all_eids * 3)
+            """,
+                all_eids * 3,
+            )
             for bsrc, btgt, bpred, beid, betitle in batch_rel_cursor.fetchall():
                 anchor = bsrc if bsrc in all_eids else btgt
                 related_map.setdefault(anchor, [])[:5]
                 if len(related_map.get(anchor, [])) < 5:
-                    related_map.setdefault(anchor, []).append({"predicate": bpred, "id": beid, "title": betitle})
+                    related_map.setdefault(anchor, []).append(
+                        {"predicate": bpred, "id": beid, "title": betitle}
+                    )
 
         results = []
         for r in rows:
-            eid, etitle, econtent, eweight, eis_core, score, created, updated, owner, scope, meta, ctx, ememory_type, rel_c, fts_snippet_raw = r
+            (
+                eid,
+                etitle,
+                econtent,
+                eweight,
+                eis_core,
+                score,
+                created,
+                updated,
+                owner,
+                scope,
+                meta,
+                ctx,
+                ememory_type,
+                rel_c,
+                fts_snippet_raw,
+            ) = r
             if fts_snippet_raw:
                 snippet = fts_snippet_raw
             else:
@@ -681,13 +848,13 @@ def search_memory(
                 "weight": eweight,
                 "is_core": bool(eis_core),
                 "memory_type": ememory_type,
-                "cursor": f"offset:{offset + limit}"
+                "cursor": f"offset:{offset + limit}",
             }
             if include_related:
                 item["related_entities"] = related_map.get(eid, [])
 
             results.append(item)
-            
+
         return results
     except Exception as e:
         logger.error("Error searching memory: %s", e)
@@ -696,7 +863,8 @@ def search_memory(
         if should_close:
             close_connection(conn)
 
-def fetch_memory_chunk(entity_id: str = None, db_connection = None, db_path: str = None) -> str:
+
+def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str = None) -> str:
     """Returns full markdown text of a memory."""
     if not entity_id:
         return "Error: entity_id is mandatory."
@@ -706,20 +874,25 @@ def fetch_memory_chunk(entity_id: str = None, db_connection = None, db_path: str
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         resolved_id = resolve_entity_id(conn, entity_id)
         if not resolved_id:
             return f"Error: Could not resolve memory entity for input '{entity_id}'."
-            
-        cursor = conn.execute("""
+
+        cursor = conn.execute(
+            """
             SELECT id, title, full_content, status, created_at, updated_at, owner_id, scope, metadata
             FROM entities WHERE id = ?
-        """, (resolved_id,))
+        """,
+            (resolved_id,),
+        )
         row = cursor.fetchone()
         if row:
             now = datetime.now(UTC).isoformat()
-            conn.execute("UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id))
+            conn.execute(
+                "UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id)
+            )
             conn.commit()
             return row[2]
         return f"Memory not found for ID: {resolved_id}"
@@ -730,7 +903,14 @@ def fetch_memory_chunk(entity_id: str = None, db_connection = None, db_path: str
         if should_close:
             close_connection(conn)
 
-def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = None, db_path: str = None, _in_transaction: bool = False) -> str:
+
+def archive_memory(  # noqa: PLR0911
+    entity_id: str = None,
+    owner_id: str = None,
+    db_connection=None,
+    db_path: str = None,
+    _in_transaction: bool = False,
+) -> str:
     """Explicitly archives (retires) a long-term memory.
 
     _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
@@ -751,7 +931,9 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         if not resolved_id:
             return f"Error: Could not resolve entity '{entity_id}'"
 
-        cursor = conn.execute("SELECT owner_id, scope, status FROM entities WHERE id = ?", (resolved_id,))
+        cursor = conn.execute(
+            "SELECT owner_id, scope, status FROM entities WHERE id = ?", (resolved_id,)
+        )
         row = cursor.fetchone()
         if not row:
             return f"Error: Memory '{resolved_id}' not found."
@@ -765,22 +947,30 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         now = datetime.now(UTC).isoformat()
 
         def _do_archive():
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE entities
                 SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id = ? AND status != 'archived'
-            """, (now, now, resolved_id))
-            conn.execute("""
+            """,
+                (now, now, resolved_id),
+            )
+            conn.execute(
+                """
                 UPDATE relations
                 SET valid_to = ?
                 WHERE (source_id = ? OR target_id = ?) AND valid_to IS NULL
-            """, (now, resolved_id, resolved_id))
+            """,
+                (now, resolved_id, resolved_id),
+            )
 
         if _in_transaction:
             _do_archive()
         else:
+
             def _write(c):
                 _do_archive()
+
             write_transaction_retrying(conn, _write)
 
         return f"Memory '{resolved_id}' was successfully archived."
@@ -791,7 +981,8 @@ def archive_memory(entity_id: str = None, owner_id: str = None, db_connection = 
         if should_close:
             close_connection(conn)
 
-def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path: str = None) -> dict:
+
+def detect_orphaned_memories(owner_id: str = None, db_connection=None, db_path: str = None) -> dict:
     """Identifies active memories with zero relationship links."""
     should_close = False
     conn = db_connection
@@ -799,7 +990,7 @@ def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         query = """
         SELECT e.id, e.title, e.owner_id
@@ -811,19 +1002,19 @@ def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path
         if owner_id:
             query += " AND e.owner_id = ?"
             params.append(owner_id)
-            
+
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
-        
+
         orphans = []
         for r in rows:
             orphans.append({"id": r[0], "title": r[1], "owner_id": r[2]})
-            
+
         return {
             "total_orphans": len(orphans),
             "orphans_detected": len(orphans),
             "details": [{"orphan": o} for o in orphans],
-            "orphaned_memories": orphans
+            "orphaned_memories": orphans,
         }
     except Exception as e:
         logger.error("Error detecting orphans: %s", e)
@@ -832,32 +1023,33 @@ def detect_orphaned_memories(owner_id: str = None, db_connection = None, db_path
         if should_close:
             close_connection(conn)
 
-def check_duplicate_memories(
+
+def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
     title: str = None,
     content: str = None,
     owner_id: str = None,
     tags: list = None,
     context_id: str = None,
     exclude_ids: list = None,
-    db_connection = None,
-    db_path: str = None
+    db_connection=None,
+    db_path: str = None,
 ) -> dict:
     """Checks the database for potential near-duplicates of a proposed memory."""
     if not title and not content:
         return {"error": "Either title or content is required"}
-        
+
     should_close = False
     conn = db_connection
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         where = ["status != 'archived'"]
         fts_where_clauses = ["e.status != 'archived'"]
         params = []
-        
+
         if exclude_ids:
             clean_excludes = [str(x) for x in exclude_ids if str(x)]
             if clean_excludes:
@@ -870,16 +1062,17 @@ def check_duplicate_memories(
             where.append("(owner_id = ? OR owner_id IS NULL OR scope = 'shared')")
             fts_where_clauses.append("(e.owner_id = ? OR e.owner_id IS NULL OR e.scope = 'shared')")
             params.append(owner_id)
-            
+
         if context_id:
             where.append("(context_id IS NULL OR context_id = ?)")
             fts_where_clauses.append("(e.context_id IS NULL OR e.context_id = ?)")
             params.append(context_id)
-            
+
         from saltmdb.utils.text import sanitize_fts_query
+
         input_text = f"{title or ''} {content or ''}"
         duplicates = []
-        
+
         # Pre-filter using FTS5 to reduce candidates from O(N) to ~30 max
         fts_candidates = []
         search_terms = sanitize_fts_query(input_text)
@@ -890,7 +1083,7 @@ def check_duplicate_memories(
                     f"SELECT e.id, e.title, e.full_content, e.owner_id, e.scope FROM entities_fts fts "
                     f"JOIN entities e ON fts.id = e.id "
                     f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
-                    [search_terms] + params
+                    [search_terms] + params,
                 ).fetchall()
                 fts_candidates = fts_rows
             except Exception:
@@ -898,16 +1091,21 @@ def check_duplicate_memories(
 
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:
-            cursor = conn.execute(f"SELECT id, title, full_content, owner_id, scope FROM entities WHERE {' AND '.join(where) if where else '1=1'}", params)
+            cursor = conn.execute(
+                f"SELECT id, title, full_content, owner_id, scope FROM entities WHERE {' AND '.join(where) if where else '1=1'}",
+                params,
+            )
             fts_candidates = cursor.fetchall()
-        
+
         from saltmdb.config import is_semantic_search_enabled
+
         use_semantic = is_semantic_search_enabled()
 
         query_vector = None
         if use_semantic:
             try:
                 from saltmdb.domain.services import embedding_service
+
                 query_vector = embedding_service.embed_text(input_text)
             except Exception as ex:
                 logger.warning("Could not generate query embedding for duplicate check: %s", ex)
@@ -918,34 +1116,37 @@ def check_duplicate_memories(
             if use_semantic and query_vector is not None:
                 try:
                     from saltmdb.domain.services import embedding_service
+
                     cand_vec = embedding_service.embed_text(existing_text)
                     # Cosine similarity = 1.0 - Cosine Distance
                     import numpy as np
+
                     dot_product = np.dot(query_vector, cand_vec)
                     norm_a = np.linalg.norm(query_vector)
                     norm_b = np.linalg.norm(cand_vec)
                     if norm_a > 0 and norm_b > 0:
                         sim = float(dot_product / (norm_a * norm_b))
-                except Exception as ex:
+                except Exception:
                     sim = word_sim(input_text, existing_text)
             else:
                 sim = word_sim(input_text, existing_text)
 
-            min_threshold = DEDUP_SUPERSESSION_THRESHOLD if use_semantic else DEDUP_LEXICAL_THRESHOLD
+            min_threshold = (
+                DEDUP_SUPERSESSION_THRESHOLD if use_semantic else DEDUP_LEXICAL_THRESHOLD
+            )
             if sim >= min_threshold:
-                duplicates.append({
-                    "id": eid,
-                    "title": etitle,
-                    "owner_id": eowner,
-                    "scope": escope,
-                    "similarity_score": round(sim, 3)
-                })
-                
+                duplicates.append(
+                    {
+                        "id": eid,
+                        "title": etitle,
+                        "owner_id": eowner,
+                        "scope": escope,
+                        "similarity_score": round(sim, 3),
+                    }
+                )
+
         duplicates.sort(key=lambda x: x["similarity_score"], reverse=True)
-        return {
-            "duplicate_found": len(duplicates) > 0,
-            "potential_duplicates": duplicates
-        }
+        return {"duplicate_found": len(duplicates) > 0, "potential_duplicates": duplicates}
     except Exception as e:
         logger.error("Error checking duplicate memories: %s", e)
         return {"error": str(e)}
@@ -953,14 +1154,15 @@ def check_duplicate_memories(
         if should_close:
             close_connection(conn)
 
+
 def scan_memories(
     owner_id: str = None,
     status_filter: str = None,
     limit: int = 20,
     offset: int = 0,
     cursor: str = None,
-    db_connection = None,
-    db_path: str = None
+    db_connection=None,
+    db_path: str = None,
 ) -> list:
     """Scans and inspects lists/contents of memories for audits."""
     should_close = False
@@ -969,7 +1171,7 @@ def scan_memories(
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     if cursor and cursor.startswith("offset:"):
         try:
             offset = int(cursor.split(":")[1])
@@ -982,35 +1184,41 @@ def scan_memories(
         if owner_id:
             where.append("(owner_id = ? OR scope = 'shared')")
             params.append(owner_id)
-            
+
         if status_filter:
             if status_filter == "active":
                 where.append("status != 'archived'")
             else:
                 where.append("status = ?")
                 params.append(status_filter)
-            
+
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-        cursor_obj = conn.execute(f"""
+        cursor_obj = conn.execute(
+            f"""
             SELECT id, title, owner_id, status, weight, is_core, updated_at, memory_type
             FROM entities
             {where_sql}
             ORDER BY updated_at DESC
             LIMIT ? OFFSET ?
-        """, params + [limit, offset])
+        """,
+            params + [limit, offset],
+        )
 
         rows = cursor_obj.fetchall()
-        return [{
-            "id": r[0],
-            "title": r[1],
-            "owner_id": r[2],
-            "status": r[3],
-            "weight": r[4],
-            "is_core": bool(r[5]),
-            "updated_at": r[6],
-            "memory_type": r[7],
-            "cursor": f"offset:{offset + limit}"
-        } for r in rows]
+        return [
+            {
+                "id": r[0],
+                "title": r[1],
+                "owner_id": r[2],
+                "status": r[3],
+                "weight": r[4],
+                "is_core": bool(r[5]),
+                "updated_at": r[6],
+                "memory_type": r[7],
+                "cursor": f"offset:{offset + limit}",
+            }
+            for r in rows
+        ]
     except Exception as e:
         logger.error("Error scanning memories: %s", e)
         return [{"error": str(e)}]
@@ -1018,7 +1226,8 @@ def scan_memories(
         if should_close:
             close_connection(conn)
 
-def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: str = None) -> list:
+
+def bulk_archive_memory(archive_requests: list, db_connection=None, db_path: str = None) -> list:
     """Bulk archives memories atomically -- all-or-nothing.
 
     The entire batch runs inside a single write_transaction_retrying transaction. If any
@@ -1037,17 +1246,21 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
         conn = get_connection(db_path)
         should_close = True
 
-    results = []
+    results: list[Any] = []
     try:
+
         def _write(c):
             results.clear()
             for req in archive_requests:
                 eid = req if isinstance(req, str) else req.get("entity_id")
                 owner = req.get("owner_id") if isinstance(req, dict) else None
-                res = archive_memory(entity_id=eid, owner_id=owner, db_connection=conn, _in_transaction=True)
+                res = archive_memory(
+                    entity_id=eid, owner_id=owner, db_connection=conn, _in_transaction=True
+                )
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk archive aborted (all-or-nothing): {res}")
                 results.append({"status": "success", "entity_id": eid, "result": res})
+
         write_transaction_retrying(conn, _write)
         return results
     except Exception as e:
@@ -1057,7 +1270,8 @@ def bulk_archive_memory(archive_requests: list, db_connection = None, db_path: s
         if should_close:
             close_connection(conn)
 
-_TAG_NAME_RE = re.compile(r'^#[a-z0-9][a-z0-9-]*$')
+
+_TAG_NAME_RE = re.compile(r"^#[a-z0-9][a-z0-9-]*$")
 
 
 def normalize_tag_name(tag_name: str) -> str:
@@ -1067,8 +1281,8 @@ def normalize_tag_name(tag_name: str) -> str:
     name = (tag_name or "").strip()
     if not name:
         return name
-    if not name.startswith('#'):
-        name = '#' + name
+    if not name.startswith("#"):
+        name = "#" + name
     return name
 
 
@@ -1098,29 +1312,30 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
     currently missing).
     """
     name = normalize_tag_name(tag_name)
-    if not name or name == '#':
+    if not name or name == "#":
         return None
 
     # Step 1: shape-sanitize -- lowercase, strip anything outside [a-z0-9-] after '#'.
     raw_body = name[1:]
-    sanitized_body = re.sub(r'[^a-z0-9-]', '', raw_body.lower())
-    sanitized_name = ('#' + sanitized_body) if sanitized_body else name
+    sanitized_body = re.sub(r"[^a-z0-9-]", "", raw_body.lower())
+    sanitized_name = ("#" + sanitized_body) if sanitized_body else name
 
     if sanitized_name != name:
         try:
             from saltmdb.domain.services.event_service import log_event
+
             log_event(
                 agent_id=agent_id or "system",
                 type="issue",
                 content=f"Tag name sanitized during resolve_or_create_tag: '{name}' -> '{sanitized_name}'",
                 db_connection=conn,
-                _in_transaction=True
+                _in_transaction=True,
             )
         except Exception as ex:
             logger.warning("Failed to log tag sanitization event: %s", ex)
         name = sanitized_name
 
-    if not name or name == '#':
+    if not name or name == "#":
         return None
 
     # Step 2: exact match
@@ -1129,12 +1344,12 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
         return row[1] if row[1] else row[0]
 
     # Step 3: normalized_name / computed-normalization fallback (mirrors store_memory)
-    norm_input = name.lower().lstrip('#')
-    norm_input = re.sub(r'[-_\s]+', '', norm_input)
+    norm_input = name.lower().lstrip("#")
+    norm_input = re.sub(r"[-_\s]+", "", norm_input)
 
     row = conn.execute(
         "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
-        (norm_input, norm_input)
+        (norm_input, norm_input),
     ).fetchone()
     if row:
         return row[1] if row[1] else row[0]
@@ -1142,24 +1357,26 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
     # Step 4: plural/suffix fallback -- full scan (small table, same cost model already
     # accepted by merge_tags_heuristics()), only for norm_input longer than 3 chars.
     if len(norm_input) > 3:
-        stripped_input = norm_input.rstrip('s')
-        all_rows = conn.execute("SELECT id, name, normalized_name, canonical_id FROM tags").fetchall()
+        stripped_input = norm_input.rstrip("s")
+        all_rows = conn.execute(
+            "SELECT id, name, normalized_name, canonical_id FROM tags"
+        ).fetchall()
         for tid, tname, tnorm, tcanon in all_rows:
-            existing_norm = tnorm if tnorm else re.sub(r'[-_\s]+', '', tname.lower().lstrip('#'))
-            if len(existing_norm) > 3 and stripped_input == existing_norm.rstrip('s'):
+            existing_norm = tnorm if tnorm else re.sub(r"[-_\s]+", "", tname.lower().lstrip("#"))
+            if len(existing_norm) > 3 and stripped_input == existing_norm.rstrip("s"):
                 return tcanon if tcanon else tid
 
     # Step 5: create a new tag row
     tag_id = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-        (tag_id, name, norm_input)
+        (tag_id, name, norm_input),
     )
     return tag_id
 
 
 # NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
-def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = None) -> list:
+def get_canonical_tags(domain: str = None, db_connection=None, db_path: str = None) -> list:
     """Queries canonical tags."""
     should_close = False
     conn = db_connection
@@ -1167,16 +1384,19 @@ def get_canonical_tags(domain: str = None, db_connection = None, db_path: str = 
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         if domain:
-            cursor = conn.execute("""
-                SELECT id, name FROM tags 
+            cursor = conn.execute(
+                """
+                SELECT id, name FROM tags
                 WHERE canonical_id IS NULL AND name LIKE ?
-            """, (f"%{domain}%",))
+            """,
+                (f"%{domain}%",),
+            )
         else:
             cursor = conn.execute("""
-                SELECT id, name FROM tags 
+                SELECT id, name FROM tags
                 WHERE canonical_id IS NULL
             """)
         rows = cursor.fetchall()

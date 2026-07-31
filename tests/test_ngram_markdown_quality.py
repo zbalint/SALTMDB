@@ -4,7 +4,7 @@ import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
-from saltmdb.utils import nlp
+
 
 class TestNGramAndMarkdownQuality(unittest.TestCase):
     def setUp(self):
@@ -25,9 +25,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         # Repeating the phrase block 3 times maintains character entropy ~4.35 bits/char but creates ~66% 3-gram repetition
         repetitive_text = f"# Sequence Loop Test\n\n{phrase_block} {phrase_block} {phrase_block}"
         res = memory_service.store_memory(
-            content=repetitive_text,
-            title="Sequence Loop Test",
-            owner_id="test_agent"
+            content=repetitive_text, title="Sequence Loop Test", owner_id="test_agent"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("3-gram sequence repetition detected", res)
@@ -38,9 +36,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         words_list = ["alpha", "beta", "alpha", "gamma", "beta", "gamma", "delta", "alpha"] * 5
         low_ttr_text = " ".join(words_list)
         res = memory_service.store_memory(
-            content=f"# Low TTR Test\n\n{low_ttr_text}",
-            title="Low TTR Test",
-            owner_id="test_agent"
+            content=f"# Low TTR Test\n\n{low_ttr_text}", title="Low TTR Test", owner_id="test_agent"
         )
         self.assertIn("Error: Memory quality check rejected", res)
 
@@ -55,9 +51,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             "# Missing closing fence"
         )
         res = memory_service.store_memory(
-            content=unclosed_markdown,
-            title="Unclosed Fence Test",
-            owner_id="test_agent"
+            content=unclosed_markdown, title="Unclosed Fence Test", owner_id="test_agent"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("Unclosed Markdown code block detected", res)
@@ -67,12 +61,10 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         malformed_table = (
             "# Broken Table Test\n\n"
             "| Header 1 | Header 2 |\n"
-            "| Row 1 Col 1 |\n" # Insufficient pipe separators
+            "| Row 1 Col 1 |\n"  # Insufficient pipe separators
         )
         res = memory_service.store_memory(
-            content=malformed_table,
-            title="Broken Table Test",
-            owner_id="test_agent"
+            content=malformed_table, title="Broken Table Test", owner_id="test_agent"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("Malformed Markdown table row detected", res)
@@ -95,13 +87,13 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             content=structured_md,
             title="High MSDI Test",
             owner_id="test_agent",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res)
 
         cursor = self.conn.execute(
             "SELECT quality_score, quality_status, quality_flags FROM entities WHERE title = ?",
-            ("High MSDI Test",)
+            ("High MSDI Test",),
         )
         row = cursor.fetchone()
         self.assertIsNotNone(row)
@@ -109,6 +101,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         self.assertGreaterEqual(q_score, 0.85)
         self.assertEqual(q_status, "ACCEPT")
         self.assertIn("HIGH_MSDI", q_flags)
+
 
 if __name__ == "__main__":
     unittest.main()

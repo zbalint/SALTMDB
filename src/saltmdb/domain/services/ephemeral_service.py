@@ -5,6 +5,7 @@ from saltmdb.db.connection import EPHEMERAL_CONN
 logger = logging.getLogger(__name__)
 _ephemeral_lock = threading.RLock()
 
+
 def store_ephemeral_memory(key: str, value: str) -> str:
     """Stores a volatile secret key/value in the isolated in-memory SQLite database."""
     if not key or not value:
@@ -12,15 +13,19 @@ def store_ephemeral_memory(key: str, value: str) -> str:
     try:
         with _ephemeral_lock:
             with EPHEMERAL_CONN:
-                EPHEMERAL_CONN.execute("""
+                EPHEMERAL_CONN.execute(
+                    """
                     INSERT INTO ephemeral_memories (key, value)
                     VALUES (?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, created_at = CURRENT_TIMESTAMP
-                """, (key, value))
+                """,
+                    (key, value),
+                )
         return f"Ephemeral secret stored successfully for key: {key}"
     except Exception as e:
         logger.error("Error storing ephemeral memory: %s", e)
         return f"Error storing ephemeral memory: {e}"
+
 
 def get_ephemeral_memory(key: str) -> str:
     """Retrieves a volatile secret from the isolated in-memory database."""
@@ -29,7 +34,9 @@ def get_ephemeral_memory(key: str) -> str:
     try:
         with _ephemeral_lock:
             with EPHEMERAL_CONN:
-                cursor = EPHEMERAL_CONN.execute("SELECT value FROM ephemeral_memories WHERE key = ?", (key,))
+                cursor = EPHEMERAL_CONN.execute(
+                    "SELECT value FROM ephemeral_memories WHERE key = ?", (key,)
+                )
                 row = cursor.fetchone()
         if row:
             return row[0]

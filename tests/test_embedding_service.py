@@ -2,9 +2,9 @@ import unittest
 import os
 import tempfile
 import shutil
-from unittest.mock import patch, MagicMock
 
-from saltmdb.domain.services.embedding_service import _is_valid_local_model, get_model, embed_text
+from saltmdb.domain.services.embedding_service import _is_valid_local_model, embed_text
+
 
 class TestEmbeddingService(unittest.TestCase):
     def setUp(self):
@@ -26,7 +26,9 @@ class TestEmbeddingService(unittest.TestCase):
         os.makedirs(model_dir, exist_ok=True)
         onnx_path = os.path.join(model_dir, "model_optimized.onnx")
         with open(onnx_path, "w") as f:
-            f.write("version https://git-lfs.github.com/spec/v1\noid sha256:123456\nsize 66465124\n")
+            f.write(
+                "version https://git-lfs.github.com/spec/v1\noid sha256:123456\nsize 66465124\n"
+            )
         self.assertFalse(_is_valid_local_model(model_dir))
 
     def test_is_valid_local_model_valid_size(self):
@@ -42,6 +44,7 @@ class TestEmbeddingService(unittest.TestCase):
         vec = embed_text("Hello SALTMDB embedding model test")
         self.assertEqual(len(vec), 384)
         self.assertIsInstance(vec[0], float)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, close_connection
 
+
 def create_snapshot(db_path: str = None) -> str:
     """Safely creates a timestamped database backup snapshot in backups/ using SQLite's backup API."""
     db_path = db_path or get_db_path()

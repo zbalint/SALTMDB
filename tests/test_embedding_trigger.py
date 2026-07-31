@@ -5,6 +5,7 @@ import time
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory
 
+
 class TestEmbeddingTrigger(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -25,20 +26,23 @@ class TestEmbeddingTrigger(unittest.TestCase):
             content="Content for testing async background embedding generation worker pool",
             owner_id="user1",
             skip_duplicate_check=True,
-            db_path=self.db_path
+            db_path=self.db_path,
         )
         entity_id = res.split("ID: ")[1]
 
         # Wait up to 5 seconds for background embedding thread pool execution
         ready = False
         for _ in range(50):
-            row = self.conn.execute("SELECT embedding_status FROM entities WHERE id = ?", (entity_id,)).fetchone()
+            row = self.conn.execute(
+                "SELECT embedding_status FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
             if row and row[0] == "ready":
                 ready = True
                 break
             time.sleep(0.1)
 
         self.assertTrue(ready, "Embedding status did not transition to 'ready'")
+
 
 if __name__ == "__main__":
     unittest.main()

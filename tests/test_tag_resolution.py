@@ -35,6 +35,7 @@ class TestResolveOrCreateTag(unittest.TestCase):
         # (mirrors how store_memory/commit_consolidation actually invoke it).
         def _write(c):
             return resolve_or_create_tag(c, tag_name, agent_id=agent_id)
+
         return write_transaction_retrying(self.conn, _write)
 
     def test_exact_match_resolves_to_same_id_on_repeated_calls(self):
@@ -53,7 +54,9 @@ class TestResolveOrCreateTag(unittest.TestCase):
         id1 = self._resolve("#skill")
         id2 = self._resolve("#skills")
         self.assertIsNotNone(id1)
-        self.assertEqual(id1, id2, "'#skills' should resolve onto '#skill' via the plural/suffix fallback")
+        self.assertEqual(
+            id1, id2, "'#skills' should resolve onto '#skill' via the plural/suffix fallback"
+        )
 
         # Confirm only one physical tag row was ever created for this family -- the whole
         # point of the fallback is that they never fragment into two rows in the first place.
@@ -70,15 +73,15 @@ class TestResolveOrCreateTag(unittest.TestCase):
         # Simulate a prior merge_tags() call by manually pointing the alias's canonical_id
         # at the canonical tag's id.
         def _write(c):
-            c.execute(
-                "UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id)
-            )
+            c.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id))
+
         write_transaction_retrying(self.conn, _write)
 
         resolved = self._resolve("#aliastag")
         self.assertEqual(
-            resolved, canonical_id,
-            "resolve_or_create_tag must follow canonical_id and return the CANONICAL id, not the alias's own id"
+            resolved,
+            canonical_id,
+            "resolve_or_create_tag must follow canonical_id and return the CANONICAL id, not the alias's own id",
         )
         self.assertNotEqual(resolved, alias_id)
 
@@ -90,13 +93,14 @@ class TestResolveOrCreateTag(unittest.TestCase):
         row = self.conn.execute("SELECT name FROM tags WHERE id = ?", (tag_id,)).fetchone()
         self.assertIsNotNone(row)
         # Sanitized: lowercase, only [a-z0-9-] retained after the leading '#'.
-        self.assertRegex(row[0], r'^#[a-z0-9-]+$')
+        self.assertRegex(row[0], r"^#[a-z0-9-]+$")
 
         events = event_service.get_recent_events(type_filter="issue", db_connection=self.conn)
         matching = [e for e in events if "sanitiz" in e["content"].lower()]
         self.assertEqual(
-            len(matching), 1,
-            "sanitizing a malformed tag name must fire exactly one 'issue' event, not zero or many"
+            len(matching),
+            1,
+            "sanitizing a malformed tag name must fire exactly one 'issue' event, not zero or many",
         )
 
     def test_new_tag_creation_populates_normalized_name(self):

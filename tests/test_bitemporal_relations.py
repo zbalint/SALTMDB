@@ -2,7 +2,6 @@ import unittest
 import tempfile
 import os
 import shutil
-import sqlite3
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.relation_service import (
     store_relation,
@@ -24,13 +23,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Entity Alpha",
             content="# Entity Alpha\n\nContent for alpha entity.",
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         m2 = store_memory(
             title="[SALTMDB] Entity Beta",
             content="# Entity Beta\n\nContent for beta entity.",
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.id_alpha = m1.split("ID: ")[1].split()[0]
         self.id_beta = m2.split("ID: ")[1].split()[0]
@@ -50,14 +49,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Relation successfully stored"))
         rel_id = res.split("ID: ")[1].rstrip(")")
 
         row = self.conn.execute(
-            "SELECT created_at, valid_from, valid_at FROM relations WHERE id = ?",
-            (rel_id,)
+            "SELECT created_at, valid_from, valid_at FROM relations WHERE id = ?", (rel_id,)
         ).fetchone()
         created_at, valid_from, valid_at = row
         self.assertIsNotNone(valid_at)
@@ -71,14 +69,12 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             valid_at=custom_time,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Relation successfully stored"))
         rel_id = res.split("ID: ")[1].rstrip(")")
 
-        row = self.conn.execute(
-            "SELECT valid_at FROM relations WHERE id = ?", (rel_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT valid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
         self.assertEqual(row[0], custom_time)
 
     def test_store_relation_duplicate_noop_preserves_valid_at(self):
@@ -88,7 +84,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             valid_at=custom_time,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         # Call store_relation again with same tuple and a different valid_at
         res_dup = store_relation(
@@ -96,13 +92,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             valid_at="2026-12-31T23:59:59+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_dup.startswith("Relation already exists (no-op)"))
 
         row = self.conn.execute(
             "SELECT valid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
-            (self.id_alpha, self.id_beta, "depends_on")
+            (self.id_alpha, self.id_beta, "depends_on"),
         ).fetchone()
         self.assertEqual(row[0], custom_time)
 
@@ -111,7 +107,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         rel_id = res_store.split("ID: ")[1].rstrip(")")
 
@@ -119,7 +115,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
         self.assertIn(rel_id, res_inv)
@@ -136,7 +132,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         custom_inv_time = "2025-06-15T12:00:00+00:00"
         res_inv = invalidate_relation(
@@ -144,14 +140,14 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             invalid_at=custom_inv_time,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
         self.assertIn(custom_inv_time, res_inv)
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
-            (self.id_alpha, self.id_beta)
+            (self.id_alpha, self.id_beta),
         ).fetchone()
         self.assertEqual(row[0], custom_inv_time)
 
@@ -160,18 +156,18 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         res_inv = invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
-            (self.id_alpha, self.id_beta)
+            (self.id_alpha, self.id_beta),
         ).fetchone()
         self.assertIsNotNone(row[0])
 
@@ -180,7 +176,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         custom_time = "2025-05-01T00:00:00+00:00"
         res1 = invalidate_relation(
@@ -188,7 +184,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             invalid_at=custom_time,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res1.startswith("Relation invalidated"))
 
@@ -197,14 +193,14 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             invalid_at="2026-01-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res2.startswith("Relation already invalidated (no-op)"))
         self.assertIn(custom_time, res2)
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
-            (self.id_alpha, self.id_beta)
+            (self.id_alpha, self.id_beta),
         ).fetchone()
         self.assertEqual(row[0], custom_time)
 
@@ -214,7 +210,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="nonexistent_predicate",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(res1, "Error: relation not found")
 
@@ -223,16 +219,18 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="resolves",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         rel_id = res_store.split("ID: ")[1].rstrip(")")
-        self.conn.execute("UPDATE relations SET valid_to = '2025-01-01T00:00:00' WHERE id = ?", (rel_id,))
+        self.conn.execute(
+            "UPDATE relations SET valid_to = '2025-01-01T00:00:00' WHERE id = ?", (rel_id,)
+        )
 
         res2 = invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="resolves",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(res2, "Error: relation not found")
 
@@ -242,21 +240,21 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="elaborates_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         # Call invalidate passing alias 'references'
         res_inv = invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="references",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
         self.assertIn("elaborates_on", res_inv)
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
-            (self.id_alpha, self.id_beta, "elaborates_on")
+            (self.id_alpha, self.id_beta, "elaborates_on"),
         ).fetchone()
         self.assertIsNotNone(row[0])
 
@@ -266,20 +264,20 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
             invalid_at="2025-06-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
         res_dep = analyze_dependencies(
             root_entity_id=self.id_alpha,
             point_in_time="2025-07-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(res_dep["total_dependencies_found"], 0)
         self.assertEqual(len(res_dep["dependencies"]), 1)
@@ -289,19 +287,19 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="consolidated_from",
             valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="consolidated_from",
             invalid_at="2025-06-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         res_lin = analyze_lineage(
             entity_id=self.id_alpha,
             point_in_time="2025-07-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(len(res_lin["ancestors"]), 1)
 
@@ -311,24 +309,24 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="depends_on",
             valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.conn.execute(
             "UPDATE relations SET valid_from = '2025-01-01T00:00:00+00:00' WHERE source_id = ? AND target_id = ?",
-            (self.id_alpha, self.id_beta)
+            (self.id_alpha, self.id_beta),
         )
         invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
             invalid_at="2025-06-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
         res_dep = analyze_dependencies(
             root_entity_id=self.id_alpha,
             point_in_time="2025-03-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(res_dep["total_dependencies_found"], 1)
         self.assertEqual(len(res_dep["dependencies"]), 2)
@@ -340,23 +338,23 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             target_id=self.id_beta,
             predicate="consolidated_from",
             valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.conn.execute(
             "UPDATE relations SET valid_from = '2025-01-01T00:00:00+00:00' WHERE source_id = ? AND target_id = ? AND predicate = 'consolidated_from'",
-            (self.id_alpha, self.id_beta)
+            (self.id_alpha, self.id_beta),
         )
         invalidate_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="consolidated_from",
             invalid_at="2025-06-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         res_lin = analyze_lineage(
             entity_id=self.id_alpha,
             point_in_time="2025-03-01T00:00:00+00:00",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertEqual(len(res_lin["ancestors"]), 2)
         ancestry_ids = {a["id"] for a in res_lin["ancestors"]}
@@ -367,7 +365,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res1.startswith("Relation successfully stored"))
 
@@ -375,7 +373,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
 
@@ -383,13 +381,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             source_id=self.id_alpha,
             target_id=self.id_beta,
             predicate="depends_on",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res2.startswith("Relation successfully stored"))
 
         rows = self.conn.execute(
             "SELECT id, valid_to, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
-            (self.id_alpha, self.id_beta, "depends_on")
+            (self.id_alpha, self.id_beta, "depends_on"),
         ).fetchall()
         self.assertEqual(len(rows), 2)
         active_rows = [r for r in rows if r[1] is None]
@@ -420,18 +418,20 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# Episodic Memory\n\nContent for episodic memory test.",
             tags=["episodic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         entity_id = res.split("ID: ")[1].split()[0]
         row = self.conn.execute(
             "SELECT t.name, t.canonical_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE et.entity_id = ?",
-            (entity_id,)
+            (entity_id,),
         ).fetchone()
         self.assertEqual(row[0], "episodic")
         self.assertIsNone(row[1])
 
         # Verify only 1 row exists in tags for 'episodic'
-        tag_count = self.conn.execute("SELECT COUNT(*) FROM tags WHERE name = 'episodic'").fetchone()[0]
+        tag_count = self.conn.execute(
+            "SELECT COUNT(*) FROM tags WHERE name = 'episodic'"
+        ).fetchone()[0]
         self.assertEqual(tag_count, 1)
 
     def test_memory_type_and_canonical_tag_simultaneous(self):
@@ -441,15 +441,17 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             memory_type="event",
             tags=["episodic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         entity_id = res.split("ID: ")[1].split()[0]
-        mtype = self.conn.execute("SELECT memory_type FROM entities WHERE id = ?", (entity_id,)).fetchone()[0]
+        mtype = self.conn.execute(
+            "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()[0]
         self.assertEqual(mtype, "event")
 
         tag_name = self.conn.execute(
             "SELECT t.name FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE et.entity_id = ?",
-            (entity_id,)
+            (entity_id,),
         ).fetchone()[0]
         self.assertEqual(tag_name, "episodic")
 
@@ -460,10 +462,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# New Entity\n\nSome body text for new entity with tags.",
             tags=["semantic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res1.startswith("Knowledge stored successfully with ID: "))
-        self.assertIn("[Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]", res1)
+        self.assertIn(
+            "[Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]",
+            res1,
+        )
 
         # (b) Brand-new entity WITHOUT tags -> no tip suffix
         res2 = store_memory(
@@ -471,7 +476,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# New Entity\n\nSome body text for new entity without tags.",
             tags=[],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res2.startswith("Knowledge stored successfully with ID: "))
         self.assertNotIn("[Tip: consider calling manage_relation", res2)
@@ -484,7 +489,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# New Entity Updated\n\nUpdated body text for new entity with tags.",
             tags=["semantic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertTrue(res3.startswith("Knowledge stored successfully with ID: "))
         self.assertNotIn("[Tip: consider calling manage_relation", res3)
@@ -496,9 +501,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# Quantum Encryption\n\nQuantum key distribution uses polarized photons to establish secure shared keys.",
             tags=["semantic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
+        res1.split("ID: ")[1].split()[0]
 
         # Second memory with different content hash and tags to verify success message and tip
         res2 = store_memory(
@@ -506,11 +511,14 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# Quantum Encryption Variant\n\nQuantum key distribution utilizes polarized photons to establish safe shared keys.",
             tags=["semantic"],
             owner_id="user1",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         prefix = "Knowledge stored successfully with ID: "
         self.assertTrue(res2.startswith(prefix))
-        self.assertIn("[Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]", res2)
+        self.assertIn(
+            "[Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]",
+            res2,
+        )
 
 
 if __name__ == "__main__":

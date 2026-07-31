@@ -6,6 +6,7 @@ from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 from saltmdb.utils import nlp, text
 
+
 class TestTextQualityGate(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -22,9 +23,7 @@ class TestTextQualityGate(unittest.TestCase):
     def test_tc_qual_01_short_length_rejection(self):
         """TC-QUAL-01: Short string ('ok done') -> REJECT"""
         res = memory_service.store_memory(
-            content="ok done",
-            title="Short Fluff",
-            owner_id="test_owner"
+            content="ok done", title="Short Fluff", owner_id="test_owner"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("below minimum threshold", res)
@@ -32,9 +31,7 @@ class TestTextQualityGate(unittest.TestCase):
     def test_tc_qual_02_fluff_regex_rejection(self):
         """TC-QUAL-02: Conversational fluff response -> REJECT"""
         res = memory_service.store_memory(
-            content="modified the file.",
-            title="Conversational Ack",
-            owner_id="test_owner"
+            content="modified the file.", title="Conversational Ack", owner_id="test_owner"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("below minimum threshold", res)
@@ -43,9 +40,7 @@ class TestTextQualityGate(unittest.TestCase):
         """TC-QUAL-03: Repetitive string (Entropy < 2.5) -> REJECT"""
         repetitive_content = "test test test test test test test test test test test test test test"
         res = memory_service.store_memory(
-            content=repetitive_content,
-            title="Repetitive Loop",
-            owner_id="test_owner"
+            content=repetitive_content, title="Repetitive Loop", owner_id="test_owner"
         )
         self.assertIn("Error: Memory quality check rejected", res)
         self.assertIn("entropy too low", res)
@@ -71,7 +66,7 @@ class TestTextQualityGate(unittest.TestCase):
             content=valid_markdown,
             title="Quality Gate Arch",
             owner_id="agent_alpha",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", first_store)
 
@@ -79,7 +74,7 @@ class TestTextQualityGate(unittest.TestCase):
             content=valid_markdown,
             title="Quality Gate Arch Duplicate",
             owner_id="agent_alpha",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("REJECT_EXACT_DUPLICATE", second_store)
 
@@ -100,14 +95,14 @@ class TestTextQualityGate(unittest.TestCase):
             content=tech_markdown,
             title="Technical Implementation Plan",
             owner_id="agent_alpha",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res)
 
         # Inspect database fields
         cursor = self.conn.execute(
             "SELECT quality_score, quality_status, quality_flags, content_hash FROM entities WHERE title = ?",
-            ("Technical Implementation Plan",)
+            ("Technical Implementation Plan",),
         )
         row = cursor.fetchone()
         self.assertIsNotNone(row)
@@ -117,6 +112,7 @@ class TestTextQualityGate(unittest.TestCase):
         self.assertIn("HAS_HEADERS", q_flags)
         self.assertIn("HAS_LIST", q_flags)
         self.assertEqual(c_hash, text.compute_content_hash(tech_markdown))
+
 
 if __name__ == "__main__":
     unittest.main()

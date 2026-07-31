@@ -5,6 +5,7 @@ import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 
+
 class TestCrossOwnerDedup(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -29,17 +30,20 @@ class TestCrossOwnerDedup(unittest.TestCase):
             owner_id="agent_a",
             scope="shared",
             skip_duplicate_check=True,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
         dup_check = memory_service.check_duplicate_memories(
             title="SALTMDB Cross-Agent Purpose Restated",
             content="SALTMDB is a local-first MCP memory database that enables cross-agent shared memory across Claude, Antigravity, and Copilot CLI",
             owner_id="agent_b",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
-        self.assertTrue(dup_check.get("duplicate_found"), "Shared-scope memory from a different owner should be detected as a duplicate candidate")
+        self.assertTrue(
+            dup_check.get("duplicate_found"),
+            "Shared-scope memory from a different owner should be detected as a duplicate candidate",
+        )
         self.assertEqual(dup_check["potential_duplicates"][0]["scope"], "shared")
 
     def test_private_scope_memory_stays_isolated_across_owners(self):
@@ -50,17 +54,21 @@ class TestCrossOwnerDedup(unittest.TestCase):
             owner_id="agent_a",
             scope="private",
             skip_duplicate_check=True,
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
         dup_check = memory_service.check_duplicate_memories(
             title="agent_a Private Debug Note",
             content="agent_a private scratch note about a local debugging session that nobody else should see",
             owner_id="agent_b",
-            db_connection=self.conn
+            db_connection=self.conn,
         )
 
-        self.assertFalse(dup_check.get("duplicate_found"), "Private-scope memory from a different owner must stay isolated")
+        self.assertFalse(
+            dup_check.get("duplicate_found"),
+            "Private-scope memory from a different owner must stay isolated",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

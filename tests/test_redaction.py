@@ -1,6 +1,7 @@
 import unittest
 from saltmdb.utils.redaction import redact_secrets
 
+
 class TestSecretsRedaction(unittest.TestCase):
     def test_standard_secret_redaction(self):
         # OpenAI API keys (sk-...) are at least 48 characters
@@ -22,6 +23,7 @@ class TestSecretsRedaction(unittest.TestCase):
         text = "This is a clean documentation string about Python programming."
         redacted = redact_secrets(text)
         self.assertEqual(text, redacted)
+
 
 if __name__ == "__main__":
     unittest.main()

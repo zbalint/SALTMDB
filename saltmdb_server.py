@@ -7,4 +7,5 @@ if src_dir not in sys.path:
 
 if __name__ == "__main__":
     from saltmdb.__main__ import main
+
     main()

@@ -5,13 +5,14 @@ from saltmdb.config import get_db_path
 logging.basicConfig(
     stream=sys.stderr,
     level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+
 def main():
     if "--librarian" in sys.argv:
-        from saltmdb.db.connection import get_connection, close_connection
+        from saltmdb.db.connection import close_connection
         from saltmdb.db.schema import init_db
         from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock
         from saltmdb.domain.services.librarian_service import (
@@ -20,8 +21,9 @@ def main():
             consolidate_memories,
             consolidate_vector_clusters,
             scout_consolidated_supersessions,
-            _run_librarian_maintenance
+            _run_librarian_maintenance,
         )
+
         db_path = get_db_path()
         conn = init_db(db_path)
         if not acquire_librarian_lock(conn):
@@ -47,15 +49,17 @@ def main():
             print("Librarian consolidation complete.", flush=True)
     else:
         from saltmdb.mcp.server import mcp
-        import saltmdb.mcp.tools  # Register all MCP tools
+
         try:
             from saltmdb.domain.services.embedding_service import backfill_pending_embeddings
+
             count = backfill_pending_embeddings()
             if count > 0:
                 logger.info("Queued %d pending entity embeddings for background generation.", count)
         except Exception as e:
             logger.warning("Startup embedding backfill check failed: %s", e)
         mcp.run()
+
 
 if __name__ == "__main__":
     main()

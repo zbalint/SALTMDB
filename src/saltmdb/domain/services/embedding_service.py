@@ -7,7 +7,8 @@ _model_lock = threading.Lock()
 _model = None
 
 
-import os
+import os  # noqa: E402
+
 
 def _is_valid_local_model(model_dir: str) -> bool:
     """Verify that bundled model directory exists and contains non-pointer binary weights."""
@@ -21,7 +22,7 @@ def _is_valid_local_model(model_dir: str) -> bool:
         if os.path.getsize(onnx_file) < 10 * 1024 * 1024:
             logger.warning(
                 "Bundled model file %s is too small (likely an un-fetched Git LFS pointer). Skipping local load.",
-                onnx_file
+                onnx_file,
             )
             return False
     except OSError:
@@ -36,8 +37,11 @@ def get_model():
         with _model_lock:
             if _model is None:
                 from fastembed import TextEmbedding
+
                 local_model_dir = os.path.abspath(
-                    os.path.join(os.path.dirname(__file__), "..", "..", "models", "bge-small-en-v1.5")
+                    os.path.join(
+                        os.path.dirname(__file__), "..", "..", "models", "bge-small-en-v1.5"
+                    )
                 )
                 if _is_valid_local_model(local_model_dir):
                     logger.info("Loading bundled ONNX embedding model from %s", local_model_dir)
@@ -45,13 +49,20 @@ def get_model():
                         _model = TextEmbedding(
                             model_name="BAAI/bge-small-en-v1.5",
                             cache_dir=os.path.dirname(local_model_dir),
-                            local_files_only=True
+                            local_files_only=True,
                         )
                     except Exception as e:
-                        logger.warning("Failed to load bundled model from %s: %s. Falling back to online model load.", local_model_dir, e)
+                        logger.warning(
+                            "Failed to load bundled model from %s: %s. Falling back to online model load.",
+                            local_model_dir,
+                            e,
+                        )
                         _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
                 else:
-                    logger.info("Bundled model not present or invalid at %s. Falling back to online model load.", local_model_dir)
+                    logger.info(
+                        "Bundled model not present or invalid at %s. Falling back to online model load.",
+                        local_model_dir,
+                    )
                     _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _model
 
@@ -103,21 +114,20 @@ def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: s
             c.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (entity_id,))
             c.execute(
                 "INSERT INTO entity_embeddings(entity_id, embedding) VALUES (?, ?)",
-                (entity_id, sqlite_vec.serialize_float32(vector))
+                (entity_id, sqlite_vec.serialize_float32(vector)),
             )
-            c.execute(
-                "UPDATE entities SET embedding_status = 'ready' WHERE id = ?",
-                (entity_id,)
-            )
+            c.execute("UPDATE entities SET embedding_status = 'ready' WHERE id = ?", (entity_id,))
+
         write_transaction_retrying(conn, _write)
         logger.debug("Embedding stored for entity %s", entity_id)
     except Exception as e:
         try:
+
             def _mark_failed(c):
                 c.execute(
-                    "UPDATE entities SET embedding_status = 'failed' WHERE id = ?",
-                    (entity_id,)
+                    "UPDATE entities SET embedding_status = 'failed' WHERE id = ?", (entity_id,)
                 )
+
             write_transaction_retrying(conn, _mark_failed)
         except Exception:
             pass

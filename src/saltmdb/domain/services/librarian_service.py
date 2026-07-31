@@ -5,6 +5,7 @@ import subprocess
 import json
 import uuid
 import logging
+from typing import Any
 from datetime import datetime, UTC
 from concurrent.futures import ThreadPoolExecutor
 from saltmdb.config import get_db_path, LIBRARIAN_TRIGGER_COOLDOWN_S
@@ -20,12 +21,19 @@ logger = logging.getLogger(__name__)
 # or contend with it. max_workers=1 is deliberate: the cooldown-claim UPDATE below is already
 # meant to collapse concurrent triggers to a single winner, so there is never a reason to run
 # more than one of these checks at a time.
-_librarian_trigger_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saltmdb-librarian-trigger")
+_librarian_trigger_pool = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="saltmdb-librarian-trigger"
+)
+
 
 def trigger_librarian(db_path: str = None):
     """Fire-and-forget: schedules the cooldown check + subprocess spawn on a background
     thread so this never blocks or adds write-lock contention to the caller's request."""
-    if os.environ.get("SALTMDB_DISABLE_LIBRARIAN") or os.environ.get("SALTMDB_TEST_MODE") or getattr(trigger_librarian, "disabled", False):
+    if (
+        os.environ.get("SALTMDB_DISABLE_LIBRARIAN")
+        or os.environ.get("SALTMDB_TEST_MODE")
+        or getattr(trigger_librarian, "disabled", False)
+    ):
         return
     db_path = db_path or get_db_path()
     _librarian_trigger_pool.submit(_trigger_librarian_impl, db_path)
@@ -53,12 +61,15 @@ def _trigger_librarian_impl(db_path: str) -> None:
 
             def _claim_cooldown(c):
                 now = datetime.now(UTC).isoformat()
-                cur = c.execute(f"""
+                cur = c.execute(
+                    f"""
                     UPDATE _system_locks
                     SET last_run_at = ?
                     WHERE task_name = 'librarian_consolidation'
                       AND (last_run_at IS NULL OR datetime(last_run_at) < datetime('now', '-{LIBRARIAN_TRIGGER_COOLDOWN_S} seconds'))
-                """, (now,))
+                """,
+                    (now,),
+                )
                 return cur.rowcount == 1
 
             if not write_transaction_retrying(conn, _claim_cooldown):
@@ -92,10 +103,11 @@ def _trigger_librarian_impl(db_path: str) -> None:
                 [sys.executable, "-m", "saltmdb", "--librarian"],
                 stdout=log_f,
                 stderr=log_f,
-                creationflags=creationflags
+                creationflags=creationflags,
             )
     except Exception as e:
         logger.warning("Failed to spawn librarian subprocess: %s", e)
+
 
 def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
     """Scans tags to merge duplicate and near-identical names to prevent folksonomy fragmentation."""
@@ -104,47 +116,68 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         logger.info("Running Tag Merging...")
+
         def _write(c):
             cursor = c.execute("SELECT id, name, canonical_id FROM tags")
             tags = cursor.fetchall()
-            
-            grouped = {}
+
+            grouped: dict[str, list[Any]] = {}
             for tag_id, name, canonical_id in tags:
                 if canonical_id is not None:
                     continue
                 norm = name.lower().strip().replace("-", "").replace("_", "").replace("#", "")
                 grouped.setdefault(norm, []).append((tag_id, name))
-                
+
             for norm, tag_list in grouped.items():
                 if len(tag_list) > 1:
                     canonical_id, canonical_name = tag_list[0]
-                    logger.info("Merging tags into canonical tag: '%s' (%s)", canonical_name, canonical_id)
+                    logger.info(
+                        "Merging tags into canonical tag: '%s' (%s)", canonical_name, canonical_id
+                    )
                     for tag_id, name in tag_list[1:]:
                         logger.info("  - Marking alias tag: '%s' (%s)", name, tag_id)
-                        c.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id))
-                        c.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
-                        c.execute("DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)", (tag_id, canonical_id))
-                        c.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id))
+                        c.execute(
+                            "UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id)
+                        )
+                        c.execute(
+                            "UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?",
+                            (canonical_id, tag_id),
+                        )
+                        c.execute(
+                            "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
+                            (tag_id, canonical_id),
+                        )
+                        c.execute(
+                            "UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?",
+                            (canonical_id, tag_id),
+                        )
+
         write_transaction_retrying(conn, _write)
     finally:
         if should_close:
             close_connection(conn)
+
 
 def _resolve_tag_id(conn: sqlite3.Connection, tag_name: str):
     """Resolves a tag name to its canonical tag id (case-insensitive, '#'-prefix-tolerant)."""
     if not tag_name:
         return None
     name = normalize_tag_name(tag_name)
-    row = conn.execute("SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (name,)).fetchone()
+    row = conn.execute(
+        "SELECT id, canonical_id FROM tags WHERE lower(name) = lower(?)", (name,)
+    ).fetchone()
     if not row:
         return None
     tag_id, canonical_id = row
     return canonical_id if canonical_id else tag_id
 
-def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = None, db_path: str = None) -> str:
+
+def merge_tags(
+    keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = None, db_path: str = None
+) -> str:
     """Merges one or more tags into an explicitly chosen canonical tag, repointing entity_tags associations.
 
     Unlike merge_tags_heuristics (which picks the canonical tag arbitrarily by SQL row order),
@@ -161,12 +194,13 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
         if not canonical_id:
             return f"Error: keep_tag '{keep_tag}' does not exist in the tags table."
 
-        merged = []
-        skipped = []
+        merged: list[Any] = []
+        skipped: list[Any] = []
+
         def _write(c):
             merged.clear()
             skipped.clear()
-            for name in (tags_to_merge or []):
+            for name in tags_to_merge or []:
                 alias_id = _resolve_tag_id(c, name)
                 if not alias_id:
                     skipped.append({"tag": name, "reason": "not found"})
@@ -176,19 +210,26 @@ def merge_tags(keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = No
                     continue
 
                 c.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, alias_id))
-                c.execute("UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                c.execute(
+                    "UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?",
+                    (canonical_id, alias_id),
+                )
                 c.execute(
                     "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
-                    (alias_id, canonical_id)
+                    (alias_id, canonical_id),
                 )
-                c.execute("UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id))
+                c.execute(
+                    "UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, alias_id)
+                )
                 merged.append(name)
+
         write_transaction_retrying(conn, _write)
 
         return f"Merged {len(merged)} tag(s) into canonical tag '{keep_tag}': {merged}. Skipped: {skipped}"
     finally:
         if should_close:
             close_connection(conn)
+
 
 def _pending_request_exists(conn: sqlite3.Connection, target: str, **key_filters) -> bool:
     """True if an unresolved consolidation_request event already covers this target.
@@ -208,7 +249,9 @@ def _pending_request_exists(conn: sqlite3.Connection, target: str, **key_filters
     matches a NULL field correctly instead of silently excluding everything via SQL's
     NULL != NULL semantics.
     """
-    extra_clauses = "".join(f" AND json_extract(content, '$.{field}') IS ?" for field in key_filters)
+    extra_clauses = "".join(
+        f" AND json_extract(content, '$.{field}') IS ?" for field in key_filters
+    )
     rows = conn.execute(
         f"""
         SELECT content FROM events
@@ -301,20 +344,19 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
             if _pending_request_exists(conn, "tag", tag_name=tag_name):
                 continue
 
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT e.id FROM entities e
                 JOIN entity_tags et ON e.id = et.entity_id
                 WHERE et.tag_id = ? AND e.status = 'raw' AND e.owner_id IS ?
-            """, (tag_id, owner_id))
+            """,
+                (tag_id, owner_id),
+            )
             raw_ids = [r[0] for r in cursor.fetchall()]
 
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
-            content = json.dumps({
-                "target": "tag",
-                "tag_name": tag_name,
-                "entity_ids": raw_ids
-            })
+            content = json.dumps({"target": "tag", "tag_name": tag_name, "entity_ids": raw_ids})
             target_agent = owner_id if owner_id else "librarian"
             to_insert.append((event_id, now, target_agent, content, tag_name, threshold, raw_ids))
 
@@ -323,17 +365,28 @@ def consolidate_cluttered_tags(conn: sqlite3.Connection = None, db_path: str = N
 
         def _write(c):
             for event_id, now, target_agent, content, *_ in to_insert:
-                c.execute("""
+                c.execute(
+                    """
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
-                """, (event_id, now, target_agent, content))
+                """,
+                    (event_id, now, target_agent, content),
+                )
+
         write_transaction_retrying(conn, _write)
 
         for _, _, target_agent, _, tag_name, threshold, raw_ids in to_insert:
-            logger.info("Logged consolidation request for tag '%s' (Owner: %s, Threshold: %d, Entity IDs: %s)", tag_name, target_agent, threshold, raw_ids)
+            logger.info(
+                "Logged consolidation request for tag '%s' (Owner: %s, Threshold: %d, Entity IDs: %s)",
+                tag_name,
+                target_agent,
+                threshold,
+                raw_ids,
+            )
     finally:
         if should_close:
             close_connection(conn)
+
 
 def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
     """General consolidator that groups raw memories by owner/scope and logs general consolidation request events."""
@@ -342,7 +395,7 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         logger.info("Running General Memory Consolidation...")
         cursor = conn.execute("""
@@ -354,10 +407,10 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
         if not raw_entities:
             logger.info("No raw memories to consolidate.")
             return
-            
+
         logger.info("Found %d raw memories for general consolidation.", len(raw_entities))
-        
-        groups = {}
+
+        groups: dict[Any, list[Any]] = {}
         for eid, owner_id, scope in raw_entities:
             key = (owner_id, scope)
             groups.setdefault(key, []).append(eid)
@@ -372,12 +425,14 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
 
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
-            content = json.dumps({
-                "target": "general",
-                "owner_id": owner_id,
-                "scope": scope,
-                "entity_ids": entity_ids
-            })
+            content = json.dumps(
+                {
+                    "target": "general",
+                    "owner_id": owner_id,
+                    "scope": scope,
+                    "entity_ids": entity_ids,
+                }
+            )
             target_agent = owner_id if owner_id else "librarian"
             to_insert.append((event_id, now, target_agent, content, owner_id, scope, entity_ids))
 
@@ -386,30 +441,41 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
 
         def _write(c):
             for event_id, now, target_agent, content, *_ in to_insert:
-                c.execute("""
+                c.execute(
+                    """
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
-                """, (event_id, now, target_agent, content))
+                """,
+                    (event_id, now, target_agent, content),
+                )
+
         write_transaction_retrying(conn, _write)
 
         for _, _, _, _, owner_id, scope, entity_ids in to_insert:
-            logger.info("Logged general consolidation request for %s/%s (Entity IDs: %s)", owner_id, scope, entity_ids)
+            logger.info(
+                "Logged general consolidation request for %s/%s (Entity IDs: %s)",
+                owner_id,
+                scope,
+                entity_ids,
+            )
     finally:
         if should_close:
             close_connection(conn)
 
-def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):
+
+def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901, PLR0912, PLR0915
     """Discovers topically related raw memories via vector embeddings and logs consolidation request events."""
     should_close = False
     if not conn:
         db_path = db_path or get_db_path()
         conn = get_connection(db_path)
         should_close = True
-        
+
     try:
         logger.info("Running Vector Topic Clustering for Raw Memories...")
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -429,7 +495,7 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
 
         raw_ids = [r[0] for r in raw_rows]
         owner_map = {r[0]: r[1] for r in raw_rows}
-        
+
         clusters = []
         visited = set()
 
@@ -437,7 +503,9 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             if eid in visited:
                 continue
 
-            query_vec_cur = conn.execute("SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (eid,))
+            query_vec_cur = conn.execute(
+                "SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (eid,)
+            )
             vec_row = query_vec_cur.fetchone()
             if not vec_row or not vec_row[0]:
                 continue
@@ -454,7 +522,9 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             neighbors_cur = conn.execute(sql, [vec_blob] + raw_ids)
             cluster_members = []
             for nid, dist in neighbors_cur.fetchall():
-                if dist <= 0.25 and nid not in visited:  # Cosine distance <= 0.25 means cosine similarity >= 0.75
+                if (
+                    dist <= 0.25 and nid not in visited
+                ):  # Cosine distance <= 0.25 means cosine similarity >= 0.75
                     cluster_members.append(nid)
 
             if len(cluster_members) >= 3:
@@ -475,11 +545,9 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             primary_owner = owner_map.get(cluster[0]) or "librarian"
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
-            content = json.dumps({
-                "target": "vector_cluster",
-                "owner_id": primary_owner,
-                "entity_ids": cluster
-            })
+            content = json.dumps(
+                {"target": "vector_cluster", "owner_id": primary_owner, "entity_ids": cluster}
+            )
             to_insert.append((event_id, now, primary_owner, content, cluster))
 
         if not to_insert:
@@ -487,21 +555,30 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
 
         def _write(c):
             for event_id, now, primary_owner, content, *_ in to_insert:
-                c.execute("""
+                c.execute(
+                    """
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
-                """, (event_id, now, primary_owner, content))
+                """,
+                    (event_id, now, primary_owner, content),
+                )
+
         write_transaction_retrying(conn, _write)
 
         for _, _, primary_owner, _, cluster in to_insert:
-            logger.info("Logged vector cluster consolidation request for Owner '%s' (Entity IDs: %s)", primary_owner, cluster)
+            logger.info(
+                "Logged vector cluster consolidation request for Owner '%s' (Entity IDs: %s)",
+                primary_owner,
+                cluster,
+            )
     except Exception as e:
         logger.warning("Error in consolidate_vector_clusters: %s", e)
     finally:
         if should_close:
             close_connection(conn)
 
-def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):
+
+def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901
     """Scouts for consolidated entities that may be outdated due to new raw memories."""
     should_close = False
     if not conn:
@@ -513,6 +590,7 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
         logger.info("Scouting Consolidated Memories for Supersession Candidates...")
         try:
             import sqlite_vec
+
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -532,18 +610,23 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
 
         to_insert = []
         for cid, ctitle, cowner, cvalid_from in consolidated_nodes:
-            vec_row = conn.execute("SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (cid,)).fetchone()
+            vec_row = conn.execute(
+                "SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (cid,)
+            ).fetchone()
             if not vec_row or not vec_row[0]:
                 continue
 
             vec_blob = vec_row[0]
-            new_raw_cur = conn.execute("""
+            new_raw_cur = conn.execute(
+                """
                 SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
                 FROM entity_embeddings ee
                 JOIN entities e ON ee.entity_id = e.id
                 WHERE e.status = 'raw' AND e.created_at > COALESCE(?, '1970-01-01T00:00:00')
                 ORDER BY distance ASC
-            """, (vec_blob, cvalid_from))
+            """,
+                (vec_blob, cvalid_from),
+            )
 
             overlapping_new_raw = [row[0] for row in new_raw_cur.fetchall() if row[1] <= 0.25]
             if len(overlapping_new_raw) < 3:
@@ -555,12 +638,14 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
             target_agent = cowner or "librarian"
-            content = json.dumps({
-                "target": "supersession_candidate",
-                "consolidated_entity_id": cid,
-                "consolidated_title": ctitle,
-                "new_raw_entity_ids": overlapping_new_raw
-            })
+            content = json.dumps(
+                {
+                    "target": "supersession_candidate",
+                    "consolidated_entity_id": cid,
+                    "consolidated_title": ctitle,
+                    "new_raw_entity_ids": overlapping_new_raw,
+                }
+            )
             to_insert.append((event_id, now, target_agent, content, ctitle, cid))
 
         if not to_insert:
@@ -568,19 +653,28 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
 
         def _write(c):
             for event_id, now, target_agent, content, *_ in to_insert:
-                c.execute("""
+                c.execute(
+                    """
                     INSERT INTO events (id, timestamp, agent_id, type, content)
                     VALUES (?, ?, ?, 'consolidation_request', ?)
-                """, (event_id, now, target_agent, content))
+                """,
+                    (event_id, now, target_agent, content),
+                )
+
         write_transaction_retrying(conn, _write)
 
         for _, _, _, _, ctitle, cid in to_insert:
-            logger.info("Logged supersession candidate request for consolidated memory '%s' (ID: %s)", ctitle, cid)
+            logger.info(
+                "Logged supersession candidate request for consolidated memory '%s' (ID: %s)",
+                ctitle,
+                cid,
+            )
     except Exception as e:
         logger.warning("Error in scout_consolidated_supersessions: %s", e)
     finally:
         if should_close:
             close_connection(conn)
+
 
 def _run_librarian_maintenance(conn) -> None:
     """Checkpoint + optimize maintenance duty. Runs once per Librarian invocation,
@@ -590,7 +684,12 @@ def _run_librarian_maintenance(conn) -> None:
         row = cursor.fetchone()
         if row:
             busy, log_pages, checkpointed_pages = row
-            logger.info("Librarian WAL checkpoint (TRUNCATE): busy=%d, wal_pages=%d, checkpointed_pages=%d", busy, log_pages, checkpointed_pages)
+            logger.info(
+                "Librarian WAL checkpoint (TRUNCATE): busy=%d, wal_pages=%d, checkpointed_pages=%d",
+                busy,
+                log_pages,
+                checkpointed_pages,
+            )
     except Exception as e:
         logger.warning("Librarian WAL checkpoint failed: %s", e)
     try:

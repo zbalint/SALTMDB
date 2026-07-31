@@ -6,6 +6,7 @@ from saltmdb.db.connection import get_connection, write_transaction_retrying
 
 logger = logging.getLogger(__name__)
 
+
 def _add_column_if_missing(conn, table: str, column_def: str) -> None:
     """Idempotent ALTER TABLE ADD COLUMN: swallows the genuine 'already exists' case,
     re-raises anything else so real schema bugs don't vanish silently."""
@@ -15,11 +16,12 @@ def _add_column_if_missing(conn, table: str, column_def: str) -> None:
         if "duplicate column name" not in str(e):
             raise
 
-def init_db(db_path: str = None) -> sqlite3.Connection:
+
+def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
     """Initialize the local SQLite database with Write-Ahead Logging (WAL), DDL tables, triggers, and migrations."""
     if not db_path:
         db_path = get_db_path()
-        
+
     conn = get_connection(db_path)
 
     # Force sqlite_vec (and its numpy dependency, a large native extension) to finish
@@ -57,7 +59,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
     # a retry could see or corrupt. This also directly helps the multi-agent concurrent-startup
     # contention that motivated the busy_timeout bump (commit 548d170), since concurrent init_db()
     # calls are exactly where BEGIN IMMEDIATE + retry pays off most.
-    def _write(c):
+    def _write(c):  # noqa: C901, PLR0912, PLR0915
         # 1. Events Table (Short-Term append-only ledger)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -69,7 +71,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             error_code TEXT
         );
         """)
-        
+
         # 2. Entities Table (Long-Term knowledge base)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS entities (
@@ -90,7 +92,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             metadata TEXT
         );
         """)
-        
+
         # Schema migration: attempt to add new columns to entities table if they don't exist
         for col in [
             "valid_from DATETIME",
@@ -119,7 +121,10 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             conn.execute("DROP INDEX IF EXISTS idx_entities_domain")
             conn.execute("ALTER TABLE entities DROP COLUMN domain")
         except sqlite3.OperationalError as e:
-            logger.debug("entities.domain column drop skipped (already migrated or unsupported SQLite version): %s", e)
+            logger.debug(
+                "entities.domain column drop skipped (already migrated or unsupported SQLite version): %s",
+                e,
+            )
 
         # Schema migration: attempt to add new columns to events table if they don't exist
         for col in ["session_id TEXT", "context_id TEXT"]:
@@ -127,17 +132,21 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
 
         # Backfill embedding_status = 'archived' for any archived entities
         try:
-            conn.execute("UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived' AND (embedding_status != 'archived' OR embedding_status IS NULL);")
+            conn.execute(
+                "UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived' AND (embedding_status != 'archived' OR embedding_status IS NULL);"
+            )
         except sqlite3.OperationalError:
             pass
 
         # Schema migration: project_id is retired in favor of context_id (kept as a physical
         # column for compatibility, but no longer written/read by application code past this backfill)
         try:
-            conn.execute("UPDATE entities SET context_id = project_id WHERE context_id IS NULL AND project_id IS NOT NULL;")
+            conn.execute(
+                "UPDATE entities SET context_id = project_id WHERE context_id IS NULL AND project_id IS NOT NULL;"
+            )
         except sqlite3.OperationalError:
             pass
-        
+
         # 3. Tags Table (Folksonomy with support for canonical aliases)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS tags (
@@ -149,18 +158,20 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             FOREIGN KEY (canonical_id) REFERENCES tags(id) ON DELETE SET NULL
         );
         """)
-        
+
         _add_column_if_missing(conn, "tags", "normalized_name TEXT")
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_normalized_name ON tags(normalized_name);")
-        
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tags_normalized_name ON tags(normalized_name);"
+        )
+
         # Schema migration (alpha.60): seed canonical top-level tags (episodic/semantic/procedural),
         # independent of each other -- no aliasing needed. Mirrors predicates' alpha.55 seeding
         # idempotency (INSERT OR IGNORE); canonical_id stays NULL, these ARE the canonical rows.
         for _seed_tag_name in ("episodic", "semantic", "procedural"):
             conn.execute(
                 "INSERT OR IGNORE INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (str(uuid.uuid4()), _seed_tag_name, _seed_tag_name)
+                (str(uuid.uuid4()), _seed_tag_name, _seed_tag_name),
             )
 
         # 4. Entity Tags Join Table
@@ -234,20 +245,29 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             FOREIGN KEY (canonical_id) REFERENCES predicates(id) ON DELETE SET NULL
         );
         """)
-        for _pred_name in ("resolves", "depends_on", "references", "elaborates_on",
-                            "consolidated_from", "supersedes", "relates_to"):
+        for _pred_name in (
+            "resolves",
+            "depends_on",
+            "references",
+            "elaborates_on",
+            "consolidated_from",
+            "supersedes",
+            "relates_to",
+        ):
             conn.execute(
                 "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (str(uuid.uuid4()), _pred_name, _pred_name)
+                (str(uuid.uuid4()), _pred_name, _pred_name),
             )
         # Pre-alias observed drift (relates_to/references used interchangeably with elaborates_on)
         # onto elaborates_on as canonical. Guarded by canonical_id IS NULL so a future manual
         # re-merge tool's decision is never silently clobbered on restart.
-        _canon_row = conn.execute("SELECT id FROM predicates WHERE name = 'elaborates_on'").fetchone()
+        _canon_row = conn.execute(
+            "SELECT id FROM predicates WHERE name = 'elaborates_on'"
+        ).fetchone()
         if _canon_row:
             conn.execute(
                 "UPDATE predicates SET canonical_id = ? WHERE name IN ('relates_to', 'references') AND canonical_id IS NULL AND id != ?",
-                (_canon_row[0], _canon_row[0])
+                (_canon_row[0], _canon_row[0]),
             )
 
         # 5. Virtual FTS5 Table with Porter Tokenizer & Search Aliases
@@ -268,19 +288,20 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
                 # Backfill FTS index from existing entities
                 conn.execute("""
                 INSERT INTO entities_fts (id, title, full_content, search_aliases)
-                SELECT id, title, full_content, 
+                SELECT id, title, full_content,
                        coalesce(json_extract(metadata, '$.search_aliases'), '')
                 FROM entities;
                 """)
         except sqlite3.OperationalError:
             pass
-            
+
         from saltmdb.db.vector_schema import init_vector_schema
+
         try:
             init_vector_schema(conn)
         except Exception as e:
             logger.warning("Vector schema init deferred/failed: %s", e)
-        
+
         # 6. Mutex Lock Table for Leader Election
         conn.execute("""
         CREATE TABLE IF NOT EXISTS _system_locks (
@@ -290,20 +311,20 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             last_run_at DATETIME
         );
         """)
-        
+
         # Schema migration: attempt to add last_run_at column if updating an existing database
         _add_column_if_missing(conn, "_system_locks", "last_run_at DATETIME")
-            
+
         conn.execute("""
-        INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at) 
+        INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at)
         VALUES ('librarian_consolidation', NULL, NULL, NULL);
         """)
-        
+
         # Drop old triggers to recreate with search_aliases support
         conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts_unarchived")
-        
+
         # Triggers to keep FTS5 and Entities in sync
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS insert_entity_fts
@@ -314,20 +335,20 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             VALUES (NEW.id, NEW.title, NEW.full_content, coalesce(json_extract(NEW.metadata, '$.search_aliases'), ''));
         END;
         """)
-        
+
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS update_entity_fts
         AFTER UPDATE ON entities
         WHEN NEW.status != 'archived' AND OLD.status != 'archived'
         BEGIN
-            UPDATE entities_fts 
-            SET title = NEW.title, 
+            UPDATE entities_fts
+            SET title = NEW.title,
                 full_content = NEW.full_content,
                 search_aliases = coalesce(json_extract(NEW.metadata, '$.search_aliases'), '')
             WHERE id = OLD.id;
         END;
         """)
-        
+
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS update_entity_fts_unarchived
         AFTER UPDATE ON entities
@@ -337,7 +358,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             VALUES (NEW.id, NEW.title, NEW.full_content, coalesce(json_extract(NEW.metadata, '$.search_aliases'), ''));
         END;
         """)
-        
+
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS archive_memory_fts
         AFTER UPDATE ON entities
@@ -355,7 +376,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             UPDATE entities SET embedding_status = 'archived' WHERE id = NEW.id;
         END;
         """)
-        
+
         conn.execute("""
         CREATE TRIGGER IF NOT EXISTS delete_entity_fts
         AFTER DELETE ON entities
@@ -363,7 +384,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:
             DELETE FROM entities_fts WHERE id = OLD.id;
         END;
         """)
-        
+
         # Performance indexes for high-traffic filtering columns
         for index_sql in [
             "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",

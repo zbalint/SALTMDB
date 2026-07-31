@@ -12,28 +12,142 @@ from saltmdb.config import (
 )
 
 STOP_WORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
-    "below", "between", "both", "but", "by", "can", "can't", "cannot", "could",
-    "did", "do", "does", "doing", "don't", "down", "during", "each", "few", "for",
-    "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers",
-    "him", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself",
-    "just", "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off",
-    "on", "once", "only", "or", "other", "our", "ours", "out", "over", "own",
-    "same", "she", "should", "so", "some", "such", "than", "that", "the", "their",
-    "theirs", "them", "themselves", "then", "there", "these", "they", "this",
-    "those", "through", "to", "too", "under", "until", "up", "very", "was", "we",
-    "were", "what", "when", "where", "which", "while", "who", "whom", "why", "with",
-    "would", "you", "your", "yours", "yourself", "yourselves"
+    "a",
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "aren't",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "by",
+    "can",
+    "can't",
+    "cannot",
+    "could",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "don't",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "him",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "just",
+    "me",
+    "more",
+    "most",
+    "my",
+    "myself",
+    "no",
+    "nor",
+    "not",
+    "of",
+    "off",
+    "on",
+    "once",
+    "only",
+    "or",
+    "other",
+    "our",
+    "ours",
+    "out",
+    "over",
+    "own",
+    "same",
+    "she",
+    "should",
+    "so",
+    "some",
+    "such",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "to",
+    "too",
+    "under",
+    "until",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "with",
+    "would",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
 }
+
 
 def stem(word: str) -> str:
     """Basic English suffix stemming for fuzzy matching."""
     w = word.lower()
     for suffix in ("ing", "edly", "ed", "es", "s", "ly", "ment", "tion", "ness", "ity", "al"):
         if len(w) > len(suffix) + 3 and w.endswith(suffix):
-            return w[:-len(suffix)]
+            return w[: -len(suffix)]
     return w
+
 
 def tokenize(text: str) -> set:
     """Extract stemmed content tokens excluding stop words."""
@@ -41,6 +155,7 @@ def tokenize(text: str) -> set:
         return set()
     words = re.findall(r"\b[a-zA-Z0-9_-]{3,}\b", text.lower())
     return {stem(w) for w in words if w not in STOP_WORDS}
+
 
 def word_sim(text1: str, text2: str) -> float:
     """Jaccard similarity coefficient based on stemmed token sets."""
@@ -52,19 +167,21 @@ def word_sim(text1: str, text2: str) -> float:
     union = len(t1.union(t2))
     return inter / union if union > 0 else 0.0
 
-import math
+
+import math  # noqa: E402
 
 FLUFF_PATTERN = re.compile(
     r"^(ok|done|thanks|got it|i have|modified the file|sure|completed|consolidated these files|consolidated|consolidated notes|merged summary)[\.!]?$",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
+
 
 def calculate_shannon_entropy(text: str) -> float:
     """Calculate character-level Shannon entropy in bits per character."""
     if not text:
         return 0.0
     length = len(text)
-    freqs = {}
+    freqs: dict[str, int] = {}
     for char in text:
         freqs[char] = freqs.get(char, 0) + 1
     entropy = 0.0
@@ -72,6 +189,7 @@ def calculate_shannon_entropy(text: str) -> float:
         p = count / length
         entropy -= p * math.log2(p)
     return entropy
+
 
 def calculate_ttr(text: str) -> float:
     """Calculate Type-Token Ratio (Lexical Diversity) based on word tokens."""
@@ -81,6 +199,7 @@ def calculate_ttr(text: str) -> float:
     unique_words = set(words)
     return len(unique_words) / len(words)
 
+
 def calculate_symbol_ratio(text: str) -> float:
     """Calculate ratio of punctuation/symbols to alphanumeric characters."""
     alpha_count = sum(1 for c in text if c.isalnum())
@@ -89,17 +208,19 @@ def calculate_symbol_ratio(text: str) -> float:
         return 1.0 if symbol_count > 0 else 0.0
     return symbol_count / alpha_count
 
+
 def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     """Calculate the ratio of duplicate word N-grams in text."""
     words = re.findall(r"\b\w+\b", text.lower())
     if len(words) < n:
         return 0.0
-    ngrams = [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+    ngrams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
     if not ngrams:
         return 0.0
     unique_count = len(set(ngrams))
     total_count = len(ngrams)
     return 1.0 - (unique_count / total_count)
+
 
 def extract_prose_content(text: str) -> str:
     """
@@ -120,6 +241,7 @@ def extract_prose_content(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
+
 def calculate_coleman_liau_index(prose_text: str) -> float:
     """
     Calculates Coleman-Liau Readability Index (CLI) on prose text:
@@ -134,28 +256,29 @@ def calculate_coleman_liau_index(prose_text: str) -> float:
     # Sentences delimited by ., !, ?, or newlines \n (for unpunctuated technical lists)
     sentences = [s for s in re.split(r"[.!?\n]+", prose_text) if s.strip()]
     sentence_count = max(1, len(sentences))
-    
+
     L = (letter_count / word_count) * 100.0
     S = (sentence_count / word_count) * 100.0
     cli = (0.0588 * L) - (0.296 * S) - 15.8
     return round(cli, 2)
 
-def auto_format_markdown(text: str) -> str:
+
+def auto_format_markdown(text: str) -> str:  # noqa: PLR0912
     """
     Idempotent pre-formatting pipeline: f(f(x)) = f(x).
     Auto-annotates untyped code blocks with language identifiers and normalizes whitespace.
     """
     if not text:
         return ""
-    
+
     # 1. Normalize line endings and trailing whitespace
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").splitlines()]
-    
+
     # 2. Auto-annotate untyped code blocks based on syntax heuristics
     formatted_lines = []
     in_code_block = False
     block_buffer = []
-    
+
     for line in lines:
         if line.strip().startswith("```"):
             if not in_code_block:
@@ -165,40 +288,48 @@ def auto_format_markdown(text: str) -> str:
             else:
                 in_code_block = False
                 fence_lang = block_buffer[0][1]
-                code_lines = [l for _, l in block_buffer[1:]]
+                code_lines = [l for _, l in block_buffer[1:]]  # noqa: E741
                 code_text = "\n".join(code_lines)
-                
+
                 # If fence was untyped, apply heuristic keyword detection
                 if not fence_lang:
                     if re.search(r"\b(def|import|from|class|elif|self|print)\b", code_text):
                         fence_lang = "python"
-                    elif re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE|FROM|WHERE)\b", code_text, re.IGNORECASE):
+                    elif re.search(
+                        r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE|FROM|WHERE)\b",
+                        code_text,
+                        re.IGNORECASE,
+                    ):
                         fence_lang = "sql"
-                    elif re.search(r"^\s*[\{\[]", code_text) and ("\"" in code_text or ":" in code_text):
+                    elif re.search(r"^\s*[\{\[]", code_text) and (
+                        '"' in code_text or ":" in code_text
+                    ):
                         fence_lang = "json"
-                    elif re.search(r"\b(function|const|let|var|console\.log|export|import)\b", code_text):
+                    elif re.search(
+                        r"\b(function|const|let|var|console\.log|export|import)\b", code_text
+                    ):
                         fence_lang = "javascript"
-                
+
                 formatted_lines.append(f"```{fence_lang}")
                 formatted_lines.extend(code_lines)
                 formatted_lines.append("```")
                 block_buffer = []
+        elif in_code_block:
+            block_buffer.append(("line", line))
         else:
-            if in_code_block:
-                block_buffer.append(("line", line))
-            else:
-                formatted_lines.append(line)
-                
+            formatted_lines.append(line)
+
     # If block was left unclosed, append buffered lines
     if in_code_block and block_buffer:
         fence_lang = block_buffer[0][1]
         formatted_lines.append(f"```{fence_lang}")
-        formatted_lines.extend([l for _, l in block_buffer[1:]])
-        
+        formatted_lines.extend([l for _, l in block_buffer[1:]])  # noqa: E741
+
     result = "\n".join(formatted_lines)
     # Collapse 3+ consecutive newlines to 2 newlines
     result = re.sub(r"\n{3,}", "\n\n", result).strip()
     return result
+
 
 def validate_markdown_structure(text: str) -> dict:
     """
@@ -211,9 +342,9 @@ def validate_markdown_structure(text: str) -> dict:
         return {
             "is_valid": False,
             "error_flag": "BROKEN_MARKDOWN_SYNTAX",
-            "reason": "Unclosed Markdown code block detected (odd count of ``` markers)."
+            "reason": "Unclosed Markdown code block detected (odd count of ``` markers).",
         }
-        
+
     # Table Column Symmetry check
     table_block_pipes = []
     for line in text.splitlines():
@@ -224,23 +355,22 @@ def validate_markdown_structure(text: str) -> dict:
                 return {
                     "is_valid": False,
                     "error_flag": "BROKEN_MARKDOWN_SYNTAX",
-                    "reason": "Malformed Markdown table row detected (insufficient pipe separators)."
+                    "reason": "Malformed Markdown table row detected (insufficient pipe separators).",
                 }
             table_block_pipes.append(pipe_count)
-        else:
-            if table_block_pipes:
-                if len(set(table_block_pipes)) > 1:
-                    return {
-                        "is_valid": False,
-                        "error_flag": "BROKEN_MARKDOWN_SYNTAX",
-                        "reason": "Malformed Markdown table row detected (mismatched column pipe separators)."
-                    }
-                table_block_pipes = []
+        elif table_block_pipes:
+            if len(set(table_block_pipes)) > 1:
+                return {
+                    "is_valid": False,
+                    "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+                    "reason": "Malformed Markdown table row detected (mismatched column pipe separators).",
+                }
+            table_block_pipes = []
     if table_block_pipes and len(set(table_block_pipes)) > 1:
         return {
             "is_valid": False,
             "error_flag": "BROKEN_MARKDOWN_SYNTAX",
-            "reason": "Malformed Markdown table row detected (mismatched column pipe separators)."
+            "reason": "Malformed Markdown table row detected (mismatched column pipe separators).",
         }
 
     # 2. Header Hierarchy & Progression Check
@@ -264,33 +394,38 @@ def validate_markdown_structure(text: str) -> dict:
     # 4. MSDI (Markdown Structural Density Index) Calculation
     words = re.findall(r"\b\w+\b", text)
     total_words = len(words)
-    
+
     header_words = sum(len(re.findall(r"\b\w+\b", h[1])) for h in headers)
-    
+
     list_items = re.findall(r"^\s*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
     list_item_words = sum(len(re.findall(r"\b\w+\b", item)) for item in list_items)
-    
+
     code_blocks = re.findall(r"```[\s\S]*?```", text)
     code_block_words = sum(len(re.findall(r"\b\w+\b", cb)) for cb in code_blocks)
-    
-    msdi = (header_words + list_item_words + code_block_words) / total_words if total_words > 0 else 0.0
+
+    msdi = (
+        (header_words + list_item_words + code_block_words) / total_words
+        if total_words > 0
+        else 0.0
+    )
 
     return {
         "is_valid": True,
         "header_count": len(headers),
         "has_header_skip": has_skip,
         "untyped_blocks": untyped_blocks,
-        "msdi": round(msdi, 3)
+        "msdi": round(msdi, 3),
     }
 
-def evaluate_memory_quality(content: str, title: str = None) -> dict:
+
+def evaluate_memory_quality(content: str, title: str = None) -> dict:  # noqa: C901, PLR0911, PLR0912, PLR0915
     """
     Evaluates memory content quality across Tier 1, Tier 2, and Tier 4 quality gates.
     Returns dict with status ('ACCEPT', 'WARN', 'REJECT'), quality_score (0.0 - 1.0), and quality_flags.
     """
     flags = []
     text = (content or "").strip()
-    
+
     # Tier 1: Boundary & Fluff Scanners
     if len(text) < QG_MIN_LENGTH:
         flags.append("SHORT_LENGTH")
@@ -298,18 +433,18 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             "status": "REJECT",
             "quality_score": 0.0,
             "quality_flags": flags,
-            "reason": f"Payload string length ({len(text)} chars) below minimum threshold of {QG_MIN_LENGTH} characters."
+            "reason": f"Payload string length ({len(text)} chars) below minimum threshold of {QG_MIN_LENGTH} characters.",
         }
-        
+
     if FLUFF_PATTERN.match(text):
         flags.append("CONVERSATIONAL_FLUFF")
         return {
             "status": "REJECT",
             "quality_score": 0.0,
             "quality_flags": flags,
-            "reason": "Conversational fluff phrase detected."
+            "reason": "Conversational fluff phrase detected.",
         }
-        
+
     symbol_ratio = calculate_symbol_ratio(text)
     if symbol_ratio > QG_MAX_SYMBOL_RATIO:
         flags.append("HIGH_SYMBOL_RATIO")
@@ -317,9 +452,9 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             "status": "REJECT",
             "quality_score": 0.05,
             "quality_flags": flags,
-            "reason": f"Symbol-to-alpha ratio ({symbol_ratio:.2f}) exceeds threshold of {QG_MAX_SYMBOL_RATIO}."
+            "reason": f"Symbol-to-alpha ratio ({symbol_ratio:.2f}) exceeds threshold of {QG_MAX_SYMBOL_RATIO}.",
         }
-        
+
     tier1_warn = False
     if len(text) > 8000:
         flags.append("OVERSIZED_PAYLOAD")
@@ -333,7 +468,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             "status": "REJECT",
             "quality_score": 0.0,
             "quality_flags": flags,
-            "reason": md_res["reason"]
+            "reason": md_res["reason"],
         }
 
     # Tier 2: Information-Theoretic & Sequence Density Filters
@@ -344,7 +479,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
             "status": "REJECT",
             "quality_score": 0.10,
             "quality_flags": flags,
-            "reason": f"Character entropy too low ({entropy:.2f} bits/char) - repetitive text loop detected."
+            "reason": f"Character entropy too low ({entropy:.2f} bits/char) - repetitive text loop detected.",
         }
     elif entropy > QG_MAX_ENTROPY:
         flags.append("HIGH_ENTROPY")
@@ -359,9 +494,9 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "status": "REJECT",
                 "quality_score": 0.10,
                 "quality_flags": flags,
-                "reason": f"High 3-gram sequence repetition detected ({dup_3gram:.1%})."
+                "reason": f"High 3-gram sequence repetition detected ({dup_3gram:.1%}).",
             }
-            
+
         dup_5gram = calculate_ngram_duplicate_ratio(text, 5)
         if dup_5gram > QG_MAX_5GRAM_DUP:
             flags.append("HIGH_5GRAM_REPETITION")
@@ -369,7 +504,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "status": "REJECT",
                 "quality_score": 0.10,
                 "quality_flags": flags,
-                "reason": f"High 5-gram sequence repetition detected ({dup_5gram:.1%})."
+                "reason": f"High 5-gram sequence repetition detected ({dup_5gram:.1%}).",
             }
 
     if len(words) > 30:
@@ -380,7 +515,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "status": "REJECT",
                 "quality_score": 0.15,
                 "quality_flags": flags,
-                "reason": f"Type-Token Ratio too low ({ttr:.2f}) - boilerplate repetition detected."
+                "reason": f"Type-Token Ratio too low ({ttr:.2f}) - boilerplate repetition detected.",
             }
 
     # Extract pure prose content for Readability evaluation
@@ -396,7 +531,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
                 "status": "REJECT",
                 "quality_score": 0.15,
                 "quality_flags": flags,
-                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [{QG_CLI_MIN}, {QG_CLI_MAX}]."
+                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [{QG_CLI_MIN}, {QG_CLI_MAX}].",
             }
 
     # Tier 4: Structural Formatting Scoring
@@ -428,11 +563,5 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
 
     score = max(0.0, min(1.0, round(score, 2)))
     status = "WARN" if tier1_warn else "ACCEPT"
-    
-    return {
-        "status": status,
-        "quality_score": score,
-        "quality_flags": flags,
-        "reason": None
-    }
 
+    return {"status": status, "quality_score": score, "quality_flags": flags, "reason": None}

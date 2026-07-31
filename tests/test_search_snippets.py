@@ -1,7 +1,6 @@
 import unittest
 import tempfile
 import os
-import time
 import shutil
 from unittest.mock import patch
 from saltmdb.db.schema import init_db
@@ -59,7 +58,9 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         )
         self.assertIn("ID:", res)
 
-        results = search_memory(query_keywords="RARETOKENXYZ", owner_id="user1", db_path=self.db_path)
+        results = search_memory(
+            query_keywords="RARETOKENXYZ", owner_id="user1", db_path=self.db_path
+        )
         self.assertTrue(len(results) > 0)
         top = results[0]
 
@@ -88,7 +89,9 @@ class TestQueryCenteredSnippets(unittest.TestCase):
             "saltmdb.domain.services.memory_service.semantic_search",
             return_value=[(entity_id, 0.05)],
         ):
-            results = search_memory(query_keywords="gadgetwidget", owner_id="user1", db_path=self.db_path)
+            results = search_memory(
+                query_keywords="gadgetwidget", owner_id="user1", db_path=self.db_path
+            )
 
         self.assertTrue(len(results) > 0)
         match = next(r for r in results if r["id"] == entity_id)
