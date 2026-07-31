@@ -17,10 +17,13 @@ ENV/
 *.db-wal
 *.db-shm
 *.log
+scratch*/
+.pytest_cache*/
 
 # Excluded example memory dataset
 example_data/
 scratch/
+.claude*/
 
 ISSUES*.md
 UPGRADE*.md
