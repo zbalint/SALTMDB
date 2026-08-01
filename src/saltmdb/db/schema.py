@@ -253,6 +253,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "consolidated_from",
             "supersedes",
             "relates_to",
+            "similar_to",
         ):
             conn.execute(
                 "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
@@ -261,6 +262,10 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # Pre-alias observed drift (relates_to/references used interchangeably with elaborates_on)
         # onto elaborates_on as canonical. Guarded by canonical_id IS NULL so a future manual
         # re-merge tool's decision is never silently clobbered on restart.
+        # similar_to is deliberately NOT aliased here: elaborates_on is an agent-curated,
+        # judgment-based edge, while similar_to is reserved for store_memory's mechanical
+        # cosine-similarity auto-linking (see memory_service.py Stage 5) -- keeping them
+        # distinct lets callers tell a reviewed edge from an unreviewed one.
         _canon_row = conn.execute(
             "SELECT id FROM predicates WHERE name = 'elaborates_on'"
         ).fetchone()

@@ -648,8 +648,16 @@ class TestGetCanonicalPredicates(unittest.TestCase):
         names = {r["name"] for r in results}
         self.assertEqual(
             names,
-            {"resolves", "depends_on", "elaborates_on", "consolidated_from", "supersedes"},
-            "relates_to/references must be excluded from canonical predicates since they alias elaborates_on",
+            {
+                "resolves",
+                "depends_on",
+                "elaborates_on",
+                "consolidated_from",
+                "supersedes",
+                "similar_to",
+            },
+            "relates_to/references must be excluded from canonical predicates since they alias "
+            "elaborates_on; similar_to is a distinct, non-aliased canonical predicate",
         )
 
     def test_query_filters_to_matching_predicate(self):

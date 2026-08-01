@@ -53,6 +53,66 @@ def validate_memory_input(title: str, content: str, metadata: dict | None) -> No
             )
 
 
+def _handle_supersession_candidate(
+    conn,
+    entity_id: str,
+    matched_supersession_id: str,
+    matched_supersession_title: str | None,
+    matched_sim_score: float,
+    owner_id: str | None,
+    context_id: str | None,
+) -> None:
+    """Logs a reviewable supersession_candidate event and, above the stricter duplicate
+    band, auto-links a 'similar_to' relation edge -- additive only (no weight/is_core change,
+    no suppression from search). A cosine score above the duplicate threshold is a defensible
+    claim of "these are semantically close"; it is NOT a defensible claim of "this replaces
+    that" (see alpha.47 regression: auto-supersedes + weight demotion on the weaker signal
+    silently buried an unreviewed memory). The judgment call of whether to also add a
+    directional 'supersedes' edge stays with whoever reviews the supersession_candidate event.
+    Must be called inside the caller's open write transaction (mirrors resolve_or_create_tag).
+    """
+    try:
+        from saltmdb.domain.services.event_service import log_event
+
+        candidate_payload = json.dumps(
+            {
+                "new_entity_id": entity_id,
+                "target_entity_id": matched_supersession_id,
+                "similarity_score": matched_sim_score,
+                "target_title": matched_supersession_title,
+            }
+        )
+        log_event(
+            agent_id=owner_id or "system",
+            type="supersession_candidate",
+            content=candidate_payload,
+            context_id=context_id,
+            db_connection=conn,
+            _in_transaction=True,
+        )
+        logger.info(
+            "Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s",
+            entity_id,
+            matched_supersession_id,
+        )
+    except Exception as ex:
+        logger.warning("Failed to log supersession_candidate event: %s", ex)
+
+    if matched_sim_score >= DEDUP_DUPLICATE_THRESHOLD:
+        try:
+            from saltmdb.domain.services.relation_service import store_relation
+
+            store_relation(
+                source_id=entity_id,
+                target_id=matched_supersession_id,
+                predicate="similar_to",
+                db_connection=conn,
+                _in_transaction=True,
+            )
+        except Exception as ex:
+            logger.warning("Failed to auto-link similar_to relation: %s", ex)
+
+
 def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     content: str = None,
     tags: list = None,
@@ -233,7 +293,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     try:
 
-        def _write(c):  # noqa: PLR0912
+        def _write(c):  # noqa: C901, PLR0912
             cursor = conn.execute(
                 "SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,)
             )
@@ -368,32 +428,15 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
             if matched_supersession_id:
-                try:
-                    from saltmdb.domain.services.event_service import log_event
-
-                    candidate_payload = json.dumps(
-                        {
-                            "new_entity_id": entity_id,
-                            "target_entity_id": matched_supersession_id,
-                            "similarity_score": matched_sim_score,
-                            "target_title": matched_supersession_title,
-                        }
-                    )
-                    log_event(
-                        agent_id=owner_id or "system",
-                        type="supersession_candidate",
-                        content=candidate_payload,
-                        context_id=context_id,
-                        db_connection=conn,
-                        _in_transaction=True,
-                    )
-                    logger.info(
-                        "Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s",
-                        entity_id,
-                        matched_supersession_id,
-                    )
-                except Exception as ex:
-                    logger.warning("Failed to log supersession_candidate event: %s", ex)
+                _handle_supersession_candidate(
+                    conn=conn,
+                    entity_id=entity_id,
+                    matched_supersession_id=matched_supersession_id,
+                    matched_supersession_title=matched_supersession_title,
+                    matched_sim_score=matched_sim_score,
+                    owner_id=owner_id,
+                    context_id=context_id,
+                )
 
             return existing
 

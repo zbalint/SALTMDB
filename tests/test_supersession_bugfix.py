@@ -174,6 +174,68 @@ class TestSupersessionBugfix(unittest.TestCase):
         row = self.conn.execute("SELECT id FROM entities WHERE id = ?", (new_id,)).fetchone()
         self.assertIsNotNone(row, "New memory should be stored in SQLite despite duplicate warning")
 
+    def test_similar_to_autolink_above_duplicate_threshold(self):
+        """Test #6: Crossing the duplicate band (>=0.85) auto-links a 'similar_to' edge,
+        additive only -- no weight/is_core change on the existing memory."""
+        orig_res = memory_service.store_memory(
+            content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
+            title="OAuth2 Core Specification",
+            weight=10,
+            owner_id="user1",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        orig_id = orig_res.split("ID: ")[1].strip()
+
+        dup_res = memory_service.store_memory(
+            content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer authorization headers",
+            title="OAuth2 Specification Update",
+            owner_id="user1",
+            db_connection=self.conn,
+        )
+        new_id = dup_res.split("ID: ")[1].split(" [WARNING:")[0].strip()
+
+        rel = self.conn.execute(
+            "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
+            (new_id, orig_id),
+        ).fetchone()
+        self.assertIsNotNone(rel, "A 'similar_to' edge should be auto-linked above the duplicate threshold")
+        self.assertEqual(rel[0], "similar_to")
+
+        row = self.conn.execute("SELECT weight FROM entities WHERE id = ?", (orig_id,)).fetchone()
+        self.assertEqual(row[0], 10, "Auto-linking similar_to must never touch existing memory weight")
+
+    def test_similar_to_no_autolink_below_duplicate_threshold(self):
+        """Test #7: Crossing only the weaker candidate band (>=0.75, <0.85; measured ~0.81 for
+        this pair) logs a supersession_candidate event but does NOT auto-link a 'similar_to' edge."""
+        orig_res = memory_service.store_memory(
+            content="Configured PostgreSQL max_connections setting to 500 and shared_buffers to 4GB in postgresql.conf",
+            title="PostgreSQL Memory Configuration",
+            owner_id="user1",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        orig_id = orig_res.split("ID: ")[1].strip()
+
+        memory_service.store_memory(
+            content="PostgreSQL connection pool size raised to 500 concurrent connections for the reporting service",
+            title="PostgreSQL Connection Pooling Increase",
+            owner_id="user1",
+            db_connection=self.conn,
+        )
+
+        events = event_service.get_recent_events(
+            type_filter="supersession_candidate", db_connection=self.conn
+        )
+        self.assertTrue(len(events) > 0, "A supersession_candidate event should still be logged")
+
+        rel = self.conn.execute(
+            "SELECT id FROM relations WHERE predicate = 'similar_to' AND target_id = ?", (orig_id,)
+        ).fetchone()
+        self.assertIsNone(
+            rel, "No 'similar_to' edge should be auto-linked below the duplicate threshold"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
