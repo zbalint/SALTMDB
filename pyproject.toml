@@ -35,6 +35,7 @@ Homepage = "https://github.com/zbalint/SALTMDB"
 [project.scripts]
 saltmdb-server = "saltmdb.__main__:main"
 saltmdb-viewer = "saltmdb.viewer.server:main"
+saltmdb-cli = "saltmdb.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
