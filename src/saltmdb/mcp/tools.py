@@ -79,22 +79,31 @@ def log_event(
 
 
 @mcp.tool()
-def get_canonical_tags(query: str = None, domain: str = None, **kwargs) -> list:
-    """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use query='auth' to filter by tag name substring."""
+def get_canonical_tags(query: str = None, domain: str = None, limit: int = None, **kwargs) -> list:
+    """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use query='auth' to filter by tag name substring.
+
+    limit caps the number of tags returned (default 50), including when query is omitted --
+    the full canonical tag table is never dumped unbounded."""
     kw = _unwrap_kwargs(kwargs)
     query_ = (
         query or domain or _resolve(None, kw, kwargs, "query", "domain", "substring", "tag_filter")
     )
-    return memory_service.get_canonical_tags(domain=query_)
+    limit_ = _resolve(limit, kw, kwargs, "limit")
+    limit_ = limit_ if limit_ is not None else 50
+    return memory_service.get_canonical_tags(domain=query_, limit=limit_)
 
 
 @mcp.tool()
-def get_canonical_predicates(query: str = None, **kwargs) -> list:
+def get_canonical_predicates(query: str = None, limit: int = None, **kwargs) -> list:
     """Queries existing canonical relation predicates matching a search substring, to reduce
-    predicate drift (e.g. elaborates_on vs relates_to vs references)."""
+    predicate drift (e.g. elaborates_on vs relates_to vs references).
+
+    limit caps the number of predicates returned (default 50)."""
     kw = _unwrap_kwargs(kwargs)
     query_ = _resolve(query, kw, kwargs, "query", "predicate_filter", "substring")
-    return relation_service.get_canonical_predicates(query=query_)
+    limit_ = _resolve(limit, kw, kwargs, "limit")
+    limit_ = limit_ if limit_ is not None else 50
+    return relation_service.get_canonical_predicates(query=query_, limit=limit_)
 
 
 @mcp.tool()

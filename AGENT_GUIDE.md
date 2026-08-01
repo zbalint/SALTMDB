@@ -141,8 +141,8 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 * `search_memory(owner_id, query_keywords, tags_filter, entity_id, fetch_full, limit, context_id, is_core, memory_type_filter, cursor, include_related)`: Search long-term memories using Hybrid FTS5 + Dense Vector RRF Search. Automatically includes 1-hop active linked entities via `relations` by default (`include_related=True`). Supports parameter aliases (`query`, `q`, `keywords`). Setting `entity_id` retrieves full markdown text directly; `fetch_full=True` without an `entity_id` has no effect (falls through to a normal keyword search). `memory_type_filter` optionally restricts results to one of the five fixed `memory_type` values (`fact`/`event`/`procedure`/`decision`/`preference`); every result item also echoes its `memory_type`.
 * `store_memory(content, title, tags, is_core, memory_type, owner_id, context_id, scope, check_duplicates_only)`: Save/upsert long-term knowledge with built-in quality gates, calibrated auto-supersession candidate logging ($\ge 0.75$ similarity), and structural quality scoring (headers, lists, markdown density). Setting `check_duplicates_only=True` returns duplicate detection without writing to the DB. Supports parameter aliases (`text`, `tag`, `owner`). `memory_type` classifies the memory into one of five fixed values (`fact`/`event`/`procedure`/`decision`/`preference`) — omitting it defaults to `fact` on a new memory, or preserves the existing value on an update.
-* `get_canonical_tags(query, domain)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (`query`, `substring`, `tag_filter`).
-* `get_canonical_predicates(query)`: Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`).
+* `get_canonical_tags(query, domain, limit)`: Queries non-alias tags matching the search query substring to suggest existing tags and prevent tag fragmentation (`query`, `substring`, `tag_filter`). `limit` (default 50) caps the result count even when `query` is omitted.
+* `get_canonical_predicates(query, limit)`: Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`). `limit` (default 50) caps the result count even when `query` is omitted.
 * `merge_tags(keep_tag, tags_to_merge)`: Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all affected entities' tag associations.
 * `log_event(agent_id, type, content, error_code, session_id, context_id)`: Log a short-term operational event. Accepts parameter aliases (`event_type`, `message`, `description`).
 * `get_events(agent_id, type_filter, session_id, limit, offset, status_filter, owner_id, mode)`: Retrieve operational events (`mode='events'`), session summary events (`mode='session'`), or scan memory logs (`mode='memories'`).
@@ -257,7 +257,7 @@ lineage_info = inspect_graph(entity_id="Synthesized Summary Title", mode="lineag
 #   "entity_id": "c-uuid-123",
 #   "total_ancestors": 1,
 #   "point_in_time": "2026-07-30T12:00:00",
-#   "ancestors": [  # also duplicated under the "ancestry_tree" key
+#   "ancestors": [
 #     {"id": "c-uuid-123", "title": "Synthesized Summary Title", "status": "consolidated", "owner_id": "...", "updated_at": "...", "generation_depth": 0},
 #     {"id": "raw-uuid-456", "title": "Raw Source Fact 1", "status": "archived", "owner_id": "...", "updated_at": "...", "generation_depth": 1}
 #   ]

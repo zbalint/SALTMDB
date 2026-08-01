@@ -1033,8 +1033,6 @@ def detect_orphaned_memories(owner_id: str = None, db_connection=None, db_path: 
 
         return {
             "total_orphans": len(orphans),
-            "orphans_detected": len(orphans),
-            "details": [{"orphan": o} for o in orphans],
             "orphaned_memories": orphans,
         }
     except Exception as e:
@@ -1397,7 +1395,9 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
 
 
 # NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
-def get_canonical_tags(domain: str = None, db_connection=None, db_path: str = None) -> list:
+def get_canonical_tags(
+    domain: str = None, limit: int = 50, db_connection=None, db_path: str = None
+) -> list:
     """Queries canonical tags."""
     should_close = False
     conn = db_connection
@@ -1412,14 +1412,19 @@ def get_canonical_tags(domain: str = None, db_connection=None, db_path: str = No
                 """
                 SELECT id, name FROM tags
                 WHERE canonical_id IS NULL AND name LIKE ?
+                LIMIT ?
             """,
-                (f"%{domain}%",),
+                (f"%{domain}%", limit),
             )
         else:
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT id, name FROM tags
                 WHERE canonical_id IS NULL
-            """)
+                LIMIT ?
+            """,
+                (limit,),
+            )
         rows = cursor.fetchall()
         return [{"id": r[0], "name": r[1]} for r in rows]
     except Exception as e:

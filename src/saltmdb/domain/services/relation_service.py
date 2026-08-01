@@ -14,6 +14,11 @@ from saltmdb.domain.services.memory_service import check_duplicate_memories, res
 logger = logging.getLogger(__name__)
 
 
+def _normalize_predicate_name(raw: str) -> str:
+    """Shape-normalizes a predicate string (lowercase, non-alnum runs -> underscore, trimmed)."""
+    return re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+
+
 def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None) -> str | None:
     """Write-time predicate canonicalization. Must be called inside an open write transaction
     (mirrors resolve_or_create_tag's contract). Returns the resolved CANONICAL NAME STRING to
@@ -30,7 +35,7 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
     raw = (predicate_name or "").strip()
     if not raw:
         return None
-    normalized = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    normalized = _normalize_predicate_name(raw)
     if not normalized:
         return None
 
@@ -64,7 +69,9 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
     return normalized
 
 
-def get_canonical_predicates(query: str = None, db_connection=None, db_path: str = None) -> list:
+def get_canonical_predicates(
+    query: str = None, limit: int = 50, db_connection=None, db_path: str = None
+) -> list:
     """Mirrors memory_service.get_canonical_tags for the predicates table."""
     should_close = False
     conn = db_connection
@@ -75,11 +82,13 @@ def get_canonical_predicates(query: str = None, db_connection=None, db_path: str
     try:
         if query:
             cursor = conn.execute(
-                "SELECT id, name FROM predicates WHERE canonical_id IS NULL AND name LIKE ?",
-                (f"%{query}%",),
+                "SELECT id, name FROM predicates WHERE canonical_id IS NULL AND name LIKE ? LIMIT ?",
+                (f"%{query}%", limit),
             )
         else:
-            cursor = conn.execute("SELECT id, name FROM predicates WHERE canonical_id IS NULL")
+            cursor = conn.execute(
+                "SELECT id, name FROM predicates WHERE canonical_id IS NULL LIMIT ?", (limit,)
+            )
         return [{"id": r[0], "name": r[1]} for r in cursor.fetchall()]
     except Exception as e:
         logger.error("Error fetching canonical predicates: %s", e)
@@ -132,7 +141,15 @@ def store_relation(  # noqa: C901
     try:
 
         def _do_store():
+            normalized_requested = _normalize_predicate_name(predicate)
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+            note = (
+                f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
+                if predicate
+                and normalized_requested
+                and normalized_requested != canonical_predicate
+                else ""
+            )
             effective_valid_at = valid_at or now
             cursor = conn.execute(
                 """
@@ -156,8 +173,8 @@ def store_relation(  # noqa: C901
                     (resolved_source, resolved_target, canonical_predicate),
                 ).fetchone()
                 existing_id = existing[0] if existing else relation_id
-                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_id})"
-            return f"Relation successfully stored: '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id})"
+                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_id}){note}"
+            return f"Relation successfully stored: '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id}){note}"
 
         if _in_transaction:
             result_msg = _do_store()
@@ -211,7 +228,15 @@ def invalidate_relation(  # noqa: C901
     try:
 
         def _do_invalidate():
+            normalized_requested = _normalize_predicate_name(predicate)
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+            note = (
+                f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
+                if predicate
+                and normalized_requested
+                and normalized_requested != canonical_predicate
+                else ""
+            )
             existing = conn.execute(
                 "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
                 (resolved_source, resolved_target, canonical_predicate),
@@ -235,7 +260,7 @@ def invalidate_relation(  # noqa: C901
                 "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
                 (effective_invalid_at, effective_invalid_at, rel_id),
             )
-            return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id})"
+            return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id}){note}"
 
         if _in_transaction:
             result_msg = _do_invalidate()
@@ -318,32 +343,15 @@ def analyze_dependencies(
         cursor = conn.execute(query, (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit))
         rows = cursor.fetchall()
 
-        id_to_title = {root_id: root_info.get("title", root_id)}
-        for r in rows:
-            id_to_title[r[1]] = r[2]
-            id_to_title[r[3]] = r[4]
-
-        nodes = [
-            {
-                "id": root_id,
-                "title": root_info.get("title"),
-                "depth": 0,
-                "path": root_info.get("title", root_id),
-            }
-        ]
+        nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
         seen_nodes = {root_id}
 
+        # dt.path (last column) is only needed by the SQL cycle guard (see CTE above) --
+        # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
         edges = []
-        for r in rows:
-            rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, raw_path = r
-            formatted_path = " -> ".join(
-                id_to_title.get(part, part) for part in raw_path.split("->")
-            )
-
+        for rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path in rows:
             if tgt_id not in seen_nodes:
-                nodes.append(
-                    {"id": tgt_id, "title": tgt_title, "depth": depth, "path": formatted_path}
-                )
+                nodes.append({"id": tgt_id, "title": tgt_title, "depth": depth})
                 seen_nodes.add(tgt_id)
 
             edges.append(
@@ -355,7 +363,6 @@ def analyze_dependencies(
                     "target_title": tgt_title,
                     "predicate": pred,
                     "depth": depth,
-                    "path": formatted_path,
                 }
             )
 
@@ -365,6 +372,7 @@ def analyze_dependencies(
             "graph_exhausted": len(edges) == 0
             or max([e["depth"] for e in edges], default=0) < max_depth,
             "dependencies": nodes,
+            "edges": edges,
             "point_in_time": pit,
         }
     except Exception as e:
@@ -473,7 +481,6 @@ def analyze_lineage(
         return {
             "entity_id": target_id,
             "total_ancestors": max(len(ancestry) - 1, 0),
-            "ancestry_tree": ancestry,
             "ancestors": ancestry,
             "point_in_time": pit,
         }

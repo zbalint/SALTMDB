@@ -12,13 +12,18 @@ from saltmdb.domain.services.relation_service import (
     resolve_or_create_predicate,
     get_canonical_predicates,
     store_relation,
+    invalidate_relation,
     bulk_store_relations,
     analyze_dependencies,
     analyze_lineage,
     commit_consolidation,
     bulk_commit_consolidation,
 )
-from saltmdb.domain.services.memory_service import store_memory, detect_orphaned_memories
+from saltmdb.domain.services.memory_service import (
+    store_memory,
+    detect_orphaned_memories,
+    get_canonical_tags,
+)
 
 
 def _cons_content(marker: str) -> str:
@@ -333,6 +338,20 @@ class TestStoreRelationDedup(unittest.TestCase):
         self.assertEqual(results[0]["status"], "duplicate")
         self.assertEqual(self._relation_count(self.id1, self.id2, "already_there"), 1)
 
+    def test_bulk_store_relations_result_string_surfaces_aliased_predicate(self):
+        results = bulk_store_relations(
+            relations=[{"source_id": self.id1, "target_id": self.id2, "predicate": "references"}],
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "success")
+        self.assertIn("elaborates_on", results[0]["result"])
+        self.assertIn(
+            "references",
+            results[0]["result"],
+            "bulk_store_relations must not lose the canonicalization note on the result string",
+        )
+
     def test_store_relation_already_exists_message_references_active_row_not_expired_one(self):
         # Manually plant an EXPIRED row for the tuple first (stale/historical data).
         expired_id = str(uuid.uuid4())
@@ -506,6 +525,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             "successfully stored", result, "a degenerate predicate must not block relation storage"
         )
         self.assertFalse(result.startswith("Error"))
+        self.assertNotIn(
+            "canonicalized",
+            result,
+            "a degenerate predicate that normalizes to empty (e.g. '!!!') and falls back to the "
+            "raw input on both sides must NOT be reported as canonicalized -- 'requested X, stored X' "
+            "is not a real substitution",
+        )
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
@@ -515,6 +541,95 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             row[0],
             "!!!",
             "when resolve_or_create_predicate returns None, the raw input string must be stored as-is (the 'or predicate' fallback)",
+        )
+
+    def test_seeded_alias_predicate_substitution_is_surfaced_in_result_message(self):
+        res1 = store_memory(
+            content="Source entity content for alias surfacing test",
+            title="Alias Surfacing Source",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        res2 = store_memory(
+            content="Target entity content for alias surfacing test",
+            title="Alias Surfacing Target",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        result = store_relation(
+            source_id=id1, target_id=id2, predicate="relates_to", db_connection=self.conn
+        )
+        self.assertIn(
+            "elaborates_on",
+            result,
+            "the canonical predicate that was actually stored must still be reported",
+        )
+        self.assertIn(
+            "relates_to",
+            result,
+            "the originally requested predicate must be surfaced, not silently discarded",
+        )
+
+    def test_non_aliased_predicate_normalization_does_not_add_canonicalization_note(self):
+        res1 = store_memory(
+            content="Source entity content for non-aliased normalization test",
+            title="Non-Aliased Normalization Source",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        res2 = store_memory(
+            content="Target entity content for non-aliased normalization test",
+            title="Non-Aliased Normalization Target",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        result = store_relation(
+            source_id=id1, target_id=id2, predicate="Depends-On", db_connection=self.conn
+        )
+        self.assertNotIn(
+            "canonicalized",
+            result,
+            "pure case/format normalization must not be reported as a canonicalization note",
+        )
+
+    def test_invalidate_relation_degenerate_predicate_does_not_add_canonicalization_note(self):
+        res1 = store_memory(
+            content="Source entity content for invalidate degenerate predicate test",
+            title="Invalidate Degenerate Source",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        res2 = store_memory(
+            content="Target entity content for invalidate degenerate predicate test",
+            title="Invalidate Degenerate Target",
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        store_relation(source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn)
+        result = invalidate_relation(
+            source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
+        )
+        self.assertIn("Relation invalidated", result)
+        self.assertNotIn(
+            "canonicalized",
+            result,
+            "a degenerate predicate that falls back to the raw input on both sides must NOT be "
+            "reported as canonicalized",
         )
 
 
@@ -541,6 +656,79 @@ class TestGetCanonicalPredicates(unittest.TestCase):
         results = get_canonical_predicates(query="depend", db_connection=self.conn)
         names = {r["name"] for r in results}
         self.assertEqual(names, {"depends_on"})
+
+    def test_limit_bounds_result_count(self):
+        def _write(c):
+            for i in range(60):
+                c.execute(
+                    "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                    (str(uuid.uuid4()), f"seeded_predicate_{i}", f"seeded_predicate_{i}"),
+                )
+
+        write_transaction_retrying(self.conn, _write)
+
+        results = get_canonical_predicates(db_connection=self.conn)
+        self.assertEqual(
+            len(results), 50, "default limit must cap unfiltered results at 50, not return all rows"
+        )
+
+    def test_explicit_limit_overrides_default(self):
+        def _write(c):
+            for i in range(20):
+                c.execute(
+                    "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                    (
+                        str(uuid.uuid4()),
+                        f"explicit_limit_predicate_{i}",
+                        f"explicit_limit_predicate_{i}",
+                    ),
+                )
+
+        write_transaction_retrying(self.conn, _write)
+
+        results = get_canonical_predicates(limit=5, db_connection=self.conn)
+        self.assertEqual(len(results), 5)
+
+
+class TestGetCanonicalTags(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_default_limit_is_fifty(self):
+        def _write(c):
+            for i in range(60):
+                c.execute(
+                    "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                    (str(uuid.uuid4()), f"#seeded_tag_{i}", f"seededtag{i}"),
+                )
+
+        write_transaction_retrying(self.conn, _write)
+
+        results = get_canonical_tags(db_connection=self.conn)
+        self.assertEqual(
+            len(results),
+            50,
+            "default limit must cap unfiltered tag results at 50, not return all rows",
+        )
+
+    def test_explicit_limit_overrides_default(self):
+        def _write(c):
+            for i in range(20):
+                c.execute(
+                    "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                    (str(uuid.uuid4()), f"#explicit_limit_tag_{i}", f"explicitlimittag{i}"),
+                )
+
+        write_transaction_retrying(self.conn, _write)
+
+        results = get_canonical_tags(limit=5, db_connection=self.conn)
+        self.assertEqual(len(results), 5)
 
 
 class TestCommitConsolidationRepointing(unittest.TestCase):
@@ -983,6 +1171,75 @@ class TestRelationPointInTime(unittest.TestCase):
         now_result = analyze_dependencies(root_entity_id=s, db_connection=self.conn)
         self.assertEqual(now_result["total_dependencies_found"], 1)
 
+    def test_analyze_dependencies_nodes_have_no_redundant_path_field(self):
+        root = self._mk("Path Removal Root")
+        mid = self._mk("Path Removal Mid")
+        leaf = self._mk("Path Removal Leaf")
+        store_relation(
+            source_id=root, target_id=mid, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=mid, target_id=leaf, predicate="depends_on", db_connection=self.conn
+        )
+
+        result = analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        for node in result["dependencies"]:
+            self.assertNotIn(
+                "path", node, "nodes must not carry a redundant pre-joined ancestor path string"
+            )
+        for edge in result["edges"]:
+            self.assertNotIn(
+                "path", edge, "edges must not carry a redundant pre-joined ancestor path string"
+            )
+
+    def test_analyze_dependencies_exposes_edges_with_reconstructable_hierarchy(self):
+        root = self._mk("Hierarchy Root")
+        mid = self._mk("Hierarchy Mid")
+        leaf = self._mk("Hierarchy Leaf")
+        store_relation(
+            source_id=root, target_id=mid, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=mid, target_id=leaf, predicate="depends_on", db_connection=self.conn
+        )
+
+        result = analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        self.assertIn("edges", result)
+        for edge in result["edges"]:
+            self.assertIn("source_id", edge)
+            self.assertIn("target_id", edge)
+            self.assertIn("depth", edge)
+            self.assertIn("predicate", edge)
+
+        # Walk edges from the leaf back to the root via target_id -> source_id to prove the
+        # ancestor chain is fully reconstructable without any pre-joined path string.
+        by_target = {e["target_id"]: e for e in result["edges"]}
+        chain = [leaf]
+        current = leaf
+        while current in by_target:
+            current = by_target[current]["source_id"]
+            chain.append(current)
+        self.assertEqual(chain, [leaf, mid, root])
+
+    def test_analyze_dependencies_cycle_guard_still_functions_after_path_field_removed_from_output(
+        self,
+    ):
+        a = self._mk("Cycle Guard A")
+        b = self._mk("Cycle Guard B")
+        c = self._mk("Cycle Guard C")
+        store_relation(source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=b, target_id=c, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=c, target_id=a, predicate="depends_on", db_connection=self.conn)
+
+        result = analyze_dependencies(root_entity_id=a, max_depth=10, db_connection=self.conn)
+        self.assertNotIn("error", result)
+        node_ids = {n["id"] for n in result["dependencies"]}
+        self.assertEqual(
+            node_ids,
+            {a, b, c},
+            "cycle guard (SQL-level path column) must still terminate traversal correctly",
+        )
+
     def test_analyze_dependencies_shows_expired_edge_at_earlier_pit_and_repointed_edge_at_now(self):
         p1 = self._mk("PIT Cons P1")
         x = self._mk("PIT Cons X")
@@ -1050,6 +1307,11 @@ class TestRelationPointInTime(unittest.TestCase):
 
         current = analyze_lineage(entity_id=c1, db_connection=self.conn)
         self.assertEqual(current["total_ancestors"], 2)
+        self.assertNotIn(
+            "ancestry_tree",
+            current,
+            "ancestry_tree must not be duplicated alongside ancestors in the response",
+        )
 
     def test_analyze_lineage_shows_manually_expired_edge_at_earlier_pit_not_at_now(self):
         # analyze_lineage's own edges (predicate='consolidated_from') are, by design, never
@@ -1136,6 +1398,8 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
             e1, orphan_ids, "an entity whose only relation is expired must be flagged as an orphan"
         )
         self.assertIn(e2, orphan_ids)
+        self.assertNotIn("details", result)
+        self.assertNotIn("orphans_detected", result)
 
     def test_entity_with_active_relation_is_not_flagged_orphan(self):
         e3 = self._mk("Orphan E3")
@@ -1147,6 +1411,13 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
             e3, orphan_ids, "an entity with an active relation must NOT be flagged as an orphan"
         )
         self.assertNotIn(e4, orphan_ids)
+        self.assertNotIn("details", result)
+        self.assertNotIn("orphans_detected", result)
+
+    def test_total_orphans_matches_orphaned_memories_length(self):
+        self._mk("Orphan E5")
+        result = detect_orphaned_memories(owner_id="orphan_tester", db_connection=self.conn)
+        self.assertEqual(result["total_orphans"], len(result["orphaned_memories"]))
 
 
 if __name__ == "__main__":

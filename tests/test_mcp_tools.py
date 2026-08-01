@@ -250,6 +250,58 @@ class TestMCPToolsWrapper(unittest.TestCase):
         names = {r["name"] for r in results}
         self.assertIn("elaborates_on", names)
 
+    def test_get_canonical_predicates_respects_explicit_limit_kwarg(self):
+        for i in range(10):
+            self.conn.execute(
+                "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (f"limit-test-pred-{i}", f"limit_test_predicate_{i}", f"limit_test_predicate_{i}"),
+            )
+        self.conn.commit()
+
+        results = tools.get_canonical_predicates(limit=3)
+        self.assertEqual(len(results), 3)
+
+    def test_get_canonical_tags_respects_explicit_limit_kwarg(self):
+        for i in range(10):
+            self.conn.execute(
+                "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (f"limit-test-tag-{i}", f"#limit_test_tag_{i}", f"limittesttag{i}"),
+            )
+        self.conn.commit()
+
+        results = tools.get_canonical_tags(limit=3)
+        self.assertEqual(len(results), 3)
+
+    def test_get_canonical_predicates_explicit_zero_limit_is_respected_not_defaulted(self):
+        for i in range(5):
+            self.conn.execute(
+                "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (f"zero-limit-pred-{i}", f"zero_limit_predicate_{i}", f"zero_limit_predicate_{i}"),
+            )
+        self.conn.commit()
+
+        results = tools.get_canonical_predicates(limit=0)
+        self.assertEqual(
+            len(results),
+            0,
+            "an explicit limit=0 must be honored (LIMIT 0), not silently replaced by the default 50",
+        )
+
+    def test_get_canonical_tags_explicit_zero_limit_is_respected_not_defaulted(self):
+        for i in range(5):
+            self.conn.execute(
+                "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (f"zero-limit-tag-{i}", f"#zero_limit_tag_{i}", f"zerolimittag{i}"),
+            )
+        self.conn.commit()
+
+        results = tools.get_canonical_tags(limit=0)
+        self.assertEqual(
+            len(results),
+            0,
+            "an explicit limit=0 must be honored (LIMIT 0), not silently replaced by the default 50",
+        )
+
     def test_manage_relation_predicate_canonicalization(self):
         res1 = tools.store_memory(
             content="Source entity for predicate canonicalization test",
@@ -281,6 +333,30 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
         self.assertIn("already exists", rel_res2)
+
+    def test_manage_relation_surfaces_seeded_alias_substitution(self):
+        res1 = tools.store_memory(
+            content="Source entity for seeded alias substitution test",
+            title="Alias Substitution Source",
+            owner_id="user1",
+            skip_duplicate_check=True,
+        )
+        res2 = tools.store_memory(
+            content="Target entity for seeded alias substitution test",
+            title="Alias Substitution Target",
+            owner_id="user1",
+            skip_duplicate_check=True,
+        )
+        id1 = res1.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].strip()
+
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
+        self.assertIn("elaborates_on", rel_res)
+        self.assertIn(
+            "relates_to",
+            rel_res,
+            "manage_relation must surface the originally requested predicate, not just the canonical one",
+        )
 
     def test_store_memory_memory_type_round_trip(self):
         res = tools.store_memory(
