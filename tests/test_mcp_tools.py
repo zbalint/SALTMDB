@@ -126,7 +126,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             entity_id=entity_id,
             content="Content for tag preservation test on update path",
             title="Tag Preservation Entity",
-            is_core=True,
+            memory_type="decision",
             owner_id="user1",
             skip_duplicate_check=True,
         )

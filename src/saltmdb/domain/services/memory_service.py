@@ -345,6 +345,27 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         (entity_id, tag_id),
                     )
 
+            # Stage 4.5: is_core -> #core tag sync. is_core is the single writable source of
+            # truth; #core is a derived label the server maintains so the two can never drift
+            # apart again. Runs on every write (even calls that touch neither is_core nor tags),
+            # which also self-heals any pre-existing drift the next time an entity is touched.
+            resolved_row = conn.execute(
+                "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            resolved_is_core = bool(resolved_row[0]) if resolved_row else False
+            core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=owner_id)
+            if core_tag_id:
+                if resolved_is_core:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                        (entity_id, core_tag_id),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
+                        (entity_id, core_tag_id),
+                    )
+
             # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
             if matched_supersession_id:
                 try:

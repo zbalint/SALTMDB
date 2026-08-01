@@ -1,0 +1,86 @@
+import unittest
+import tempfile
+import os
+import shutil
+
+from saltmdb.db.schema import init_db
+from saltmdb.domain.services.memory_service import store_memory
+
+
+class TestCoreTagSync(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _store(self, title, is_core=None, tags=None, entity_id=None):
+        res = store_memory(
+            content=f"Seed content for core-tag-sync tests: {title}",
+            title=title,
+            owner_id="tester",
+            is_core=is_core,
+            tags=tags,
+            entity_id=entity_id,
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
+        return res.split("ID: ")[1].split()[0]
+
+    def _tags_of(self, entity_id):
+        rows = self.conn.execute(
+            """
+            SELECT t.name FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+            WHERE et.entity_id = ?
+            """,
+            (entity_id,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def test_is_core_true_adds_core_tag(self):
+        entity_id = self._store("Core Sync Add Tag Entity", is_core=True)
+        self.assertIn("#core", self._tags_of(entity_id))
+
+    def test_is_core_false_has_no_core_tag(self):
+        entity_id = self._store("Core Sync No Tag Entity", is_core=False)
+        self.assertNotIn("#core", self._tags_of(entity_id))
+
+    def test_flipping_is_core_to_false_removes_core_tag(self):
+        entity_id = self._store("Core Sync Flip Off Entity", is_core=True)
+        self.assertIn("#core", self._tags_of(entity_id))
+
+        self._store("Core Sync Flip Off Entity", is_core=False, entity_id=entity_id)
+        self.assertNotIn("#core", self._tags_of(entity_id))
+
+    def test_explicit_core_tag_is_overridden_by_false_is_core(self):
+        entity_id = self._store("Core Sync Override Entity", is_core=False)
+        self.assertNotIn("#core", self._tags_of(entity_id))
+
+        # Caller tries to sneak "#core" in via tags while leaving is_core untouched (None ->
+        # preserved as False). The server must strip it right back out.
+        self._store(
+            "Core Sync Override Entity",
+            tags=["#core", "#foo"],
+            entity_id=entity_id,
+        )
+        tags = self._tags_of(entity_id)
+        self.assertNotIn("#core", tags)
+        self.assertIn("#foo", tags)
+
+    def test_is_core_true_self_heals_legacy_entity_with_tags_omitted(self):
+        entity_id = self._store("Core Sync Self Heal Entity", is_core=False, tags=["#foo"])
+        self.assertNotIn("#core", self._tags_of(entity_id))
+
+        # A later write sets is_core=True but never touches tags at all.
+        self._store("Core Sync Self Heal Entity", is_core=True, entity_id=entity_id)
+        tags = self._tags_of(entity_id)
+        self.assertIn("#core", tags)
+        self.assertIn("#foo", tags, "unrelated pre-existing tags must survive the self-heal")
+
+
+if __name__ == "__main__":
+    unittest.main()

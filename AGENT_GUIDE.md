@@ -166,7 +166,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 - **Tag Discipline & Consolidation**:
   - Always include relevant folksonomy tags (e.g., `#core`, `#architecture`, `#fix`, `#performance`, `#ui-ux`).
   - Use `get_canonical_tags(query)` before creating new tags to prevent tag fragmentation.
-  - Set `is_core=true` (and tag `#core`) for fundamental rules, persona guidelines, and system constraints.
+  - Set `is_core=true` for fundamental rules, persona guidelines, and system constraints — the server automatically keeps the `#core` tag in sync with this flag; do not set `#core` directly via the `tags` list, it will be silently overridden to match `is_core`.
 - **Proper Scoping (`scope`)**: Use `scope='shared'` (default) for global facts that should benefit all agents across sessions. Use `scope='private'` only for agent-private transient state.
 - **Duplicate Prevention**: Before storing large knowledge blocks, call `store_memory(check_duplicates_only=True)` to avoid duplicating pre-existing memories.
 
@@ -185,7 +185,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 ### Phase A: Bootstrap (Session Start)
 Immediately upon initialization, before answering the user:
 0. **MANDATORY, unconditional, every session — no self-judgment call**: check whether your available-tools list includes a tool-discovery/search mechanism (e.g. Claude Code's `ToolSearch`, Copilot CLI's `search_tool`). If it does, invoke it now targeting the `saltmdb` tools to load their full schemas, before proceeding to step 1 — do this even if you believe schemas are already loaded, since that belief is exactly what causes this step to get silently skipped. Only skip this step if no such discovery mechanism exists in your tool list at all.
-1. Call `search_memory` filtering by `#core` tag (e.g., `tags_filter = ['#core']`). This loads your persona, behavioral constraints, and user rules.
+1. Call `search_memory` filtering by `is_core=True` (e.g., `search_memory(is_core=True)`). This loads your persona, behavioral constraints, and user rules. On harnesses with lifecycle hooks configured (see Section 7 below), this bootstrap step normally already ran automatically before the session started via a `SessionStart` hook; this manual step is a fallback for when no such hook exists or fired.
 2. Run a keyword search matching the active repository, folder, or project name (e.g. `query_keywords = 'SALTMDB'`) and task domain (`context_id = 'my-task'`) to gather project intel, past decisions, and component constraints.
 3. Call `get_events` with `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. `get_events` already computes this for you: each `consolidation_request` event item carries a top-level `status` field (`'resolved'` once every entity ID in the event's `content.entity_ids` is no longer `'raw'`, `'pending'` otherwise) — no need to manually cross-check entity statuses yourself.
 4. **Think Before You Leap:** Before executing any sub-task, modifying a file, or running commands, call `search_memory` with keywords matching the target component, command, or error string. You must actively search for past constraints, bug fixes, or design parameters before writing code.
@@ -221,7 +221,7 @@ If you find pending `consolidation_request` events targeting your active domain 
 sequenceDiagram
     participant Agent
     participant DB as SQLite DB
-    Agent->>DB: search_memory(tags_filter=["#core"])
+    Agent->>DB: search_memory(is_core=True)
     DB-->>Agent: Returns Persona & Core Rules
     Agent->>DB: search_memory(query_keywords="authentication service", include_related=True)
     DB-->>Agent: Returns Matching Knowledge & 1-Hop Related Nodes
@@ -285,6 +285,16 @@ This section is for **you, the agent**, not just the human reading this file. If
 2. **Diff the Core Operating Commandments.** Compare this file's §3 System Prompt Template (specifically the "Core Operating Commandments" list) against your own currently-loaded global/persistent instructions — for Claude Code that's `~/.claude/CLAUDE.md`; for other MCP clients, wherever your equivalent standing instructions live. If the count or content differs, **do not silently overwrite your global instruction file.** Show the user the specific diff and ask for confirmation before editing it — that file governs every project you use, not just SALTMDB.
 3. **Diff your bundled orchestration references.** If you maintain your own copies of `ORCHESTRATOR.md`, `MULTI_AGENT_ORCHESTRATION.md`, or `WORKER_TEMPLATE.md` outside this repo (for Claude Code: `~/.claude/skills/saltmdb-subagent-orchestration/references/`), these do **not** auto-sync with the repo copies — a real audit on 2026-07-25 found them independently drifted in both directions. Diff your copies against the repo's root-level files and reconcile — but reconcile *protocol content*, not vendor-specific wording: the repo root is meant to stay a vendor-neutral template (any MCP client, not just Claude Code), while your bundled skill copy is allowed to be concretely Claude-Code-specific (naming the `Agent` tool, `SendMessage`, `~/.claude/CLAUDE.md`, etc.). A same-day fix on 2026-07-25 initially got this backwards — it copied the Claude-specific skill wording into the repo root — and had to be reverted. Don't repeat that; sync the *rules*, keep vendor-neutral placeholders in the repo copy.
 4. **Record the sync.** Once reconciled (or once you've confirmed nothing needed to change), store a memory noting the version you're now synced to, so a future session doesn't have to repeat this check from scratch.
+
+---
+
+## 7. Session Automation via Lifecycle Hooks
+
+When starting work in a project that has no automation hooks configured yet, check whether session lifecycle hooks can be configured to automate SALTMDB operations:
+
+1. **Detect Harness Hook Capabilities**: Determine whether your host agent harness/CLI supports lifecycle or event hooks. For example, Claude Code has `SessionStart`, `PreCompact`, `PreToolUse`, and `Stop` hooks configurable in a `settings.json` file; other harnesses may have differently-named equivalents, or none at all — check your harness's documentation or configuration rather than assuming specific hook names or availability.
+2. **Offer Hook Setup (If Supported)**: If hooks are supported, offer to set up hooks that automate the SALTMDB bootstrap (a `SessionStart`-equivalent hook that runs `search_memory(is_core=True)` plus a keyword search on the current project/folder name, and returns a compact digest instead of raw dumps) and optionally a pre-compaction memory-sweep hook and light enforcement gates. Reference the existing reference implementation at `C:\Users\zbalint\.claude\hooks\saltmdb-pre-action-gate.sh`, `saltmdb-self-critique-gate.sh`, and the inline `SessionStart`/`PreCompact` hook prompts already defined in `C:\Users\zbalint\.claude\settings.json` as the pattern to ADAPT (not copy verbatim — their exact transcript-parsing and JSON decision-payload shape is specific to Claude Code and won't match another harness's hook contract).
+3. **Handle Unsupported Harnesses**: If the harness genuinely has no hook/automation mechanism at all, the Phase A prose bootstrap instructions in this same document are the only available lever there, and that is an accepted, known limitation — not something to try to compensate for with more emphatic wording elsewhere in the doc.
 
 ---
 

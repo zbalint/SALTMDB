@@ -124,6 +124,10 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
       - decision: ADR-style rationale record (what was chosen and why).
       - preference: durable user/agent preference statement.
 
+    is_core is the single writable source of truth for "always load at session bootstrap."
+    The '#core' tag is a derived label the server auto-maintains from is_core on every write --
+    do not set '#core' via the tags list, it will be silently overridden to match is_core.
+
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
     """
 )
