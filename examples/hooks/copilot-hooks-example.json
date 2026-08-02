@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-session-bootstrap.sh",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-session-bootstrap.ps1",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-copilot-pre-tool.sh",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-copilot-pre-tool.ps1",
+        "timeoutSec": 15
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-self-critique-gate.sh",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-self-critique-gate.ps1",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

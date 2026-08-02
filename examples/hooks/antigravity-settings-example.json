@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "saltmdb-cli bootstrap-digest --project-keywords $(basename $PWD)",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "replace_file_content|write_to_file|run_command",
+        "type": "command",
+        "command": "$HOME/.mcp/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh",
+        "timeout": 15
+      }
+    ]
+  }
+}

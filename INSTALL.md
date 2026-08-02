@@ -185,3 +185,24 @@ Since MCP servers run over standard I/O, error output is consumed by the client 
   * **macOS/Linux:** `~/Library/Logs/Claude/mcp.log` and `~/Library/Logs/Claude/mcp-server-saltmdb.log`
 * **Google Antigravity CLI Logs:**
   * View task logs inside the conversation folder: `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/tasks/`
+
+---
+
+## 8. Setting Up Lifecycle Hooks for Agent Automation
+
+To maximize reliability, SALTMDB supports automated lifecycle hooks for **Claude Code**, **Google Antigravity CLI (`agy`)**, and **GitHub Copilot CLI**.
+
+Lifecycle hooks automate:
+1. **Context Bootstrap:** Automatically inject core rules and project memory digests into your session on start.
+2. **Pre-Action Enforcement:** Require memory searches (`search_memory`) before executing code edits or shell commands.
+3. **Pre-Compaction Memory Sweeps:** Preserve unpersisted architectural decisions and bug fixes before conversation truncation.
+4. **Post-Turn Quality Self-Critique:** Mandatory reflection on confidence and unknown risks before finishing complex turns.
+
+### Quick Setup Summary
+
+- **Claude Code:** Add hook definitions to `~/.claude/settings.json` pointing to scripts in `~/.claude/hooks/`.
+- **Google Antigravity CLI (`agy`):** Configure `PreInvocation` and `PreToolUse` hooks in `~/.gemini/antigravity-cli/settings.json`.
+- **GitHub Copilot CLI:** Add `.github/hooks/saltmdb.json` or `~/.copilot/hooks/saltmdb.json` using the `preToolUse` permission JSON protocol (`{"permissionDecision": "allow" | "deny"}`).
+
+👉 **For complete script source listings and JSON configurations, check the [`examples/hooks/`](examples/hooks/) directory and refer to [AGENT_GUIDE.md §7 (Session Automation via Lifecycle Hooks)](AGENT_GUIDE.md#7-session-automation-via-lifecycle-hooks)**.
+

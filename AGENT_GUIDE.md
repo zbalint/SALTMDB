@@ -291,13 +291,65 @@ This section is for **you, the agent**, not just the human reading this file. If
 
 ## 7. Session Automation via Lifecycle Hooks
 
-When starting work in a project that has no automation hooks configured yet, check whether session lifecycle hooks can be configured to automate SALTMDB operations:
+Session lifecycle hooks allow your AI host harness (such as **Claude Code**, **Antigravity CLI (`agy`)**, or **GitHub Copilot CLI**) to automatically trigger SALTMDB operations at specific session lifecycle events—such as session start, pre-tool execution, context compaction, and post-turn completion.
 
-1. **Detect Harness Hook Capabilities**: Determine whether your host agent harness/CLI supports lifecycle or event hooks. For example, Claude Code has `SessionStart`, `PreCompact`, `PreToolUse`, and `Stop` hooks configurable in a `settings.json` file; other harnesses may have differently-named equivalents, or none at all — check your harness's documentation or configuration rather than assuming specific hook names or availability.
-2. **Offer Hook Setup (If Supported)**: If hooks are supported, offer to set up hooks that automate the SALTMDB bootstrap (a `SessionStart`-equivalent hook that runs `search_memory(is_core=True)` plus a keyword search on the current project/folder name, and returns a compact digest instead of raw dumps) and optionally a pre-compaction memory-sweep hook and light enforcement gates. Reference the existing reference implementation at `C:\Users\zbalint\.claude\hooks\saltmdb-pre-action-gate.sh`, `saltmdb-self-critique-gate.sh`, and the inline `SessionStart`/`PreCompact` hook prompts already defined in `C:\Users\zbalint\.claude\settings.json` as the pattern to ADAPT (not copy verbatim — their exact transcript-parsing and JSON decision-payload shape is specific to Claude Code and won't match another harness's hook contract).
-3. **Handle Unsupported Harnesses**: If the harness genuinely has no hook/automation mechanism at all, the Phase A prose bootstrap instructions in this same document are the only available lever there, and that is an accepted, known limitation — not something to try to compensate for with more emphatic wording elsewhere in the doc.
+Using hooks eliminates manual prompt bootstrapping, enforces pre-action memory searches ("Think Before You Leap"), prevents context loss during transcript compaction, and ensures post-action quality self-critique.
+
+All production reference hook scripts and harness configuration examples are provided in the [`examples/hooks/`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/) directory.
+
+---
+
+### A. Claude Code Hooks Configuration
+
+Claude Code supports lifecycle hooks configured in your global settings file (`~/.claude/settings.json` or `%USERPROFILE%\.claude\settings.json`).
+
+#### Reference Files:
+- **Configuration Template**: [`examples/hooks/claude-settings-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/claude-settings-example.json)
+- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh)
+- **Pre-Action Search Gate Script**: [`examples/hooks/saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh)
+- **Stop Self-Critique Gate Script**: [`examples/hooks/saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh)
+
+#### Overview of Hooks:
+1. **`SessionStart`**: Triggers [`saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh) to extract `cwd` from input JSON and invoke `saltmdb-cli bootstrap-digest`, auto-injecting core rules and project memory digests into context.
+2. **`PreToolUse`**: Triggers [`saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call is recorded in the transcript.
+3. **`PreCompact`**: Inlines a background agent prompt to sweep and persist unrecorded decisions, bug fixes, or rules before conversation transcript compaction.
+4. **`Stop`**: Triggers [`saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh) to require a 2-question quality self-reflection before completing turns that modified files.
+
+---
+
+### B. Google Antigravity CLI (`agy`) Hooks Integration
+
+Antigravity CLI supports execution lifecycle hooks configured in workspace or global settings (`~/.gemini/antigravity-cli/settings.json`).
+
+#### Reference Files:
+- **Configuration Template**: [`examples/hooks/antigravity-settings-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/antigravity-settings-example.json)
+- **Pre-Tool Action Gate**: [`examples/hooks/saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh)
+
+#### Overview of Hooks:
+- **`PreInvocation`**: Invokes `saltmdb-cli bootstrap-digest --project-keywords $(basename $PWD)` to pre-load project facts and standing rules prior to initial prompt processing.
+- **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh) to ensure prior memory searches.
+
+---
+
+### C. GitHub Copilot CLI Hooks Integration
+
+GitHub Copilot CLI supports custom hooks defined in `.github/hooks/*.json` in your project repository or globally in `~/.copilot/hooks/hooks.json` (Unix) / `%USERPROFILE%\.copilot\hooks\hooks.json` (Windows).
+
+#### Reference Files:
+- **Configuration Specification**: [`examples/hooks/copilot-hooks-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/copilot-hooks-example.json)
+- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh)
+- **Pre-Tool Interceptor Script**: [`examples/hooks/saltmdb-copilot-pre-tool.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-copilot-pre-tool.sh)
+
+#### Overview & Permission Decision Protocol:
+- **`sessionStart`**: Runs [`saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh) to output project memory digests on session init.
+- **`preToolUse`**: Runs [`saltmdb-copilot-pre-tool.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-copilot-pre-tool.sh). Reads tool context on `stdin` and writes JSON permission decisions on `stdout`:
+  - Allowed: `{"permissionDecision": "allow"}`
+  - Denied: `{"permissionDecision": "deny", "permissionDecisionReason": "..."}`
+- **`agentStop`**: Triggers [`saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh) for post-turn reflection.
+
 
 ---
 
 > [!IMPORTANT]
 > **SQL Access Security:** Agents do not have raw SQL execution permissions. All actions must be performed using the predefined parameterized MCP tools. Do not expose a SQL client tool to agents, as this creates a major database integrity and credentials leak vulnerability.
+
