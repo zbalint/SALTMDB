@@ -367,11 +367,13 @@ def commit_consolidation(
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id")
     scope = _resolve(None, kw, kwargs, "scope") or "shared"
     weight = _resolve(None, kw, kwargs, "weight") or 1
+    is_core_ = _resolve(None, kw, kwargs, "is_core")
 
     return relation_service.commit_consolidation(
         parent_ids=parent_ids_,
         title=title_,
         content=content_,
+        is_core=is_core_,
         tags=tags_,
         scope=scope,  # type: ignore[arg-type]  # Any from raw kwarg; not runtime-validated against the Literal, stored as-is
         weight=weight,

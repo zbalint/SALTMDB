@@ -499,6 +499,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     tags: list[str] = None,
     scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
+    is_core: bool = None,
     owner_id: str = None,
     context_id: str = None,
     db_connection=None,
@@ -543,6 +544,16 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if should_close:
             close_connection(conn)
         return "Error: None of the provided parent_ids could be resolved."
+
+    if is_core is None:
+        placeholders_core = ",".join("?" for _ in resolved_parents)
+        core_row = conn.execute(
+            f"SELECT 1 FROM entities WHERE id IN ({placeholders_core}) AND is_core = 1 LIMIT 1",
+            resolved_parents,
+        ).fetchone()
+        is_core_val = 1 if core_row else 0
+    else:
+        is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
 
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
@@ -605,7 +616,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             conn.execute(
                 """
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     consolidated_id,
@@ -614,6 +625,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     now,
                     owner_val,
                     scope,
+                    is_core_val,
                     weight,
                     json.dumps(resolved_parents),
                     clean_title,
@@ -635,6 +647,14 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     conn.execute(
                         "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
                         (consolidated_id, tag_id),
+                    )
+
+            if is_core_val:
+                core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=owner_val)
+                if core_tag_id:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                        (consolidated_id, core_tag_id),
                     )
 
             placeholders = ",".join("?" for _ in resolved_parents)
@@ -761,6 +781,7 @@ def bulk_commit_consolidation(
                 tags = item.get("tags", [])
                 scope = item.get("scope", "shared")
                 w = item.get("weight", 1)
+                is_core = item.get("is_core")
 
                 res = commit_consolidation(
                     parent_ids=p_ids,
@@ -769,6 +790,7 @@ def bulk_commit_consolidation(
                     tags=tags,
                     scope=scope,
                     weight=w,
+                    is_core=is_core,
                     db_connection=conn,
                     _in_transaction=True,
                 )
