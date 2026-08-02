@@ -639,6 +639,9 @@ def get_frontend_html(db_path: str = None) -> str:
                 <div class="nav-item-left"><span class="nav-icon">🔍</span> Vector Playground</div>
                 <span class="nav-key">6</span>
             </li>
+            <li class="nav-item" id="nav-scatterplot" onclick="switchView('scatterplot')">
+                <div class="nav-item-left"><span class="nav-icon">🌌</span> 2D Embeddings</div>
+            </li>
             <li class="nav-item" id="nav-tags" onclick="switchView('tags')">
                 <div class="nav-item-left"><span class="nav-icon">🏷️</span> Folksonomy Tags</div>
                 <span class="nav-key">7</span>
@@ -915,6 +918,19 @@ def get_frontend_html(db_path: str = None) -> str:
             </div>
         </div>
 
+        <!-- 6b. 2D Embedding Scatterplot View -->
+        <div class="view-container" id="view-scatterplot">
+            <div class="bento-card" style="margin-bottom:16px;">
+                <div class="stat-label">2D SVD Projected Embedding Topology Scatterplot</div>
+                <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">
+                    384D ONNX entity embeddings projected to 2D via Singular Value Decomposition. Click any point to inspect entity details.
+                </div>
+            </div>
+            <div id="scatterplot-canvas-container" style="padding:16px; min-height:480px;">
+                <div style="color:var(--text-muted); text-align:center; padding:50px;">Click 2D Embeddings to load topology plot...</div>
+            </div>
+        </div>
+
         <!-- 7. Folksonomy Tags View -->
         <div class="view-container" id="view-tags">
             <div id="tags-cloud-container" style="display:flex; flex-wrap:wrap; gap:10px;">
@@ -999,6 +1015,7 @@ def get_frontend_html(db_path: str = None) -> str:
                 relations: '🕸️ Knowledge Graph Topology Network',
                 lineage: '🌳 Consolidation Lineage & Ancestry',
                 embeddings: '🔍 Dense Vector & Hybrid RRF Playground',
+                scatterplot: '🌌 2D Embedding Topology Scatterplot',
                 tags: '🏷️ Folksonomy Tag Registry',
                 locks: '🔒 System Mutex & Task Locks'
             };
@@ -1015,6 +1032,7 @@ def get_frontend_html(db_path: str = None) -> str:
             else if (currentView === 'relations') loadGraphTopology();
             else if (currentView === 'lineage') loadLineage();
             else if (currentView === 'embeddings') runVectorSearch();
+            else if (currentView === 'scatterplot') loadScatterplot();
             else if (currentView === 'tags') loadTags();
             else if (currentView === 'locks') loadLocks();
         }
@@ -1682,6 +1700,63 @@ def get_frontend_html(db_path: str = None) -> str:
             switchView('entities');
             document.getElementById('entity-search-input').value = tagName;
             loadEntities(1);
+        }
+
+        async function loadScatterplot() {
+            const container = document.getElementById('scatterplot-canvas-container');
+            if (!container) return;
+            container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:50px;">Computing SVD 2D embedding projection...</div>';
+
+            try {
+                const res = await fetch('/api/scatterplot');
+                const data = await res.json();
+                if (!data.points || data.points.length === 0) {
+                    container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:50px;">No ready entity embeddings found to plot.</div>';
+                    return;
+                }
+
+                const points = data.points;
+                const width = container.clientWidth || 800;
+                const height = 450;
+                const padding = 40;
+
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                points.forEach(p => {
+                    if (p.x < minX) minX = p.x;
+                    if (p.x > maxX) maxX = p.x;
+                    if (p.y < minY) minY = p.y;
+                    if (p.y > maxY) maxY = p.y;
+                });
+
+                const spanX = (maxX - minX) || 1;
+                const spanY = (maxY - minY) || 1;
+
+                let svg = `<svg width="100%" height="${height}" viewBox="0 0 ${width} ${height}" style="background:var(--bg-card); border-radius:12px; border:var(--glass-border);">`;
+                svg += `<line x1="${padding}" y1="${height/2}" x2="${width-padding}" y2="${height/2}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4"/>`;
+                svg += `<line x1="${width/2}" y1="${padding}" x2="${width/2}" y2="${height-padding}" stroke="rgba(255,255,255,0.05)" stroke-dasharray="4"/>`;
+
+                points.forEach(p => {
+                    const cx = padding + ((p.x - minX) / spanX) * (width - 2 * padding);
+                    const cy = height - (padding + ((p.y - minY) / spanY) * (height - 2 * padding));
+                    const color = p.status === 'raw' ? 'var(--accent)' : 'var(--green)';
+                    const titleEsc = escapeHtml(p.title || p.id);
+
+                    svg += `<circle cx="${cx}" cy="${cy}" r="6" fill="${color}" opacity="0.85" cursor="pointer" onclick="openEntityDetail('${p.id}')">
+                        <title>${titleEsc} (${p.status}, ${p.owner_id})</title>
+                    </circle>`;
+                });
+
+                svg += `</svg>`;
+                svg += `<div style="display:flex; gap:16px; margin-top:12px; font-size:0.8rem; color:var(--text-secondary); justify-content:center;">
+                    <span><span style="color:var(--accent);">●</span> Raw Memories (${points.filter(p => p.status === 'raw').length})</span>
+                    <span><span style="color:var(--green);">●</span> Consolidated Memories (${points.filter(p => p.status === 'consolidated').length})</span>
+                    <span>Click any node to open detail viewer</span>
+                </div>`;
+
+                container.innerHTML = svg;
+            } catch (err) {
+                container.innerHTML = `<div style="color:var(--red); text-align:center; padding:40px;">Error loading scatterplot: ${err}</div>`;
+            }
         }
 
         async function loadLocks() {

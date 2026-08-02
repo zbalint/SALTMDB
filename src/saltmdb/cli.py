@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 
 
 def _fmt_digest(core, project, pending_events, project_keywords):
@@ -49,7 +50,7 @@ def cmd_bootstrap_digest(args):
     except Exception:
         core = []
     keywords = args.project_keywords or os.path.basename(os.getcwd().rstrip("\\/"))
-    project = []
+    project: Any = []
     if keywords:
         try:
             project = search_memory(

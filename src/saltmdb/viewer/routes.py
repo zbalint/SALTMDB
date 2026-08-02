@@ -72,6 +72,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/embeddings_stats":
             self.get_embeddings_stats()
+        elif path == "/api/scatterplot":
+            self.get_scatterplot()
         elif path in ("/api/entities", "/api/entity"):
             self.get_entities(query)
         elif path == "/api/events":
@@ -131,6 +133,63 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = sqlite3.connect(db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def get_scatterplot(self):
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.execute("""
+                SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
+                FROM entities e
+                JOIN entity_embeddings ee ON e.id = ee.entity_id
+                WHERE e.status IN ('raw', 'consolidated') AND e.embedding_status = 'ready'
+                LIMIT 500
+            """)
+            rows = cursor.fetchall()
+            if not rows:
+                self.send_json({"points": []})
+                return
+
+            import numpy as np
+
+            valid_items = []
+            vectors = []
+            for r in rows:
+                blob = r["embedding"]
+                if blob:
+                    vec = np.frombuffer(blob, dtype=np.float32)
+                    if vec.shape[0] == 384:
+                        vectors.append(vec)
+                        valid_items.append({
+                            "id": r["id"],
+                            "title": r["title"] or r["id"][:8],
+                            "status": r["status"],
+                            "owner_id": r["owner_id"] or "system",
+                            "is_core": bool(r["is_core"]),
+                        })
+
+            if len(vectors) < 2:
+                self.send_json({"points": []})
+                return
+
+            X = np.vstack(vectors)
+            X_centered = X - np.mean(X, axis=0)
+            U, S, _ = np.linalg.svd(X_centered, full_matrices=False)
+            coords_2d = U[:, :2] * S[:2]
+
+            points = []
+            for idx, item in enumerate(valid_items):
+                item["x"] = round(float(coords_2d[idx, 0]), 4)
+                item["y"] = round(float(coords_2d[idx, 1]), 4)
+                points.append(item)
+
+            self.send_json({"points": points})
+        except Exception as e:
+            logger.error("Error in get_scatterplot: %s", e, exc_info=True)
+            self.send_json({"error": str(e)}, 500)
+        finally:
+            if conn:
+                conn.close()
 
     def get_entities(self, query):  # noqa: C901, PLR0912, PLR0915
         conn = None
