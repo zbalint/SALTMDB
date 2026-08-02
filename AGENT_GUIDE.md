@@ -94,6 +94,8 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 5. **Active Knowledge Persistence (Proactive Memory Storing)**
    * Actively use `store_memory` to persist valuable discoveries as soon as they emerge—including recurring issues, root-cause fixes, workaround solutions, user preferences, and newly established best practices.
    * Do NOT rely on prompt context alone to carry insights. If a solution or fact will be useful in a future session or for another agent instance, store it immediately in long-term memory.
+   * **Core Memory Scoping (`is_core` / `#core`)**: Reserve `is_core=True` strictly for global persona guidelines, standing behavioral rules, or cross-project constraints. Never mark project-specific audits, state reports, code findings, or repository notes as `is_core=True` — project-specific items must stay `is_core=False` to avoid cluttering bootstrap context in unrelated projects.
+
 
 6. **Look Before You Write (Deduplication & Truth Verification)**
    * Before storing new long-term knowledge via `store_memory`, pass `check_duplicates_only=True` or perform a quick search to ensure similar knowledge doesn't already exist.
@@ -167,7 +169,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 - **Tag Discipline & Consolidation**:
   - Always include relevant folksonomy tags (e.g., `#core`, `#architecture`, `#fix`, `#performance`, `#ui-ux`).
   - Use `get_canonical_tags(query)` before creating new tags to prevent tag fragmentation.
-  - Set `is_core=true` for fundamental rules, persona guidelines, and system constraints — the server automatically keeps the `#core` tag in sync with this flag; do not set `#core` directly via the `tags` list, it will be silently overridden to match `is_core`.
+  - Set `is_core=true` strictly for fundamental global persona rules, standing behavioral guidelines, and cross-project system constraints. Never set `is_core=true` on project-specific state reports, repository audits, or component facts — those must stay `is_core=false` so they don't clutter bootstrap digests when working in unrelated projects. (Note: the server automatically keeps the `#core` tag in sync with `is_core`; do not set `#core` directly via the `tags` list, it will be silently overridden).
 - **Proper Scoping (`scope`)**: Use `scope='shared'` (default) for global facts that should benefit all agents across sessions. Use `scope='private'` only for agent-private transient state.
 - **Duplicate Prevention**: Before storing large knowledge blocks, call `store_memory(check_duplicates_only=True)` to avoid duplicating pre-existing memories.
 
@@ -295,7 +297,7 @@ Session lifecycle hooks allow your AI host harness (such as **Claude Code**, **A
 
 Using hooks eliminates manual prompt bootstrapping, enforces pre-action memory searches ("Think Before You Leap"), prevents context loss during transcript compaction, and ensures post-action quality self-critique.
 
-All production reference hook scripts and harness configuration examples are provided in the [`examples/hooks/`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/) directory.
+All production reference hook scripts and harness configuration examples are provided in the [`examples/hooks/`](examples/hooks/) directory.
 
 ---
 
@@ -304,16 +306,16 @@ All production reference hook scripts and harness configuration examples are pro
 Claude Code supports lifecycle hooks configured in your global settings file (`~/.claude/settings.json` or `%USERPROFILE%\.claude\settings.json`).
 
 #### Reference Files:
-- **Configuration Template**: [`examples/hooks/claude-settings-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/claude-settings-example.json)
-- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh)
-- **Pre-Action Search Gate Script**: [`examples/hooks/saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh)
-- **Stop Self-Critique Gate Script**: [`examples/hooks/saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh)
+- **Configuration Template**: [`examples/hooks/claude-settings-example.json`](examples/hooks/claude-settings-example.json)
+- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh)
+- **Pre-Action Search Gate Script**: [`examples/hooks/saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh)
+- **Stop Self-Critique Gate Script**: [`examples/hooks/saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh)
 
 #### Overview of Hooks:
-1. **`SessionStart`**: Triggers [`saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh) to extract `cwd` from input JSON and invoke `saltmdb-cli bootstrap-digest`, auto-injecting core rules and project memory digests into context.
-2. **`PreToolUse`**: Triggers [`saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call is recorded in the transcript.
+1. **`SessionStart`**: Triggers [`saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh) to extract `cwd` from input JSON and invoke `saltmdb-cli bootstrap-digest`, auto-injecting core rules and project memory digests into context.
+2. **`PreToolUse`**: Triggers [`saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call is recorded in the transcript.
 3. **`PreCompact`**: Inlines a background agent prompt to sweep and persist unrecorded decisions, bug fixes, or rules before conversation transcript compaction.
-4. **`Stop`**: Triggers [`saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh) to require a 2-question quality self-reflection before completing turns that modified files.
+4. **`Stop`**: Triggers [`saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh) to require a 2-question quality self-reflection before completing turns that modified files.
 
 ---
 
@@ -322,12 +324,12 @@ Claude Code supports lifecycle hooks configured in your global settings file (`~
 Antigravity CLI supports execution lifecycle hooks configured in workspace or global settings (`~/.gemini/antigravity-cli/settings.json`).
 
 #### Reference Files:
-- **Configuration Template**: [`examples/hooks/antigravity-settings-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/antigravity-settings-example.json)
-- **Pre-Tool Action Gate**: [`examples/hooks/saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh)
+- **Configuration Template**: [`examples/hooks/antigravity-settings-example.json`](examples/hooks/antigravity-settings-example.json)
+- **Pre-Tool Action Gate**: [`examples/hooks/saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh)
 
 #### Overview of Hooks:
 - **`PreInvocation`**: Invokes `saltmdb-cli bootstrap-digest --project-keywords $(basename $PWD)` to pre-load project facts and standing rules prior to initial prompt processing.
-- **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-action-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-pre-action-gate.sh) to ensure prior memory searches.
+- **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh) to ensure prior memory searches.
 
 ---
 
@@ -336,16 +338,17 @@ Antigravity CLI supports execution lifecycle hooks configured in workspace or gl
 GitHub Copilot CLI supports custom hooks defined in `.github/hooks/*.json` in your project repository or globally in `~/.copilot/hooks/hooks.json` (Unix) / `%USERPROFILE%\.copilot\hooks\hooks.json` (Windows).
 
 #### Reference Files:
-- **Configuration Specification**: [`examples/hooks/copilot-hooks-example.json`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/copilot-hooks-example.json)
-- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh)
-- **Pre-Tool Interceptor Script**: [`examples/hooks/saltmdb-copilot-pre-tool.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-copilot-pre-tool.sh)
+- **Configuration Specification**: [`examples/hooks/copilot-hooks-example.json`](examples/hooks/copilot-hooks-example.json)
+- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh)
+- **Pre-Tool Interceptor Script**: [`examples/hooks/saltmdb-copilot-pre-tool.sh`](examples/hooks/saltmdb-copilot-pre-tool.sh)
 
 #### Overview & Permission Decision Protocol:
-- **`sessionStart`**: Runs [`saltmdb-session-bootstrap.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-session-bootstrap.sh) to output project memory digests on session init.
-- **`preToolUse`**: Runs [`saltmdb-copilot-pre-tool.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-copilot-pre-tool.sh). Reads tool context on `stdin` and writes JSON permission decisions on `stdout`:
+- **`sessionStart`**: Runs [`saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh) to output project memory digests on session init.
+- **`preToolUse`**: Runs [`saltmdb-copilot-pre-tool.sh`](examples/hooks/saltmdb-copilot-pre-tool.sh). Reads tool context on `stdin` and writes JSON permission decisions on `stdout`:
   - Allowed: `{"permissionDecision": "allow"}`
   - Denied: `{"permissionDecision": "deny", "permissionDecisionReason": "..."}`
-- **`agentStop`**: Triggers [`saltmdb-self-critique-gate.sh`](file:///home/zbalint/workspace/SALTMDB/examples/hooks/saltmdb-self-critique-gate.sh) for post-turn reflection.
+- **`agentStop`**: Triggers [`saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh) for post-turn reflection.
+
 
 
 ---
