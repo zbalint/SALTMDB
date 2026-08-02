@@ -1,3 +1,6 @@
+import math
+import re
+import collections
 import sys
 import os
 import sqlite3
@@ -463,6 +466,173 @@ def consolidate_memories(conn: sqlite3.Connection = None, db_path: str = None):
             close_connection(conn)
 
 
+ENGLISH_STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't",
+    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by",
+    "can", "cannot", "could", "did", "do", "does", "doing", "done", "down", "during", "each", "few",
+    "for", "from", "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself",
+    "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "just",
+    "me", "more", "most", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only",
+    "or", "other", "our", "ours", "ourselves", "out", "over", "own", "same", "she", "should", "so",
+    "some", "such", "than", "that", "the", "their", "theirs", "them", "themselves", "then", "there",
+    "these", "they", "this", "those", "through", "to", "too", "under", "until", "up", "very", "was",
+    "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why", "with", "would",
+    "you", "your", "yours", "yourself", "yourselves"
+}
+
+
+def _compute_doc_frequencies(
+    conn: sqlite3.Connection, stopwords: set[str]
+) -> tuple[collections.Counter[str], int]:
+    corpus_cursor = conn.execute(
+        "SELECT title, full_content FROM entities WHERE status IN ('raw', 'consolidated') LIMIT 100"
+    )
+    corpus_rows = corpus_cursor.fetchall()
+    corpus_doc_count = max(len(corpus_rows), 1)
+
+    doc_frequency: collections.Counter[str] = collections.Counter()
+    for title, content in corpus_rows:
+        doc_text = f"{title or ''} {content or ''}".lower()
+        unique_words = set(re.findall(r"\b[a-z0-9_-]{3,}\b", doc_text)) - stopwords
+        for w in unique_words:
+            doc_frequency[w] += 1
+    return doc_frequency, corpus_doc_count
+
+
+def extract_c_tfidf_tags(
+    conn: sqlite3.Connection, cluster_ids: list[str], top_k: int = 3
+) -> tuple[list[str], float]:
+    """Extracts top canonical tags for a cluster using c-TF-IDF and returns candidate tags with confidence score."""
+    if not cluster_ids:
+        return [], 0.0
+
+    placeholders = ",".join("?" for _ in cluster_ids)
+    cursor = conn.execute(
+        f"SELECT title, full_content FROM entities WHERE id IN ({placeholders})", cluster_ids
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        return [], 0.0
+
+    cluster_tokens = []
+    for title, content in rows:
+        text = f"{title or ''} {content or ''}".lower()
+        words = re.findall(r"\b[a-z0-9_-]{3,}\b", text)
+        cluster_tokens.extend([w for w in words if w not in ENGLISH_STOPWORDS])
+
+    if not cluster_tokens:
+        return [], 0.0
+
+    tf_counts = collections.Counter(cluster_tokens)
+    total_cluster_terms = len(cluster_tokens)
+    doc_frequency, corpus_doc_count = _compute_doc_frequencies(conn, ENGLISH_STOPWORDS)
+
+    tfidf_scores = {
+        term: (count / total_cluster_terms)
+        * math.log(1.0 + (corpus_doc_count / (doc_frequency.get(term, 1) + 1.0)))
+        for term, count in tf_counts.items()
+    }
+
+    sorted_terms = sorted(tfidf_scores.items(), key=lambda x: x[1], reverse=True)
+    if not sorted_terms:
+        return [], 0.0
+
+    canonical_tags = []
+    try:
+        from saltmdb.domain.services.memory_service import get_canonical_tags
+
+        canonical_tags = get_canonical_tags(db_connection=conn)
+    except Exception as e:
+        logger.debug("Failed to fetch canonical tags in extract_c_tfidf_tags: %s", e)
+
+    canonical_map = {}
+    for item in canonical_tags:
+        if isinstance(item, dict) and "name" in item:
+            tname = item["name"]
+        elif isinstance(item, str):
+            tname = item
+        else:
+            continue
+        canonical_map[tname.lower().lstrip("#")] = tname
+
+    suggested_tags = [
+        canonical_map[term.lstrip("#")]
+        if term.lstrip("#") in canonical_map
+        else f"#{term.lstrip('#')}"
+        for term, _ in sorted_terms[:top_k]
+    ]
+
+    seen = set()
+    final_tags = []
+    for t in suggested_tags:
+        if t not in seen:
+            seen.add(t)
+            final_tags.append(t)
+
+    top_score = sorted_terms[0][1]
+    confidence_score = round(min(1.0, max(0.5, 0.5 + (top_score * 0.5))), 2)
+
+    return final_tags, confidence_score
+
+
+def find_connected_vector_clusters(
+    valid_ids: list[str],
+    vectors: list[Any],
+    min_cluster_size: int = 3,
+    similarity_threshold: float = 0.75,
+) -> list[tuple[list[str], float]]:
+    """Discovers vector clusters via connected components on a cosine similarity adjacency graph."""
+    if len(vectors) < min_cluster_size:
+        return []
+
+    try:
+        import numpy as np
+
+        X = np.vstack(vectors)
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        X_norm = X / norms
+
+        sim_matrix = np.dot(X_norm, X_norm.T)
+        adj_matrix = sim_matrix >= similarity_threshold
+
+        n = len(valid_ids)
+        visited = [False] * n
+        clusters = []
+
+        for i in range(n):
+            if visited[i]:
+                continue
+
+            component = []
+            queue = [i]
+            visited[i] = True
+
+            while queue:
+                curr = queue.pop(0)
+                component.append(curr)
+                for neighbor in range(n):
+                    if adj_matrix[curr, neighbor] and not visited[neighbor]:
+                        visited[neighbor] = True
+                        queue.append(neighbor)
+
+            if len(component) >= min_cluster_size:
+                comp_ids = [valid_ids[idx] for idx in component]
+                sub_sims = sim_matrix[np.ix_(component, component)]
+                k = len(component)
+                if k > 1:
+                    off_diag_sum = float(np.sum(sub_sims) - np.trace(sub_sims))
+                    mean_sim = off_diag_sum / (k * (k - 1))
+                else:
+                    mean_sim = 1.0
+                clusters.append((comp_ids, round(mean_sim, 4)))
+
+        return clusters
+    except Exception as e:
+        logger.warning("Error in find_connected_vector_clusters: %s", e)
+        return []
+
+
 def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901, PLR0912, PLR0915
     """Discovers topically related raw memories via vector embeddings and logs consolidation request events."""
     should_close = False
@@ -473,18 +643,19 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
 
     try:
         logger.info("Running Vector Topic Clustering for Raw Memories...")
-        try:
-            import sqlite_vec
+        if should_close:
+            try:
+                import sqlite_vec
 
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-        except Exception as e:
-            logger.debug("sqlite-vec extension not available for vector clustering: %s", e)
-            return
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+            except Exception as e:
+                logger.debug("sqlite_vec extension load skipped or failed: %s", e)
+                return
 
         cursor = conn.execute("""
-            SELECT e.id, e.owner_id
+            SELECT e.id, e.owner_id, ee.embedding
             FROM entities e
             JOIN entity_embeddings ee ON e.id = ee.entity_id
             WHERE e.status = 'raw' AND e.embedding_status = 'ready'
@@ -493,64 +664,55 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
         if len(raw_rows) < 3:
             return
 
-        raw_ids = [r[0] for r in raw_rows]
         owner_map = {r[0]: r[1] for r in raw_rows}
+        valid_rows = [(r[0], r[2]) for r in raw_rows if r[2]]
+        if len(valid_rows) < 3:
+            return
 
-        clusters = []
-        visited = set()
+        import numpy as np
 
-        for eid in raw_ids:
-            if eid in visited:
-                continue
+        valid_ids = [vr[0] for vr in valid_rows]
+        vectors = [np.frombuffer(vr[1], dtype=np.float32) for vr in valid_rows]
 
-            query_vec_cur = conn.execute(
-                "SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (eid,)
-            )
-            vec_row = query_vec_cur.fetchone()
-            if not vec_row or not vec_row[0]:
-                continue
-
-            vec_blob = vec_row[0]
-            placeholders = ",".join("?" for _ in raw_ids)
-            sql = f"""
-                SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
-                FROM entity_embeddings ee
-                JOIN entities e ON ee.entity_id = e.id
-                WHERE e.id IN ({placeholders}) AND e.status = 'raw'
-                ORDER BY distance ASC
-            """
-            neighbors_cur = conn.execute(sql, [vec_blob] + raw_ids)
-            cluster_members = []
-            for nid, dist in neighbors_cur.fetchall():
-                if (
-                    dist <= 0.25 and nid not in visited
-                ):  # Cosine distance <= 0.25 means cosine similarity >= 0.75
-                    cluster_members.append(nid)
-
-            if len(cluster_members) >= 3:
-                clusters.append(cluster_members)
-                visited.update(cluster_members)
+        cluster_data = find_connected_vector_clusters(
+            valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.75
+        )
 
         to_insert = []
-        for cluster in clusters:
-            # Cluster membership lives in a JSON array (entity_ids), not a scalar field, so
-            # it can't go through _pending_request_exists' json_extract($.field) matching --
-            # dedupe instead on whether this cluster's anchor member already appears in an
-            # unresolved prior vector_cluster request (same rationale as
-            # _pending_request_exists: stop re-logging the same still-unprocessed cluster on
-            # every run).
+        domain_suggestions = []
+
+        for cluster, mean_prob in cluster_data:
             if _anchor_in_pending_cluster(conn, cluster[0]):
                 continue
 
             primary_owner = owner_map.get(cluster[0]) or "librarian"
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
-            content = json.dumps(
-                {"target": "vector_cluster", "owner_id": primary_owner, "entity_ids": cluster}
-            )
+
+            # Extract c-TF-IDF candidate tags and confidence
+            suggested_tags, tfidf_conf = extract_c_tfidf_tags(conn, cluster, top_k=3)
+            confidence_score = round(0.5 * mean_prob + 0.5 * tfidf_conf, 2)
+
+            content_dict = {
+                "target": "vector_cluster",
+                "owner_id": primary_owner,
+                "entity_ids": cluster,
+                "suggested_tags": suggested_tags,
+            }
+            content = json.dumps(content_dict)
             to_insert.append((event_id, now, primary_owner, content, cluster))
 
-        if not to_insert:
+            if suggested_tags:
+                sug_event_id = str(uuid.uuid4())
+                sug_content = json.dumps({
+                    "cluster_entity_ids": cluster,
+                    "suggested_tags": suggested_tags,
+                    "confidence_score": confidence_score,
+                    "rationale": "Connected components cosine graph cluster with c-TF-IDF term specificity",
+                })
+                domain_suggestions.append((sug_event_id, now, primary_owner, sug_content))
+
+        if not to_insert and not domain_suggestions:
             return
 
         def _write(c):
@@ -561,6 +723,15 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
                     VALUES (?, ?, ?, 'consolidation_request', ?)
                 """,
                     (event_id, now, primary_owner, content),
+                )
+
+            for event_id, now, primary_owner, sug_content in domain_suggestions:
+                c.execute(
+                    """
+                    INSERT INTO events (id, timestamp, agent_id, type, content)
+                    VALUES (?, ?, ?, 'domain_suggestion', ?)
+                """,
+                    (event_id, now, primary_owner, sug_content),
                 )
 
         write_transaction_retrying(conn, _write)
