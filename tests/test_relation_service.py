@@ -1248,6 +1248,33 @@ class TestRelationPointInTime(unittest.TestCase):
             "cycle guard (SQL-level path column) must still terminate traversal correctly",
         )
 
+    def test_analyze_dependencies_diamond_dedupes_edges(self):
+        # Diamond: root -> a, root -> b, a -> c, b -> c. The relation root->c doesn't exist
+        # directly, but c is reached via two distinct paths (root->a->c and root->b->c), which
+        # previously caused every relation downstream of the convergence point to be emitted
+        # once per incoming path.
+        root = self._mk("Diamond Deps Root")
+        a = self._mk("Diamond Deps A")
+        b = self._mk("Diamond Deps B")
+        c = self._mk("Diamond Deps C")
+        store_relation(source_id=root, target_id=a, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=root, target_id=b, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=a, target_id=c, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=b, target_id=c, predicate="depends_on", db_connection=self.conn)
+
+        result = analyze_dependencies(root_entity_id=root, max_depth=10, db_connection=self.conn)
+        self.assertNotIn("error", result)
+
+        relation_ids = [e["relation_id"] for e in result["edges"]]
+        self.assertEqual(
+            len(relation_ids),
+            len(set(relation_ids)),
+            "each relation must appear at most once in edges, even when reached via "
+            "multiple converging paths",
+        )
+        self.assertEqual(len(result["edges"]), 4, "diamond has exactly 4 distinct relations")
+        self.assertEqual(result["total_dependencies_found"], 4)
+
     def test_analyze_dependencies_shows_expired_edge_at_earlier_pit_and_repointed_edge_at_now(self):
         p1 = self._mk("PIT Cons P1")
         x = self._mk("PIT Cons X")

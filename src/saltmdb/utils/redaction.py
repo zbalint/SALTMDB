@@ -20,6 +20,7 @@ SECRET_PATTERNS = [
     r"\b[a-zA-Z0-9_]{20,}:[a-zA-Z0-9_]{40,}\b",  # Generic API secret pattern (ID:Secret)
     r"\bAKIA[A-Z0-9]{16}\b",  # AWS access key ID
     r"\b[a-zA-Z0-9_-]{23,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38}\b",  # Discord token
+    r"\b(?:api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd|pwd)\s*[:=]\s*['\"]?[A-Za-z0-9_\-\.\/+]{8,}['\"]?",  # Generic key=value credential assignment
 ]
 
 CUSTOM_REDACT_PATTERNS: list[str] = []

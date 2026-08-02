@@ -349,10 +349,19 @@ def analyze_dependencies(
         # dt.path (last column) is only needed by the SQL cycle guard (see CTE above) --
         # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
         edges = []
+        seen_edges = set()
         for rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path in rows:
             if tgt_id not in seen_nodes:
                 nodes.append({"id": tgt_id, "title": tgt_title, "depth": depth})
                 seen_nodes.add(tgt_id)
+
+            # Multiple converging paths in a diamond-shaped graph can revisit the same
+            # relation once per incoming path (the CTE's cycle guard only stops a single
+            # path from looping, not distinct paths reconverging). Dedupe on the relation's
+            # own id, keeping the first (shallowest, per ORDER BY dt.depth ASC) occurrence.
+            if rel_id in seen_edges:
+                continue
+            seen_edges.add(rel_id)
 
             edges.append(
                 {

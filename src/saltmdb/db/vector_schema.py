@@ -1,4 +1,28 @@
+import logging
 import sqlite3
+
+logger = logging.getLogger(__name__)
+
+
+def try_load_vector_extension(conn: sqlite3.Connection) -> bool:
+    """Best-effort load of the sqlite_vec extension onto an existing connection.
+
+    For callers (e.g. viewer HTTP routes) that open their own ad-hoc connection per
+    request rather than going through init_db()/init_vector_schema(), and therefore
+    need the extension loaded before querying the entity_embeddings vec0 virtual table.
+    Returns False instead of raising if the extension can't be loaded, so callers can
+    degrade gracefully the same way the rest of the vector-feature call sites do.
+    """
+    try:
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return True
+    except Exception as e:
+        logger.debug("sqlite_vec extension load skipped or failed: %s", e)
+        return False
 
 
 def init_vector_schema(conn: sqlite3.Connection) -> None:

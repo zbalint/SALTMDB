@@ -641,14 +641,15 @@ def get_frontend_html(db_path: str = None) -> str:
             </li>
             <li class="nav-item" id="nav-scatterplot" onclick="switchView('scatterplot')">
                 <div class="nav-item-left"><span class="nav-icon">🌌</span> 2D Embeddings</div>
+                <span class="nav-key">7</span>
             </li>
             <li class="nav-item" id="nav-tags" onclick="switchView('tags')">
                 <div class="nav-item-left"><span class="nav-icon">🏷️</span> Folksonomy Tags</div>
-                <span class="nav-key">7</span>
+                <span class="nav-key">8</span>
             </li>
             <li class="nav-item" id="nav-locks" onclick="switchView('locks')">
                 <div class="nav-item-left"><span class="nav-icon">🔒</span> System Locks</div>
-                <span class="nav-key">8</span>
+                <span class="nav-key">9</span>
             </li>
         </ul>
 
@@ -1710,6 +1711,10 @@ def get_frontend_html(db_path: str = None) -> str:
             try {
                 const res = await fetch('/api/scatterplot');
                 const data = await res.json();
+                if (data.error) {
+                    container.innerHTML = `<div style="color:var(--red); text-align:center; padding:40px;">Error loading scatterplot: ${escapeHtml(data.error)}</div>`;
+                    return;
+                }
                 if (!data.points || data.points.length === 0) {
                     container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:50px;">No ready entity embeddings found to plot.</div>';
                     return;
@@ -1803,8 +1808,8 @@ def get_frontend_html(db_path: str = None) -> str:
             if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
                 e.preventDefault();
                 toggleCmdPalette();
-            } else if (e.key >= '1' && e.key <= '8' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-                const viewKeys = ['dashboard', 'entities', 'events', 'relations', 'lineage', 'embeddings', 'tags', 'locks'];
+            } else if (e.key >= '1' && e.key <= '9' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+                const viewKeys = ['dashboard', 'entities', 'events', 'relations', 'lineage', 'embeddings', 'scatterplot', 'tags', 'locks'];
                 const idx = parseInt(e.key) - 1;
                 if (viewKeys[idx]) switchView(viewKeys[idx]);
             } else if (e.key === 'Escape') {

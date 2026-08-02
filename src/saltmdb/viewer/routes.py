@@ -7,6 +7,7 @@ import sys
 import logging
 from typing import Any
 from saltmdb.config import get_db_path
+from saltmdb.db.vector_schema import try_load_vector_extension
 from saltmdb.domain.services import relation_service
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         conn = None
         try:
             conn = self.get_db_connection()
+            if not try_load_vector_extension(conn):
+                self.send_json({"points": [], "error": "sqlite_vec extension unavailable"})
+                return
             cursor = conn.execute("""
                 SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
                 FROM entities e

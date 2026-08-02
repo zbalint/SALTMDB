@@ -2,6 +2,10 @@ import unittest
 import tempfile
 import os
 import shutil
+from datetime import datetime, timezone
+
+import numpy as np
+
 from saltmdb.db.schema import init_db
 from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.domain.services import relation_service
@@ -255,6 +259,69 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         self.assertIsInstance(results, list)
         for r in results:
             self.assertTrue(r.get("is_core"))
+
+
+class TestViewerScatterplot(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        # Real production schema (init_db creates entity_embeddings as an actual vec0
+        # virtual table) -- required to exercise/catch a regression in the viewer's
+        # own per-request connection needing the sqlite_vec extension loaded before it
+        # can query that table, same as the consolidate_vector_clusters regression.
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+
+    def tearDown(self):
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _handler(self):
+        return SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), DummyServer())
+
+    def _capture_json(self, handler):
+        captured = {}
+
+        def fake_send_json(data, status=200):
+            captured["data"] = data
+            captured["status"] = status
+
+        handler.send_json = fake_send_json
+        return captured
+
+    def _insert_ready_entity(self, entity_id, title):
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "title, full_content, status, embedding_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'raw', 'ready')",
+            (entity_id, now, now, now, "viewer_tester", title, f"Content for {title}"),
+        )
+        vec = np.ones(384, dtype=np.float32) * (hash(entity_id) % 100 / 100.0)
+        self.conn.execute(
+            "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+            (entity_id, vec.tobytes()),
+        )
+
+    def test_get_scatterplot_with_ready_embeddings(self):
+        self._insert_ready_entity("scatter-e1", "Scatterplot Entity One")
+        self._insert_ready_entity("scatter-e2", "Scatterplot Entity Two")
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture_json(handler)
+        handler.get_scatterplot()
+
+        self.assertNotIn("error", captured["data"])
+        points = captured["data"]["points"]
+        self.assertEqual(len(points), 2)
+        point_ids = {p["id"] for p in points}
+        self.assertEqual(point_ids, {"scatter-e1", "scatter-e2"})
+        for p in points:
+            self.assertIn("x", p)
+            self.assertIn("y", p)
 
 
 if __name__ == "__main__":
