@@ -230,11 +230,15 @@ def main():
     logger.info("Reading database: %s", db_path)
 
     SALTMDBTCPServer.allow_reuse_address = True
-    with SALTMDBTCPServer(("127.0.0.1", port), SALTMDBHandler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            logger.info("Stopping SALTMDB Viewer.")
+    try:
+        with SALTMDBTCPServer(("127.0.0.1", port), SALTMDBHandler) as httpd:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                logger.info("Stopping SALTMDB Viewer.")
+    except OSError as e:
+        logger.error("Failed to bind viewer to 127.0.0.1:%d: %s", port, e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

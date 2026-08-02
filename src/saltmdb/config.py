@@ -25,6 +25,26 @@ def is_semantic_search_enabled() -> bool:
     return val not in ("0", "false", "no", "off")
 
 
+def get_viewer_port() -> int:
+    """Resolve the web viewer's port from SALTMDB_VIEWER_PORT. Defaults to 8080."""
+    return int(os.environ.get("SALTMDB_VIEWER_PORT", "8080"))
+
+
+def get_viewer_host() -> str:
+    """Resolve the web viewer's bind host from SALTMDB_VIEWER_HOST. Defaults to 127.0.0.1 (loopback only)."""
+    return os.environ.get("SALTMDB_VIEWER_HOST", "127.0.0.1")
+
+
+def is_viewer_enabled() -> bool:
+    """Check SALTMDB_VIEWER_ENABLED env var. Defaults to True (enabled).
+
+    Controls whether the MCP server auto-starts the web viewer on startup.
+    Set SALTMDB_VIEWER_ENABLED=false (or 0/off/no) to disable auto-start.
+    """
+    val = os.environ.get("SALTMDB_VIEWER_ENABLED", "true").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
 # Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
 DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate event
 DEDUP_DUPLICATE_THRESHOLD = 0.85  # >= this -> warn the caller of a likely duplicate
