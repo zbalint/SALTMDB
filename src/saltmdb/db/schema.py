@@ -325,6 +325,16 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         VALUES ('librarian_consolidation', NULL, NULL, NULL);
         """)
 
+        # 6b. Viewer Sessions Table for Reference-Counted Lifecycle
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS _viewer_sessions (
+            port INTEGER NOT NULL,
+            session_pid INTEGER NOT NULL,
+            started_at DATETIME NOT NULL,
+            PRIMARY KEY (port, session_pid)
+        );
+        """)
+
         # Drop old triggers to recreate with search_aliases support
         conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts")

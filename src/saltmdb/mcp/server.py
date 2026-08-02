@@ -6,7 +6,13 @@ from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
 from saltmdb import config
 from saltmdb.config import get_db_path
+from saltmdb.db.connection import get_connection
 from saltmdb.db.schema import init_db
+from saltmdb.db.viewer_sessions import (
+    count_live_sessions,
+    register_session,
+    unregister_session,
+)
 from saltmdb.viewer.server import start_viewer, stop_viewer
 
 # Configure standard logging exclusively to stderr to protect MCP stdio stream
@@ -35,17 +41,23 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     db_path = get_db_path()
     logger.info("Initializing SALTMDB database schema at: %s", db_path)
     conn = init_db(db_path)
-    conn.close()
 
     viewer_port = config.get_viewer_port()
     if config.is_viewer_enabled():
+        register_session(conn, viewer_port)
         viewer_task = asyncio.create_task(asyncio.to_thread(start_viewer, viewer_port))
         viewer_task.add_done_callback(_log_viewer_start_result)
 
+    conn.close()
     yield {}
 
     if config.is_viewer_enabled():
-        stop_viewer(port=viewer_port)
+        conn = get_connection(db_path)
+        unregister_session(conn, viewer_port)
+        remaining = count_live_sessions(conn, viewer_port)
+        conn.close()
+        if remaining == 0:
+            stop_viewer(port=viewer_port)
     logger.info("SALTMDB server shutting down.")
 
 
