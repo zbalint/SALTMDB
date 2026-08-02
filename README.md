@@ -22,65 +22,88 @@ graph TD
     subgraph MCP Server Layer
         A -->|Stdio / MCP| Server[saltmdb.mcp.server]
         B -->|Stdio / MCP| Server
-        Server -->|timeout=10.0 / WAL| MainDB[(sqlite3: saltmdb.db)]
+        Server -->|BEGIN IMMEDIATE / WAL / write_transaction_retrying| MainDB[(sqlite3: saltmdb.db)]
         Server -->|check_same_thread=False| EphemDB[(sqlite3: :memory:)]
     end
 
     subgraph Background Threads
-        Server -->|daemon thread| EmbedWorker[embedding_service.embed_entity_async]
-        EmbedWorker -->|fastembed ONNX| VecDB[(entity_embeddings vec0)]
-        Server -->|Asynchronous detached spawn| Lib[Librarian gc worker]
-        Lib -->|Atomic Leader Election Lock| Lock[_system_locks]
-        Lib -->|Consolidate & Archive| MainDB
+        Server -->|_embed_pool: ThreadPoolExecutor x2| EmbedWorker[embedding_service.embed_entity_async]
+        EmbedWorker -->|fastembed ONNX + sqlite_vec| VecDB[(entity_embeddings vec0)]
+        Server -->|_librarian_trigger_pool x1 fire-and-forget| TriggerCheck[cooldown check / subprocess spawn]
+        TriggerCheck -->|Atomic last_run_at UPDATE| Lock[_system_locks]
+        TriggerCheck -->|python -m saltmdb --librarian| Lib[Librarian gc subprocess]
+        Lib -->|acquire_librarian_lock| Lock
+        Lib -->|merge_tags_heuristics| MainDB
+        Lib -->|consolidate_cluttered_tags| MainDB
+        Lib -->|consolidate_memories| MainDB
+        Lib -->|consolidate_vector_clusters| MainDB
+        Lib -->|scout_consolidated_supersessions| MainDB
+        Lib -->|WAL checkpoint + PRAGMA optimize| MainDB
     end
 ```
 
-- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, Coleman-Liau readability bounds, and MSDI structural density scoring) and Stage A SHA-256 exact hash collision lookups before ONNX embedding generation. Calibrated cosine similarity ($\ge 0.75$) logs a reviewable `supersession_candidate` event rather than auto-linking or demoting weight (a prior auto-supersession design was reverted after it silently buried an unreviewed memory); crossing the stricter duplicate band ($\ge 0.85$) additionally auto-links a non-authoritative `similar_to` relation edge, and warns the caller of a likely duplicate, while target exclusion prevents false deduplication warnings during parent memory consolidation.
-- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default.
-- **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write.
-- **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution and canonical redirects.
-- **SCD Type 2 Temporal History:** Every upsert preserves the prior version as an archived snapshot for full audit lineage.
+- **Mechanical Text Quality Gate & Sub-ms Deduplication:** Sub-millisecond multi-stage pre-embedding quality evaluation — idempotent auto-formatting (`auto_format_markdown`), prose extraction (`extract_prose_content`), Shannon character entropy ($H(X) \in [2.5, 5.3]$), Word 3-gram and 5-gram sequence repetition, Type-Token Ratio ($\ge 0.35$), Coleman-Liau readability bounds ($CLI \in [2.0, 26.0]$), and MSDI structural density scoring — followed by Stage A SHA-256 exact hash collision lookup before ONNX embedding generation. Calibrated cosine similarity ($\ge 0.75$) logs a reviewable `supersession_candidate` event rather than auto-linking or demoting weight (a prior auto-supersession design was reverted after it silently buried an unreviewed memory); crossing the stricter duplicate band ($\ge 0.85$) additionally auto-links a non-authoritative `similar_to` relation edge and warns the caller of a likely duplicate, while target exclusion prevents false deduplication warnings during parent memory consolidation.
+- **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default; each search type runs on a dedicated thread pool. FTS5 uses a Porter tokenizer with title-biased BM25 weights (10:1 title-to-content, 5:1 alias-to-content). Semantic search uses a dedicated per-request connection to avoid cross-thread sqlite_vec conflicts.
+- **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write. Custom patterns can be added via `.saltmdb_redact` in the working directory (one regex per line).
+- **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution, canonical redirects, and three seeded top-level tags (`episodic`, `semantic`, `procedural`).
+- **SCD Type 2 Temporal History:** Every upsert preserves the prior version as an archived snapshot (`<entity_id>_h_<8-char-suffix>`) for full audit lineage.
 - **Lossless Consolidation:** Soft-archives source memories, auto-creates `consolidated_from` graph edges — never hard-deletes.
+- **Bi-Temporal Relations:** Relation edges carry both a system/transaction-time axis (`valid_from`/`valid_to`, set by consolidation) and an independent event/world-time axis (`valid_at`/`invalid_at`, settable directly by agents via `manage_relation(invalidate=True)`).
 
 ### 1. Database Schema
-The SQLite database operates in **Write-Ahead Logging (WAL)** mode for safe concurrent readers. It includes the following tables:
-* **`events`**: An immutable, append-only ledger tracking agent operations (issues, attempts, decisions, fixes).
-* **`entities`**: The long-term knowledge base storing facts, markdown content, weights, status (`raw`, `consolidated`, `archived`), and `embedding_status` (`pending`, `ready`, `failed`, `archived`).
-* **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects.
+The SQLite database operates in **Write-Ahead Logging (WAL)** mode (`PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`). All writes use explicit `BEGIN IMMEDIATE` transactions with exponential backoff retry (up to 4 total attempts). It includes the following tables:
+
+* **`events`**: An immutable, append-only ledger tracking agent operations (`decision`, `issue`, `fix`, `attempt`, `supersession_candidate`, `consolidation_request`, `domain_suggestion`). Columns: `id`, `timestamp`, `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id`.
+* **`entities`**: The long-term knowledge base. Key columns: `id` (UUID), `title`, `full_content` (markdown), `status` (`raw`/`consolidated`/`archived`), `embedding_status` (`pending`/`ready`/`failed`/`archived`), `memory_type` (`fact`/`event`/`procedure`/`decision`/`preference`), `is_core`, `weight`, `scope` (`private`/`shared`), `owner_id`, `context_id`, `content_hash` (SHA-256), `quality_score`, `quality_status`, `quality_flags`, `valid_from`/`valid_to` (SCD Type 2 windows).
+* **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects. Seeded with `episodic`, `semantic`, `procedural`.
 * **`entity_tags`**: A mapping table linking knowledge entities to folksonomy tags.
-* **`relations`**: A typed directional edge table for the knowledge graph (`source_id → predicate → target_id`).
-* **`predicates`**: A canonical-predicate lookup table (mirrors `tags`' alias-resolution shape) reducing relation-predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`).
-* **`entities_fts`**: A virtual table using **SQLite FTS5** (Porter tokenizer) to index titles, full content, and search aliases for weighted keyword search.
-* **`entity_embeddings`**: A `sqlite-vec` `vec0` virtual table storing 384-dimensional ONNX embeddings for semantic vector search.
-* **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent processes.
+* **`relations`**: A typed directional edge table for the knowledge graph (`source_id → predicate → target_id`). Supports bi-temporal tracking via `valid_from`/`valid_to` (system time, set by `commit_consolidation`) and `valid_at`/`invalid_at` (event time, set by agents via `manage_relation`). A **partial unique index** `WHERE valid_to IS NULL` prevents duplicate live edges while allowing expired + live replacements to coexist.
+* **`predicates`**: A canonical-predicate lookup table (mirrors `tags`' alias-resolution shape). Seeded with: `resolves`, `depends_on`, `references`, `elaborates_on`, `consolidated_from`, `supersedes`, `relates_to`, `similar_to`. `relates_to` and `references` are pre-aliased onto `elaborates_on`. Write-time predicate canonicalization via `resolve_or_create_predicate()` normalizes all submitted predicates before storage and notes any alias substitution in the result string.
+* **`entities_fts`**: A virtual table using **SQLite FTS5** (Porter tokenizer) indexing `title`, `full_content`, and `search_aliases` (from `metadata.search_aliases`). Kept in sync with entities via four triggers (`insert_entity_fts`, `update_entity_fts`, `update_entity_fts_unarchived`, `archive_memory_fts`, `delete_entity_fts`).
+* **`entity_embeddings`**: A `sqlite-vec` `vec0` virtual table storing 384-dimensional ONNX float32 embeddings (`embedding FLOAT[384]`). Loaded via `sqlite_vec.load(conn)` on a per-connection basis; the extension is pre-imported *before* any `BEGIN IMMEDIATE` transaction opens to prevent stalled cold-import from holding the write lock.
+* **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent Librarian processes. Columns: `task_name`, `locked_at`, `locked_by_pid`, `last_run_at`. Lock expiry: 10 minutes (stale safety net). Trigger cooldown: 5 minutes between subprocess spawns.
+* **`_viewer_sessions`**: Tracks active web viewer sessions by `port` + `session_pid` for reference-counted lifecycle management.
 
 ---
 
 ## 🚀 Core Features
 
 ### 1. Hybrid FTS5 + Vector Search
-SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in parallel**, merging results via **Reciprocal Rank Fusion (RRF)**:
-* FTS5 uses SQLite's built-in `bm25` auxiliary function with a **10:1 title-to-content weight ratio**.
-* Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~66MB pre-bundled model weights) stored in a `sqlite-vec` `vec0` virtual table.
-* RRF merges on rank position (not raw scores), keeping the existing BM25 tuning intact.
+SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in parallel** using a `ThreadPoolExecutor`, merging results via **Reciprocal Rank Fusion (RRF)**:
+* FTS5 uses SQLite's built-in `bm25` auxiliary function with a **10:1 title-to-content weight ratio** (alias weight: 5:1). An AND-query is tried first; if it returns no results with multiple terms, an OR-fallback is automatically applied.
+* Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~66MB pre-bundled model weights) stored in a `sqlite-vec` `vec0` virtual table. The query text is `{title}\n\n{full_content}` concatenated for embedding.
+* RRF merges on rank position (not raw scores) with `k=60`, keeping the existing BM25 tuning intact. Rows that matched via FTS5 carry a query-centered `fts_snippet` excerpt with `<mark>`/`</mark>` highlighting; rows that only surfaced via semantic search fall back to the heuristic snippet extractor.
+* Relation count is factored into FTS5 ranking as a small boost: `ORDER BY (bm25 * weight + rel_count * 0.1) ASC`.
 * Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search.
+* Duplicate checks (`check_duplicate_memories`) use batched precomputed vector lookups (`_batch_semantic_similarities`) to avoid re-embedding each candidate, with FTS5 pre-filtering to cap candidates at ~30 before the similarity pass.
 
 ### 2. Hybrid Title Extraction
-When storing new knowledge, agents can optionally specify a custom `title`. If omitted, the server automatically extracts the first markdown heading (`# Heading`) as the title, falling back to a snippet of the first line if no heading is present.
+When storing new knowledge, agents can optionally specify a custom `title`. If omitted, the server automatically extracts the first markdown heading (`# Heading`) as the title, falling back to a snippet of the first line if no heading is present. Title bounds: minimum 5 characters, maximum 120 characters.
 
-### 3. Security & Redaction Middleware
+### 3. Quality Gate Pipeline
+All `store_memory` and `commit_consolidation` calls pass through a multi-tier quality gate before any embedding or write:
+1. **Tier 1 — Boundary & Fluff:** Minimum length (20 chars), conversational fluff regex patterns, maximum symbol-to-alpha ratio (0.35), oversized payload warning (>8000 chars).
+2. **Tier 1.5 — Markdown Syntax Integrity:** Balanced code fences, table pipe symmetry, header hierarchy validation (no level-skipping). Also scored: MSDI (Markdown Structural Density Index = ratio of words in headers+lists+code blocks to total words).
+3. **Tier 2 — Information-Theoretic Filters:** Shannon entropy bounds (`[2.5, 5.3]` bits/char), 3-gram duplicate ratio (>0.30 → REJECT), 5-gram duplicate ratio (>0.20 → REJECT), Type-Token Ratio (>30 words: TTR < 0.35 → REJECT).
+4. **Tier 2.5 — Coleman-Liau Readability (prose-only):** On extracted prose (code blocks, URLs, file paths stripped), if >30 prose words: CLI outside `[2.0, 26.0]` → REJECT.
+5. **Tier 4 — Structural Scoring:** Base score 0.50; +0.15 for headers, +0.10 for lists, +0.15 for MSDI ≥ 0.35, −0.15 for MSDI < 0.10 on large (>80 word) text, −0.10 for untyped code blocks, −0.10 for non-hierarchical headers. Score clamped to `[0.0, 1.0]`.
+
+`auto_format_markdown` runs as an idempotent pre-pass: normalizes line endings, annotates untyped code fences with language identifiers (Python/SQL/JSON/JavaScript heuristics), collapses 3+ consecutive blank lines.
+
+### 4. Security & Redaction Middleware
 Before any database writes occur, the text is evaluated by a regex-based scrubbing pipeline:
-* **Core Redactions:** Automatically censors standard credentials (GitHub tokens, Anthropic API keys, OpenAI API keys, AWS credentials, and Discord tokens).
+* **Core Redactions:** Automatically censors standard credentials (GitHub tokens, Anthropic API keys, OpenAI API keys, AWS credentials, Discord tokens).
 * **Custom Developer Rules:** On startup, the server reads `.saltmdb_redact` from the current working directory. You can add one custom regex pattern per line (e.g. internal staging domains, proprietary IDs) to strip out company-specific secrets.
 
-### 4. Ephemeral State Layer
-For temporary data (like short-lived session tokens, OTPs, or process variables), the server maintains an isolated `:memory:` SQLite database. These variables are never written to disk and disappear completely when the server stops.
+### 5. Ephemeral State Layer
+For temporary data (like short-lived session tokens, OTPs, or process variables), the server maintains an isolated `:memory:` SQLite database (a module-level singleton on `connection.py`). These variables are never written to disk and disappear completely when the server stops.
 
-### 5. Atomic Leader Election Mutex
+### 6. Atomic Leader Election Mutex
 To prevent multiple parent processes from launching redundant garbage collection tasks simultaneously, the server uses an **Atomic SQLite lock** in the `_system_locks` table.
 * The lock uses a **10-minute expiry safety net**. If a terminal session crashes mid-run, the lock automatically expires, preventing permanent deadlocks.
+* Trigger cooldown: the cooldown check runs on a single-worker `_librarian_trigger_pool` background thread (fire-and-forget), claiming the `last_run_at` timestamp atomically via a single `UPDATE ... WHERE last_run_at IS NULL OR last_run_at < now - 300s`. This prevents both redundant spawns and the old two-transaction lock-check pattern from adding contention to the hot path.
 
-### 6. Automated Session Lifecycle Hooks
+### 7. Automated Session Lifecycle Hooks
 SALTMDB integrates with native lifecycle hooks across major AI agent frameworks (**Claude Code**, **Google Antigravity CLI**, and **GitHub Copilot CLI**):
 * **Context Digest Injection (`SessionStart` / `PreInvocation` / `sessionStart`):** Automatically injects core rules and project memory digests at session initialization.
 * **Pre-Action Memory Search Gate (`PreToolUse`):** Enforces Rule 1 ("Think Before You Leap") by requiring a memory search before executing code edits or terminal commands. Supports Copilot CLI's JSON `permissionDecision` (`allow`/`deny`) protocol.
@@ -92,36 +115,56 @@ SALTMDB integrates with native lifecycle hooks across major AI agent frameworks 
 
 ## 🧹 The Librarian Process (Garbage Collection)
 
-Whenever the database is modified, the server asynchronously spawns a detached background instance of the server in Librarian mode (`python -m saltmdb --librarian`):
-* **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
-* **Unix Detachment:** Spawns with `start_new_session=True` so it survives parent process termination.
+Whenever the database is modified, the server schedules a fire-and-forget cooldown check on a background thread pool (`_librarian_trigger_pool`, 1 worker). If at least 2 raw entities exist and 5 minutes have elapsed since the last librarian spawn, a detached background subprocess is launched:
 
-Once the background Librarian acquires the atomic lock, it runs the following tasks:
-1. **Tag Merging:** Merges case-insensitive tag aliases (e.g. `#Auth-Error` and `#auth_error`) into a canonical tag to prevent folksonomy fragmentation.
-2. **Lossless Memory Preservation (No LRU Decay):** Unaccessed memories are never archived or weight-decremented based purely on access recency. Archiving occurs only upon explicit supersession or synthesis consolidation, preserving rare-but-important root cause knowledge indefinitely.
-3. **Clutter Tag Consolidation (Request-based):** Identifies tags accumulating $\ge 5$ raw entries and logs a JSON-formatted `consolidation_request` event to the short-term `events` ledger.
-4. **General Consolidation (Request-based):** Identifies overall raw accumulation ($\ge 5$ items sharing owner/scope) and logs a `consolidation_request` event. The cognitive task of merging and rephrasing markdown is offloaded to the active client agent, ensuring the server runs fully offline without independent API requirements.
+```
+python -m saltmdb --librarian
+```
+
+* **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
+* **Unix Detachment:** Does not pass `start_new_session=True`; the subprocess's stdout/stderr are redirected to an append-mode `librarian.log` file in the same directory as `saltmdb.db` (rotated at 5 MB → `.1` backup). This allows debugging Librarian output while keeping it off the MCP stdio channel.
+
+Once the background Librarian acquires the atomic lock, it runs five passes in order:
+
+1. **Tag Merging (`merge_tags_heuristics`):** Merges case-insensitive, punctuation-stripped tag aliases (e.g. `#Auth-Error` and `#auth_error` normalize to `autherror`) into a canonical tag to prevent folksonomy fragmentation. Arbitrary SQL row order determines the canonical winner.
+
+2. **Clutter Tag Consolidation (`consolidate_cluttered_tags`, request-based):** Identifies tags with ≥5 raw entries per owner. Logs a `consolidation_request` event with `target="tag"` to the short-term events ledger. Idempotent: skips tags that already have an unresolved pending request (checked via `_pending_request_exists`).
+
+3. **General Consolidation (`consolidate_memories`, request-based):** Groups raw memories by `(owner_id, scope)` pairs. If a group has ≥5 raw entries and no unresolved pending request, logs a `consolidation_request` event with `target="general"`. The cognitive task of merging and rephrasing markdown is offloaded to the active client agent, ensuring the server runs fully offline without independent API requirements.
+
+4. **Vector Topic Clustering (`consolidate_vector_clusters`, request-based):** Requires both `sqlite_vec` and `numpy`. Fetches all raw entities with `embedding_status='ready'`. Builds a cosine similarity adjacency matrix using NumPy (`np.dot(X_norm, X_norm.T)`). Discovers connected components above a **0.75 cosine similarity threshold** with a minimum cluster size of **3 entities** using a BFS walk. For each new cluster not already covered by a pending request:
+   * Runs **c-TF-IDF** (`extract_c_tfidf_tags`) to extract the top-3 most cluster-specific terms: computes TF within the cluster and IDF against a 100-document corpus sample, applies standard TF-IDF scoring, then maps terms to existing canonical tags where available.
+   * Computes a **composite confidence score**: `0.5 × mean_pairwise_similarity + 0.5 × c-TF-IDF_confidence`, where c-TF-IDF confidence = `clamp(0.5 + top_score × 0.5, 0.5, 1.0)`.
+   * Logs a `consolidation_request` event with `target="vector_cluster"` and `suggested_tags`.
+   * Also logs a separate `domain_suggestion` event with the full cluster membership and confidence score.
+
+5. **Consolidated Supersession Scouting (`scout_consolidated_supersessions`):** For each consolidated entity with a ready embedding, queries for raw entities created *after* the consolidated node's `valid_from` date with cosine distance ≤ 0.25 (i.e., similarity ≥ 0.75). If ≥3 such new-raw entities overlap, and no pending supersession request covers this consolidated entity, logs a `consolidation_request` event with `target="supersession_candidate"`.
+
+**Maintenance pass (`_run_librarian_maintenance`):** Runs unconditionally after all consolidation passes (even on partial failure), while the leader lock is still held: `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA optimize=0x10002`.
+
+### No LRU Decay
+Memories are **never** weight-decremented or archived due to inactivity or disuse. Archiving occurs only upon explicit supersession or synthesis consolidation. The previously-present `decay_low_quality_memories` function was removed in alpha.62 as confirmed-dead code.
 
 ---
 
 ## 🛠️ API & MCP Tools Reference
 
-The server exposes 12 consolidated tools over standard I/O:
+The server exposes **12 consolidated tools** over standard I/O (stdio MCP):
 
-| Tool Name | Parameters | Description |
+| Tool Name | Key Parameters | Description |
 | :--- | :--- | :--- |
-| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `entity_id`, `fetch_full`, `limit`, `context_id`, `is_core`, `memory_type_filter`, `cursor`, `include_related` | Hybrid FTS5 + vector RRF search. Setting `entity_id` retrieves full markdown text directly; `fetch_full=True` without an `entity_id` has no effect. |
-| `store_memory` | `content`, `title`, `tags`, `is_core`, `memory_type`, `owner_id`, `context_id`, `scope`, `check_duplicates_only` | Stores/upserts facts in raw markdown. Enforces quality gates, logs a reviewable supersession-candidate signal, and auto-links a `similar_to` edge above the duplicate threshold. `check_duplicates_only=True` returns duplicate detection without writing to DB. |
-| `get_canonical_tags` | `query (alias: domain)`, `limit` (default 50) | Queries non-alias tags matching the search filter to prevent tag fragmentation. Result count is capped by `limit` even when `query` is omitted. |
-| `get_canonical_predicates` | `query`, `limit` (default 50) | Queries existing canonical relation predicates matching a search substring, to reduce predicate drift (e.g. `elaborates_on` vs `relates_to` vs `references`). Result count is capped by `limit` even when `query` is omitted. |
-| `merge_tags` | `keep_tag`, `tags_to_merge` (list) | Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all affected entities' tag associations. |
-| `log_event` | `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id` | Appends a scrubbed entry to the immutable short-term ledger. |
-| `get_events` | `agent_id`, `type_filter`, `session_id`, `limit`, `offset`, `status_filter`, `owner_id`, `mode` | Query events (`mode='events'`), session summaries (`mode='session'`), or scan memory logs (`mode='memories'`). |
-| `archive_memory` | `entity_id` (str \| list[str]), `owner_id` | Polymorphic tool to archive (retire) one or multiple long-term memories. |
-| `manage_relation` | `relations` (list), `source_id`, `target_id`, `predicate`, `invalidate` | Polymorphic tool to store single or multiple directional semantic relationship edges, or invalidate an existing edge (`invalidate=True`). |
-| `commit_consolidation`| `consolidations` (list), `parent_ids`, `title`, `content`, `tags`, `owner_id`, `context_id` | Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parents and linking lineage. |
-| `inspect_graph` | `entity_id` (optional), `mode` (`dependencies` \| `lineage` \| `orphans`), `max_depth`, `owner_id`, `point_in_time` | Unifies dependency CTE traversals, consolidation lineage tracing, and orphan memory detection. `point_in_time` (aliases `as_of`/`at`) restricts traversal to relation edges valid as of a past ISO timestamp. |
-| `ephemeral_memory` | `action` (`get` \| `store`), `key`, `value` | Unified volatile in-memory secret storage manager. |
+| `search_memory` | `query_keywords`, `tags_filter`, `owner_id`, `entity_id`, `fetch_full`, `limit`, `context_id`, `is_core`, `memory_type_filter`, `cursor`, `include_related` | Hybrid FTS5 + vector RRF search. Setting `entity_id` retrieves full markdown text directly; `fetch_full=True` without `entity_id` is a no-op (falls through to normal search). `include_related=True` (default) batches 1-hop active linked entities in a single query. |
+| `store_memory` | `content`, `title`, `tags`, `is_core`, `memory_type`, `owner_id`, `context_id`, `scope`, `check_duplicates_only` | Stores/upserts facts in raw markdown. Enforces quality gates and SHA-256 hash deduplication, logs reviewable supersession-candidate signals (≥0.75), auto-links `similar_to` edges (≥0.85), triggers background embedding generation. `check_duplicates_only=True` returns duplicate detection without writing. On brand-new stores with `tags`, appends a one-time nudge to consider `manage_relation`. |
+| `get_canonical_tags` | `query` (alias: `domain`), `limit` (default 50) | Queries non-alias tags matching the search filter to prevent tag fragmentation. Capped by `limit` even when `query` is omitted. |
+| `get_canonical_predicates` | `query`, `limit` (default 50) | Queries existing canonical relation predicates matching a search substring, to reduce predicate drift. Capped by `limit` even when `query` is omitted. |
+| `merge_tags` | `keep_tag`, `tags_to_merge` (list) | Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all affected entity_tags associations. |
+| `log_event` | `agent_id`, `type`, `content`, `error_code`, `session_id`, `context_id` | Appends a scrubbed entry to the immutable short-term ledger. Aliases: `event_type`, `message`, `description`. |
+| `get_events` | `agent_id`, `type_filter`, `session_id`, `limit`, `offset`, `status_filter`, `owner_id`, `mode` | Query events (`mode='events'`, default), session summaries (`mode='session'`), or scan memory logs (`mode='memories'`). Event items carry a computed `status` field (`'resolved'` / `'pending'`) based on whether all referenced `entity_ids` are still `status='raw'`. |
+| `archive_memory` | `entity_id` (str \| list[str]), `owner_id` | Polymorphic: archives one or multiple long-term memories. Bulk archive is all-or-nothing (a single failed item rolls back the entire batch). Archiving also sets `valid_to` on all active outgoing/incoming relation edges. |
+| `manage_relation` | `relations` (list), `source_id`, `target_id`, `predicate`, `invalidate`, `valid_at`, `invalid_at` | Polymorphic: store single or multiple directional semantic relationship edges (bulk via `relations` list), or invalidate an existing live edge (`invalidate=True`, sets `invalid_at` on the event/world-time axis; does not touch `valid_to`). Predicate strings are canonicalized at write time via `resolve_or_create_predicate()`. |
+| `commit_consolidation` | `consolidations` (list), `parent_ids`, `title`, `content`, `tags`, `owner_id`, `context_id` | Polymorphic: commit single or multiple synthesized consolidations. Soft-archives parents, creates `consolidated_from` lineage edges, expires old relation edges and re-inserts them pointing at the consolidated entity. Triggers background embedding generation for the new consolidated entity. `title` and `content` are mandatory on every call — no ID-only shortcut. |
+| `inspect_graph` | `entity_id` (optional), `mode` (`dependencies` \| `lineage` \| `orphans`), `max_depth`, `owner_id`, `point_in_time` | Unifies dependency CTE traversals, consolidation lineage tracing (`consolidated_from` edges, recursive CTE), and orphan memory detection. `point_in_time` (aliases `as_of`/`at`) filters `dependencies`/`lineage` to relation edges valid as of a past ISO timestamp (checks `valid_to`, `valid_from`, `invalid_at`, `valid_at`); ignored for `mode='orphans'`. |
+| `ephemeral_memory` | `action` (`get` \| `store`), `key`, `value` | Unified volatile in-memory secret storage manager. Backed by a module-level singleton `:memory:` SQLite connection. |
 
 
 ---
@@ -131,10 +174,25 @@ The server exposes 12 consolidated tools over standard I/O:
 ### 1. Configuration Path
 By default, the server initializes the database under `~/.saltmdb/saltmdb.db`. You can override this behavior by setting the `SALTMDB_DB_PATH` environment variable:
 ```bash
+# Unix
+export SALTMDB_DB_PATH="/custom/path/memory.db"
+# Windows PowerShell
 $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 ```
 
-### 2. Registering with MCP Clients
+### 2. Environment Variables
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SALTMDB_DB_PATH` | `~/.saltmdb/saltmdb.db` | Path to the SQLite database file. |
+| `SALTMDB_ENABLE_SEMANTIC` | `true` | Set to `false`/`0`/`off`/`no` to disable vector search and use FTS5 only. |
+| `SALTMDB_VIEWER_PORT` | `8080` | Port for the database dashboard viewer. |
+| `SALTMDB_VIEWER_HOST` | `127.0.0.1` | Bind host for the viewer (loopback-only by default). |
+| `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable auto-start of the viewer on MCP server startup. |
+| `SALTMDB_DISABLE_LIBRARIAN` | _(unset)_ | Set to any value to suppress all Librarian subprocess spawns. |
+| `SALTMDB_TEST_MODE` | _(unset)_ | Set to any value in test environments to suppress Librarian spawns. |
+
+### 3. Registering with MCP Clients
 MCP clients do not inherit your shell's PATH — always use the **full path** to your Python executable. Find it first:
 ```bash
 python -c "import sys; print(sys.executable)"
@@ -156,7 +214,7 @@ Then add to your MCP client configuration file:
 
 See [INSTALL.md](INSTALL.md) for platform-specific examples and troubleshooting.
 
-### 3. Database Dashboard Viewer
+### 4. Database Dashboard Viewer
 SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**:
 1. Run the viewer:
    ```bash
@@ -168,7 +226,7 @@ SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events,
 2. Open your web browser and navigate to:
    [http://localhost:8080](http://localhost:8080)
 
-### 4. Running Unit Tests
+### 5. Running Unit Tests
 Run the hybrid search test suite (against the refactored package):
 ```bash
 python -m unittest discover tests

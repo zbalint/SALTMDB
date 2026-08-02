@@ -38,10 +38,14 @@ pip install -e .
 ### Environment Variables
 
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
-- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`) to disable vector search.
+- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search.
 - `SALTMDB_VIEWER_PORT`: Custom port for the database dashboard viewer (default: `8080`). Can also be set per-invocation via the `--port` CLI flag (see §5).
+- `SALTMDB_VIEWER_HOST`: Bind host for the database viewer (default: `127.0.0.1`, loopback only). Set to `0.0.0.0` to expose on the local network.
+- `SALTMDB_VIEWER_ENABLED`: Set to `false` (or `0`/`off`/`no`) to disable auto-start of the web viewer on MCP server startup (default: `true`).
+- `SALTMDB_DISABLE_LIBRARIAN`: Set to any non-empty value to suppress all Librarian subprocess spawns (useful for debugging or controlled environments).
+- `SALTMDB_TEST_MODE`: Set to any non-empty value in automated test environments to suppress Librarian spawns without affecting other behavior.
 
-> **Mechanical Text Quality Gate & Deduplication:** All writes (`store_memory`) and merges (`commit_consolidation`) undergo sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy, Word N-Gram sequence repetition, pure Python Bigram Perplexity word-salad filtering, Coleman-Liau readability bounds, and MSDI structural density scoring) and Stage A SHA-256 exact hash deduplication before ONNX embedding execution. Calibrated cosine similarity ($\ge 0.75$) logs a reviewable `supersession_candidate` event rather than auto-linking or demoting weight; crossing the stricter duplicate band ($\ge 0.85$) additionally auto-links a non-authoritative `similar_to` relation edge and warns the caller of a likely duplicate, while target exclusion prevents false deduplication warnings during parent memory consolidation.
+> **Mechanical Text Quality Gate & Deduplication:** All writes (`store_memory`) and merges (`commit_consolidation`) undergo sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy bounds \[2.5, 5.3\], Word 3-gram/5-gram sequence repetition, Type-Token Ratio, Coleman-Liau readability bounds \[2.0, 26.0\], and MSDI structural density scoring) and Stage A SHA-256 exact hash deduplication before ONNX embedding execution. Calibrated cosine similarity ($\ge 0.75$) logs a reviewable `supersession_candidate` event rather than auto-linking or demoting weight; crossing the stricter duplicate band ($\ge 0.85$) additionally auto-links a non-authoritative `similar_to` relation edge and warns the caller of a likely duplicate, while target exclusion prevents false deduplication warnings during parent memory consolidation.
 
 > **Note on bundled model:** The `BAAI/bge-small-en-v1.5` ONNX model weights (~66 MB) are pre-bundled directly within the `saltmdb` package for offline execution out of the box. If bundled model files are missing or modified, `fastembed` will fall back to downloading them from Hugging Face automatically.
 
