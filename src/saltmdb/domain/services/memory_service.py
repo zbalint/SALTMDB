@@ -607,6 +607,49 @@ def semantic_search(
             close_connection(conn)
 
 
+def _batch_semantic_similarities(
+    candidate_ids: list[str],
+    query_vector: list[float],
+    db_path: str,
+) -> dict[str, float]:
+    """Return {entity_id: cosine_similarity} for candidates with a ready precomputed vector.
+
+    Looks up precomputed vectors for the given candidate IDs in a single SQL query instead
+    of re-embedding each candidate's text. Opens its own dedicated connection and loads
+    sqlite_vec on it, same reasoning as semantic_search(): must not conflict with a
+    shared/FTS connection the caller may have passed in. Candidates whose embedding_status
+    != 'ready' are simply absent from the result; callers should fall back to a lexical
+    comparison for those.
+    """
+    if not candidate_ids:
+        return {}
+    conn = None
+    try:
+        import sqlite_vec
+
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        placeholders = ",".join("?" for _ in candidate_ids)
+        sql = f"""
+            SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
+            FROM entity_embeddings ee
+            JOIN entities e ON ee.entity_id = e.id
+            WHERE e.embedding_status = 'ready' AND e.id IN ({placeholders})
+        """
+        exec_params = [sqlite_vec.serialize_float32(query_vector)] + list(candidate_ids)
+        rows = conn.execute(sql, exec_params).fetchall()
+        return {row[0]: 1.0 - row[1] for row in rows}
+    except Exception as e:
+        logger.warning("Batched semantic similarity lookup failed, falling back to lexical: %s", e)
+        return {}
+    finally:
+        if conn:
+            close_connection(conn)
+
+
 def reciprocal_rank_fusion(
     fts_results: list,
     semantic_results: list[tuple[str, float]],
@@ -1100,11 +1143,11 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
     if not title and not content:
         return {"error": "Either title or content is required"}
 
+    effective_db_path = db_path or get_db_path()
     should_close = False
     conn = db_connection
     if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
+        conn = get_connection(effective_db_path)
         should_close = True
 
     try:
@@ -1154,7 +1197,8 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:
             cursor = conn.execute(
-                f"SELECT id, title, full_content, owner_id, scope FROM entities WHERE {' AND '.join(where) if where else '1=1'}",
+                f"SELECT id, title, full_content, owner_id, scope FROM entities "
+                f"WHERE {' AND '.join(where) if where else '1=1'} LIMIT 30",
                 params,
             )
             fts_candidates = cursor.fetchall()
@@ -1172,30 +1216,35 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
             except Exception as ex:
                 logger.warning("Could not generate query embedding for duplicate check: %s", ex)
 
+        semantic_sims: dict = {}
+        if use_semantic and query_vector is not None and fts_candidates:
+            semantic_sims = _batch_semantic_similarities(
+                [row[0] for row in fts_candidates], query_vector, effective_db_path
+            )
+
         for eid, etitle, econtent, eowner, escope in fts_candidates:
             existing_text = f"{etitle} {econtent}"
-            sim = 0.0
-            if use_semantic and query_vector is not None:
+            if eid in semantic_sims:
+                sim = semantic_sims[eid]
+                min_threshold = DEDUP_SUPERSESSION_THRESHOLD
+            elif use_semantic and query_vector is not None:
                 try:
                     from saltmdb.domain.services import embedding_service
-
-                    cand_vec = embedding_service.embed_text(existing_text)
-                    # Cosine similarity = 1.0 - Cosine Distance
                     import numpy as np
 
+                    cand_vec = embedding_service.embed_text(existing_text)
                     dot_product = np.dot(query_vector, cand_vec)
                     norm_a = np.linalg.norm(query_vector)
                     norm_b = np.linalg.norm(cand_vec)
-                    if norm_a > 0 and norm_b > 0:
-                        sim = float(dot_product / (norm_a * norm_b))
+                    sim = float(dot_product / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
+                    min_threshold = DEDUP_SUPERSESSION_THRESHOLD
                 except Exception:
                     sim = word_sim(input_text, existing_text)
+                    min_threshold = DEDUP_LEXICAL_THRESHOLD
             else:
                 sim = word_sim(input_text, existing_text)
+                min_threshold = DEDUP_LEXICAL_THRESHOLD
 
-            min_threshold = (
-                DEDUP_SUPERSESSION_THRESHOLD if use_semantic else DEDUP_LEXICAL_THRESHOLD
-            )
             if sim >= min_threshold:
                 duplicates.append(
                     {
