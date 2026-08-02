@@ -1237,7 +1237,9 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                     dot_product = np.dot(query_vector, cand_vec)
                     norm_a = np.linalg.norm(query_vector)
                     norm_b = np.linalg.norm(cand_vec)
-                    sim = float(dot_product / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
+                    sim = (
+                        float(dot_product / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
+                    )
                     min_threshold = DEDUP_SUPERSESSION_THRESHOLD
                 except Exception:
                     sim = word_sim(input_text, existing_text)

@@ -1,21 +1,21 @@
 {
   "errors": [],
-  "generated_at": "2026-07-31T21:30:34Z",
+  "generated_at": "2026-08-02T19:35:44Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 34,
+      "CONFIDENCE.HIGH": 37,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 33,
+      "SEVERITY.LOW": 36,
       "SEVERITY.MEDIUM": 1,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 7042,
+      "loc": 7914,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 2
     },
-    "src\\saltmdb\\__init__.py": {
+    "src/saltmdb/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -28,7 +28,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\__main__.py": {
+    "src/saltmdb/__main__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -41,7 +41,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\config.py": {
+    "src/saltmdb/cli.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -50,11 +50,24 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 44,
+      "loc": 84,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\__init__.py": {
+    "src/saltmdb/config.py": {
+      "CONFIDENCE.HIGH": 0,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
+      "CONFIDENCE.UNDEFINED": 0,
+      "SEVERITY.HIGH": 0,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
+      "SEVERITY.UNDEFINED": 0,
+      "loc": 57,
+      "nosec": 0,
+      "skipped_tests": 0
+    },
+    "src/saltmdb/db/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -67,7 +80,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\backup.py": {
+    "src/saltmdb/db/backup.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -80,7 +93,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\connection.py": {
+    "src/saltmdb/db/connection.py": {
       "CONFIDENCE.HIGH": 1,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -93,7 +106,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\locks.py": {
+    "src/saltmdb/db/locks.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -106,7 +119,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\schema.py": {
+    "src/saltmdb/db/schema.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -115,11 +128,11 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 302,
+      "loc": 311,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\db\\vector_schema.py": {
+    "src/saltmdb/db/vector_schema.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -128,11 +141,24 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 24,
+      "loc": 43,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\__init__.py": {
+    "src/saltmdb/db/viewer_sessions.py": {
+      "CONFIDENCE.HIGH": 3,
+      "CONFIDENCE.LOW": 0,
+      "CONFIDENCE.MEDIUM": 0,
+      "CONFIDENCE.UNDEFINED": 0,
+      "SEVERITY.HIGH": 0,
+      "SEVERITY.LOW": 3,
+      "SEVERITY.MEDIUM": 0,
+      "SEVERITY.UNDEFINED": 0,
+      "loc": 76,
+      "nosec": 0,
+      "skipped_tests": 0
+    },
+    "src/saltmdb/domain/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -145,7 +171,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\__init__.py": {
+    "src/saltmdb/domain/services/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -158,7 +184,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\embedding_service.py": {
+    "src/saltmdb/domain/services/embedding_service.py": {
       "CONFIDENCE.HIGH": 1,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -171,7 +197,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\ephemeral_service.py": {
+    "src/saltmdb/domain/services/ephemeral_service.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -184,7 +210,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\event_service.py": {
+    "src/saltmdb/domain/services/event_service.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -197,7 +223,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\librarian_service.py": {
+    "src/saltmdb/domain/services/librarian_service.py": {
       "CONFIDENCE.HIGH": 4,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -206,11 +232,11 @@
       "SEVERITY.LOW": 4,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 582,
+      "loc": 843,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\domain\\services\\memory_service.py": {
+    "src/saltmdb/domain/services/memory_service.py": {
       "CONFIDENCE.HIGH": 4,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -219,11 +245,11 @@
       "SEVERITY.LOW": 4,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1214,
+      "loc": 1325,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
-    "src\\saltmdb\\domain\\services\\relation_service.py": {
+    "src/saltmdb/domain/services/relation_service.py": {
       "CONFIDENCE.HIGH": 2,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -232,11 +258,11 @@
       "SEVERITY.LOW": 2,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 739,
+      "loc": 768,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\mcp\\__init__.py": {
+    "src/saltmdb/mcp/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -249,7 +275,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\mcp\\server.py": {
+    "src/saltmdb/mcp/server.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -258,11 +284,11 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 23,
+      "loc": 73,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\mcp\\tools.py": {
+    "src/saltmdb/mcp/tools.py": {
       "CONFIDENCE.HIGH": 1,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -271,11 +297,11 @@
       "SEVERITY.LOW": 1,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 379,
+      "loc": 393,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\utils\\__init__.py": {
+    "src/saltmdb/utils/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -288,7 +314,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\utils\\nlp.py": {
+    "src/saltmdb/utils/nlp.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -301,7 +327,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\utils\\redaction.py": {
+    "src/saltmdb/utils/redaction.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -310,11 +336,11 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 53,
+      "loc": 55,
       "nosec": 0,
-      "skipped_tests": 0
+      "skipped_tests": 1
     },
-    "src\\saltmdb\\utils\\text.py": {
+    "src/saltmdb/utils/text.py": {
       "CONFIDENCE.HIGH": 2,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -327,7 +353,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\viewer\\__init__.py": {
+    "src/saltmdb/viewer/__init__.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -340,7 +366,7 @@
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\viewer\\routes.py": {
+    "src/saltmdb/viewer/routes.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -349,11 +375,11 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 726,
+      "loc": 795,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\viewer\\server.py": {
+    "src/saltmdb/viewer/server.py": {
       "CONFIDENCE.HIGH": 19,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -362,11 +388,11 @@
       "SEVERITY.LOW": 18,
       "SEVERITY.MEDIUM": 1,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 202,
+      "loc": 245,
       "nosec": 0,
       "skipped_tests": 0
     },
-    "src\\saltmdb\\viewer\\templates.py": {
+    "src/saltmdb/viewer/templates.py": {
       "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
@@ -375,7 +401,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1557,
+      "loc": 1649,
       "nosec": 0,
       "skipped_tests": 0
     }
@@ -385,7 +411,7 @@
       "code": "106                 raise\n107             delay = RETRY_BASE_DELAY_S * (2**attempt) + random.uniform(0, RETRY_JITTER_S)\n108             logger.warning(\n",
       "col_offset": 56,
       "end_col_offset": 89,
-      "filename": "src\\saltmdb\\db\\connection.py",
+      "filename": "src/saltmdb/db/connection.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 330,
@@ -402,10 +428,80 @@
       "test_name": "blacklist"
     },
     {
+      "code": "2 import sys\n3 import subprocess\n4 from datetime import datetime, UTC\n",
+      "col_offset": 0,
+      "end_col_offset": 17,
+      "filename": "src/saltmdb/db/viewer_sessions.py",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "issue_severity": "LOW",
+      "issue_text": "Consider possible security implications associated with the subprocess module.",
+      "line_number": 3,
+      "line_range": [
+        3
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b404-import-subprocess",
+      "test_id": "B404",
+      "test_name": "blacklist"
+    },
+    {
+      "code": "11         try:\n12             res = subprocess.run(\n13                 [\"tasklist\", \"/FI\", f\"PID eq {pid}\", \"/NH\"],\n14                 capture_output=True,\n15                 text=True,\n16                 timeout=5,\n17             )\n18             if res.returncode == 0 and res.stdout:\n",
+      "col_offset": 18,
+      "end_col_offset": 13,
+      "filename": "src/saltmdb/db/viewer_sessions.py",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "issue_severity": "LOW",
+      "issue_text": "Starting a process with a partial executable path",
+      "line_number": 12,
+      "line_range": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
+      "test_id": "B607",
+      "test_name": "start_process_with_partial_path"
+    },
+    {
+      "code": "11         try:\n12             res = subprocess.run(\n13                 [\"tasklist\", \"/FI\", f\"PID eq {pid}\", \"/NH\"],\n14                 capture_output=True,\n15                 text=True,\n16                 timeout=5,\n17             )\n18             if res.returncode == 0 and res.stdout:\n",
+      "col_offset": 18,
+      "end_col_offset": 13,
+      "filename": "src/saltmdb/db/viewer_sessions.py",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "issue_severity": "LOW",
+      "issue_text": "subprocess call - check for execution of untrusted input.",
+      "line_number": 12,
+      "line_range": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
+      "test_id": "B603",
+      "test_name": "subprocess_without_shell_equals_true"
+    },
+    {
       "code": "131             write_transaction_retrying(conn, _mark_failed)\n132         except Exception:\n133             pass\n134         logger.error(\"Embedding generation failed for %s: %s\", entity_id, e)\n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\domain\\services\\embedding_service.py",
+      "filename": "src/saltmdb/domain/services/embedding_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -423,10 +519,10 @@
       "test_name": "try_except_pass"
     },
     {
-      "code": "3 import sqlite3\n4 import subprocess\n5 import json\n",
+      "code": "6 import sqlite3\n7 import subprocess\n8 import json\n",
       "col_offset": 0,
       "end_col_offset": 17,
-      "filename": "src\\saltmdb\\domain\\services\\librarian_service.py",
+      "filename": "src/saltmdb/domain/services/librarian_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -434,19 +530,19 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Consider possible security implications associated with the subprocess module.",
-      "line_number": 4,
+      "line_number": 7,
       "line_range": [
-        4
+        7
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b404-import-subprocess",
       "test_id": "B404",
       "test_name": "blacklist"
     },
     {
-      "code": "100         with open(log_path, \"a\", encoding=\"utf-8\") as log_f:\n101             subprocess.Popen(\n102                 [sys.executable, \"-m\", \"saltmdb\", \"--librarian\"],\n103                 stdout=log_f,\n104                 stderr=log_f,\n105                 creationflags=creationflags,\n106             )\n107     except Exception as e:\n",
+      "code": "104         with open(log_path, \"a\", encoding=\"utf-8\") as log_f:\n105             subprocess.Popen(\n106                 [sys.executable, \"-m\", \"saltmdb\", \"--librarian\"],\n107                 stdout=log_f,\n108                 stderr=log_f,\n109                 creationflags=creationflags,\n110             )\n111     except Exception as e:\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\domain\\services\\librarian_service.py",
+      "filename": "src/saltmdb/domain/services/librarian_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -454,24 +550,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 101,
+      "line_number": 105,
       "line_range": [
-        101,
-        102,
-        103,
-        104,
         105,
-        106
+        106,
+        107,
+        108,
+        109,
+        110
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "265             data = json.loads(content_str)\n266         except Exception:\n267             continue\n268         # \"Unresolved\" is judged by the raw entities the request is actually waiting on --\n",
+      "code": "269             data = json.loads(content_str)\n270         except Exception:\n271             continue\n272         # \"Unresolved\" is judged by the raw entities the request is actually waiting on --\n",
       "col_offset": 8,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\domain\\services\\librarian_service.py",
+      "filename": "src/saltmdb/domain/services/librarian_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -479,20 +575,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Continue detected.",
-      "line_number": 266,
+      "line_number": 270,
       "line_range": [
-        266,
-        267
+        270,
+        271
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
       "test_id": "B112",
       "test_name": "try_except_continue"
     },
     {
-      "code": "300             data = json.loads(content_str)\n301         except Exception:\n302             continue\n303         entity_ids = data.get(\"entity_ids\") or []\n",
+      "code": "304             data = json.loads(content_str)\n305         except Exception:\n306             continue\n307         entity_ids = data.get(\"entity_ids\") or []\n",
       "col_offset": 8,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\domain\\services\\librarian_service.py",
+      "filename": "src/saltmdb/domain/services/librarian_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -500,20 +596,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Continue detected.",
-      "line_number": 301,
+      "line_number": 305,
       "line_range": [
-        301,
-        302
+        305,
+        306
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
       "test_id": "B112",
       "test_name": "try_except_continue"
     },
     {
-      "code": "166                 return f\"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}\"\n167         except Exception:\n168             pass\n169 \n",
+      "code": "226                 return f\"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}\"\n227         except Exception:\n228             pass\n229 \n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\domain\\services\\memory_service.py",
+      "filename": "src/saltmdb/domain/services/memory_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -521,20 +617,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 167,
+      "line_number": 227,
       "line_range": [
-        167,
-        168
+        227,
+        228
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "186                 )\n187         except Exception:\n188             pass\n189 \n",
+      "code": "246                 )\n247         except Exception:\n248             pass\n249 \n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\domain\\services\\memory_service.py",
+      "filename": "src/saltmdb/domain/services/memory_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -542,20 +638,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 187,
+      "line_number": 247,
       "line_range": [
-        187,
-        188
+        247,
+        248
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "227                         duplicate_warning_str = f\" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]\"\n228         except Exception:\n229             pass\n230 \n",
+      "code": "287                         duplicate_warning_str = f\" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]\"\n288         except Exception:\n289             pass\n290 \n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\domain\\services\\memory_service.py",
+      "filename": "src/saltmdb/domain/services/memory_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -563,20 +659,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 228,
+      "line_number": 288,
       "line_range": [
-        228,
-        229
+        288,
+        289
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "1085                 fts_candidates = fts_rows\n1086             except Exception:\n1087                 pass\n1088 \n",
+      "code": "1194                 fts_candidates = fts_rows\n1195             except Exception:\n1196                 pass\n1197 \n",
       "col_offset": 12,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\domain\\services\\memory_service.py",
+      "filename": "src/saltmdb/domain/services/memory_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -584,20 +680,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 1086,
+      "line_number": 1195,
       "line_range": [
-        1086,
-        1087
+        1195,
+        1196
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "569             return f\"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}\"\n570     except Exception:\n571         pass\n572 \n",
+      "code": "596             return f\"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}\"\n597     except Exception:\n598         pass\n599 \n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\domain\\services\\relation_service.py",
+      "filename": "src/saltmdb/domain/services/relation_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -605,20 +701,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 570,
+      "line_number": 597,
       "line_range": [
-        570,
-        571
+        597,
+        598
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "588             )\n589     except Exception:\n590         pass\n591 \n",
+      "code": "615             )\n616     except Exception:\n617         pass\n618 \n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\domain\\services\\relation_service.py",
+      "filename": "src/saltmdb/domain/services/relation_service.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -626,10 +722,10 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 589,
+      "line_number": 616,
       "line_range": [
-        589,
-        590
+        616,
+        617
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
@@ -639,7 +735,7 @@
       "code": "25                     return parsed\n26             except Exception:\n27                 pass\n28         if \",\" in val_str:\n",
       "col_offset": 12,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\mcp\\tools.py",
+      "filename": "src/saltmdb/mcp/tools.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -660,7 +756,7 @@
       "code": "18             return input_val\n19     except Exception:\n20         pass\n21 \n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\utils\\text.py",
+      "filename": "src/saltmdb/utils/text.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -681,7 +777,7 @@
       "code": "39             return row[0]\n40     except Exception:\n41         pass\n42 \n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\utils\\text.py",
+      "filename": "src/saltmdb/utils/text.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -702,7 +798,7 @@
       "code": "4 import socketserver\n5 import subprocess\n6 import time\n",
       "col_offset": 0,
       "end_col_offset": 17,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -719,10 +815,10 @@
       "test_name": "blacklist"
     },
     {
-      "code": "20     try:\n21         with urllib.request.urlopen(f\"http://localhost:{port}/\", timeout=0.5) as res:\n22             if res.status == 200:\n",
+      "code": "57     try:\n58         with urllib.request.urlopen(f\"http://localhost:{port}/\", timeout=0.5) as res:\n59             if res.status == 200:\n",
       "col_offset": 13,
       "end_col_offset": 77,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 22,
@@ -730,19 +826,19 @@
       },
       "issue_severity": "MEDIUM",
       "issue_text": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
-      "line_number": 21,
+      "line_number": 58,
       "line_range": [
-        21
+        58
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b310-urllib-urlopen",
       "test_id": "B310",
       "test_name": "blacklist"
     },
     {
-      "code": "23                 is_running = True\n24     except Exception:\n25         pass\n26 \n",
+      "code": "60                 is_running = True\n61     except Exception:\n62         pass\n63 \n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -750,20 +846,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 24,
+      "line_number": 61,
       "line_range": [
-        24,
-        25
+        61,
+        62
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "37             port_occupied = True\n38         except Exception:\n39             pass\n40 \n",
+      "code": "74             port_occupied = True\n75         except Exception:\n76             pass\n77 \n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -771,20 +867,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 38,
+      "line_number": 75,
       "line_range": [
-        38,
-        39
+        75,
+        76
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "71 \n72         process = subprocess.Popen(viewer_cmd, **popen_kwargs)\n73         log_file.close()\n",
+      "code": "108 \n109         process = subprocess.Popen(viewer_cmd, **popen_kwargs)\n110         log_file.close()\n",
       "col_offset": 18,
       "end_col_offset": 62,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -792,19 +888,19 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 72,
+      "line_number": 109,
       "line_range": [
-        72
+        109
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "79                 pf.write(str(process.pid))\n80         except Exception:\n81             pass\n82 \n",
+      "code": "116                 pf.write(str(process.pid))\n117         except Exception:\n118             pass\n119 \n",
       "col_offset": 8,
       "end_col_offset": 16,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -812,20 +908,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 80,
+      "line_number": 117,
       "line_range": [
-        80,
-        81
+        117,
+        118
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "93                 break\n94             except Exception:\n95                 pass\n96             time.sleep(0.1)\n",
+      "code": "130                 break\n131             except Exception:\n132                 pass\n133             time.sleep(0.1)\n",
       "col_offset": 12,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -833,20 +929,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 94,
+      "line_number": 131,
       "line_range": [
-        94,
-        95
+        131,
+        132
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "105                         log_snippet = \"\".join(lines[-15:])\n106             except Exception:\n107                 pass\n108             exit_code_str = f\"code {poll}\" if poll is not None else \"timeout\"\n",
+      "code": "142                         log_snippet = \"\".join(lines[-15:])\n143             except Exception:\n144                 pass\n145             exit_code_str = f\"code {poll}\" if poll is not None else \"timeout\"\n",
       "col_offset": 12,
       "end_col_offset": 20,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -854,20 +950,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 106,
+      "line_number": 143,
       "line_range": [
-        106,
-        107
+        143,
+        144
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "135                     ]\n136                     res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)\n137                     if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
+      "code": "172                     ]\n173                     res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)\n174                     if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
       "col_offset": 26,
       "end_col_offset": 88,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -875,19 +971,19 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 136,
+      "line_number": 173,
       "line_range": [
-        136
+        173
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "146                     else:\n147                         res = subprocess.run(\n148                             [\"ps\", \"-p\", str(pid), \"-o\", \"command=\"],\n149                             capture_output=True,\n150                             text=True,\n151                             timeout=5,\n152                         )\n153                         if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
+      "code": "183                     else:\n184                         res = subprocess.run(\n185                             [\"ps\", \"-p\", str(pid), \"-o\", \"command=\"],\n186                             capture_output=True,\n187                             text=True,\n188                             timeout=5,\n189                         )\n190                         if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
       "col_offset": 30,
       "end_col_offset": 25,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -895,24 +991,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 147,
+      "line_number": 184,
       "line_range": [
-        147,
-        148,
-        149,
-        150,
-        151,
-        152
+        184,
+        185,
+        186,
+        187,
+        188,
+        189
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "146                     else:\n147                         res = subprocess.run(\n148                             [\"ps\", \"-p\", str(pid), \"-o\", \"command=\"],\n149                             capture_output=True,\n150                             text=True,\n151                             timeout=5,\n152                         )\n153                         if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
+      "code": "183                     else:\n184                         res = subprocess.run(\n185                             [\"ps\", \"-p\", str(pid), \"-o\", \"command=\"],\n186                             capture_output=True,\n187                             text=True,\n188                             timeout=5,\n189                         )\n190                         if res.returncode == 0 and res.stdout and \"saltmdb\" in res.stdout.lower():\n",
       "col_offset": 30,
       "end_col_offset": 25,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -920,24 +1016,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 147,
+      "line_number": 184,
       "line_range": [
-        147,
-        148,
-        149,
-        150,
-        151,
-        152
+        184,
+        185,
+        186,
+        187,
+        188,
+        189
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "163                     os.remove(pid_file)\n164                 except Exception:\n165                     pass\n166                 return f\"Database viewer stopped (PID {pid}) on port {port}.\"\n",
+      "code": "200                     os.remove(pid_file)\n201                 except Exception:\n202                     pass\n203                 return f\"Database viewer stopped (PID {pid}) on port {port}.\"\n",
       "col_offset": 16,
       "end_col_offset": 24,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -945,20 +1041,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 164,
+      "line_number": 201,
       "line_range": [
-        164,
-        165
+        201,
+        202
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "166                 return f\"Database viewer stopped (PID {pid}) on port {port}.\"\n167     except Exception:\n168         pass\n169     # Fallback: broad process name match filtered by port\n",
+      "code": "203                 return f\"Database viewer stopped (PID {pid}) on port {port}.\"\n204     except Exception:\n205         pass\n206     # Fallback: broad process name match filtered by port\n",
       "col_offset": 4,
       "end_col_offset": 12,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 703,
@@ -966,20 +1062,20 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 167,
+      "line_number": 204,
       "line_range": [
-        167,
-        168
+        204,
+        205
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "171         if sys.platform == \"win32\":\n172             subprocess.run(\n173                 [\n174                     \"powershell\",\n175                     \"-Command\",\n176                     f\"Get-CimInstance Win32_Process | Where-Object {{ ($_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*') -and $_.CommandLine -like '*--port {port}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}\",\n177                 ],\n178                 stdout=subprocess.DEVNULL,\n179                 stderr=subprocess.DEVNULL,\n180             )\n181         else:\n",
+      "code": "208         if sys.platform == \"win32\":\n209             subprocess.run(\n210                 [\n211                     \"powershell\",\n212                     \"-Command\",\n213                     f\"Get-CimInstance Win32_Process | Where-Object {{ ($_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*') -and $_.CommandLine -like '*--port {port}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}\",\n214                 ],\n215                 stdout=subprocess.DEVNULL,\n216                 stderr=subprocess.DEVNULL,\n217             )\n218         else:\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -987,27 +1083,27 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 172,
+      "line_number": 209,
       "line_range": [
-        172,
-        173,
-        174,
-        175,
-        176,
-        177,
-        178,
-        179,
-        180
+        209,
+        210,
+        211,
+        212,
+        213,
+        214,
+        215,
+        216,
+        217
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "171         if sys.platform == \"win32\":\n172             subprocess.run(\n173                 [\n174                     \"powershell\",\n175                     \"-Command\",\n176                     f\"Get-CimInstance Win32_Process | Where-Object {{ ($_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*') -and $_.CommandLine -like '*--port {port}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}\",\n177                 ],\n178                 stdout=subprocess.DEVNULL,\n179                 stderr=subprocess.DEVNULL,\n180             )\n181         else:\n",
+      "code": "208         if sys.platform == \"win32\":\n209             subprocess.run(\n210                 [\n211                     \"powershell\",\n212                     \"-Command\",\n213                     f\"Get-CimInstance Win32_Process | Where-Object {{ ($_.CommandLine -like '*saltmdb_viewer*' -or $_.CommandLine -like '*saltmdb.viewer*') -and $_.CommandLine -like '*--port {port}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}\",\n214                 ],\n215                 stdout=subprocess.DEVNULL,\n216                 stderr=subprocess.DEVNULL,\n217             )\n218         else:\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -1015,27 +1111,27 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 172,
+      "line_number": 209,
       "line_range": [
-        172,
-        173,
-        174,
-        175,
-        176,
-        177,
-        178,
-        179,
-        180
+        209,
+        210,
+        211,
+        212,
+        213,
+        214,
+        215,
+        216,
+        217
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "181         else:\n182             subprocess.run(\n183                 [\"pkill\", \"-f\", f\"saltmdb_viewer.*--port {port}\"],\n184                 stdout=subprocess.DEVNULL,\n185                 stderr=subprocess.DEVNULL,\n186             )\n187             subprocess.run(\n",
+      "code": "218         else:\n219             subprocess.run(\n220                 [\"pkill\", \"-f\", f\"saltmdb_viewer.*--port {port}\"],\n221                 stdout=subprocess.DEVNULL,\n222                 stderr=subprocess.DEVNULL,\n223             )\n224             subprocess.run(\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -1043,23 +1139,23 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 182,
+      "line_number": 219,
       "line_range": [
-        182,
-        183,
-        184,
-        185,
-        186
+        219,
+        220,
+        221,
+        222,
+        223
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "181         else:\n182             subprocess.run(\n183                 [\"pkill\", \"-f\", f\"saltmdb_viewer.*--port {port}\"],\n184                 stdout=subprocess.DEVNULL,\n185                 stderr=subprocess.DEVNULL,\n186             )\n187             subprocess.run(\n",
+      "code": "218         else:\n219             subprocess.run(\n220                 [\"pkill\", \"-f\", f\"saltmdb_viewer.*--port {port}\"],\n221                 stdout=subprocess.DEVNULL,\n222                 stderr=subprocess.DEVNULL,\n223             )\n224             subprocess.run(\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -1067,23 +1163,23 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 182,
+      "line_number": 219,
       "line_range": [
-        182,
-        183,
-        184,
-        185,
-        186
+        219,
+        220,
+        221,
+        222,
+        223
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "186             )\n187             subprocess.run(\n188                 [\"pkill\", \"-f\", f\"saltmdb.viewer.*--port {port}\"],\n189                 stdout=subprocess.DEVNULL,\n190                 stderr=subprocess.DEVNULL,\n191             )\n192         return f\"Database viewer stopped successfully on port {port} (or was not running).\"\n",
+      "code": "223             )\n224             subprocess.run(\n225                 [\"pkill\", \"-f\", f\"saltmdb.viewer.*--port {port}\"],\n226                 stdout=subprocess.DEVNULL,\n227                 stderr=subprocess.DEVNULL,\n228             )\n229         return f\"Database viewer stopped successfully on port {port} (or was not running).\"\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -1091,23 +1187,23 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 187,
+      "line_number": 224,
       "line_range": [
-        187,
-        188,
-        189,
-        190,
-        191
+        224,
+        225,
+        226,
+        227,
+        228
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "186             )\n187             subprocess.run(\n188                 [\"pkill\", \"-f\", f\"saltmdb.viewer.*--port {port}\"],\n189                 stdout=subprocess.DEVNULL,\n190                 stderr=subprocess.DEVNULL,\n191             )\n192         return f\"Database viewer stopped successfully on port {port} (or was not running).\"\n",
+      "code": "223             )\n224             subprocess.run(\n225                 [\"pkill\", \"-f\", f\"saltmdb.viewer.*--port {port}\"],\n226                 stdout=subprocess.DEVNULL,\n227                 stderr=subprocess.DEVNULL,\n228             )\n229         return f\"Database viewer stopped successfully on port {port} (or was not running).\"\n",
       "col_offset": 12,
       "end_col_offset": 13,
-      "filename": "src\\saltmdb\\viewer\\server.py",
+      "filename": "src/saltmdb/viewer/server.py",
       "issue_confidence": "HIGH",
       "issue_cwe": {
         "id": 78,
@@ -1115,13 +1211,13 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 187,
+      "line_number": 224,
       "line_range": [
-        187,
-        188,
-        189,
-        190,
-        191
+        224,
+        225,
+        226,
+        227,
+        228
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",

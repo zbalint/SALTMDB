@@ -1,5 +1,4 @@
 import unittest
-import sqlite3
 import json
 import os
 import tempfile
@@ -92,7 +91,9 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         valid_ids = ["e1", "e2", "e3"]
         vectors = [v1, v2, v3]
 
-        clusters = find_connected_vector_clusters(valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.75)
+        clusters = find_connected_vector_clusters(
+            valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.75
+        )
         self.assertEqual(len(clusters), 1)
         self.assertEqual(sorted(clusters[0][0]), ["e1", "e2", "e3"])
         self.assertGreaterEqual(clusters[0][1], 0.9)
@@ -106,7 +107,9 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         valid_ids = ["e1", "e2", "e3"]
         vectors = [v1, v2, v3]
 
-        clusters = find_connected_vector_clusters(valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.6)
+        clusters = find_connected_vector_clusters(
+            valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.6
+        )
         self.assertEqual(len(clusters), 1)
         # Off-diagonal mean should be around 0.7467 rather than inflated by 1.0 diagonals
         self.assertAlmostEqual(clusters[0][1], 0.7467, places=3)
@@ -115,10 +118,22 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         self.conn.executemany(
             "INSERT INTO entities (id, title, full_content, status) VALUES (?, ?, ?, 'raw')",
             [
-                ("e1", "SQLite WAL Concurrency", "Fixing sqlite wal transaction locking and retries"),
-                ("e2", "SQLite Transaction Retries", "Handling wal mode lock contention in sqlite database"),
-                ("e3", "SQLite Lock Contention", "Optimizing sqlite wal transaction retries under high concurrency"),
-            ]
+                (
+                    "e1",
+                    "SQLite WAL Concurrency",
+                    "Fixing sqlite wal transaction locking and retries",
+                ),
+                (
+                    "e2",
+                    "SQLite Transaction Retries",
+                    "Handling wal mode lock contention in sqlite database",
+                ),
+                (
+                    "e3",
+                    "SQLite Lock Contention",
+                    "Optimizing sqlite wal transaction retries under high concurrency",
+                ),
+            ],
         )
         self.conn.commit()
 
@@ -134,9 +149,21 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         v3 = np.ones(384, dtype=np.float32) * 0.99
 
         entities = [
-            ("e1", "Docker Container Setup", "Configuring Docker containers for WSL2 dev environment"),
-            ("e2", "Docker Container Storage", "Setting up persistent Docker volume mounts in WSL2"),
-            ("e3", "Docker Networking WSL2", "Debugging Docker container networking ports under WSL2"),
+            (
+                "e1",
+                "Docker Container Setup",
+                "Configuring Docker containers for WSL2 dev environment",
+            ),
+            (
+                "e2",
+                "Docker Container Storage",
+                "Setting up persistent Docker volume mounts in WSL2",
+            ),
+            (
+                "e3",
+                "Docker Networking WSL2",
+                "Debugging Docker container networking ports under WSL2",
+            ),
         ]
         vectors = [v1.tobytes(), v2.tobytes(), v3.tobytes()]
 
@@ -186,9 +213,21 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         v3 = np.ones(384, dtype=np.float32) * 0.99
 
         entities = [
-            ("e1", "Docker Container Setup", "Configuring Docker containers for WSL2 dev environment"),
-            ("e2", "Docker Container Storage", "Setting up persistent Docker volume mounts in WSL2"),
-            ("e3", "Docker Networking WSL2", "Debugging Docker container networking ports under WSL2"),
+            (
+                "e1",
+                "Docker Container Setup",
+                "Configuring Docker containers for WSL2 dev environment",
+            ),
+            (
+                "e2",
+                "Docker Container Storage",
+                "Setting up persistent Docker volume mounts in WSL2",
+            ),
+            (
+                "e3",
+                "Docker Networking WSL2",
+                "Debugging Docker container networking ports under WSL2",
+            ),
         ]
         vectors = [v1.tobytes(), v2.tobytes(), v3.tobytes()]
 

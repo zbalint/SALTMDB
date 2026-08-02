@@ -49,7 +49,6 @@ def _run_liveness_watchdog(
         time.sleep(check_interval)
 
 
-
 def start_viewer(port: int = 8080) -> str:  # noqa: C901, PLR0912, PLR0915
     """Spawns the local SALTMDB web dashboard/viewer in the background on specified port."""
     port = port or 8080

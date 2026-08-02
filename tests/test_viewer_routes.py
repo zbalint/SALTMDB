@@ -201,23 +201,31 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         )
 
     def test_get_entities_is_core_filter(self):
-        core_id = store_memory(
-            content="Core architectural fact memory content",
-            title="Core Architecture Fact",
-            owner_id="viewer_tester",
-            is_core=True,
-            skip_duplicate_check=True,
-            db_connection=self.conn,
-        ).split("ID: ")[1].strip()
+        core_id = (
+            store_memory(
+                content="Core architectural fact memory content",
+                title="Core Architecture Fact",
+                owner_id="viewer_tester",
+                is_core=True,
+                skip_duplicate_check=True,
+                db_connection=self.conn,
+            )
+            .split("ID: ")[1]
+            .strip()
+        )
 
-        non_core_id = store_memory(
-            content="Non-core ephemeral detail content",
-            title="Non Core Detail",
-            owner_id="viewer_tester",
-            is_core=False,
-            skip_duplicate_check=True,
-            db_connection=self.conn,
-        ).split("ID: ")[1].strip()
+        non_core_id = (
+            store_memory(
+                content="Non-core ephemeral detail content",
+                title="Non Core Detail",
+                owner_id="viewer_tester",
+                is_core=False,
+                skip_duplicate_check=True,
+                db_connection=self.conn,
+            )
+            .split("ID: ")[1]
+            .strip()
+        )
 
         handler = self._handler()
 
@@ -326,4 +334,3 @@ class TestViewerScatterplot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

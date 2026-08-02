@@ -165,7 +165,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         # Candidate C: NO ready vector + lexically dissimilar text (matching only sparse FTS terms)
         eid_c = "mixed-cand-c"
         t_c = "SALTMDB Database System Network Infrastructure"
-        c_c = "Configuring Linux firewall rules and socket buffer sizes for distributed server nodes"
+        c_c = (
+            "Configuring Linux firewall rules and socket buffer sizes for distributed server nodes"
+        )
         memory_service.store_memory(
             title=t_c,
             content=c_c,
@@ -188,7 +190,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         dup_map = {d["id"]: d for d in potential_dups}
 
         # Candidate A: present with similarity_score >= 0.75
-        self.assertIn(eid_a, dup_map, "Candidate A (ready vector) should be in potential duplicates")
+        self.assertIn(
+            eid_a, dup_map, "Candidate A (ready vector) should be in potential duplicates"
+        )
         self.assertGreaterEqual(
             dup_map[eid_a]["similarity_score"],
             0.75,
@@ -196,7 +200,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         )
 
         # Candidate B: present via lexical fallback
-        self.assertIn(eid_b, dup_map, "Candidate B (lexical fallback) should be in potential duplicates")
+        self.assertIn(
+            eid_b, dup_map, "Candidate B (lexical fallback) should be in potential duplicates"
+        )
 
         # Candidate C: excluded due to low lexical similarity (< 0.40)
         self.assertNotIn(
@@ -253,4 +259,3 @@ class TestCrossOwnerDedup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

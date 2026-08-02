@@ -164,13 +164,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     vec = np.frombuffer(blob, dtype=np.float32)
                     if vec.shape[0] == 384:
                         vectors.append(vec)
-                        valid_items.append({
-                            "id": r["id"],
-                            "title": r["title"] or r["id"][:8],
-                            "status": r["status"],
-                            "owner_id": r["owner_id"] or "system",
-                            "is_core": bool(r["is_core"]),
-                        })
+                        valid_items.append(
+                            {
+                                "id": r["id"],
+                                "title": r["title"] or r["id"][:8],
+                                "status": r["status"],
+                                "owner_id": r["owner_id"] or "system",
+                                "is_core": bool(r["is_core"]),
+                            }
+                        )
 
             if len(vectors) < 2:
                 self.send_json({"points": []})

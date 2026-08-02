@@ -199,11 +199,15 @@ class TestSupersessionBugfix(unittest.TestCase):
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
             (new_id, orig_id),
         ).fetchone()
-        self.assertIsNotNone(rel, "A 'similar_to' edge should be auto-linked above the duplicate threshold")
+        self.assertIsNotNone(
+            rel, "A 'similar_to' edge should be auto-linked above the duplicate threshold"
+        )
         self.assertEqual(rel[0], "similar_to")
 
         row = self.conn.execute("SELECT weight FROM entities WHERE id = ?", (orig_id,)).fetchone()
-        self.assertEqual(row[0], 10, "Auto-linking similar_to must never touch existing memory weight")
+        self.assertEqual(
+            row[0], 10, "Auto-linking similar_to must never touch existing memory weight"
+        )
 
     def test_similar_to_no_autolink_below_duplicate_threshold(self):
         """Test #7: Crossing only the weaker candidate band (>=0.75, <0.85; measured ~0.81 for

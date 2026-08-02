@@ -87,4 +87,3 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
 mcp = FastMCP("SALTMDB", lifespan=server_lifespan)
 
 from saltmdb.mcp import tools  # noqa: F401, E402 -- registers @mcp.tool() decorators as a side effect
-

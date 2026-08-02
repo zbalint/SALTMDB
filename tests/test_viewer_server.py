@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from saltmdb.viewer.server import SALTMDBTCPServer, main, start_viewer, stop_viewer, _run_liveness_watchdog
+from saltmdb.viewer.server import main, start_viewer, _run_liveness_watchdog
 
 
 class TestViewerServer(unittest.TestCase):
