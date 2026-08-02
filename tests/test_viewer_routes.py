@@ -196,6 +196,67 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             "get_entity_detail must correctly populate parent_ids via row['parent_ids'] key access",
         )
 
+    def test_get_entities_is_core_filter(self):
+        core_id = store_memory(
+            content="Core architectural fact memory content",
+            title="Core Architecture Fact",
+            owner_id="viewer_tester",
+            is_core=True,
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        ).split("ID: ")[1].strip()
+
+        non_core_id = store_memory(
+            content="Non-core ephemeral detail content",
+            title="Non Core Detail",
+            owner_id="viewer_tester",
+            is_core=False,
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        ).split("ID: ")[1].strip()
+
+        handler = self._handler()
+
+        # Filter is_core=true
+        captured_true = self._capture_json(handler)
+        handler.get_entities({"is_core": ["true"]})
+        entities_true = captured_true["data"]["entities"]
+        true_ids = [e["id"] for e in entities_true]
+        self.assertIn(core_id, true_ids)
+        self.assertNotIn(non_core_id, true_ids)
+        for e in entities_true:
+            self.assertTrue(e["is_core"])
+
+        # Filter is_core=false
+        captured_false = self._capture_json(handler)
+        handler.get_entities({"is_core": ["false"]})
+        entities_false = captured_false["data"]["entities"]
+        false_ids = [e["id"] for e in entities_false]
+        self.assertIn(non_core_id, false_ids)
+        self.assertNotIn(core_id, false_ids)
+        for e in entities_false:
+            self.assertFalse(e["is_core"])
+
+    def test_get_search_is_core_filter(self):
+        store_memory(
+            content="Unique keyword quantum ground state core memory",
+            title="Quantum Ground State",
+            owner_id="viewer_tester",
+            is_core=True,
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+
+        handler = self._handler()
+        captured = self._capture_json(handler)
+        handler.get_search({"q": ["quantum"], "is_core": ["true"]})
+        self.assertEqual(captured["status"], 200)
+        results = captured["data"]["results"]
+        self.assertIsInstance(results, list)
+        for r in results:
+            self.assertTrue(r.get("is_core"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

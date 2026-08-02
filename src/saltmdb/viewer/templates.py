@@ -760,6 +760,11 @@ def get_frontend_html(db_path: str = None) -> str:
                     <input type="text" id="entity-search-input" placeholder="Search by title, content, or tag..." onkeyup="handleEntitySearch(event)">
                 </div>
                 <div style="display:flex; gap:8px;">
+                    <select id="entity-is-core-filter" class="btn" onchange="loadEntities(1)">
+                        <option value="">All Memories</option>
+                        <option value="true">⭐ Core Only</option>
+                        <option value="false">Non-Core Only</option>
+                    </select>
                     <select id="entity-status-filter" class="btn" onchange="loadEntities(1)">
                         <option value="">All Statuses</option>
                         <option value="raw">Raw</option>
@@ -897,6 +902,11 @@ def get_frontend_html(db_path: str = None) -> str:
                         <span class="search-icon">🔍</span>
                         <input type="text" id="vector-query-input" placeholder="Type a test query (e.g. 'molecular ground state energy simulation')..." onkeyup="if(event.key==='Enter') runVectorSearch()">
                     </div>
+                    <select id="vector-is-core-filter" class="btn" onchange="runVectorSearch()">
+                        <option value="">All Memories</option>
+                        <option value="true">⭐ Core Only</option>
+                        <option value="false">Non-Core Only</option>
+                    </select>
                     <button class="btn btn-primary" onclick="runVectorSearch()">Execute Search</button>
                 </div>
             </div>
@@ -1115,9 +1125,12 @@ def get_frontend_html(db_path: str = None) -> str:
 
         async function loadEntities(page = 1) {
             currentEntitiesPage = page;
+            const isCoreEl = document.getElementById('entity-is-core-filter');
+            const isCore = isCoreEl ? isCoreEl.value : '';
             const status = document.getElementById('entity-status-filter').value;
             const search = document.getElementById('entity-search-input').value;
             let url = `/api/entities?page=${page}`;
+            if (isCore) url += `&is_core=${encodeURIComponent(isCore)}`;
             if (status) url += `&status=${status}`;
             if (search) url += `&q=${encodeURIComponent(search)}`;
 
@@ -1135,7 +1148,10 @@ def get_frontend_html(db_path: str = None) -> str:
                 }
                 tbody.innerHTML = data.entities.map(e => `
                     <tr onclick="openEntityDetail('${escapeHtml(e.id)}')">
-                        <td><strong>${escapeHtml(e.title || 'Untitled')}</strong></td>
+                        <td>
+                            <strong>${escapeHtml(e.title || 'Untitled')}</strong>
+                            ${e.is_core ? ' <span class="badge badge-yellow" style="font-size:0.7rem; margin-left:4px;">⭐ Core</span>' : ''}
+                        </td>
                         <td><span class="badge ${e.status==='raw'?'badge-green':(e.status==='consolidated'?'badge-yellow':'badge-red')}">${e.status}</span></td>
                         <td><span class="badge ${e.embedding_status==='ready'?'badge-green':'badge-yellow'}">${e.embedding_status}</span></td>
                         <td><span class="badge badge-blue">${escapeHtml(e.scope)}</span></td>
@@ -1311,6 +1327,8 @@ def get_frontend_html(db_path: str = None) -> str:
         async function runVectorSearch() {
             const input = document.getElementById('vector-query-input');
             const query = input ? input.value.trim() : '';
+            const isCoreEl = document.getElementById('vector-is-core-filter');
+            const isCore = isCoreEl ? isCoreEl.value : '';
             const container = document.getElementById('vector-results-container');
             if (!query) {
                 container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:30px;">Enter a query above to test live dense vector matching.</div>';
@@ -1318,7 +1336,9 @@ def get_frontend_html(db_path: str = None) -> str:
             }
             container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:20px;">Executing dense vector search...</div>';
             try {
-                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                let searchUrl = `/api/search?q=${encodeURIComponent(query)}`;
+                if (isCore) searchUrl += `&is_core=${encodeURIComponent(isCore)}`;
+                const res = await fetch(searchUrl);
                 const data = await res.json();
                 if (!data.results || data.results.length === 0) {
                     container.innerHTML = '<div style="color:var(--text-muted); text-align:center; padding:30px;">No matching vector entities found.</div>';
@@ -1338,7 +1358,10 @@ def get_frontend_html(db_path: str = None) -> str:
                             ${data.results.map((r, i) => `
                                 <tr onclick="openEntityDetail('${escapeHtml(r.id)}')">
                                     <td>#${i+1}</td>
-                                    <td><strong>${escapeHtml(r.title)}</strong></td>
+                                    <td>
+                                        <strong>${escapeHtml(r.title)}</strong>
+                                        ${r.is_core ? ' <span class="badge badge-yellow" style="font-size:0.7rem; margin-left:4px;">⭐ Core</span>' : ''}
+                                    </td>
                                     <td><span class="badge badge-green">${r.score}</span></td>
                                     <td style="color:var(--text-secondary);">${escapeHtml(r.snippet)}</td>
                                 </tr>

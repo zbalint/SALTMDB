@@ -164,8 +164,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 where_clauses.append("(context_id = ? OR project_id = ?)")
                 params.extend([context_id_filter, context_id_filter])
             if is_core_filter:
-                where_clauses.append("is_core = ?")
-                params.append(1 if is_core_filter.lower() in ("true", "1", "yes") else 0)
+                if is_core_filter.lower() in ("true", "1", "yes"):
+                    where_clauses.append("is_core = ?")
+                    params.append(1)
+                elif is_core_filter.lower() in ("false", "0", "no"):
+                    where_clauses.append("is_core = ?")
+                    params.append(0)
             if tag_filter:
                 where_clauses.append(
                     "id IN (SELECT et.entity_id FROM entity_tags et "
@@ -616,9 +620,17 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if not q:
                 self.send_json({"results": []})
                 return
+            is_core_raw = query.get("is_core", [None])[0]
+            is_core = None
+            if is_core_raw:
+                if is_core_raw.lower() in ("true", "1", "yes"):
+                    is_core = True
+                elif is_core_raw.lower() in ("false", "0", "no"):
+                    is_core = False
+
             from saltmdb.domain.services.memory_service import search_memory
 
-            results = search_memory(query_keywords=q, limit=20)
+            results = search_memory(query_keywords=q, limit=20, is_core=is_core)
             self.send_json({"query": q, "results": results})
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
