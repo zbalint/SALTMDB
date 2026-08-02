@@ -1,5 +1,7 @@
 import asyncio
+import os
 import sys
+import atexit
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -22,6 +24,27 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_session_on_exit() -> None:
+    try:
+        if config.is_viewer_enabled():
+            db_path = get_db_path()
+            if os.path.exists(db_path):
+                conn = get_connection(db_path)
+                try:
+                    viewer_port = config.get_viewer_port()
+                    unregister_session(conn, viewer_port)
+                    remaining = count_live_sessions(conn, viewer_port)
+                    if remaining == 0:
+                        stop_viewer(port=viewer_port)
+                finally:
+                    conn.close()
+    except Exception as e:
+        logger.debug("Error in atexit session cleanup: %s", e)
+
+
+atexit.register(_cleanup_session_on_exit)
 
 
 def _log_viewer_start_result(task: "asyncio.Task[str]") -> None:

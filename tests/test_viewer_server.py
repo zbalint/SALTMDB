@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from saltmdb.viewer.server import SALTMDBTCPServer, main, start_viewer, stop_viewer
+from saltmdb.viewer.server import SALTMDBTCPServer, main, start_viewer, stop_viewer, _run_liveness_watchdog
 
 
 class TestViewerServer(unittest.TestCase):
@@ -56,6 +56,27 @@ class TestViewerServer(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
         mock_logger.error.assert_called()
         self.assertIn("Failed to bind viewer", mock_logger.error.call_args[0][0])
+
+    @patch("saltmdb.viewer.server.os.path.exists", return_value=True)
+    @patch("saltmdb.viewer.server.get_connection")
+    @patch("saltmdb.viewer.server.count_live_sessions", return_value=0)
+    def test_liveness_watchdog_shuts_down_when_no_live_sessions(
+        self, mock_count, mock_get_conn, mock_exists
+    ):
+        mock_httpd = MagicMock()
+        _run_liveness_watchdog(mock_httpd, port=8080, check_interval=0.001, grace_period=0.001)
+        mock_httpd.shutdown.assert_called_once()
+
+    @patch("saltmdb.viewer.server.os.path.exists", return_value=True)
+    @patch("saltmdb.viewer.server.get_connection")
+    @patch("saltmdb.viewer.server.count_live_sessions", side_effect=[1, 0])
+    def test_liveness_watchdog_shuts_down_after_sessions_exit(
+        self, mock_count, mock_get_conn, mock_exists
+    ):
+        mock_httpd = MagicMock()
+        _run_liveness_watchdog(mock_httpd, port=8080, check_interval=0.001, grace_period=0.001)
+        mock_httpd.shutdown.assert_called_once()
+        self.assertEqual(mock_count.call_count, 2)
 
 
 if __name__ == "__main__":

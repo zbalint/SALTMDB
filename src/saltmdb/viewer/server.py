@@ -5,12 +5,49 @@ import socketserver
 import subprocess
 import time
 import logging
+import threading
 import urllib.request
 from typing import Any
 from saltmdb.config import get_db_path, VIEWER_SHIM_PATH
+from saltmdb.db.connection import get_connection
+from saltmdb.db.viewer_sessions import count_live_sessions
 from saltmdb.viewer.routes import SALTMDBHandler
 
 logger = logging.getLogger(__name__)
+
+
+def _run_liveness_watchdog(
+    httpd: socketserver.TCPServer,
+    port: int,
+    check_interval: float = 15.0,
+    grace_period: float = 30.0,
+) -> None:
+    """Periodically checks active MCP sessions in _viewer_sessions table.
+
+    If no live sessions exist after initial grace_period, shuts down the HTTP server.
+    """
+    time.sleep(grace_period)
+    while True:
+        try:
+            db_path = get_db_path()
+            if os.path.exists(db_path):
+                conn = get_connection(db_path)
+                try:
+                    live_count = count_live_sessions(conn, port)
+                finally:
+                    conn.close()
+
+                if live_count == 0:
+                    logger.info(
+                        "No active MCP sessions found for viewer port %d. Shutting down viewer server.",
+                        port,
+                    )
+                    httpd.shutdown()
+                    break
+        except Exception as e:
+            logger.debug("Error in viewer liveness watchdog: %s", e)
+        time.sleep(check_interval)
+
 
 
 def start_viewer(port: int = 8080) -> str:  # noqa: C901, PLR0912, PLR0915
@@ -232,6 +269,12 @@ def main():
     SALTMDBTCPServer.allow_reuse_address = True
     try:
         with SALTMDBTCPServer(("127.0.0.1", port), SALTMDBHandler) as httpd:
+            watchdog_thread = threading.Thread(
+                target=_run_liveness_watchdog,
+                args=(httpd, port),
+                daemon=True,
+            )
+            watchdog_thread.start()
             try:
                 httpd.serve_forever()
             except KeyboardInterrupt:

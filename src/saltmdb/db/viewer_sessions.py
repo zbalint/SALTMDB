@@ -34,9 +34,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 def register_session(conn, port: int, pid: int | None = None) -> None:
-    """Registers a session PID in the _viewer_sessions table."""
+    """Registers a session PID in the _viewer_sessions table after sweeping dead PIDs."""
     pid = pid or os.getpid()
     started_at = datetime.now(UTC).isoformat()
+
+    count_live_sessions(conn, port)
 
     def _write(c):
         c.execute(
