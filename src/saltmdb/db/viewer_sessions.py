@@ -16,12 +16,10 @@ if sys.platform == "win32":
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    # WaitForSingleObject is preferred over GetExitCodeProcess: it avoids the
-    # STILL_ACTIVE (259) ambiguity where a process that legitimately exits with
-    # code 259 would be falsely reported as alive.
-    # NOTE: WaitForSingleObject requires SYNCHRONIZE (0x00100000) on the handle.
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    # GetExitCodeProcess requires only PROCESS_QUERY_LIMITED_INFORMATION (0x1000),
+    # no SYNCHRONIZE right needed — avoids access-right failures on restricted systems.
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -29,28 +27,36 @@ def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
         try:
-            # PROCESS_QUERY_LIMITED_INFORMATION (0x1000) | SYNCHRONIZE (0x00100000)
-            # SYNCHRONIZE is required for WaitForSingleObject; without it the call
-            # returns WAIT_FAILED (0xFFFFFFFF) and the process would appear dead.
-            handle = kernel32.OpenProcess(0x00101000, False, pid)
+            # PROCESS_QUERY_LIMITED_INFORMATION (0x1000): sufficient for
+            # GetExitCodeProcess without needing the SYNCHRONIZE right.
+            handle = kernel32.OpenProcess(0x1000, False, pid)
             if handle:
                 try:
-                    # WaitForSingleObject(handle, 0): non-blocking wait.
-                    # WAIT_TIMEOUT (0x102) means the process is still running.
-                    # WAIT_OBJECT_0 (0x0) means the process has exited.
-                    # WAIT_FAILED (0xFFFFFFFF) means the call itself failed.
-                    result = kernel32.WaitForSingleObject(handle, 0)
-                    if result == 0xFFFFFFFF:  # WAIT_FAILED
-                        logger.warning("WaitForSingleObject failed for PID %s, last error: %s", pid, ctypes.get_last_error())
-                        return True  # assume alive on unexpected API failure
-                    return result == 0x00000102  # WAIT_TIMEOUT => still alive
+                    # Use wintypes.DWORD (c_ulong) — the correct type for the
+                    # lpExitCode out-parameter; c_uint32 would cause ArgumentError.
+                    exit_code = wintypes.DWORD()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        # 259 (STILL_ACTIVE) means the process has not exited.
+                        alive = exit_code.value == 259
+                        logger.info(
+                            "[win32] PID %s: GetExitCodeProcess exit_code=%s alive=%s",
+                            pid, exit_code.value, alive,
+                        )
+                        return alive
+                    err = ctypes.get_last_error()
+                    logger.warning(
+                        "[win32] PID %s: GetExitCodeProcess failed, error=%s; assuming alive",
+                        pid, err,
+                    )
+                    return True
                 finally:
                     kernel32.CloseHandle(handle)
             else:
                 error = ctypes.get_last_error()
-                # ERROR_ACCESS_DENIED (5): process exists but we lack permission.
-                if error == 5:
+                if error == 5:  # ERROR_ACCESS_DENIED: process exists, no permission
+                    logger.info("[win32] PID %s: OpenProcess ACCESS_DENIED, treating as alive", pid)
                     return True
+                logger.warning("[win32] PID %s: OpenProcess failed, error=%s, treating as dead", pid, error)
                 return False
         except Exception as e:
             logger.warning("Failed to check PID liveness on Windows for PID %s: %s", pid, e, exc_info=True)

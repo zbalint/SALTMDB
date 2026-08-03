@@ -38,7 +38,7 @@ def _run_liveness_watchdog(
                     conn.close()
 
                 if live_count == 0:
-                    logger.info(
+                    logger.warning(
                         "No active MCP sessions found for viewer port %d. Shutting down viewer server.",
                         port,
                     )
@@ -255,6 +255,13 @@ def main():
                 port = int(sys.argv[idx + 1])
             except ValueError:
                 pass
+
+    log_level = os.environ.get("SALTMDB_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=getattr(logging, log_level, logging.INFO),
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    )
 
     db_path = get_db_path()
     if not os.path.exists(db_path):

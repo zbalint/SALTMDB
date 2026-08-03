@@ -75,36 +75,41 @@ class TestViewerSessions(unittest.TestCase):
 
         with patch("sys.platform", "win32"), \
              patch("saltmdb.db.viewer_sessions.kernel32", create=True) as mock_kernel32, \
-             patch("ctypes.get_last_error", create=True) as mock_get_last_error:
+             patch("saltmdb.db.viewer_sessions.wintypes", create=True) as mock_wintypes, \
+             patch("ctypes.get_last_error", create=True) as mock_get_last_error, \
+             patch("ctypes.byref", create=True):
 
-            # Alive: OpenProcess succeeds, WaitForSingleObject returns WAIT_TIMEOUT (0x102)
+            mock_exit_code = MagicMock()
+            mock_wintypes.DWORD.return_value = mock_exit_code
+
+            # Alive: OpenProcess succeeds, GetExitCodeProcess returns STILL_ACTIVE (259)
             mock_kernel32.OpenProcess.return_value = 9999
-            mock_kernel32.WaitForSingleObject.return_value = 0x00000102
+            mock_kernel32.GetExitCodeProcess.return_value = True
+            mock_exit_code.value = 259
             self.assertTrue(_pid_alive(target_pid))
-            # Access mask must include SYNCHRONIZE (0x00100000) for WaitForSingleObject
-            mock_kernel32.OpenProcess.assert_called_with(0x00101000, False, target_pid)
-            mock_kernel32.WaitForSingleObject.assert_called_with(9999, 0)
+            mock_kernel32.OpenProcess.assert_called_with(0x1000, False, target_pid)
             mock_kernel32.CloseHandle.assert_called_with(9999)
 
-            # Dead (zombie or exited): OpenProcess succeeds, WaitForSingleObject returns WAIT_OBJECT_0 (0x0)
+            # Dead (zombie/exited): OpenProcess succeeds, GetExitCodeProcess returns exit code 0
             mock_kernel32.OpenProcess.return_value = 9999
-            mock_kernel32.WaitForSingleObject.return_value = 0x00000000
+            mock_kernel32.GetExitCodeProcess.return_value = True
+            mock_exit_code.value = 0
             self.assertFalse(_pid_alive(target_pid))
 
-            # API failure: WaitForSingleObject returns WAIT_FAILED (0xFFFFFFFF) — assume alive
+            # GetExitCodeProcess API failure: conservatively assume alive
             mock_kernel32.OpenProcess.return_value = 9999
-            mock_kernel32.WaitForSingleObject.return_value = 0xFFFFFFFF
+            mock_kernel32.GetExitCodeProcess.return_value = False
             mock_get_last_error.return_value = 6  # ERROR_INVALID_HANDLE
             self.assertTrue(_pid_alive(target_pid))
 
-            # Dead: OpenProcess returns NULL, error is not ACCESS_DENIED
+            # OpenProcess returns NULL, error is not ACCESS_DENIED: dead
             mock_kernel32.OpenProcess.return_value = 0
             mock_get_last_error.return_value = 87  # ERROR_INVALID_PARAMETER
             self.assertFalse(_pid_alive(target_pid))
 
-            # Alive (access denied): OpenProcess returns NULL, error is ACCESS_DENIED (5)
+            # OpenProcess returns NULL, ERROR_ACCESS_DENIED (5): process exists, alive
             mock_kernel32.OpenProcess.return_value = 0
-            mock_get_last_error.return_value = 5  # ERROR_ACCESS_DENIED
+            mock_get_last_error.return_value = 5
             self.assertTrue(_pid_alive(target_pid))
 
 
