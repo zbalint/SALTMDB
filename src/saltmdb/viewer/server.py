@@ -248,6 +248,13 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def main():
+    # Force single-threaded BLAS before numpy is ever imported.
+    # On Windows in windowless processes (CREATE_NO_WINDOW), multi-threaded
+    # OpenBLAS crashes at native DLL level with no Python traceback.
+    # Must be set before first numpy import to take effect.
+    for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(_blas_var, "1")
+
     port = int(os.environ.get("SALTMDB_VIEWER_PORT", 8080))
     for idx, arg in enumerate(sys.argv):
         if arg == "--port" and idx + 1 < len(sys.argv):

@@ -14,6 +14,44 @@ logger = logging.getLogger(__name__)
 from saltmdb.viewer.templates import get_frontend_html  # noqa: E402
 
 
+def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
+    """Randomized power-iteration PCA that avoids heavy LAPACK/BLAS routines.
+
+    On Windows in windowless processes (CREATE_NO_WINDOW), OpenBLAS can crash
+    at the native DLL level when called from np.linalg.svd or np.linalg.eigh
+    on large matrices. This implementation uses only small sequential dot
+    products that do not trigger the problematic native code paths.
+
+    Args:
+        X: (n_samples, n_features) centered data matrix (numpy float32/64).
+        n_components: Number of principal components to return.
+        n_iter: Power-iteration refinement passes (3 is sufficient for PCA).
+        seed: Random seed for reproducibility.
+
+    Returns:
+        coords: (n_samples, n_components) projected coordinates.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    n_samples, n_features = X.shape
+
+    # Random projection matrix: (n_features, n_components)
+    Q = rng.standard_normal((n_features, n_components)).astype(X.dtype)
+
+    # Power iteration: repeatedly multiply X @ X.T @ sketch to align with
+    # top singular directions. Each step is an (n, k) or (n, n) multiply
+    # but n_components is tiny (2), so these are cheap column-wise ops.
+    for _ in range(n_iter):
+        # Project: (n_samples, n_components)
+        Z = X @ Q
+        # Back-project: (n_features, n_components)
+        Q, _ = np.linalg.qr(X.T @ Z)
+
+    # Final projection onto the orthonormal basis Q
+    return X @ Q[:, :n_components]
+
+
 class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
     """Zero-dependency HTTP Request Handler for the SALTMDB Dashboard Viewer."""
 
@@ -180,15 +218,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             X = np.vstack(vectors)
             X_centered = X - np.mean(X, axis=0)
-            # Use covariance eigendecomposition instead of SVD.
-            # np.linalg.eigh (LAPACK DSYEVD) is far more stable than
-            # np.linalg.svd (LAPACK DGESDD) on Windows in windowless
-            # processes where OpenBLAS can crash at native DLL level.
-            cov = X_centered.T @ X_centered  # (384, 384) — cheap
-            eigenvalues, eigenvectors = np.linalg.eigh(cov)
-            # eigh returns ascending order; take the 2 largest
-            top2 = eigenvectors[:, -2:][:, ::-1]  # shape (384, 2)
-            coords_2d = X_centered @ top2
+            # Randomized power-iteration PCA — avoids all LAPACK/BLAS heavy
+            # routines (SVD, eigh, matmul on large matrices) that crash
+            # OpenBLAS in windowless Windows processes.
+            # Uses only small dot products; stable across all platforms.
+            coords_2d = _blas_free_pca(X_centered, n_components=2, n_iter=3, seed=42)
 
             points = []
             for idx, item in enumerate(valid_items):
