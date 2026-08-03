@@ -3,6 +3,7 @@ import tempfile
 import os
 import shutil
 import json
+import uuid
 from datetime import datetime, UTC
 
 from saltmdb.db.schema import init_db
@@ -53,38 +54,6 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
             return len(rows)
         return sum(1 for (c,) in rows if json.loads(c).get("target") == target)
 
-    def test_cluttered_tags_pass_does_not_reduplicate_pending_request(self):
-        for i in range(5):
-            self._store(f"Cluttered Tag Entity {i}", tags=["#dedupclutter"])
-
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
-        self.assertEqual(self._consolidation_request_count("tag"), 1)
-
-        # Running the same pass again with nothing resolved must NOT log a second event
-        # for the same tag -- this is the exact regression: unbounded re-logging on every run.
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
-        self.assertEqual(self._consolidation_request_count("tag"), 1)
-
-    def test_cluttered_tags_pass_logs_again_once_prior_request_resolved(self):
-        ids = [self._store(f"Cluttered Tag Entity B{i}", tags=["#dedupclutter2"]) for i in range(5)]
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
-        self.assertEqual(self._consolidation_request_count("tag"), 1)
-
-        # Resolve the backlog the first request was waiting on.
-        datetime.now(UTC).isoformat()
-        placeholders = ",".join("?" for _ in ids)
-        self.conn.execute(
-            f"UPDATE entities SET status = 'archived' WHERE id IN ({placeholders})", ids
-        )
-        self.conn.commit()
-
-        for i in range(5):
-            self._store(f"Cluttered Tag Entity C{i}", tags=["#dedupclutter2"])
-
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
-        self.assertEqual(self._consolidation_request_count("tag"), 2)
-
     def test_supersession_scouting_does_not_reduplicate_pending_request(self):
         # scout_consolidated_supersessions requires sqlite-vec + embeddings; skip gracefully
         # in environments where the extension truly can't load (mirrors the function's own
@@ -102,7 +71,16 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
 
     def test_pending_request_exists_helper_true_only_while_unresolved(self):
         ids = [self._store(f"Helper Probe Entity {i}", tags=["#helperprobe"]) for i in range(5)]
-        librarian_service.consolidate_cluttered_tags(conn=self.conn)
+
+        event_id = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        content = json.dumps({"target": "tag", "tag_name": "#helperprobe", "entity_ids": ids})
+        self.conn.execute(
+            "INSERT INTO events (id, timestamp, agent_id, type, content) "
+            "VALUES (?, ?, 'tester', 'consolidation_request', ?)",
+            (event_id, now, content),
+        )
+        self.conn.commit()
 
         self.assertTrue(
             librarian_service._pending_request_exists(self.conn, "tag", tag_name="#helperprobe")
@@ -117,6 +95,28 @@ class TestLibrarianConsolidationRequestDedup(unittest.TestCase):
         self.assertFalse(
             librarian_service._pending_request_exists(self.conn, "tag", tag_name="#helperprobe")
         )
+
+    def test_librarian_pipeline_produces_no_tag_or_general_consolidation_requests(self):
+        for i in range(5):
+            self._store(f"Cluttered Tag Entity {i}", tags=["#sharedtag"])
+
+        for i in range(5):
+            store_memory(
+                content=f"Body content for Shared Owner Entity {i}, padded to satisfy the quality gate minimum length requirement.",
+                title=f"Shared Owner Entity {i}",
+                owner_id="shared_owner",
+                scope="shared",
+                skip_duplicate_check=True,
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+
+        librarian_service.merge_tags_heuristics(self.conn)
+        librarian_service.consolidate_vector_clusters(self.conn)
+        librarian_service.scout_consolidated_supersessions(self.conn)
+
+        self.assertEqual(self._consolidation_request_count("tag"), 0)
+        self.assertEqual(self._consolidation_request_count("general"), 0)
 
 
 if __name__ == "__main__":

@@ -34,8 +34,6 @@ graph TD
         TriggerCheck -->|python -m saltmdb --librarian| Lib[Librarian gc subprocess]
         Lib -->|acquire_librarian_lock| Lock
         Lib -->|merge_tags_heuristics| MainDB
-        Lib -->|consolidate_cluttered_tags| MainDB
-        Lib -->|consolidate_memories| MainDB
         Lib -->|consolidate_vector_clusters| MainDB
         Lib -->|scout_consolidated_supersessions| MainDB
         Lib -->|WAL checkpoint + PRAGMA optimize| MainDB
@@ -124,21 +122,17 @@ python -m saltmdb --librarian
 * **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
 * **Unix Detachment:** Does not pass `start_new_session=True`; the subprocess's stdout/stderr are redirected to an append-mode `librarian.log` file in the same directory as `saltmdb.db` (rotated at 5 MB → `.1` backup). This allows debugging Librarian output while keeping it off the MCP stdio channel.
 
-Once the background Librarian acquires the atomic lock, it runs five passes in order:
+Once the background Librarian acquires the atomic lock, it runs three passes in order:
 
 1. **Tag Merging (`merge_tags_heuristics`):** Merges case-insensitive, punctuation-stripped tag aliases (e.g. `#Auth-Error` and `#auth_error` normalize to `autherror`) into a canonical tag to prevent folksonomy fragmentation. Arbitrary SQL row order determines the canonical winner.
 
-2. **Clutter Tag Consolidation (`consolidate_cluttered_tags`, request-based):** Identifies tags with ≥5 raw entries per owner. Logs a `consolidation_request` event with `target="tag"` to the short-term events ledger. Idempotent: skips tags that already have an unresolved pending request (checked via `_pending_request_exists`).
-
-3. **General Consolidation (`consolidate_memories`, request-based):** Groups raw memories by `(owner_id, scope)` pairs. If a group has ≥5 raw entries and no unresolved pending request, logs a `consolidation_request` event with `target="general"`. The cognitive task of merging and rephrasing markdown is offloaded to the active client agent, ensuring the server runs fully offline without independent API requirements.
-
-4. **Vector Topic Clustering (`consolidate_vector_clusters`, request-based):** Requires both `sqlite_vec` and `numpy`. Fetches all raw entities with `embedding_status='ready'`. Builds a cosine similarity adjacency matrix using NumPy (`np.dot(X_norm, X_norm.T)`). Discovers connected components above a **0.75 cosine similarity threshold** with a minimum cluster size of **3 entities** using a BFS walk. For each new cluster not already covered by a pending request:
+2. **Vector Topic Clustering (`consolidate_vector_clusters`, request-based):** Requires both `sqlite_vec` and `numpy`. Fetches all raw entities with `embedding_status='ready'`. Builds a cosine similarity adjacency matrix using NumPy (`np.dot(X_norm, X_norm.T)`). Discovers connected components above a **0.75 cosine similarity threshold** with a minimum cluster size of **3 entities** using a BFS walk. For each new cluster not already covered by a pending request:
    * Runs **c-TF-IDF** (`extract_c_tfidf_tags`) to extract the top-3 most cluster-specific terms: computes TF within the cluster and IDF against a 100-document corpus sample, applies standard TF-IDF scoring, then maps terms to existing canonical tags where available.
    * Computes a **composite confidence score**: `0.5 × mean_pairwise_similarity + 0.5 × c-TF-IDF_confidence`, where c-TF-IDF confidence = `clamp(0.5 + top_score × 0.5, 0.5, 1.0)`.
    * Logs a `consolidation_request` event with `target="vector_cluster"` and `suggested_tags`.
    * Also logs a separate `domain_suggestion` event with the full cluster membership and confidence score.
 
-5. **Consolidated Supersession Scouting (`scout_consolidated_supersessions`):** For each consolidated entity with a ready embedding, queries for raw entities created *after* the consolidated node's `valid_from` date with cosine distance ≤ 0.25 (i.e., similarity ≥ 0.75). If ≥3 such new-raw entities overlap, and no pending supersession request covers this consolidated entity, logs a `consolidation_request` event with `target="supersession_candidate"`.
+3. **Consolidated Supersession Scouting (`scout_consolidated_supersessions`):** For each consolidated entity with a ready embedding, queries for raw entities created *after* the consolidated node's `valid_from` date with cosine distance ≤ 0.25 (i.e., similarity ≥ 0.75). If ≥3 such new-raw entities overlap, and no pending supersession request covers this consolidated entity, logs a `consolidation_request` event with `target="supersession_candidate"`.
 
 **Maintenance pass (`_run_librarian_maintenance`):** Runs unconditionally after all consolidation passes (even on partial failure), while the leader lock is still held: `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA optimize=0x10002`.
 
