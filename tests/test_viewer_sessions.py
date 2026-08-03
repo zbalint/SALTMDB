@@ -81,7 +81,8 @@ class TestViewerSessions(unittest.TestCase):
             mock_kernel32.OpenProcess.return_value = 9999
             mock_kernel32.WaitForSingleObject.return_value = 0x00000102
             self.assertTrue(_pid_alive(target_pid))
-            mock_kernel32.OpenProcess.assert_called_with(0x1000, False, target_pid)
+            # Access mask must include SYNCHRONIZE (0x00100000) for WaitForSingleObject
+            mock_kernel32.OpenProcess.assert_called_with(0x00101000, False, target_pid)
             mock_kernel32.WaitForSingleObject.assert_called_with(9999, 0)
             mock_kernel32.CloseHandle.assert_called_with(9999)
 
@@ -89,6 +90,12 @@ class TestViewerSessions(unittest.TestCase):
             mock_kernel32.OpenProcess.return_value = 9999
             mock_kernel32.WaitForSingleObject.return_value = 0x00000000
             self.assertFalse(_pid_alive(target_pid))
+
+            # API failure: WaitForSingleObject returns WAIT_FAILED (0xFFFFFFFF) — assume alive
+            mock_kernel32.OpenProcess.return_value = 9999
+            mock_kernel32.WaitForSingleObject.return_value = 0xFFFFFFFF
+            mock_get_last_error.return_value = 6  # ERROR_INVALID_HANDLE
+            self.assertTrue(_pid_alive(target_pid))
 
             # Dead: OpenProcess returns NULL, error is not ACCESS_DENIED
             mock_kernel32.OpenProcess.return_value = 0

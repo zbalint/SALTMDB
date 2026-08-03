@@ -19,6 +19,7 @@ if sys.platform == "win32":
     # WaitForSingleObject is preferred over GetExitCodeProcess: it avoids the
     # STILL_ACTIVE (259) ambiguity where a process that legitimately exits with
     # code 259 would be falsely reported as alive.
+    # NOTE: WaitForSingleObject requires SYNCHRONIZE (0x00100000) on the handle.
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 
@@ -28,14 +29,20 @@ def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
         try:
-            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = kernel32.OpenProcess(0x1000, False, pid)
+            # PROCESS_QUERY_LIMITED_INFORMATION (0x1000) | SYNCHRONIZE (0x00100000)
+            # SYNCHRONIZE is required for WaitForSingleObject; without it the call
+            # returns WAIT_FAILED (0xFFFFFFFF) and the process would appear dead.
+            handle = kernel32.OpenProcess(0x00101000, False, pid)
             if handle:
                 try:
                     # WaitForSingleObject(handle, 0): non-blocking wait.
                     # WAIT_TIMEOUT (0x102) means the process is still running.
                     # WAIT_OBJECT_0 (0x0) means the process has exited.
+                    # WAIT_FAILED (0xFFFFFFFF) means the call itself failed.
                     result = kernel32.WaitForSingleObject(handle, 0)
+                    if result == 0xFFFFFFFF:  # WAIT_FAILED
+                        logger.warning("WaitForSingleObject failed for PID %s, last error: %s", pid, ctypes.get_last_error())
+                        return True  # assume alive on unexpected API failure
                     return result == 0x00000102  # WAIT_TIMEOUT => still alive
                 finally:
                     kernel32.CloseHandle(handle)
