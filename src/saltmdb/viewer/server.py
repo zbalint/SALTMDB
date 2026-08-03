@@ -100,7 +100,12 @@ def start_viewer(port: int = 8080) -> str:  # noqa: C901, PLR0912, PLR0915
         env["SALTMDB_DB_PATH"] = get_db_path()
         env["SALTMDB_VIEWER_PORT"] = str(port)
 
-        popen_kwargs: dict[str, Any] = {"stdout": log_file, "stderr": log_file, "env": env}
+        popen_kwargs: dict[str, Any] = {
+            "stdout": log_file,
+            "stderr": log_file,
+            "stdin": subprocess.DEVNULL,
+            "env": env,
+        }
         if sys.platform == "win32":
             popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         else:
