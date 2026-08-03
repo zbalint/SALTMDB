@@ -33,6 +33,21 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
     """
     import numpy as np
 
+    def _gram_schmidt(A):
+        # Modified Gram-Schmidt using only elementwise multiply + sum, which
+        # numpy evaluates with its own reduction loop rather than dispatching
+        # to a BLAS/LAPACK routine. np.linalg.qr (LAPACK DGEQRF) was found to
+        # still crash on Windows even with all other LAPACK/BLAS calls removed,
+        # so orthonormalization here avoids BLAS entirely, not just LAPACK.
+        Qo = np.zeros_like(A)
+        for i in range(A.shape[1]):
+            v = A[:, i].copy()
+            for j in range(i):
+                v = v - np.sum(Qo[:, j] * v) * Qo[:, j]
+            norm = np.sqrt(np.sum(v * v))
+            Qo[:, i] = v / norm if norm > 1e-10 else v
+        return Qo
+
     rng = np.random.default_rng(seed)
     n_samples, n_features = X.shape
 
@@ -46,7 +61,7 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
         # Project: (n_samples, n_components)
         Z = X @ Q
         # Back-project: (n_features, n_components)
-        Q, _ = np.linalg.qr(X.T @ Z)
+        Q = _gram_schmidt(X.T @ Z)
 
     # Final projection onto the orthonormal basis Q
     return X @ Q[:, :n_components]
