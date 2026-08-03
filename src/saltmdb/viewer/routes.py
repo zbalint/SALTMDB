@@ -189,12 +189,27 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         return conn
 
     def get_scatterplot(self):
+        def _checkpoint(msg):
+            # A native-level crash (e.g. OpenBLAS DLL abort) kills the process
+            # without raising a Python exception, so ordinary error logging
+            # never runs. Log + flush BEFORE each risky step so viewer.log
+            # shows the last checkpoint reached even if the process dies
+            # immediately after, pinpointing the exact crashing line.
+            logger.info("get_scatterplot checkpoint: %s", msg)
+            for h in logger.handlers:
+                h.flush()
+            for h in logging.getLogger().handlers:
+                h.flush()
+
         conn = None
         try:
+            _checkpoint("start")
             conn = self.get_db_connection()
+            _checkpoint("db connected")
             if not try_load_vector_extension(conn):
                 self.send_json({"points": [], "error": "sqlite_vec extension unavailable"})
                 return
+            _checkpoint("vector extension loaded")
             cursor = conn.execute("""
                 SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
                 FROM entities e
@@ -203,11 +218,14 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 LIMIT 500
             """)
             rows = cursor.fetchall()
+            _checkpoint(f"fetched {len(rows)} rows")
             if not rows:
                 self.send_json({"points": []})
                 return
 
             import numpy as np
+
+            _checkpoint("numpy imported")
 
             valid_items = []
             vectors = []
@@ -227,17 +245,22 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                             }
                         )
 
+            _checkpoint(f"parsed {len(vectors)} vectors via np.frombuffer")
+
             if len(vectors) < 2:
                 self.send_json({"points": []})
                 return
 
             X = np.vstack(vectors)
+            _checkpoint(f"np.vstack done, X.shape={X.shape}")
             X_centered = X - np.mean(X, axis=0)
+            _checkpoint("np.mean/centering done")
             # Randomized power-iteration PCA — avoids all LAPACK/BLAS heavy
             # routines (SVD, eigh, matmul on large matrices) that crash
             # OpenBLAS in windowless Windows processes.
             # Uses only small dot products; stable across all platforms.
             coords_2d = _blas_free_pca(X_centered, n_components=2, n_iter=3, seed=42)
+            _checkpoint("_blas_free_pca done")
 
             points = []
             for idx, item in enumerate(valid_items):
@@ -246,6 +269,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 points.append(item)
 
             self.send_json({"points": points})
+            _checkpoint("response sent")
         except Exception as e:
             logger.error("Error in get_scatterplot: %s", e, exc_info=True)
             self.send_json({"error": str(e)}, 500)
