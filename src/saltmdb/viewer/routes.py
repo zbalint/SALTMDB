@@ -180,8 +180,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
             X = np.vstack(vectors)
             X_centered = X - np.mean(X, axis=0)
-            U, S, _ = np.linalg.svd(X_centered, full_matrices=False)
-            coords_2d = U[:, :2] * S[:2]
+            # Use covariance eigendecomposition instead of SVD.
+            # np.linalg.eigh (LAPACK DSYEVD) is far more stable than
+            # np.linalg.svd (LAPACK DGESDD) on Windows in windowless
+            # processes where OpenBLAS can crash at native DLL level.
+            cov = X_centered.T @ X_centered  # (384, 384) — cheap
+            eigenvalues, eigenvectors = np.linalg.eigh(cov)
+            # eigh returns ascending order; take the 2 largest
+            top2 = eigenvectors[:, -2:][:, ::-1]  # shape (384, 2)
+            coords_2d = X_centered @ top2
 
             points = []
             for idx, item in enumerate(valid_items):
