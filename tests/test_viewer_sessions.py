@@ -72,31 +72,33 @@ class TestViewerSessions(unittest.TestCase):
 
     def test_pid_alive_windows_branch(self):
         target_pid = 123
-        canned_match_output = (
-            "Image Name                     PID Session Name        Session#    Mem Usage\n"
-            "========================= ======== ================ =========== ============\n"
-            "python.exe                     123 Console                    1     15,000 K\n"
-        )
-        canned_substring_output = (
-            "Image Name                     PID Session Name        Session#    Mem Usage\n"
-            "========================= ======== ================ =========== ============\n"
-            "python.exe                    1234 Console                    1     15,000 K\n"
-        )
 
-        with patch("sys.platform", "win32"):
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0, stdout=canned_match_output)
-                self.assertTrue(_pid_alive(target_pid))
-                mock_run.assert_called_once_with(
-                    ["tasklist", "/FI", f"PID eq {target_pid}", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
+        with patch("sys.platform", "win32"), \
+             patch("saltmdb.db.viewer_sessions.kernel32", create=True) as mock_kernel32, \
+             patch("ctypes.get_last_error", create=True) as mock_get_last_error:
 
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0, stdout=canned_substring_output)
-                self.assertFalse(_pid_alive(target_pid))
+            # Alive: OpenProcess succeeds, WaitForSingleObject returns WAIT_TIMEOUT (0x102)
+            mock_kernel32.OpenProcess.return_value = 9999
+            mock_kernel32.WaitForSingleObject.return_value = 0x00000102
+            self.assertTrue(_pid_alive(target_pid))
+            mock_kernel32.OpenProcess.assert_called_with(0x1000, False, target_pid)
+            mock_kernel32.WaitForSingleObject.assert_called_with(9999, 0)
+            mock_kernel32.CloseHandle.assert_called_with(9999)
+
+            # Dead (zombie or exited): OpenProcess succeeds, WaitForSingleObject returns WAIT_OBJECT_0 (0x0)
+            mock_kernel32.OpenProcess.return_value = 9999
+            mock_kernel32.WaitForSingleObject.return_value = 0x00000000
+            self.assertFalse(_pid_alive(target_pid))
+
+            # Dead: OpenProcess returns NULL, error is not ACCESS_DENIED
+            mock_kernel32.OpenProcess.return_value = 0
+            mock_get_last_error.return_value = 87  # ERROR_INVALID_PARAMETER
+            self.assertFalse(_pid_alive(target_pid))
+
+            # Alive (access denied): OpenProcess returns NULL, error is ACCESS_DENIED (5)
+            mock_kernel32.OpenProcess.return_value = 0
+            mock_get_last_error.return_value = 5  # ERROR_ACCESS_DENIED
+            self.assertTrue(_pid_alive(target_pid))
 
 
 if __name__ == "__main__":
