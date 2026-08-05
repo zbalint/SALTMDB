@@ -74,6 +74,11 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             content="Synthesized content merging the core rule with the plain fact.",
             owner_id="agent_c",
             db_connection=self.conn,
+            # Real cosine similarity between these two parents' content sits close to the
+            # cohesion gate's threshold (~0.68 vs a 0.60 placeholder pending benchmark lock) --
+            # this test cares about is_core inheritance, not the cohesion gate, so an explicit
+            # override keeps it from becoming fragile once the real threshold is locked in.
+            override_justification="pre-existing test fixture, not exercising the cohesion gate",
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
         consolidated_id = res.split("ID: ")[1].strip()

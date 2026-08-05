@@ -5,7 +5,12 @@ import shutil
 import sqlite3
 import time
 import uuid
+import json
 from datetime import datetime, UTC
+from unittest.mock import patch
+
+import sqlite_vec
+
 from saltmdb.db.schema import init_db
 from saltmdb.db.connection import write_transaction_retrying
 from saltmdb.domain.services.relation_service import (
@@ -24,6 +29,18 @@ from saltmdb.domain.services.memory_service import (
     detect_orphaned_memories,
     get_canonical_tags,
 )
+from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
+
+DIM = 384
+
+
+def _axis_vector(index: int, dim: int = DIM) -> list:
+    """Unit basis vector -- cosine(axis_vector(i), axis_vector(j)) is exactly 1.0 if i == j,
+    else exactly 0.0 (orthogonal). Mirrors tests/test_topic_rerank.py's helper of the same
+    name/contract."""
+    v = [0.0] * dim
+    v[index] = 1.0
+    return v
 
 
 def _cons_content(marker: str) -> str:
@@ -1453,6 +1470,531 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
         self._mk("Orphan E5")
         result = detect_orphaned_memories(owner_id="orphan_tester", db_connection=self.conn)
         self.assertEqual(result["total_orphans"], len(result["orphaned_memories"]))
+
+
+class TestCommitConsolidationCohesionGate(unittest.TestCase):
+    """Memory-core rework Phase 3, Part A -- the pairwise cohesion gate (see plans/ and SALTMDB
+    memory `5c09effa`). Parents' chunk vectors are inserted directly into
+    entity_chunk_embeddings (axis-aligned, exact cosine similarity by construction), mirroring
+    tests/test_topic_rerank.py's / tests/test_cohesion_service.py's pattern, so cohesive vs
+    incohesive parent sets are hand-computable rather than relying on real-model variance."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk_vector_entity(self, title: str, vector: list, status: str = "raw") -> tuple[str, str]:
+        """Inserts a bare `entities` row plus a single matching entity_chunk_embeddings row
+        (bypassing store_memory's async chunk-embed trigger entirely), so this test class
+        controls every parent's centroid directly -- a single chunk's centroid is exactly that
+        chunk's own (already-unit) vector."""
+        entity_id = str(uuid.uuid4())
+        content_hash = f"hash-{entity_id}"
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', ?, ?, ?, ?)",
+            (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings"
+            "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+            " VALUES (?, ?, ?, 0, 0, 10, ?)",
+            (f"{entity_id}::0", entity_id, sqlite_vec.serialize_float32(vector), content_hash),
+        )
+        self.conn.commit()
+        return entity_id, content_hash
+
+    def test_commit_consolidation_rejects_incohesive_parent_set_without_override(self):
+        a, _ = self._mk_vector_entity("Incohesive A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Incohesive B", _axis_vector(1))  # orthogonal -> min_sim=0.0
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Incohesive",
+            content=_cons_content("incohesive"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
+
+    def test_commit_consolidation_rejects_when_a_parent_has_no_usable_centroid(self):
+        a, _ = self._mk_vector_entity("Unresolvable Pair A", _axis_vector(0))
+        # b has empty full_content and no chunk rows -> unresolved ("no embeddable content").
+        b = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Unresolvable Pair B', '', ?)",
+            (b, now, now, now, "empty-hash"),
+        )
+        self.conn.commit()
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Unresolvable",
+            content=_cons_content("unresolvable"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
+        self.assertIn("unresolved", res)
+
+    def test_commit_consolidation_accepts_incohesive_parent_set_with_valid_override_justification(
+        self,
+    ):
+        a, _ = self._mk_vector_entity("Override A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Override B", _axis_vector(1))
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Override",
+            content=_cons_content("override"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+            override_justification=(
+                "deliberately merging unrelated axis-0/axis-1 test fixtures for override coverage"
+            ),
+        )
+        self.assertIn("Successfully committed", res, res)
+        consolidated_id = res.split("ID: ")[1].strip()
+
+        content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (consolidated_id,)
+        ).fetchone()[0]
+        self.assertIn("[Consolidation Override]", content)
+
+        events = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'consolidation_gate_override'"
+        ).fetchall()
+        self.assertEqual(len(events), 1)
+        event_data = json.loads(events[0][0])
+        self.assertEqual(event_data["consolidated_id"], consolidated_id)
+
+    def test_commit_consolidation_rejects_override_justification_below_minimum_length(self):
+        a, _ = self._mk_vector_entity("Short Override A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Short Override B", _axis_vector(1))
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Short Override",
+            content=_cons_content("short-override"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+            override_justification="too short",
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
+
+    def test_commit_consolidation_gate_noops_for_single_parent(self):
+        a, _ = self._mk_vector_entity("Solo Parent", _axis_vector(0))
+        res = commit_consolidation(
+            parent_ids=[a],
+            title="C Solo",
+            content=_cons_content("solo"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed", res, res)
+
+    def test_commit_consolidation_gate_noops_for_single_unresolvable_parent(self):
+        """P1 regression (Codex review bf4qtkp7j / 7a5eba85): a lone parent with no usable
+        content used to land in `unresolved`, which unconditionally forced min_sim=0.0 and
+        rejected the merge -- even though there is only one parent and nothing to compare it
+        against. The gate must short-circuit on parent count alone, before any centroid work."""
+        a = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Solo Unresolvable', '', ?)",
+            (a, now, now, now, "empty-hash-solo"),
+        )
+        self.conn.commit()
+
+        res = commit_consolidation(
+            parent_ids=[a],
+            title="C Solo Unresolvable",
+            content=_cons_content("solo-unresolvable"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed", res, res)
+
+    def test_commit_consolidation_accepts_override_for_active_unscorable_parent(self):
+        """P1 regression (Codex review bf4qtkp7j / 7a5eba85): get_fresh_entity_centroids used to
+        drop observed_state entirely for a parent whose row read succeeded but embedding failed
+        (e.g. no embeddable content), so commit's TOCTOU revalidation hard-rejected even a valid
+        override_justification with observed=None before any merge or audit event. An
+        active-but-unscorable parent must remain override-eligible and auditable."""
+        a, _ = self._mk_vector_entity("Scorable Partner", _axis_vector(0))
+        b = str(uuid.uuid4())  # active parent, no embeddable content -> unresolved but not archived
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Active Unscorable', '', ?)",
+            (b, now, now, now, "empty-hash-active"),
+        )
+        self.conn.commit()
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Active Unscorable Override",
+            content=_cons_content("active-unscorable-override"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+            override_justification=(
+                "merging despite one parent having no scorable content, override intentional"
+            ),
+        )
+        self.assertIn("Successfully committed", res, res)
+        consolidated_id = res.split("ID: ")[1].strip()
+
+        events = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'consolidation_gate_override'"
+        ).fetchall()
+        self.assertEqual(len(events), 1)
+        event_data = json.loads(events[0][0])
+        self.assertEqual(event_data["consolidated_id"], consolidated_id)
+
+        b_status = self.conn.execute("SELECT status FROM entities WHERE id = ?", (b,)).fetchone()[0]
+        self.assertEqual(b_status, "archived", "override must still archive the unscorable parent")
+
+    def test_commit_consolidation_rejects_override_for_archived_unscorable_parent(self):
+        """Contrast case for the fix above: an archived parent must stay hard-rejected even with
+        a valid override_justification -- observed_state is never recorded for it, so TOCTOU
+        revalidation cannot be satisfied and the merge must not proceed."""
+        a, _ = self._mk_vector_entity("Scorable Partner Archived Case", _axis_vector(0))
+        b = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'archived', 'Archived Unscorable', '', ?)",
+            (b, now, now, now, "empty-hash-archived"),
+        )
+        self.conn.commit()
+
+        res = commit_consolidation(
+            parent_ids=[a, b],
+            title="C Archived Unscorable Override",
+            content=_cons_content("archived-unscorable-override"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+            override_justification=(
+                "attempting to merge despite one parent already being archived, should fail"
+            ),
+        )
+        self.assertTrue(res.startswith("Error"), res)
+
+        consolidated_count = self.conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE title = 'C Archived Unscorable Override'"
+        ).fetchone()[0]
+        self.assertEqual(consolidated_count, 0)
+
+    def test_commit_consolidation_rolls_back_when_audit_event_insertion_fails(self):
+        a, _ = self._mk_vector_entity("Audit Fail A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Audit Fail B", _axis_vector(1))
+
+        with patch(
+            "saltmdb.domain.services.relation_service.log_event",
+            return_value="Error: simulated audit failure",
+        ):
+            res = commit_consolidation(
+                parent_ids=[a, b],
+                title="C Audit Fail",
+                content=_cons_content("audit-fail"),
+                owner_id="agent_c",
+                db_connection=self.conn,
+                override_justification=(
+                    "deliberately merging unrelated fixtures to exercise the audit-failure "
+                    "rollback path"
+                ),
+            )
+        self.assertTrue(res.startswith("Error"), res)
+
+        a_status = self.conn.execute("SELECT status FROM entities WHERE id = ?", (a,)).fetchone()[0]
+        b_status = self.conn.execute("SELECT status FROM entities WHERE id = ?", (b,)).fetchone()[0]
+        self.assertEqual(a_status, "raw")
+        self.assertEqual(b_status, "raw")
+
+        consolidated_count = self.conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE title = 'C Audit Fail'"
+        ).fetchone()[0]
+        self.assertEqual(consolidated_count, 0)
+
+    def test_commit_consolidation_revalidates_against_the_state_that_produced_the_centroid(self):
+        a, _ = self._mk_vector_entity("Reval A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Reval B", _axis_vector(0))  # identical -> cohesive
+
+        real_get_centroids = get_fresh_entity_centroids
+
+        def _racy_get_centroids(entity_ids, conn, db_path):
+            result = real_get_centroids(entity_ids, conn, db_path)
+            # Simulate a concurrent edit landing in the gap between centroid computation and
+            # the in-transaction revalidation read inside _do_commit.
+            conn.execute("UPDATE entities SET content_hash = 'mutated-mid-call' WHERE id = ?", (a,))
+            conn.commit()
+            return result
+
+        with patch(
+            "saltmdb.domain.services.relation_service.get_fresh_entity_centroids",
+            side_effect=_racy_get_centroids,
+        ):
+            res = commit_consolidation(
+                parent_ids=[a, b],
+                title="C Reval Race",
+                content=_cons_content("reval-race"),
+                owner_id="agent_c",
+                db_connection=self.conn,
+            )
+        self.assertTrue(res.startswith("Error"), res)
+        a_status = self.conn.execute("SELECT status FROM entities WHERE id = ?", (a,)).fetchone()[0]
+        self.assertEqual(a_status, "raw", "parent must not be archived by the aborted commit")
+
+        # Inverse: content_hash changes BEFORE centroid computation runs at all -- the "new"
+        # content is what gets embedded/snapshotted, so nothing changes in the gap and this must
+        # succeed normally.
+        c, _ = self._mk_vector_entity("Reval C", _axis_vector(0))
+        d, _ = self._mk_vector_entity("Reval D", _axis_vector(0))
+        self.conn.execute(
+            "UPDATE entities SET content_hash = 'changed-before-call' WHERE id = ?", (c,)
+        )
+        # vec0 virtual tables don't support UPDATE against a partition-key-scoped predicate
+        # (confirmed: "UPDATE on partition key columns are not supported yet") -- DELETE +
+        # re-INSERT instead, mirroring write_entity_chunk_embeddings' own re-embed pattern.
+        self.conn.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id = ?", (c,))
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings"
+            "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+            " VALUES (?, ?, ?, 0, 0, 10, ?)",
+            (f"{c}::0", c, sqlite_vec.serialize_float32(_axis_vector(0)), "changed-before-call"),
+        )
+        self.conn.commit()
+        res2 = commit_consolidation(
+            parent_ids=[c, d],
+            title="C Reval No Race",
+            content=_cons_content("reval-no-race"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed", res2, res2)
+
+    def test_commit_consolidation_accepts_already_consolidated_entity_as_parent(self):
+        consolidated_id, _ = self._mk_vector_entity(
+            "Already Consolidated Parent", _axis_vector(0), status="consolidated"
+        )
+        fresh_raw, _ = self._mk_vector_entity("Refresh Raw Evidence", _axis_vector(0))
+
+        res = commit_consolidation(
+            parent_ids=[consolidated_id, fresh_raw],
+            title="C Refresh Consolidated",
+            content=_cons_content("refresh-consolidated"),
+            owner_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed", res, res)
+
+    def test_bulk_commit_consolidation_per_item_override_does_not_leak_to_other_items(self):
+        a1, _ = self._mk_vector_entity("Bulk Leak A1", _axis_vector(0))
+        a2, _ = self._mk_vector_entity("Bulk Leak A2", _axis_vector(1))  # incohesive with a1
+
+        b1, _ = self._mk_vector_entity("Bulk Leak B1", _axis_vector(5))
+        b2, _ = self._mk_vector_entity("Bulk Leak B2", _axis_vector(5))  # cohesive, no override
+
+        batch = [
+            {
+                "parent_ids": [a1, a2],
+                "title": "Bulk Leak Item A",
+                "content": _cons_content("bulk-leak-a"),
+                "override_justification": (
+                    "deliberately merging unrelated axis-0/axis-1 test fixtures"
+                ),
+            },
+            {
+                "parent_ids": [b1, b2],
+                "title": "Bulk Leak Item B",
+                "content": _cons_content("bulk-leak-b"),
+            },
+        ]
+        results = bulk_commit_consolidation(consolidations=batch, db_connection=self.conn)
+        self.assertEqual(len(results), 2, results)
+        self.assertEqual(results[0]["status"], "success", results)
+        self.assertEqual(results[1]["status"], "success", results)
+
+        item_a_content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (results[0]["entity_id"],)
+        ).fetchone()[0]
+        item_b_content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (results[1]["entity_id"],)
+        ).fetchone()[0]
+        self.assertIn("[Consolidation Override]", item_a_content)
+        self.assertNotIn("[Consolidation Override]", item_b_content)
+
+    def test_bulk_commit_consolidation_precomputes_centroids_before_write_transaction(self):
+        a, _ = self._mk_vector_entity("Bulk Precompute A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Bulk Precompute B", _axis_vector(0))
+
+        real_get_centroids = get_fresh_entity_centroids
+        call_count = {"n": 0}
+
+        def _counting_get_centroids(entity_ids, conn, db_path):
+            call_count["n"] += 1
+            return real_get_centroids(entity_ids, conn, db_path)
+
+        def _raising_write_transaction(conn, fn):
+            raise RuntimeError("write_transaction_retrying should not run yet in this assertion")
+
+        with (
+            patch(
+                "saltmdb.domain.services.relation_service.get_fresh_entity_centroids",
+                side_effect=_counting_get_centroids,
+            ),
+            patch(
+                "saltmdb.domain.services.relation_service.write_transaction_retrying",
+                side_effect=_raising_write_transaction,
+            ),
+        ):
+            results = bulk_commit_consolidation(
+                consolidations=[
+                    {
+                        "parent_ids": [a, b],
+                        "title": "Bulk Precompute Item",
+                        "content": _cons_content("bulk-precompute"),
+                    }
+                ],
+                db_connection=self.conn,
+            )
+
+        # write_transaction_retrying raising is caught by bulk_commit_consolidation's own
+        # try/except and reported as a top-level error -- but the centroid precompute must
+        # already have run exactly once by that point, proving it happens BEFORE the write
+        # transaction opens, not inside it.
+        self.assertEqual(results[0]["status"], "error", results)
+        self.assertEqual(call_count["n"], 1)
+
+    def test_bulk_commit_consolidation_resolves_and_dedupes_parent_ids_before_building_union(self):
+        a, _ = self._mk_vector_entity("Bulk Union Dedup A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Bulk Union Dedup B", _axis_vector(0))
+        c, _ = self._mk_vector_entity("Bulk Union Dedup C", _axis_vector(0))
+
+        real_get_centroids = get_fresh_entity_centroids
+        captured = {}
+
+        def _capturing_get_centroids(entity_ids, conn, db_path):
+            captured["ids"] = list(entity_ids)
+            return real_get_centroids(entity_ids, conn, db_path)
+
+        batch = [
+            {
+                # References `a` by its raw canonical UUID.
+                "parent_ids": [a, b],
+                "title": "Bulk Union Item 1",
+                "content": _cons_content("bulk-union-1"),
+            },
+            {
+                # References the SAME entity `a` via its title (an alias-equivalent reference,
+                # resolve_entity_id's title-resolution fallback), alongside a disjoint parent
+                # `c` -- item 2 doesn't share a consolidation TARGET with item 1, only the raw
+                # *reference* to `a` overlaps, isolating this test from the separate
+                # archived-shared-parent race covered by the "second_item_rejects" test below
+                # (this batch is expected to abort on that unrelated, separately-tested race --
+                # this test only cares about what union_ids get_fresh_entity_centroids saw).
+                "parent_ids": ["Bulk Union Dedup A", c],
+                "title": "Bulk Union Item 2",
+                "content": _cons_content("bulk-union-2"),
+            },
+        ]
+
+        with patch(
+            "saltmdb.domain.services.relation_service.get_fresh_entity_centroids",
+            side_effect=_capturing_get_centroids,
+        ):
+            bulk_commit_consolidation(consolidations=batch, db_connection=self.conn)
+
+        union_ids = captured["ids"]
+        self.assertEqual(
+            len(union_ids), len(set(union_ids)), "union must not contain duplicate ids"
+        )
+        self.assertIn(a, union_ids)
+        self.assertNotIn(
+            "Bulk Union Dedup A",
+            union_ids,
+            "raw title alias must be resolved before the union is built, not passed through verbatim",
+        )
+
+    def test_bulk_commit_consolidation_second_item_rejects_when_first_item_archived_shared_parent(
+        self,
+    ):
+        shared, _ = self._mk_vector_entity("Bulk Shared Parent", _axis_vector(0))
+        b1, _ = self._mk_vector_entity("Bulk Shared B1", _axis_vector(0))
+        b2, _ = self._mk_vector_entity("Bulk Shared B2", _axis_vector(0))
+
+        batch = [
+            {
+                "parent_ids": [shared, b1],
+                "title": "Bulk Shared Item 1",
+                "content": _cons_content("bulk-shared-1"),
+            },
+            {
+                "parent_ids": [shared, b2],
+                "title": "Bulk Shared Item 2",
+                "content": _cons_content("bulk-shared-2"),
+            },
+        ]
+        results = bulk_commit_consolidation(consolidations=batch, db_connection=self.conn)
+        self.assertEqual(len(results), 1, results)
+        self.assertEqual(results[0]["status"], "error", results)
+
+        # All-or-nothing: item 1's own archiving must have been rolled back too.
+        shared_status = self.conn.execute(
+            "SELECT status FROM entities WHERE id = ?", (shared,)
+        ).fetchone()[0]
+        self.assertEqual(shared_status, "raw")
+
+    def test_get_fresh_entity_centroids_self_loads_extension_on_injected_connection(self):
+        a, _ = self._mk_vector_entity("Self Load A", _axis_vector(0))
+        raw_conn = sqlite3.connect(self.db_path)
+        try:
+            centroids, unresolved, _observed_state = get_fresh_entity_centroids(
+                [a], raw_conn, self.db_path
+            )
+        finally:
+            raw_conn.close()
+        self.assertIn(a, centroids)
+        self.assertEqual(unresolved, {})
+
+    def test_get_fresh_entity_centroids_excludes_archived_entities_even_via_fallback(self):
+        entity_id = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'archived', ?, ?, ?)",
+            (entity_id, now, now, now, "Archived Entity", "some archived content", "archived-hash"),
+        )
+        self.conn.commit()
+
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(
+            [entity_id], self.conn, self.db_path
+        )
+        self.assertNotIn(entity_id, centroids)
+        self.assertIn(entity_id, unresolved)
+        self.assertIn("archived", unresolved[entity_id].lower())
+        self.assertNotIn(entity_id, observed_state)
 
 
 if __name__ == "__main__":

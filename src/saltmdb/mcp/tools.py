@@ -367,9 +367,18 @@ def commit_consolidation(
     tags: list = None,
     owner_id: str = None,
     context_id: str = None,
+    override_justification: str = None,
     **kwargs,
 ) -> str | list:
-    """Commits single or multiple consolidated memories, archiving raw parents and creating lineage edges."""
+    """Commits single or multiple consolidated memories, archiving raw parents and creating lineage edges.
+
+    A pairwise-cohesion gate rejects parent sets whose chunk-embedding centroids fail a minimum
+    similarity threshold (REJECT_LOW_COHESION), unless override_justification (a non-throwaway
+    string explaining why this merge should proceed anyway) is supplied to force it through --
+    the override is baked into the committed content and atomically audited. For the bulk
+    (`consolidations`) shape, put `override_justification` on each individual item that needs
+    it, not at the top level -- it is never shared across items in the same batch.
+    """
     kw = _unwrap_kwargs(kwargs)
     consolidations_ = _resolve(consolidations, kw, kwargs, "consolidations")
     if consolidations_:
@@ -388,6 +397,9 @@ def commit_consolidation(
     scope = _resolve(None, kw, kwargs, "scope") or "shared"
     weight = _resolve(None, kw, kwargs, "weight") or 1
     is_core_ = _resolve(None, kw, kwargs, "is_core")
+    override_justification_ = _resolve(
+        override_justification, kw, kwargs, "override_justification", "override_reason"
+    )
 
     return relation_service.commit_consolidation(
         parent_ids=parent_ids_,
@@ -399,6 +411,7 @@ def commit_consolidation(
         weight=weight,
         owner_id=owner_id_,
         context_id=context_id_,
+        override_justification=override_justification_,
     )
 
 

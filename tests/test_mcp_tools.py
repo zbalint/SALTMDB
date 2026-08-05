@@ -586,6 +586,117 @@ class TestMCPToolsWrapper(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row2[0], custom_invalid_at)
 
+    def _mk_vector_entity(self, title: str, vector: list) -> str:
+        """Inserts a bare `entities` row plus a single matching entity_chunk_embeddings row
+        (bypassing store_memory's async chunk-embed trigger), so this test controls each
+        parent's centroid directly -- mirrors tests/test_relation_service.py's helper of the
+        same name/contract."""
+        import uuid
+        from datetime import datetime, UTC
+        import sqlite_vec
+
+        entity_id = str(uuid.uuid4())
+        content_hash = f"hash-{entity_id}"
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'raw', ?, ?, ?)",
+            (entity_id, now, now, now, title, f"content body for {title}", content_hash),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings"
+            "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+            " VALUES (?, ?, ?, 0, 0, 10, ?)",
+            (f"{entity_id}::0", entity_id, sqlite_vec.serialize_float32(vector), content_hash),
+        )
+        self.conn.commit()
+        return entity_id
+
+    def test_commit_consolidation_tool_forwards_override_justification(self):
+        """override_justification must reach relation_service.commit_consolidation through the
+        actual MCP tool wrapper, for both the single-item and bulk-item (per-item) shapes
+        (memory-core rework Phase 3, Part A6)."""
+        dim = 384
+
+        def _axis(i):
+            v = [0.0] * dim
+            v[i] = 1.0
+            return v
+
+        # Single-item shape.
+        a = self._mk_vector_entity("Override Tool A", _axis(0))
+        b = self._mk_vector_entity("Override Tool B", _axis(1))  # orthogonal -> incohesive
+
+        res_no_override = tools.commit_consolidation(
+            parent_ids=[a, b],
+            title="C Override Tool No Justification",
+            content=(
+                "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
+                "- Merged detail alpha\n- Merged detail beta"
+            ),
+            owner_id="agent_c",
+        )
+        self.assertTrue(res_no_override.startswith("Error: REJECT_LOW_COHESION"))
+
+        res_with_override = tools.commit_consolidation(
+            parent_ids=[a, b],
+            title="C Override Tool With Justification",
+            content=(
+                "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
+                "- Merged detail alpha\n- Merged detail beta"
+            ),
+            owner_id="agent_c",
+            override_justification="deliberately merging unrelated fixtures via the MCP tool wrapper",
+        )
+        self.assertIn("Successfully committed", res_with_override)
+        consolidated_id = res_with_override.split("ID: ")[1].strip()
+        content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (consolidated_id,)
+        ).fetchone()[0]
+        self.assertIn("[Consolidation Override]", content)
+
+        # Bulk-item shape: override_justification lives per-item, not shared at the batch level.
+        c = self._mk_vector_entity("Override Tool Bulk C", _axis(0))
+        d = self._mk_vector_entity("Override Tool Bulk D", _axis(1))
+        e = self._mk_vector_entity("Override Tool Bulk E", _axis(5))
+        f = self._mk_vector_entity("Override Tool Bulk F", _axis(5))  # cohesive with E
+
+        bulk_content = (
+            "# Consolidated Bulk Record\n\nSynthesized summary combining bulk source facts.\n"
+            "- Merged bulk detail alpha\n- Merged bulk detail beta"
+        )
+        bulk_results = tools.commit_consolidation(
+            consolidations=[
+                {
+                    "parent_ids": [c, d],
+                    "title": "Bulk Override Item CD",
+                    "content": bulk_content,
+                    "override_justification": (
+                        "deliberately merging unrelated bulk fixtures via the MCP tool wrapper"
+                    ),
+                },
+                {
+                    "parent_ids": [e, f],
+                    "title": "Bulk Override Item EF",
+                    "content": bulk_content,
+                },
+            ]
+        )
+        self.assertEqual(len(bulk_results), 2)
+        self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
+        self.assertEqual(bulk_results[1]["status"], "success", bulk_results)
+
+        cd_content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (bulk_results[0]["entity_id"],)
+        ).fetchone()[0]
+        ef_content = self.conn.execute(
+            "SELECT full_content FROM entities WHERE id = ?", (bulk_results[1]["entity_id"],)
+        ).fetchone()[0]
+        self.assertIn("[Consolidation Override]", cd_content)
+        self.assertNotIn("[Consolidation Override]", ef_content)
+
     def test_mcp_tool_count_regression_guard(self):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(

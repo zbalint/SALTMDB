@@ -4,12 +4,21 @@ import logging
 import re
 from datetime import datetime, UTC
 from typing import Any, Literal
-from saltmdb.config import get_db_path
+from saltmdb.config import (
+    get_db_path,
+    COHESION_MIN_PAIRWISE_THRESHOLD,
+    COHESION_OVERRIDE_MIN_LENGTH,
+)
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import resolve_entity_id, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
+from saltmdb.domain.services.cohesion_service import (
+    get_fresh_entity_centroids,
+    min_pairwise_cohesion,
+)
+from saltmdb.domain.services.event_service import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -501,41 +510,20 @@ def analyze_lineage(
             close_connection(conn)
 
 
-def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
-    parent_ids: list[str],
-    title: str,
-    content: str,
-    tags: list[str] = None,
-    scope: Literal["private", "shared"] = "shared",
-    weight: int = 1,
-    is_core: bool = None,
-    owner_id: str = None,
-    context_id: str = None,
-    db_connection=None,
-    db_path: str = None,
-    _in_transaction: bool = False,
-) -> str:
-    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations.
+def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
+    """Resolves each parent_id to its canonical entity id (via resolve_entity_id), dedupes,
+    and filters out any id that doesn't currently exist in entities.
 
-    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
-    bulk_commit_consolidation, whose caller already holds an open write transaction around the
-    whole batch (so the single-item write here must not open/commit its own nested transaction).
+    Single source of truth for this resolution, shared by commit_consolidation's own
+    single-item path and bulk_commit_consolidation's pre-transaction cross-item union (Codex
+    correction R3 -- resolve-before-union: mixing raw and resolved ids when slicing the
+    precomputed centroid/unresolved/observed_state maps per item is unsafe, since a raw alias
+    would miss the entry actually stored under the canonical id). Exactly one resolution code
+    path, not two that could drift.
     """
-    if not parent_ids or not isinstance(parent_ids, list):
-        return "Error: parent_ids must be a non-empty list of UUID strings."
-    if not title or not content:
-        return "Error: title and content are mandatory."
-
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
     resolved_parents = []
     seen = set()
-    for p in parent_ids:
+    for p in parent_ids or []:
         res = resolve_entity_id(conn, str(p))
         if res and res not in seen:
             seen.add(res)
@@ -549,10 +537,122 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         existing_set = {r[0] for r in existing_rows}
         resolved_parents = [p for p in resolved_parents if p in existing_set]
 
+    return resolved_parents
+
+
+def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    parent_ids: list[str],
+    title: str,
+    content: str,
+    tags: list[str] = None,
+    scope: Literal["private", "shared"] = "shared",
+    weight: int = 1,
+    is_core: bool = None,
+    owner_id: str = None,
+    context_id: str = None,
+    override_justification: str | None = None,
+    db_connection=None,
+    db_path: str = None,
+    _in_transaction: bool = False,
+    _precomputed_centroids: dict[str, list[float]] | None = None,
+    _precomputed_unresolved: dict[str, str] | None = None,
+    _precomputed_observed_state: dict[str, tuple[str, str]] | None = None,
+) -> str:
+    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
+    bulk_commit_consolidation, whose caller already holds an open write transaction around the
+    whole batch (so the single-item write here must not open/commit its own nested transaction).
+
+    A pairwise-cohesion gate runs before the write: parent_ids' chunk-embedding centroids must
+    clear COHESION_MIN_PAIRWISE_THRESHOLD (MIN, not MEAN, pairwise cosine similarity) or the
+    call is rejected with REJECT_LOW_COHESION, unless override_justification (>=
+    COHESION_OVERRIDE_MIN_LENGTH chars) is supplied to force the merge (audited atomically, see
+    _do_commit below). The `_precomputed_*` params are never set by external callers or the MCP
+    surface -- they exist only so bulk_commit_consolidation can hoist expensive centroid
+    computation before its write transaction opens, while every item still routes through this
+    same single code path.
+    """
+    if not parent_ids or not isinstance(parent_ids, list):
+        return "Error: parent_ids must be a non-empty list of UUID strings."
+    if not title or not content:
+        return "Error: title and content are mandatory."
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    resolved_parents = _resolve_and_filter_parent_ids(conn, parent_ids)
+
     if not resolved_parents:
         if should_close:
             close_connection(conn)
         return "Error: None of the provided parent_ids could be resolved."
+
+    # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
+    # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted
+    # outlier" failure mode that let `6a8fec3d` force-merge 37+ unrelated memories.
+    #
+    # P1 (Codex review, bf4qtkp7j / 7a5eba85): the gate is a no-op by contract for fewer than
+    # two parents -- there's no pairwise comparison to make. That must be a short-circuit BEFORE
+    # any centroid work, not just min_pairwise_cohesion's own len(centroids) < 2 trivial-pass:
+    # with only one parent, an `unresolved` entry (e.g. empty/unembeddable content) used to still
+    # force min_sim=0.0 below and reject the merge, even though there was nothing to compare it
+    # against. cohesion_gate_applicable also gates the TOCTOU revalidation in _do_commit below --
+    # no cohesion decision means no observed_state snapshot to revalidate against.
+    cohesion_gate_applicable = len(resolved_parents) >= 2
+    if not cohesion_gate_applicable:
+        centroids, unresolved, observed_state = {}, {}, {}
+        min_sim, offending_pair = 1.0, None
+    else:
+        centroids, unresolved, observed_state = (
+            (_precomputed_centroids, _precomputed_unresolved, _precomputed_observed_state)
+            if _precomputed_centroids is not None
+            else get_fresh_entity_centroids(resolved_parents, conn, db_path or get_db_path())
+        )
+        if unresolved:
+            min_sim, offending_pair = (
+                0.0,
+                (
+                    next(iter(unresolved)),
+                    f"<{next(iter(unresolved.values()))}>",
+                ),
+            )
+        else:
+            min_sim, offending_pair = min_pairwise_cohesion(centroids)
+
+    justification = (override_justification or "").strip()
+    override_applied = min_sim < COHESION_MIN_PAIRWISE_THRESHOLD
+    if override_applied and len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
+        if should_close:
+            close_connection(conn)
+        return (
+            f"Error: REJECT_LOW_COHESION - parent set fails pairwise similarity gate "
+            f"(min={min_sim:.4f} < {COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
+            f"{', unresolved=' + str(unresolved) if unresolved else ''}). "
+            f"Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge."
+        )
+
+    if override_applied:
+        # A3: baked into `content` BEFORE redact_secrets/compute_content_hash run below, so the
+        # override is part of the committed content_hash, not a side-channel annotation. Kept
+        # to plain prose sentences deliberately (no raw UUIDs/dict dumps): the full technical
+        # detail (parent_ids, offending_pair, unresolved) is already recorded precisely in the
+        # consolidation_gate_override audit event below -- packing long underscore-joined
+        # identifiers or raw UUID tokens into this annotation would itself skew the consolidated
+        # content's Coleman-Liau readability score (evaluate_memory_quality, run just below)
+        # high enough to trip its own quality gate on otherwise-unremarkable content.
+        content = (
+            f"{content}\n\n---\n"
+            f"[Consolidation Override] This merge was forced past the automatic cohesion gate. "
+            f"The minimum pairwise similarity between parents was {min_sim:.4f}, below the "
+            f"required threshold of {COHESION_MIN_PAIRWISE_THRESHOLD}. "
+            f"{'One or more parents had no usable content for scoring. ' if unresolved else ''}"
+            f"Justification: {justification}"
+        )
 
     if is_core is None:
         placeholders_core = ",".join("?" for _ in resolved_parents)
@@ -621,7 +721,65 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     try:
 
-        def _do_commit():
+        def _do_commit():  # noqa: C901, PLR0912
+            # A4: TOCTOU revalidation, first statements, before any destructive write. Re-fetch
+            # content_hash/status for every resolved parent and compare against observed_state
+            # -- the dict returned from the EXACT read that produced (or failed to produce)
+            # each centroid, never a separately-later-taken snapshot. Any mismatch (content
+            # changed, status no longer eligible, or a resolved parent with no observed_state
+            # entry at all -- meaning it was unresolved/archived, or its read never completed
+            # cleanly) aborts the whole transaction. This is also what catches an earlier item
+            # in the same bulk batch having already archived a shared parent: that parent's
+            # current status reads back 'archived', mismatching its recorded observed_state.
+            # Gated on cohesion_gate_applicable (P1, Codex review bf4qtkp7j / 7a5eba85): for a
+            # single-parent commit the gate never ran, so observed_state is deliberately empty --
+            # there is no cohesion snapshot to revalidate against, and requiring one here would
+            # make every single-parent commit spuriously fail this check.
+            if cohesion_gate_applicable and resolved_parents:
+                placeholders_reval = ",".join("?" for _ in resolved_parents)
+                current_rows = conn.execute(
+                    f"SELECT id, content_hash, status FROM entities WHERE id IN ({placeholders_reval})",
+                    resolved_parents,
+                ).fetchall()
+                current_state = {r[0]: (r[1], r[2]) for r in current_rows}
+                for pid in resolved_parents:
+                    if observed_state.get(pid) != current_state.get(pid):
+                        raise RuntimeError(
+                            f"Consolidation aborted: parent {pid} state changed since the "
+                            f"cohesion decision was made (observed={observed_state.get(pid)}, "
+                            f"current={current_state.get(pid)})"
+                        )
+
+            # A3: atomic audit trail for an override commit -- written as the first destructive
+            # step for fail-fast clarity. log_event catches its own exceptions and RETURNS an
+            # "Error: ..." string rather than raising, so the result must be checked and raised
+            # on here -- because this runs inside the surrounding write_transaction_retrying
+            # (directly for a single-item call, or one level up in bulk_commit_consolidation for
+            # a batch item), any exception raised anywhere in _do_commit rolls back the whole
+            # transaction, which is what actually makes this audit atomic with the merge itself.
+            if override_applied:
+                audit_result = log_event(
+                    agent_id=owner_val,
+                    type="consolidation_gate_override",
+                    content=json.dumps(
+                        {
+                            "parent_ids": resolved_parents,
+                            "min_pairwise_similarity": min_sim,
+                            "threshold": COHESION_MIN_PAIRWISE_THRESHOLD,
+                            "offending_pair": offending_pair,
+                            "unresolved": unresolved,
+                            "justification": justification,
+                            "consolidated_id": consolidated_id,
+                        }
+                    ),
+                    db_connection=conn,
+                    _in_transaction=True,
+                )
+                if audit_result.startswith("Error"):
+                    raise RuntimeError(
+                        f"Failed to record consolidation override audit event: {audit_result}"
+                    )
+
             conn.execute(
                 """
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
@@ -778,6 +936,19 @@ def bulk_commit_consolidation(
     failure unwinds every prior "successful" item in the same batch, a mixed per-item
     success/error list would misrepresent the outcome -- so on failure this returns a
     single top-level error result instead of claiming any individual items succeeded.
+
+    A4 (memory-core rework Phase 3): every item's parent_ids is resolved/deduped FIRST via the
+    same helper commit_consolidation itself uses (_resolve_and_filter_parent_ids), so the
+    cross-item union built from them is keyed on canonical entity ids, never raw aliases. The
+    union's chunk-embedding centroids are then computed ONCE, before write_transaction_retrying
+    opens -- no write lock (BEGIN IMMEDIATE) held yet, so an on-demand embedding fallback for an
+    uncached parent never blocks other writers. Each per-item commit_consolidation(...) call
+    inside the transaction receives its own slice of the precomputed centroids/unresolved/
+    observed_state maps -- the gate decision itself is then pure numpy inside the lock, no I/O,
+    no model calls -- and re-validates that slice's observed_state against the entities table's
+    current state as the first statements of its own _do_commit (see commit_consolidation's A4
+    docstring), which is what actually catches an earlier item in the same batch having already
+    archived a shared parent.
     """
     if not consolidations or not isinstance(consolidations, list):
         return [{"status": "error", "error": "consolidations must be a non-empty array of objects"}]
@@ -790,17 +961,37 @@ def bulk_commit_consolidation(
 
     results: list[Any] = []
     try:
+        item_resolved_parents: list[list[str]] = []
+        union_ids: list[str] = []
+        seen_union: set[str] = set()
+        for item in consolidations:
+            p_ids = _resolve_and_filter_parent_ids(conn, item.get("parent_ids", []))
+            item_resolved_parents.append(p_ids)
+            for pid in p_ids:
+                if pid not in seen_union:
+                    seen_union.add(pid)
+                    union_ids.append(pid)
+
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(
+            union_ids, conn, db_path or get_db_path()
+        )
 
         def _write(conn_arg):
             results.clear()
-            for item in consolidations:
-                p_ids = item.get("parent_ids", [])
+            for item, p_ids in zip(consolidations, item_resolved_parents):
                 t = item.get("title")
                 c = item.get("content")
                 tags = item.get("tags", [])
                 scope = item.get("scope", "shared")
                 w = item.get("weight", 1)
                 is_core = item.get("is_core")
+                override_justification = item.get("override_justification")
+
+                item_centroids = {pid: centroids[pid] for pid in p_ids if pid in centroids}
+                item_unresolved = {pid: unresolved[pid] for pid in p_ids if pid in unresolved}
+                item_observed_state = {
+                    pid: observed_state[pid] for pid in p_ids if pid in observed_state
+                }
 
                 res = commit_consolidation(
                     parent_ids=p_ids,
@@ -810,8 +1001,12 @@ def bulk_commit_consolidation(
                     scope=scope,
                     weight=w,
                     is_core=is_core,
+                    override_justification=override_justification,
                     db_connection=conn,
                     _in_transaction=True,
+                    _precomputed_centroids=item_centroids,
+                    _precomputed_unresolved=item_unresolved,
+                    _precomputed_observed_state=item_observed_state,
                 )
                 if res.startswith("Error"):
                     raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")

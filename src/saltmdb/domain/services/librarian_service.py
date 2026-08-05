@@ -542,18 +542,135 @@ def extract_c_tfidf_tags(
     return final_tags, confidence_score
 
 
+def _find_best_cohesive_subset(
+    remaining: list[int],
+    sim_matrix: "np.ndarray",  # noqa: F821
+    valid_ids: list[str],
+    min_pairwise_cohesion: float,
+    min_cluster_size: int,
+) -> tuple[list[int], float] | None:
+    """Deterministic greedy heuristic: repeatedly identify the current worst-offending pair
+    (lowest pairwise similarity) and drop the more weakly-connected of the two (lower mean
+    similarity to the rest of the current set), until the remaining subset's minimum pairwise
+    similarity clears min_pairwise_cohesion or it shrinks below min_cluster_size.
+
+    NOT guaranteed to find the maximum-cardinality or globally highest-cohesion subset -- that's
+    an NP-hard combinatorial search in general (related to maximum clique under a similarity-
+    threshold constraint). This is a bounded-effort heuristic, acceptable because output here is
+    always a *proposal* (consolidate_vector_clusters never auto-commits; relation_service's
+    separate, whole-set cohesion gate at commit time is the actual safety backstop).
+
+    Determinism: `remaining` holds POSITIONAL INDICES into valid_ids/sim_matrix, which are
+    caller-supplied and permutation-dependent -- index 0 refers to a different entity if the
+    caller's valid_ids ordering changes. Sorting the indices themselves does NOT stabilize
+    behavior across permutations, since a given index means a different entity each time.
+    `current` is instead ordered by each index's underlying, permutation-INVARIANT entity_id
+    string (valid_ids[idx]), so ties in the worst-offending-pair search and the mean-similarity
+    tie-break resolve to the same actual entities regardless of how the caller happened to order
+    its input (memory-core rework Phase 3, Codex correction R4).
+    """
+    import numpy as np  # local import: see module-level note above find_connected_vector_clusters
+
+    current = sorted(remaining, key=lambda idx: valid_ids[idx])  # order by entity_id, not raw index
+    while len(current) >= min_cluster_size:
+        sub = sim_matrix[np.ix_(current, current)]
+        k = len(current)
+        mask = ~np.eye(k, dtype=bool)
+        min_val = float(np.min(sub[mask]))
+        if min_val >= min_pairwise_cohesion:
+            return current, min_val
+        masked = np.where(mask, sub, np.inf)
+        # deterministic tie-break: np.argmin returns the first (lowest flat-index) occurrence of
+        # the minimum over `current`'s entity_id-sorted ordering, so ties resolve to the same
+        # actual entities every run, independent of the caller's input order
+        i, j = np.unravel_index(np.argmin(masked), masked.shape)
+        avg_i = (np.sum(sub[i]) - sub[i, i]) / (k - 1)
+        avg_j = (np.sum(sub[j]) - sub[j, j]) / (k - 1)
+        # tie-break on the drop choice itself: if avg_i == avg_j exactly, drop the
+        # entity_id-sorted-later of the pair -- arbitrary but fixed, documented, and
+        # permutation-invariant (compares current[i]/current[j]'s entity_ids, not raw indices)
+        drop = (
+            i
+            if avg_i < avg_j
+            else (
+                j if avg_j < avg_i else (i if valid_ids[current[i]] > valid_ids[current[j]] else j)
+            )
+        )
+        current.pop(drop)
+    return None
+
+
+def _extract_cohesive_clusters(
+    component: list[int],
+    sim_matrix: "np.ndarray",  # noqa: F821
+    valid_ids: list[str],
+    min_pairwise_cohesion: float,
+    min_cluster_size: int,
+) -> list[tuple[list[int], float]]:
+    """Iteratively peels disjoint cohesive subsets out of one connected component, so a
+    component containing multiple genuinely distinct cohesive groups joined by a bridge
+    proposes all of them, not just one (memory-core rework Phase 3, Codex correction R3 --
+    multi-subset policy; the previous single-subset heuristic had no defined tie-break when a
+    component legitimately contained 2+ distinct cohesive groups joined by a weak bridge, and
+    could silently drop one). Threads valid_ids through to _find_best_cohesive_subset so every
+    ordering decision is keyed on permutation-invariant entity_id, not positional index.
+    """
+    remaining = list(component)
+    results: list[tuple[list[int], float]] = []
+    while len(remaining) >= min_cluster_size:
+        best = _find_best_cohesive_subset(
+            remaining, sim_matrix, valid_ids, min_pairwise_cohesion, min_cluster_size
+        )
+        if best is None:
+            break  # nothing salvageable in what's left of this component
+        subset, _min_val = best
+        results.append(best)
+        subset_set = set(subset)
+        remaining = [idx for idx in remaining if idx not in subset_set]
+    return results
+
+
 def find_connected_vector_clusters(
     valid_ids: list[str],
     vectors: list[Any],
     min_cluster_size: int = 3,
     similarity_threshold: float = 0.75,
+    min_pairwise_cohesion: float | None = None,
 ) -> list[tuple[list[str], float]]:
-    """Discovers vector clusters via connected components on a cosine similarity adjacency graph."""
+    """Discovers vector clusters via connected components on a cosine similarity adjacency
+    graph, then extracts every genuinely cohesive subset out of each component (memory-core
+    rework Phase 3, Part B -- see plans/ and SALTMDB memory `5c09effa`).
+
+    A raw connected-components pass at `similarity_threshold` is single-linkage clustering: one
+    weak bridging edge can chain two otherwise-unrelated cohesive groups into a single component
+    (confirmed chaining bug, SALTMDB memory `3deae748`). `_extract_cohesive_clusters` peels every
+    disjoint subset whose own minimum pairwise similarity clears `min_pairwise_cohesion` out of
+    each component, so a bridged component proposes each of its real cohesive groups separately
+    instead of merging them or silently discarding all but one.
+
+    `min_pairwise_cohesion` defaults to `similarity_threshold` when omitted, so this function's
+    standalone behavior stays sensible for any caller that doesn't pass it explicitly;
+    consolidate_vector_clusters always passes CLUSTER_MIN_PAIRWISE_THRESHOLD explicitly.
+
+    Components larger than config.COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION are skipped
+    (logged, not proposed) rather than run through the full extraction: multi-subset extraction
+    is O(k^4) worst case per component (each of up to k prune iterations can call
+    _find_best_cohesive_subset again on a shrinking remainder, and each of those re-slices/
+    re-scans an O(k^2) submatrix up to k times), and while real Librarian batches run ~28-35
+    entities (SALTMDB memory `760e8ee1`), components are only bounded by the connectivity of the
+    raw-entity pool, not by a hard cap.
+    """
     if len(vectors) < min_cluster_size:
         return []
 
+    effective_min_pairwise_cohesion = (
+        similarity_threshold if min_pairwise_cohesion is None else min_pairwise_cohesion
+    )
+
     try:
         import numpy as np
+
+        from saltmdb.config import COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION
 
         X = np.vstack(vectors)
         norms = np.linalg.norm(X, axis=1, keepdims=True)
@@ -583,13 +700,32 @@ def find_connected_vector_clusters(
                         visited[neighbor] = True
                         queue.append(neighbor)
 
-            if len(component) >= min_cluster_size:
-                comp_ids = [valid_ids[idx] for idx in component]
-                sub_sims = sim_matrix[np.ix_(component, component)]
-                k = len(component)
+            if len(component) < min_cluster_size:
+                continue
+
+            if len(component) > COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION:
+                logger.warning(
+                    "find_connected_vector_clusters: skipping component of size %d (exceeds "
+                    "COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION=%d) -- multi-subset extraction "
+                    "is O(k^4) worst case per component, defensively capped rather than run "
+                    "unbounded this pass",
+                    len(component),
+                    COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION,
+                )
+                continue
+
+            for surviving, _min_off_diag in _extract_cohesive_clusters(
+                component,
+                sim_matrix,
+                valid_ids,
+                effective_min_pairwise_cohesion,
+                min_cluster_size,
+            ):
+                comp_ids = [valid_ids[idx] for idx in surviving]
+                sub_sims = sim_matrix[np.ix_(surviving, surviving)]
+                k = len(surviving)
                 if k > 1:
-                    off_diag_sum = float(np.sum(sub_sims) - np.trace(sub_sims))
-                    mean_sim = off_diag_sum / (k * (k - 1))
+                    mean_sim = float(np.sum(sub_sims[~np.eye(k, dtype=bool)])) / (k * (k - 1))
                 else:
                     mean_sim = 1.0
                 clusters.append((comp_ids, round(mean_sim, 4)))
@@ -601,7 +737,15 @@ def find_connected_vector_clusters(
 
 
 def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901, PLR0912, PLR0915
-    """Discovers topically related raw memories via vector embeddings and logs consolidation request events."""
+    """Discovers topically related raw memories via chunk-embedding centroids and logs
+    consolidation request events for genuinely cohesive multi-subset extractions.
+
+    Memory-core rework Phase 3, Part B (see plans/ and SALTMDB memory `5c09effa`): replaced the
+    doc-level entity_embeddings join and single-linkage-chaining-prone Connected Components pass
+    (confirmed bug, SALTMDB memory `3deae748`) with entity_chunk_embeddings centroids
+    (cohesion_service.get_fresh_entity_centroids, B0) and multi-subset cohesive-cluster
+    extraction (find_connected_vector_clusters -> _extract_cohesive_clusters, B1).
+    """
     should_close = False
     if not conn:
         db_path = db_path or get_db_path()
@@ -610,39 +754,45 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
 
     try:
         logger.info("Running Vector Topic Clustering for Raw Memories...")
-        if should_close:
-            try:
-                import sqlite_vec
 
-                conn.enable_load_extension(True)
-                sqlite_vec.load(conn)
-                conn.enable_load_extension(False)
-            except Exception as e:
-                logger.debug("sqlite_vec extension load skipped or failed: %s", e)
-                return
+        from saltmdb.config import CLUSTER_MIN_PAIRWISE_THRESHOLD
+        from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
 
-        cursor = conn.execute("""
-            SELECT e.id, e.owner_id, ee.embedding
-            FROM entities e
-            JOIN entity_embeddings ee ON e.id = ee.entity_id
-            WHERE e.status = 'raw' AND e.embedding_status = 'ready'
-        """)
-        raw_rows = cursor.fetchall()
+        # Librarian's own scoping choice: only ever cluster raw entities. This candidate-pool
+        # pre-filter is independent of get_fresh_entity_centroids' own "not archived" (never
+        # "raw-only") eligibility rule -- that rule governs what the shared primitive itself
+        # will compute a centroid for, given whatever ids it's asked about.
+        raw_rows = conn.execute("SELECT id, owner_id FROM entities WHERE status = 'raw'").fetchall()
         if len(raw_rows) < 3:
             return
 
         owner_map = {r[0]: r[1] for r in raw_rows}
-        valid_rows = [(r[0], r[2]) for r in raw_rows if r[2]]
-        if len(valid_rows) < 3:
+        raw_ids = [r[0] for r in raw_rows]
+
+        centroids, unresolved, _observed_state = get_fresh_entity_centroids(
+            raw_ids, conn, db_path or get_db_path()
+        )
+        if unresolved:
+            logger.info(
+                "consolidate_vector_clusters: excluding %d raw entities without a usable "
+                "centroid this pass: %s",
+                len(unresolved),
+                unresolved,
+            )
+        if len(centroids) < 3:
             return
 
         import numpy as np
 
-        valid_ids = [vr[0] for vr in valid_rows]
-        vectors = [np.frombuffer(vr[1], dtype=np.float32) for vr in valid_rows]
+        valid_ids = list(centroids.keys())
+        vectors = [np.array(centroids[eid], dtype=np.float32) for eid in valid_ids]
 
         cluster_data = find_connected_vector_clusters(
-            valid_ids, vectors, min_cluster_size=3, similarity_threshold=0.75
+            valid_ids,
+            vectors,
+            min_cluster_size=3,
+            similarity_threshold=0.75,
+            min_pairwise_cohesion=CLUSTER_MIN_PAIRWISE_THRESHOLD,
         )
 
         to_insert = []

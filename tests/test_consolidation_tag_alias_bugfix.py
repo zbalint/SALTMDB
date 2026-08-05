@@ -97,6 +97,11 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             tags=["#fix", "#anewconsolidationtag"],
             owner_id="user1",
             db_connection=self.conn,
+            # Real cosine similarity between these two parents sits at ~0.73, above the 0.60
+            # placeholder threshold but with a margin that shouldn't be relied on once the real
+            # benchmark locks the final value -- this test is about tag-alias resolution, not
+            # the cohesion gate.
+            override_justification="pre-existing test fixture, not exercising the cohesion gate",
         )
         self.assertIn("Successfully committed consolidated memory", consolidation_res)
         consolidated_id = consolidation_res.split("ID: ")[1].strip()

@@ -109,3 +109,26 @@ LIBRARIAN_LOCK_STALE_MINUTES = 10  # promoted from a hardcoded "-10 minutes" lit
 LIBRARIAN_TRIGGER_COOLDOWN_S = (
     300  # promoted from a hardcoded 300 literal in librarian_service.py's trigger_librarian()
 )
+
+# Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py,
+# relation_service.py:commit_consolidation, librarian_service.py:consolidate_vector_clusters).
+# Memory-core rework Phase 3 -- see plans/ and SALTMDB memory `5c09effa`. Locked from
+# scripts/benchmarking/benchmark_cohesion_threshold.py's real bge-small-en-v1.5 MIN-pairwise-
+# cosine measurements over hand-crafted positive (genuinely related fragment groups) and negative
+# (the confirmed `6a8fec3d` 37-way-omnibus and `3deae748` chaining-incident shapes) classes --
+# do not re-tune without new benchmark evidence.
+COHESION_MIN_PAIRWISE_THRESHOLD = 0.6547
+# Separate, lower operating point for consolidate_vector_clusters: the benchmark's Population B
+# (larger, 6-8-item Librarian candidate-pool clusters) measured a meaningfully lower positive/
+# negative separation band than Population A's smaller commit-gate parent sets (2-4 items) --
+# MIN over more items has more chances of hitting a weaker pair even within a genuinely cohesive
+# group -- so this is intentionally NOT aliased to COHESION_MIN_PAIRWISE_THRESHOLD (see
+# librarian_service.py:B3).
+CLUSTER_MIN_PAIRWISE_THRESHOLD = 0.5108
+COHESION_OVERRIDE_MIN_LENGTH = 20  # mirrors QG_MIN_LENGTH's "not a throwaway string" floor
+# Defensive cap on find_connected_vector_clusters' multi-subset cohesive extraction, whose
+# worst-case cost is O(k^4) per connected component (see librarian_service.py:B1). A prior
+# benchmark (SALTMDB memory `760e8ee1`) found real Librarian batches run ~28-35 entities; 75 is
+# comfortably above that with headroom. Components larger than this are skipped (logged, not
+# proposed) rather than run through the full extraction.
+COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION = 75
