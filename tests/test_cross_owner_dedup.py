@@ -98,19 +98,27 @@ class TestCrossOwnerDedup(unittest.TestCase):
     def test_dedup_check_no_per_row_embedding_loop(self):
         """Regression guard: verify check_duplicate_memories embeds query text only once and does not loop per candidate."""
         owner = "agent_dedup"
-        for i in range(6):
-            eid = f"candidate-entity-{i}"
-            t = f"SALTMDB Vector Memory Architecture Candidate {i}"
-            c = f"Detailed technical text for candidate memory {i} regarding SALTMDB deduplication service"
-            memory_service.store_memory(
-                title=t,
-                content=c,
-                owner_id=owner,
-                entity_id=eid,
-                skip_duplicate_check=True,
-                db_connection=self.conn,
-            )
-            _seed_ready_embedding(self.conn, eid, t, c)
+        # store_memory queues its own async embed-trigger jobs on the module-global _embed_pool
+        # (entity-level, and, since Phase 2 Part A1, chunk-level too) -- pure waste here since
+        # _seed_ready_embedding immediately overwrites the entity-level result below anyway, but
+        # worse: if any of those jobs are still in flight once the `with patch(embed_text)` block
+        # further down activates, that background thread's call to the now-globally-patched
+        # embed_text would be counted by the mock too, flaking this call-count assertion.
+        # Suppressed for this setup loop only; real production behavior is unaffected.
+        with patch.object(memory_service._embed_pool, "submit", return_value=None):
+            for i in range(6):
+                eid = f"candidate-entity-{i}"
+                t = f"SALTMDB Vector Memory Architecture Candidate {i}"
+                c = f"Detailed technical text for candidate memory {i} regarding SALTMDB deduplication service"
+                memory_service.store_memory(
+                    title=t,
+                    content=c,
+                    owner_id=owner,
+                    entity_id=eid,
+                    skip_duplicate_check=True,
+                    db_connection=self.conn,
+                )
+                _seed_ready_embedding(self.conn, eid, t, c)
 
         real_embed_text = embedding_service.embed_text
         with patch(

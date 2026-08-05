@@ -248,12 +248,27 @@ def write_entity_chunk_embeddings(
     that just wrote/read the entity itself inside the same logical operation and already knows
     it's current.
 
+    Every row written carries a content_hash value (Part A0): expected_content_hash itself when
+    the guard is active (it's already been verified fresh, inside this same transaction, to
+    match entities.content_hash right above), or a freshly computed
+    compute_content_hash(full_content) when the guard is skipped -- mirroring the same value
+    store_memory/commit_consolidation already computed/committed for entities.content_hash at
+    that point, so it's consistent by construction rather than recomputed independently. This is
+    what lets the startup repair sweep (backfill_chunk_embeddings) tell "current" rows from
+    "stale" ones instead of only "present" from "missing".
+
     Returns the number of chunk rows written (0 on a guard skip or on empty/unchunkable content).
     """
     import sqlite_vec
     from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+    from saltmdb.utils.text import compute_content_hash
 
     rows = compute_entity_chunk_embeddings(entity_id, full_content)
+    row_content_hash = (
+        expected_content_hash
+        if expected_content_hash is not None
+        else compute_content_hash(full_content or "")
+    )
 
     conn = get_connection(db_path)
     try:
@@ -273,8 +288,8 @@ def write_entity_chunk_embeddings(
             if rows:
                 c.executemany(
                     "INSERT INTO entity_chunk_embeddings"
-                    "(id, entity_id, embedding, chunk_index, char_start, char_end)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             r["id"],
@@ -283,6 +298,7 @@ def write_entity_chunk_embeddings(
                             r["chunk_index"],
                             r["char_start"],
                             r["char_end"],
+                            row_content_hash,
                         )
                         for r in rows
                     ],
@@ -295,14 +311,21 @@ def write_entity_chunk_embeddings(
 
 
 def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
-    """Manually-invocable backfill: computes and stores chunk embeddings for active entities
-    that don't yet have rows in entity_chunk_embeddings.
+    """Manually-invocable backfill/repair sweep: computes and stores chunk embeddings for active
+    entities that have no chunk rows yet OR whose existing chunk rows are stale (Part A3 -- see
+    plans/ and SALTMDB memory `5c09effa`).
 
-    NOT triggered by store_memory or any other existing write path -- invoke explicitly (e.g.
-    via `python -m saltmdb --backfill-chunk-embeddings`) to populate the table against a real DB
-    for testing/validation without live-wiring anything into the store_memory hot path yet. Runs
-    synchronously in-process (not via memory_service._embed_pool -- deliberately off-limits for
-    this phase).
+    As of Phase 2 Part A, this table IS wired into the live write path: store_memory and
+    commit_consolidation both trigger write_entity_chunk_embeddings on memory_service._embed_pool
+    (fire-and-forget, same pool as the entity-level embed). This function is a separate,
+    synchronous repair pass over that -- invoked explicitly on demand (e.g. via
+    `python -m saltmdb --backfill-chunk-embeddings`) and unconditionally at normal server startup
+    (see __main__.py, right after backfill_pending_embeddings()) -- catching anything an async
+    job never completed or completed incorrectly: never-chunked entities, a failed/interrupted
+    job, Foundation-era rows that predate this column, or (defense-in-depth) any stale write that
+    somehow slipped past the hot-path guard. Runs synchronously in-process (not via
+    memory_service._embed_pool), per user decision -- self-contained and easy to reason about for
+    a startup sweep, at the cost of blocking startup for its duration.
 
     Captures each candidate's content_hash at selection time and passes it through to
     write_entity_chunk_embeddings as expected_content_hash, so the staleness guard there has
@@ -328,18 +351,33 @@ def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
     db_path = db_path or get_db_path()
     conn = get_connection(db_path)
     try:
-        # The NOT EXISTS subquery below queries entity_chunk_embeddings, a vec0 virtual table --
-        # querying it (like any operation on it) requires sqlite_vec loaded on THIS connection
-        # object specifically, not just imported in-process (see init_vector_schema's docstring
-        # for why per-connection loading is a separate step from the module import).
+        # The subquery below queries entity_chunk_embeddings, a vec0 virtual table -- querying
+        # it (like any operation on it) requires sqlite_vec loaded on THIS connection object
+        # specifically, not just imported in-process (see init_vector_schema's docstring for why
+        # per-connection loading is a separate step from the module import).
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
 
+        # Selects entities with NO chunk rows OR STALE chunk rows (Part A3, post-A0's
+        # content_hash column). The stale-row branch uses `c.content_hash IS NULL OR
+        # c.content_hash IS NOT e.content_hash`, not a bare `!=`: SQL's `!=`/`<>` yields neither
+        # true nor false when either side is NULL (three-valued logic), so
+        # `c.content_hash != e.content_hash` would silently fail to match any row with a NULL
+        # content_hash -- exactly the malformed/legacy-row case this branch exists to catch.
+        # `IS NOT` is SQLite's NULL-safe inequality operator and handles this correctly on its
+        # own; the explicit `IS NULL OR` is kept for readability/defensiveness rather than
+        # relying on `IS NOT`'s NULL semantics being obvious to the next reader.
         query = (
-            "SELECT id, full_content, content_hash FROM entities e "
-            "WHERE status != 'archived' AND NOT EXISTS "
-            "(SELECT 1 FROM entity_chunk_embeddings WHERE entity_id = e.id)"
+            "SELECT e.id, e.full_content, e.content_hash FROM entities e "
+            "WHERE e.status != 'archived' "
+            "AND ("
+            "NOT EXISTS (SELECT 1 FROM entity_chunk_embeddings c WHERE c.entity_id = e.id) "
+            "OR EXISTS ("
+            "SELECT 1 FROM entity_chunk_embeddings c WHERE c.entity_id = e.id "
+            "AND (c.content_hash IS NULL OR c.content_hash IS NOT e.content_hash)"
+            ")"
+            ")"
         )
         if limit:
             rows = conn.execute(query + " LIMIT ?", (int(limit),)).fetchall()

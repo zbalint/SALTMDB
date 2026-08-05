@@ -56,6 +56,18 @@ DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
 CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 200
 
+# Cross-chunk topic reranking (search_memory's rerank_by_topic, see
+# src/saltmdb/domain/services/memory_service.py:rerank_candidates_by_topic). Separate RERANK_*
+# prefix from DEDUP_* above -- different subsystem/phase, independently tunable. Threshold values
+# locked from scripts/benchmarking/benchmark_rerank_thresholds.py's real bge-small-en-v1.5
+# Mean(Max(cosine_similarity)) measurements over hand-labeled same-topic/related-theme/unrelated
+# triplets (see SALTMDB memory `4b178f4b`) -- do not re-tune without new benchmark evidence.
+RERANK_CANDIDATE_POOL_SIZE = 20  # widened Stage-1 pool pulled before Stage-2 scores it
+RERANK_SAME_TOPIC_THRESHOLD = 0.7680  # topic_score >= this -> "SAME_SPECIFIC_TOPIC"
+RERANK_BROAD_THEME_THRESHOLD = (
+    0.5322  # topic_score >= this (and below SAME_TOPIC) -> "BROADLY_RELATED_THEMES"
+)
+
 # BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
 BM25_TITLE_WEIGHT = 10.0
 BM25_CONTENT_WEIGHT = 1.0

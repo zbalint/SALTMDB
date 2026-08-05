@@ -10,14 +10,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main():  # noqa: PLR0915
     if "--backfill-chunk-embeddings" in sys.argv:
-        # Manual, opt-in entry point for the memory-core rework's Foundation phase (see
-        # plans/ and SALTMDB memory `5c09effa`): populates entity_chunk_embeddings against a
-        # real DB for testing/validation. Deliberately NOT run automatically on normal server
-        # startup (unlike backfill_pending_embeddings() below) -- no rework phase consumes this
-        # table yet, so there's no reason to pay a startup-latency cost for it by default. This
-        # is a local process flag, not an addition to the MCP tool surface.
+        # Manual, on-demand entry point for ops use (see plans/ and SALTMDB memory `5c09effa`):
+        # populates/repairs entity_chunk_embeddings against a real DB outside the normal startup
+        # sweep below -- e.g. to force an immediate repair pass without restarting the server.
+        # As of Phase 2 Part A, this table IS wired into the live write path (store_memory,
+        # commit_consolidation) and is also swept unconditionally at normal server startup (see
+        # the mcp.run() branch below) -- this flag is a convenience, not the only way it runs.
+        # This is a local process flag, not an addition to the MCP tool surface.
         from saltmdb.db.schema import init_db
         from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
 
@@ -71,6 +72,25 @@ def main():
                 logger.info("Queued %d pending entity embeddings for background generation.", count)
         except Exception as e:
             logger.warning("Startup embedding backfill check failed: %s", e)
+
+        try:
+            # Part A3 (chunk-embedding freshness lifecycle): unconditional, synchronous repair
+            # sweep over entity_chunk_embeddings -- self-heals anything an async _embed_pool job
+            # (store_memory's/commit_consolidation's chunk-write trigger) never completed or
+            # completed incorrectly, plus any Foundation-era stale rows this DB was carrying
+            # before Part A0's content_hash column existed to detect staleness at all. Runs
+            # synchronously per user decision, matching backfill_chunk_embeddings' existing
+            # contract; log-and-continue on failure, same shape as the block above.
+            from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
+
+            chunk_count = backfill_chunk_embeddings()
+            if chunk_count > 0:
+                logger.info(
+                    "Chunk-embedding startup sweep repaired/backfilled %d entities.", chunk_count
+                )
+        except Exception as e:
+            logger.warning("Startup chunk-embedding backfill sweep failed: %s", e)
+
         mcp.run()
 
 

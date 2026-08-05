@@ -212,6 +212,18 @@ def store_memory(
     memory_type_filter optionally restricts results to one of the five fixed memory_type
     values ('fact', 'event', 'procedure', 'decision', 'preference'); every result item also
     echoes its 'memory_type'.
+
+    rerank_by_topic (opt-in, default False): applies a Stage-2 cross-chunk semantic rerank on
+    top of the normal hybrid search, using precomputed per-chunk embeddings instead of whole-
+    document vectors. Use it when a short, specific query keeps losing to longer documents that
+    merely share vocabulary but aren't actually about the query's topic (the "length dilution"
+    problem) -- e.g. a query about one narrow fact loses to a long, generic document that happens
+    to mention the same words in passing. When enabled, each result item gains a `topic_score`
+    (0-1, higher = more topically specific to the query) and a `semantic_verdict`
+    ("SAME_SPECIFIC_TOPIC" / "BROADLY_RELATED_THEMES" / "DIFFERENT_TOPICS"), and result ordering
+    is fully reranked by topic_score instead of the normal hybrid-search order. Has no effect
+    (silently ignored) when semantic search is disabled, the query is empty, or explain_mode is
+    used.
     """
 )
 def search_memory(
@@ -226,6 +238,7 @@ def search_memory(
     memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"] = None,
     cursor: str = None,
     include_related: bool = None,
+    rerank_by_topic: bool | None = None,
     **kwargs,
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
@@ -252,6 +265,12 @@ def search_memory(
     cursor_ = _resolve(cursor, kw, kwargs, "cursor")
     include_related_ = _resolve(include_related, kw, kwargs, "include_related")
     include_related_ = include_related_ if include_related_ is not None else True
+    # Mirrors include_related_'s exact two-line shape above, not explain_mode's single-line
+    # `or False` shape (~line 245 in this same function): a `bool = False` declared-parameter
+    # default is never None, so _resolve's alias fallback (which only triggers on a None
+    # sentinel) would never see the "rerank" kwarg alias if that pattern were copied here.
+    rerank_by_topic_ = _resolve(rerank_by_topic, kw, kwargs, "rerank_by_topic", "rerank")
+    rerank_by_topic_ = rerank_by_topic_ if rerank_by_topic_ is not None else False
 
     return memory_service.search_memory(
         owner_id=owner_id_,
@@ -266,6 +285,7 @@ def search_memory(
         tag_operator=tag_operator,  # type: ignore[arg-type]  # Any from raw kwarg; any non-"AND" value falls back to OR at runtime, no crash risk
         cursor=cursor_,
         include_related=include_related_,
+        rerank_by_topic=rerank_by_topic_,
     )
 
 

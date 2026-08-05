@@ -454,6 +454,22 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             _embed_pool.submit(
                 embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db
             )
+            # Part A1 (chunk-embedding freshness lifecycle): pass the just-committed content_hash
+            # (same value computed above and written into entities.content_hash in the same
+            # transaction that wrote redacted_content), not None. This is the actual fix for the
+            # out-of-order race two _embed_pool jobs for the same entity_id can hit: if this job's
+            # worker happens to run *after* a subsequent edit to the same entity_id has already
+            # committed a different content_hash, the guard inside write_entity_chunk_embeddings
+            # re-reads entities.content_hash fresh inside its own transaction, sees it no longer
+            # matches this job's content_hash, and no-ops -- existing, newer rows are left
+            # untouched instead of being clobbered by a stale in-flight write.
+            _embed_pool.submit(
+                embedding_service.write_entity_chunk_embeddings,
+                entity_id,
+                redacted_content,
+                target_db,
+                content_hash,
+            )
 
         res_msg = f"Knowledge stored successfully with ID: {entity_id}"
         if duplicate_warning_str:
@@ -651,6 +667,106 @@ def _batch_semantic_similarities(
             close_connection(conn)
 
 
+def rerank_candidates_by_topic(
+    query_text: str,
+    candidate_ids: list[str],
+    db_path: str,
+) -> dict[str, dict]:
+    """Return {entity_id: {"topic_score": float, "semantic_verdict": str}} for candidates
+    scorable from PRECOMPUTED entity_chunk_embeddings rows (Phase 2 Part B -- see plans/ and
+    SALTMDB memory `5c09effa`).
+
+    Never re-chunks/re-embeds candidate content -- that's the deliberate, load-bearing deviation
+    from the original Gemini-generated spec (which re-chunked/re-embedded candidates live on
+    every search), reusing Foundation's precomputed chunk vectors instead. IDs with zero chunk
+    rows are simply absent from the returned dict -- callers apply their own fallback (see
+    search_memory's rerank_by_topic handling).
+
+    Algorithm: chunk the query text the same way entity content is chunked (usually one chunk
+    for a realistic search query, implemented generally), batch-embed all query chunks in one
+    call, then for each query chunk vector run one SQL query that computes, per candidate,
+    MIN(vec_distance_cosine(...)) grouped by entity_id -- the "max similarity over this
+    candidate's chunks" half of Mean(Max(cosine_similarity)), since distance is 1 - similarity so
+    MIN(distance) is exactly MAX(similarity). Accumulating (1.0 - min_distance) across every query
+    chunk and dividing by the chunk count gives the "mean over query chunks" half. Same
+    own-dedicated-connection / try-except-log-and-return-{} shape as _batch_semantic_similarities
+    and semantic_search.
+
+    Staleness guard (post-Codex-review fix): the SQL joins entity_chunk_embeddings to entities
+    and requires `c.content_hash IS e.content_hash` plus `e.status != 'archived'`. Without this, a
+    chunk row left behind by a failed/in-flight async refresh (Part A's write path) would still
+    be readable and could influence topic_score until the next startup repair sweep -- the join
+    makes staleness exclusion synchronous with every call instead. A candidate whose only chunk
+    rows are stale is excluded from the returned dict exactly like a candidate with zero chunk
+    rows, so it falls through to the caller's fallback tier (_batch_semantic_similarities) rather
+    than silently vanishing.
+    """
+    if not candidate_ids:
+        return {}
+    conn = None
+    try:
+        import sqlite_vec
+
+        from saltmdb.config import (
+            CHUNK_SIZE_CHARS,
+            CHUNK_OVERLAP_CHARS,
+            RERANK_SAME_TOPIC_THRESHOLD,
+            RERANK_BROAD_THEME_THRESHOLD,
+        )
+        from saltmdb.utils.chunking import chunk_text
+        from saltmdb.domain.services import embedding_service
+
+        query_chunks = chunk_text(query_text or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+        if not query_chunks:
+            query_chunks = [{"text": query_text or ""}]
+        query_vectors = embedding_service.embed_texts([c["text"] for c in query_chunks])
+        if not query_vectors:
+            return {}
+
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        placeholders = ",".join("?" for _ in candidate_ids)
+        sql = f"""
+            SELECT c.entity_id, MIN(vec_distance_cosine(c.embedding, ?)) AS min_distance
+            FROM entity_chunk_embeddings c
+            JOIN entities e ON e.id = c.entity_id
+            WHERE c.entity_id IN ({placeholders})
+              AND e.status != 'archived'
+              AND c.content_hash IS e.content_hash
+            GROUP BY c.entity_id
+        """
+        similarity_sums: dict[str, float] = {}
+        for qv in query_vectors:
+            exec_params = [sqlite_vec.serialize_float32(qv)] + list(candidate_ids)
+            rows = conn.execute(sql, exec_params).fetchall()
+            for entity_id, min_distance in rows:
+                similarity_sums[entity_id] = similarity_sums.get(entity_id, 0.0) + (
+                    1.0 - min_distance
+                )
+
+        num_query_chunks = len(query_vectors)
+        results: dict[str, dict] = {}
+        for entity_id, total in similarity_sums.items():
+            topic_score = total / num_query_chunks
+            if topic_score >= RERANK_SAME_TOPIC_THRESHOLD:
+                verdict = "SAME_SPECIFIC_TOPIC"
+            elif topic_score >= RERANK_BROAD_THEME_THRESHOLD:
+                verdict = "BROADLY_RELATED_THEMES"
+            else:
+                verdict = "DIFFERENT_TOPICS"
+            results[entity_id] = {"topic_score": topic_score, "semantic_verdict": verdict}
+        return results
+    except Exception as e:
+        logger.warning("Cross-chunk topic reranking failed, falling back: %s", e)
+        return {}
+    finally:
+        if conn:
+            close_connection(conn)
+
+
 def reciprocal_rank_fusion(
     fts_results: list,
     semantic_results: list[tuple[str, float]],
@@ -681,6 +797,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     tag_operator: Literal["AND", "OR"] = "AND",
     cursor: str = None,
     include_related: bool = True,
+    rerank_by_topic: bool = False,
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
@@ -790,6 +907,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
 
         if explain_mode:
+            if rerank_by_topic:
+                logger.debug("rerank_by_topic ignored: explain_mode takes precedence.")
             terms = sanitized_query.split() if sanitized_query else []
             searched_terms = {}
             for t in terms:
@@ -818,6 +937,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             }
 
         rows: list[Any] = []
+        # Populated only when rerank_by_topic actually runs (Part B); left empty on every other
+        # path, including rerank_by_topic=True requests that get gated off below -- the result-
+        # item assembly loop attaches topic_score/semantic_verdict only for ids present here, so
+        # an empty map here is exactly what keeps unreranked results free of those keys.
+        topic_scores_map: dict[str, dict] = {}
         if sanitized_query:
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
             from saltmdb.config import is_semantic_search_enabled
@@ -825,7 +949,12 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
-                candidate_window = offset + limit
+                if rerank_by_topic:
+                    from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
+
+                    candidate_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
+                else:
+                    candidate_window = offset + limit
                 fts_future = _search_pool.submit(
                     _run_fts_search,
                     conn,
@@ -852,7 +981,44 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, candidate_window)
 
                 if rrf_score_map:
-                    merged_ids = list(rrf_score_map.keys())[offset : offset + limit]
+                    if rerank_by_topic:
+                        # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks the
+                        # whole candidate_window, then offset/limit slices the RERANKED order.
+                        pool_ids = list(rrf_score_map.keys())
+                        topic_scores = rerank_candidates_by_topic(query_keywords, pool_ids, db_path)
+                        # Fallback tier (B4) for ids rerank_candidates_by_topic couldn't score
+                        # (not yet chunk-embedded) -- reuses entity-level entity_embeddings via
+                        # _batch_semantic_similarities so no candidate is ever dropped from the
+                        # pool, it just sinks to the bottom of the reranked order instead.
+                        missing_ids = [eid for eid in pool_ids if eid not in topic_scores]
+                        if missing_ids:
+                            from saltmdb.config import RERANK_BROAD_THEME_THRESHOLD
+                            from saltmdb.domain.services import embedding_service
+
+                            fallback_vec = embedding_service.embed_text(query_keywords)
+                            fallback = _batch_semantic_similarities(
+                                missing_ids, fallback_vec, db_path
+                            )
+                            for eid in missing_ids:
+                                fscore = fallback.get(eid, 0.0)
+                                fverdict = (
+                                    "BROADLY_RELATED_THEMES"
+                                    if fscore >= RERANK_BROAD_THEME_THRESHOLD
+                                    else "DIFFERENT_TOPICS"
+                                )
+                                topic_scores[eid] = {
+                                    "topic_score": fscore,
+                                    "semantic_verdict": fverdict,
+                                }
+                        topic_scores_map = topic_scores
+                        # Full-override semantics (per spec): reranked order is sorted purely by
+                        # topic_score, replacing RRF order for Stage 2 -- not a blend.
+                        ranked_pool = sorted(
+                            pool_ids, key=lambda eid: -topic_scores[eid]["topic_score"]
+                        )
+                        merged_ids = ranked_pool[offset : offset + limit]
+                    else:
+                        merged_ids = list(rrf_score_map.keys())[offset : offset + limit]
                     if merged_ids:
                         placeholders = ",".join("?" for _ in merged_ids)
                         id_order = {eid: i for i, eid in enumerate(merged_ids)}
@@ -883,8 +1049,12 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 else:
                     rows = fts_rows[offset : offset + limit]
             else:
+                if rerank_by_topic:
+                    logger.debug("rerank_by_topic ignored: semantic search is disabled.")
                 rows = _run_fts_search(conn, sanitized_query, where_clauses, params, limit, offset)
         else:
+            if rerank_by_topic:
+                logger.debug("rerank_by_topic ignored: query_keywords is empty.")
             sql = f"""
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
@@ -899,7 +1069,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             cursor_obj = conn.execute(sql, exec_params)
             rows = cursor_obj.fetchall()
 
-        # Batch-fetch all related entities in a single query to avoid N+1
+        # Batch-fetch all related entities in a single query to avoid N+1. Ordering invariant:
+        # this always runs on the FINAL rows/merged_ids-derived set -- Part B's candidate-window
+        # widening and Stage-2 rerank both happen strictly before merged_ids is computed above, so
+        # the wider pre-rerank pool never reaches this step. A future refactor that moves the
+        # widening later could break this silently -- keep it upstream of this block.
         related_map: dict[str, list[Any]] = {}  # {entity_id: [related items]}
         if include_related and rows:
             all_eids = [r[0] for r in rows]
@@ -960,6 +1134,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             }
             if include_related:
                 item["related_entities"] = related_map.get(eid, [])
+            if rerank_by_topic and eid in topic_scores_map:
+                item["topic_score"] = round(topic_scores_map[eid]["topic_score"], 6)
+                item["semantic_verdict"] = topic_scores_map[eid]["semantic_verdict"]
 
             results.append(item)
 

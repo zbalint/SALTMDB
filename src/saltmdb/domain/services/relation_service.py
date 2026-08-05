@@ -748,6 +748,16 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 redacted_content,
                 target_db,
             )
+            # Part A2 (chunk-embedding freshness lifecycle): analogous chunk-write trigger for
+            # the newly consolidated entity, passing the real content_hash computed/committed
+            # above (~line 578/644), not None -- same out-of-order-race fix as store_memory's A1.
+            _embed_pool.submit(
+                embedding_service.write_entity_chunk_embeddings,
+                consolidated_id,
+                redacted_content,
+                target_db,
+                content_hash,
+            )
 
         return f"Successfully committed consolidated memory with ID: {consolidated_id}"
     except Exception as e:

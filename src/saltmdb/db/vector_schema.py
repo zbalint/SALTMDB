@@ -91,6 +91,70 @@ def init_entity_chunk_vector_schema(conn: sqlite3.Connection) -> None:
             embedding FLOAT[384],
             +chunk_index INTEGER,
             +char_start INTEGER,
-            +char_end INTEGER
+            +char_end INTEGER,
+            +content_hash TEXT
+        );
+    """)
+
+
+def migrate_entity_chunk_embeddings_content_hash(conn: sqlite3.Connection) -> None:
+    """One-time atomic drop+recreate migration adding a `content_hash` auxiliary column to
+    entity_chunk_embeddings (memory-core rework Phase 2, Part A0 -- see plans/ and SALTMDB
+    memory `5c09effa`).
+
+    Every row this table stores from here on carries the `entities.content_hash` value that
+    produced it, which is what lets the startup repair sweep (Part A3's
+    backfill_chunk_embeddings) distinguish "chunk rows exist and are current" from "chunk rows
+    exist but are stale" -- a distinction a presence-only `NOT EXISTS` check cannot make.
+
+    vec0 virtual tables reject `ALTER TABLE ... ADD COLUMN` outright (confirmed directly against
+    the pinned sqlite-vec 0.1.9: raises `sqlite3.OperationalError: virtual tables may not be
+    altered`), so unlike every other schema migration in this codebase this one cannot use
+    `_add_column_if_missing`. Detects whether a migration is needed by reading the table's
+    declared DDL straight from sqlite_master rather than attempt-and-catch:
+      - no row for this table name -> table doesn't exist yet (fresh install); nothing to
+        migrate here, no sqlite_vec load needed either -- the normal
+        `CREATE VIRTUAL TABLE IF NOT EXISTS` in init_entity_chunk_vector_schema (called right
+        after this, inside the existing best-effort try/except) creates it fresh with the new
+        column, preserving graceful degradation for installs where sqlite_vec can't load at all.
+      - row exists and its `sql` text already mentions `content_hash` -> already migrated, no-op.
+      - row exists without `content_hash` -> the only case that needs a real migration: DROP +
+        recreate. Since nothing outside this dev branch depends on the old (Foundation-era,
+        columnless) shape yet ("rework" branch, unmerged), dropping and losing existing chunk
+        rows is acceptable here -- and it happens to double as the one-time atomic clear of all
+        chunk rows a staleness migration would need anyway, so no separate DELETE step.
+
+    Must be called on a connection that is already inside the caller's own write transaction
+    (schema.py's init_db runs this from inside write_transaction_retrying's BEGIN
+    IMMEDIATE/COMMIT) and must NOT open its own nested BEGIN/COMMIT -- sqlite3 connections don't
+    support nested transactions, and the outer write_transaction() context manager already
+    ROLLBACKs the whole init_db transaction on any exception raised here, which is exactly the
+    atomicity this migration needs (never let the DROP commit without its recreate landing in
+    the same transaction). Callers must NOT wrap this call in a broad try/except -- a failed
+    migration must abort init_db() loudly, not silently leave a committed database with no
+    entity_chunk_embeddings table at all.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='entity_chunk_embeddings'"
+    ).fetchone()
+    if row is None or (row[0] and "content_hash" in row[0]):
+        return  # doesn't exist yet, or already migrated -- nothing to do
+
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    conn.execute("DROP TABLE entity_chunk_embeddings")
+    conn.execute("""
+        CREATE VIRTUAL TABLE entity_chunk_embeddings USING vec0(
+            id TEXT PRIMARY KEY,
+            entity_id TEXT PARTITION KEY,
+            embedding FLOAT[384],
+            +chunk_index INTEGER,
+            +char_start INTEGER,
+            +char_end INTEGER,
+            +content_hash TEXT
         );
     """)

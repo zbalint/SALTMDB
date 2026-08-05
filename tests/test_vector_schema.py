@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 import sqlite3
@@ -180,6 +181,150 @@ class TestEntityChunkVectorSchema(unittest.TestCase):
                     os.remove(db_path)
                 except Exception:
                     pass
+
+
+class TestContentHashMigration(unittest.TestCase):
+    """Codex-required regression coverage for
+    vector_schema.migrate_entity_chunk_embeddings_content_hash (Phase 2 Part A0): builds a
+    Foundation-era columnless entity_chunk_embeddings table by hand, runs the real init_db()
+    migration path over it end-to-end, and asserts all three of the migration's documented
+    guarantees -- the new column exists, old (pre-migration) rows are intentionally reset rather
+    than carried forward, and a subsequent repair/backfill rebuilds current rows safely for the
+    entity that survives (see vector_schema.py's migration docstring for why vec0's rejection of
+    ALTER TABLE ADD COLUMN forces an atomic drop+recreate instead of an in-place column add)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _build_foundation_era_db(self) -> None:
+        """Hand-builds the pre-Phase-2 shape directly: an `entities` row with no content_hash
+        (predates that column too) and a columnless entity_chunk_embeddings vec0 table with one
+        legacy chunk row -- exactly what a real pre-rework install on disk would contain."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            conn.execute("""
+                CREATE TABLE entities (
+                    id TEXT PRIMARY KEY,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    last_accessed_at DATETIME NOT NULL,
+                    owner_id TEXT,
+                    scope TEXT DEFAULT 'shared',
+                    is_core BOOLEAN DEFAULT 0,
+                    weight INTEGER DEFAULT 1,
+                    status TEXT DEFAULT 'raw',
+                    parent_ids TEXT,
+                    title TEXT NOT NULL,
+                    full_content TEXT NOT NULL,
+                    valid_from DATETIME,
+                    valid_to DATETIME,
+                    metadata TEXT
+                );
+            """)
+            conn.execute(
+                "INSERT INTO entities"
+                " (id, created_at, updated_at, last_accessed_at, title, full_content)"
+                " VALUES ('legacy-entity', datetime('now'), datetime('now'), datetime('now'),"
+                " 'Legacy Entity', 'Legacy content that predates the content_hash column.')"
+            )
+            # The Foundation-era shape: no +content_hash column at all.
+            conn.execute("""
+                CREATE VIRTUAL TABLE entity_chunk_embeddings USING vec0(
+                    id TEXT PRIMARY KEY,
+                    entity_id TEXT PARTITION KEY,
+                    embedding FLOAT[384],
+                    +chunk_index INTEGER,
+                    +char_start INTEGER,
+                    +char_end INTEGER
+                );
+            """)
+            conn.execute(
+                "INSERT INTO entity_chunk_embeddings"
+                " (id, entity_id, embedding, chunk_index, char_start, char_end)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "legacy-entity::0",
+                    "legacy-entity",
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0] * 96),
+                    0,
+                    0,
+                    100,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_migration_adds_column_resets_old_rows_and_backfill_rebuilds_them(self):
+        from saltmdb.db.schema import init_db
+        from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
+
+        self._build_foundation_era_db()
+
+        # Real init_db() migration path, not a direct unit call -- proves the DROP+recreate
+        # actually runs from inside schema.py's write transaction against a real legacy file.
+        conn = init_db(self.db_path)
+        try:
+            # 1. The new content_hash column exists post-migration.
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'entity_chunk_embeddings'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIn("content_hash", row[0], "migration must add the content_hash column")
+
+            # 2. Old (pre-migration) rows are intentionally reset, not carried forward.
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id = 'legacy-entity'"
+            ).fetchone()[0]
+            self.assertEqual(
+                remaining, 0, "migration must reset (drop) rows that predate content_hash"
+            )
+
+            # 3. A subsequent repair/backfill rebuilds current rows safely for the surviving
+            # entity -- init_db()'s own entities.content_hash backfill migration (a separate,
+            # pre-existing step) must have already populated a real hash for it to key off of.
+            entity_hash = conn.execute(
+                "SELECT content_hash FROM entities WHERE id = 'legacy-entity'"
+            ).fetchone()[0]
+            self.assertTrue(entity_hash, "entities.content_hash backfill must have run first")
+
+            written = backfill_chunk_embeddings(self.db_path)
+            self.assertGreaterEqual(written, 1)
+
+            repaired = conn.execute(
+                "SELECT content_hash FROM entity_chunk_embeddings WHERE entity_id = 'legacy-entity'"
+            ).fetchall()
+            self.assertTrue(repaired, "backfill should rebuild chunk rows for the legacy entity")
+            for (row_hash,) in repaired:
+                self.assertEqual(row_hash, entity_hash)
+        finally:
+            conn.close()
+
+    def test_migration_is_a_no_op_when_content_hash_column_already_present(self):
+        """A DB that's already on the current schema (fresh install, or already-migrated) must
+        not be re-dropped on a later init_db() run -- the sqlite_master DDL-text check is what
+        makes this safe, not a version table."""
+        from saltmdb.db.schema import init_db
+
+        conn = init_db(self.db_path)
+        conn.close()
+
+        conn = init_db(self.db_path)  # second run over an already-migrated DB
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'entity_chunk_embeddings'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIn("content_hash", row[0])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

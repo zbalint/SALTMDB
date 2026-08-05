@@ -122,6 +122,15 @@ class TestEmbeddingChunkStorage(unittest.TestCase):
     def test_staleness_guard_skips_on_content_hash_mismatch(self):
         content = "Content whose hash will deliberately not match at write time."
         entity_id = self._store("Staleness Guard Hash Mismatch", content)
+        # Phase 2 Part A1 now queues a live async chunk-write trigger on every store_memory
+        # call, using the real (correct) content_hash -- wait for it to land, then delete its
+        # rows so this test's "starts with zero chunk rows" precondition is deterministic and
+        # independent of that unrelated live-trigger race (see the analogous fix in
+        # test_backfill_selection_skips_archived_and_already_chunked_entities).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not self._chunk_rows(entity_id):
+            time.sleep(0.05)
+        self.conn.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id = ?", (entity_id,))
 
         count = write_entity_chunk_embeddings(
             entity_id, content, self.db_path, expected_content_hash="deliberately-wrong-hash"
@@ -167,6 +176,18 @@ class TestEmbeddingChunkStorage(unittest.TestCase):
     def test_backfill_selection_skips_archived_and_already_chunked_entities(self):
         fresh_content = "Fresh entity content, should be picked up by backfill."
         fresh_id = self._store("Backfill Fresh", fresh_content)
+        # Phase 2 Part A1 now queues a live async chunk-write trigger on every store_memory
+        # call, so a freshly stored entity no longer reliably stays "never chunked" long enough
+        # to race against backfill's NOT EXISTS branch below (it settles almost immediately with
+        # a warm embedding model). Wait for that live trigger to land, then delete its rows to
+        # deterministically reproduce the "genuinely no chunk rows yet" precondition this test
+        # exists to check -- equivalent to a legacy/never-triggered entity, independent of
+        # whichever pool worker happens to win the live-trigger race.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not self._chunk_rows(fresh_id):
+            time.sleep(0.05)
+        self.conn.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id = ?", (fresh_id,))
+        self.assertEqual(self._chunk_rows(fresh_id), [])
 
         archived_content = "Archived entity content, must be skipped by the status filter."
         archived_id = self._store("Backfill Archived", archived_content)

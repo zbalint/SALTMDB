@@ -322,7 +322,22 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         except sqlite3.OperationalError:
             pass
 
-        from saltmdb.db.vector_schema import init_vector_schema, init_entity_chunk_vector_schema
+        from saltmdb.db.vector_schema import (
+            init_vector_schema,
+            init_entity_chunk_vector_schema,
+            migrate_entity_chunk_embeddings_content_hash,
+        )
+
+        # Codex-mandated (Phase 2 Part A0): this destructive drop+recreate migration must NOT
+        # be swallowed by the broad best-effort try/except below. That catch-all exists for
+        # Foundation's "vector features are best-effort, degrade gracefully" posture, which is
+        # fine for a fresh CREATE ... IF NOT EXISTS but wrong for a destructive drop+recreate --
+        # silently swallowing a failed migration here could leave a committed database with NO
+        # entity_chunk_embeddings table at all. A failure here aborts init_db() loudly instead.
+        # Runs inside this same _write closure / write_transaction_retrying transaction, so a
+        # raised exception here still triggers the outer ROLLBACK -- the DROP never commits
+        # without its recreate landing in the same transaction.
+        migrate_entity_chunk_embeddings_content_hash(conn)
 
         try:
             init_vector_schema(conn)
