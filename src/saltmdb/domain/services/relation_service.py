@@ -8,6 +8,9 @@ from saltmdb.config import (
     get_db_path,
     COHESION_MIN_PAIRWISE_THRESHOLD,
     COHESION_OVERRIDE_MIN_LENGTH,
+    RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
+    RELATION_GATE_STRONG_PREDICATES,
+    RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import resolve_entity_id, compute_content_hash
@@ -107,11 +110,13 @@ def get_canonical_predicates(
             close_connection(conn)
 
 
-def store_relation(  # noqa: C901
+def store_relation(  # noqa: C901, PLR0915
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
     valid_at: str | None = None,
+    override_justification: str | None = None,
+    owner_id: str = None,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
@@ -121,6 +126,17 @@ def store_relation(  # noqa: C901
     _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
     bulk_store_relations, whose caller already holds an open write transaction around the
     whole batch (so the single-item write here must not open/commit its own nested transaction).
+
+    Memory-core rework Phase 5 governance gate (see plans/structured-finding-matsumoto.md and
+    SALTMDB memory `5c09effa`/`6490fe88`): for RELATION_GATE_STRONG_PREDICATES
+    (elaborates_on/resolves/supersedes), the source/target chunk-embedding centroids must clear
+    RELATION_GATE_MIN_SIMILARITY_THRESHOLD, and no contradictory predicate pair
+    (RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS) may already exist on the same directional edge
+    -- either violation rejects the call as REJECT_LOW_RELATION_SIMILARITY /
+    REJECT_CONTRADICTORY_PREDICATE unless override_justification (>= COHESION_OVERRIDE_MIN_LENGTH
+    chars) is supplied, in which case the relation is stored and a relation_gate_override event
+    is logged atomically (agent_id = owner_id or "system"). An already-active identical edge is
+    always a no-op, checked BEFORE the gate -- re-submitting it never requires an override.
     """
     if not source_id or not target_id or not predicate:
         return "Error: source_id, target_id, and predicate are mandatory parameters."
@@ -149,7 +165,7 @@ def store_relation(  # noqa: C901
     now = datetime.now(UTC).isoformat()
     try:
 
-        def _do_store():
+        def _do_store():  # noqa: C901
             normalized_requested = _normalize_predicate_name(predicate)
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
             note = (
@@ -159,6 +175,117 @@ def store_relation(  # noqa: C901
                 and normalized_requested != canonical_predicate
                 else ""
             )
+            owner_val = owner_id or "system"
+
+            # D1 (Phase 5 R2 fix #4): an existing active identical edge is a legitimate no-op --
+            # short-circuit BEFORE any gate check runs, so re-submitting an already-active edge
+            # (e.g. a low-similarity strong-predicate edge accepted before this gate existed)
+            # never demands an override for creating nothing. Same match shape as the
+            # ON CONFLICT(...) WHERE valid_to IS NULL constraint the INSERT below relies on.
+            existing_edge = conn.execute(
+                "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
+                (resolved_source, resolved_target, canonical_predicate),
+            ).fetchone()
+            if existing_edge:
+                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+
+            # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
+            # (archived, no usable content) forces a gate failure requiring override -- same
+            # convention as Phase 3/4's unresolved-centroid handling, not a silent pass.
+            sim, offending, unresolved = 1.0, None, {}
+            if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
+                centroids, unresolved, _observed_state = get_fresh_entity_centroids(
+                    [resolved_source, resolved_target], conn, db_path or get_db_path()
+                )
+                if unresolved:
+                    sim, offending = (
+                        0.0,
+                        (next(iter(unresolved)), f"<{next(iter(unresolved.values()))}>"),
+                    )
+                else:
+                    sim, offending = min_pairwise_cohesion(centroids)
+
+            # D4: contradictory-predicate check, same directional edge only (MVP scope).
+            # Existing predicates are canonicalized (Phase 5 R2 fix #3) before comparison, so a
+            # pre-canonicalization-era row holding a raw legacy-alias string (e.g. "references",
+            # which aliases to elaborates_on) is still caught. Applies regardless of predicate
+            # strength -- a contradictory pair is a structural problem, not a similarity one.
+            existing_raw = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
+                    (resolved_source, resolved_target),
+                ).fetchall()
+            }
+            existing_predicates = {
+                resolve_or_create_predicate(conn, ep) or ep for ep in existing_raw
+            }
+            contradictions = [
+                ep
+                for ep in existing_predicates
+                if frozenset({ep, canonical_predicate})
+                in RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS
+            ]
+
+            # D5: one unified override, one audit event covering both checks.
+            violations = []
+            if (
+                canonical_predicate in RELATION_GATE_STRONG_PREDICATES
+                and sim < RELATION_GATE_MIN_SIMILARITY_THRESHOLD
+            ):
+                violations.append("low_similarity")
+            if contradictions:
+                violations.append("contradictory_predicate")
+
+            justification = (override_justification or "").strip()
+            if violations:
+                if len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
+                    reasons = []
+                    if "low_similarity" in violations:
+                        reasons.append(
+                            f"REJECT_LOW_RELATION_SIMILARITY (similarity={sim:.4f} < "
+                            f"{RELATION_GATE_MIN_SIMILARITY_THRESHOLD}, offending={offending}"
+                            f"{', unresolved=' + str(unresolved) if unresolved else ''})"
+                        )
+                    if "contradictory_predicate" in violations:
+                        reasons.append(
+                            f"REJECT_CONTRADICTORY_PREDICATE (predicate='{canonical_predicate}' "
+                            f"conflicts with existing {contradictions} on this edge)"
+                        )
+                    return (
+                        "Error: "
+                        + " ".join(reasons)
+                        + f" Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} "
+                        "chars) to force this relation."
+                    )
+
+                # Atomic audit trail -- written as the first write for this call, before the
+                # relation itself, so any log_event failure rolls back the whole transaction
+                # (same fail-fast-atomicity reasoning as commit_consolidation's override audit).
+                audit_result = log_event(
+                    agent_id=owner_val,
+                    type="relation_gate_override",
+                    content=json.dumps(
+                        {
+                            "source_id": resolved_source,
+                            "target_id": resolved_target,
+                            "predicate": canonical_predicate,
+                            "violations": violations,
+                            "similarity": sim,
+                            "similarity_threshold": RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
+                            "contradicting_predicates": contradictions,
+                            "justification": justification,
+                            "relation_id": relation_id,
+                        }
+                    ),
+                    db_connection=conn,
+                    _in_transaction=True,
+                )
+                if audit_result.startswith("Error"):
+                    raise RuntimeError(
+                        f"Failed to record relation gate override audit event: {audit_result}"
+                    )
+
             effective_valid_at = valid_at or now
             cursor = conn.execute(
                 """
@@ -177,6 +304,9 @@ def store_relation(  # noqa: C901
                 ),
             )
             if cursor.rowcount == 0:
+                # Defensive backstop only now (D1 above already handles the primary no-op path)
+                # -- a same-transaction race where a concurrent writer resolved this exact edge
+                # between the D1 check and this INSERT.
                 existing = conn.execute(
                     "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
                     (resolved_source, resolved_target, canonical_predicate),
@@ -1055,11 +1185,19 @@ def bulk_store_relations(relations: list, db_connection=None, db_path: str = Non
                 tgt = r.get("target_id")
                 pred = r.get("predicate")
                 valid_at = r.get("valid_at")
+                # Phase 5 D8: per-item, not a single top-level value for the whole batch -- a
+                # bulk call can legitimately mix relations attributed to different agents/owners
+                # or needing different override justifications, same reasoning as
+                # commit_consolidation's per-item override_justification.
+                override_justification = r.get("override_justification")
+                owner_id = r.get("owner_id")
                 res = store_relation(
                     source_id=src,
                     target_id=tgt,
                     predicate=pred,
                     valid_at=valid_at,
+                    override_justification=override_justification,
+                    owner_id=owner_id,
                     db_connection=conn,
                     _in_transaction=True,
                 )

@@ -1997,5 +1997,355 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         self.assertNotIn(entity_id, observed_state)
 
 
+class TestStoreRelationGovernanceGate(unittest.TestCase):
+    """Memory-core rework Phase 5 -- the manage_relation governance gate on store_relation (see
+    plans/structured-finding-matsumoto.md and SALTMDB memory `5c09effa`/`6490fe88`). Reuses
+    TestCommitConsolidationCohesionGate's axis-vector fixture pattern so cohesive vs incohesive
+    pairs are hand-computable rather than relying on real-model variance."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk_vector_entity(self, title: str, vector: list, status: str = "raw") -> tuple[str, str]:
+        entity_id = str(uuid.uuid4())
+        content_hash = f"hash-{entity_id}"
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', ?, ?, ?, ?)",
+            (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings"
+            "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+            " VALUES (?, ?, ?, 0, 0, 10, ?)",
+            (f"{entity_id}::0", entity_id, sqlite_vec.serialize_float32(vector), content_hash),
+        )
+        self.conn.commit()
+        return entity_id, content_hash
+
+    def _override_events(self) -> list:
+        rows = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'relation_gate_override'"
+        ).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def test_store_relation_rejects_low_similarity_strong_predicate(self):
+        a, _ = self._mk_vector_entity("Low Sim A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Low Sim B", _axis_vector(1))  # orthogonal -> sim=0.0
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
+
+        row = self.conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND target_id = ?", (a, b)
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_store_relation_override_low_similarity_stores_and_logs_audit_event(self):
+        a, _ = self._mk_vector_entity("Override Sim A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Override Sim B", _axis_vector(1))
+
+        res = store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            owner_id="agent_override",
+            override_justification="deliberately linking orthogonal test fixtures for coverage",
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+
+        events = self._override_events()
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0]["source_id"], a)
+        self.assertEqual(events[0]["target_id"], b)
+        self.assertEqual(events[0]["predicate"], "elaborates_on")
+        self.assertIn("low_similarity", events[0]["violations"])
+        self.assertAlmostEqual(events[0]["similarity"], 0.0, places=4)
+
+    def test_store_relation_passes_gate_silently_on_high_similarity(self):
+        a, _ = self._mk_vector_entity("High Sim A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("High Sim B", _axis_vector(0))  # identical -> sim=1.0
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="resolves", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(self._override_events(), [])
+
+    def test_store_relation_weak_predicate_bypasses_gate(self):
+        a, _ = self._mk_vector_entity("Weak Predicate A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Weak Predicate B", _axis_vector(1))
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(self._override_events(), [])
+
+    def test_store_relation_similar_to_bypasses_gate(self):
+        a, _ = self._mk_vector_entity("Similar To A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Similar To B", _axis_vector(1))
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="similar_to", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(self._override_events(), [])
+
+    def test_store_relation_gate_checks_canonical_predicate_not_alias(self):
+        """D1 regression: the gate must run on the resolved CANONICAL predicate name, not the
+        raw caller-supplied string -- 'references' aliases to 'elaborates_on' (schema.py seed
+        data), so it must be gated exactly like an explicit 'elaborates_on' request."""
+        a, _ = self._mk_vector_entity("Alias Gate A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Alias Gate B", _axis_vector(1))
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="references", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
+
+    def test_store_relation_rejects_contradictory_predicate_pair(self):
+        a, _ = self._mk_vector_entity("Contradiction A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Contradiction B", _axis_vector(0))  # sim=1.0, isolates test
+
+        seed_res = store_relation(
+            source_id=a, target_id=b, predicate="supersedes", db_connection=self.conn
+        )
+        self.assertTrue(seed_res.startswith("Relation successfully stored"), seed_res)
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Error: REJECT_CONTRADICTORY_PREDICATE"), res)
+
+        override_res = store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            override_justification="deliberately allowing a contradictory pair for test coverage",
+            db_connection=self.conn,
+        )
+        self.assertTrue(override_res.startswith("Relation successfully stored"), override_res)
+
+        active_predicates = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
+                (a, b),
+            ).fetchall()
+        }
+        self.assertEqual(active_predicates, {"supersedes", "elaborates_on"})
+
+    def test_store_relation_rejects_contradictory_predicate_pair_via_legacy_alias(self):
+        """[R2 fix #3] regression: a pre-canonicalization-era row holding the raw literal
+        'references' string (never rewritten in relations.predicate) must still be recognized
+        as contradicting a new 'supersedes' edge via canonicalization at check time."""
+        a, _ = self._mk_vector_entity("Legacy Alias A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Legacy Alias B", _axis_vector(0))  # sim=1.0, isolates test
+
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'references', ?, ?, ?)",
+            (str(uuid.uuid4()), a, b, now, now, now),
+        )
+        self.conn.commit()
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="supersedes", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Error: REJECT_CONTRADICTORY_PREDICATE"), res)
+        self.assertIn("elaborates_on", res)
+
+    def test_store_relation_unresolved_entity_forces_gate_failure(self):
+        a, _ = self._mk_vector_entity("Unresolved Partner", _axis_vector(0))
+        b = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Unresolved B', '', ?)",
+            (b, now, now, now, "empty-hash"),
+        )
+        self.conn.commit()
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="resolves", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
+        self.assertIn("unresolved", res)
+
+        override_res = store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="resolves",
+            override_justification="forcing a relation to an unscorable entity for coverage",
+            db_connection=self.conn,
+        )
+        self.assertTrue(override_res.startswith("Relation successfully stored"), override_res)
+
+    def test_store_relation_gate_only_ever_writes_relations_and_events(self):
+        a, _ = self._mk_vector_entity("Invariant A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Invariant B", _axis_vector(1))
+
+        def _entities_snapshot():
+            return self.conn.execute(
+                "SELECT id, status, weight, is_core, updated_at FROM entities ORDER BY id"
+            ).fetchall()
+
+        before = _entities_snapshot()
+        res = store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            override_justification="invariant check override, no entity row should ever change",
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        after = _entities_snapshot()
+        self.assertEqual(before, after)
+
+    def test_store_relation_gate_only_ever_writes_relations_and_events_on_clean_pass(self):
+        """Companion to the override-path invariance test above: the same "gate only ever
+        writes relations and events" claim must also hold on the high-similarity clean-pass
+        path, where no override_justification is supplied at all."""
+        a, _ = self._mk_vector_entity("Invariant Clean Pass A", _axis_vector(0))
+        b, _ = self._mk_vector_entity(
+            "Invariant Clean Pass B", _axis_vector(0)
+        )  # identical -> min_sim=1.0
+
+        def _entities_snapshot():
+            return self.conn.execute(
+                "SELECT id, status, weight, is_core, updated_at FROM entities ORDER BY id"
+            ).fetchall()
+
+        before = _entities_snapshot()
+        res = store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        after = _entities_snapshot()
+        self.assertEqual(before, after)
+
+    def test_store_relation_override_audit_event_uses_supplied_owner_id(self):
+        a, _ = self._mk_vector_entity("Owner Supplied A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Owner Supplied B", _axis_vector(1))
+
+        store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            owner_id="agent_custom_owner",
+            override_justification="checking supplied owner_id propagates to the audit event",
+            db_connection=self.conn,
+        )
+
+        event = self.conn.execute(
+            "SELECT agent_id FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "agent_custom_owner")
+
+    def test_store_relation_override_audit_event_defaults_to_system_owner(self):
+        a, _ = self._mk_vector_entity("Owner Default A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Owner Default B", _axis_vector(1))
+
+        store_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            override_justification="checking omitted owner_id defaults the audit event to system",
+            db_connection=self.conn,
+        )
+
+        event = self.conn.execute(
+            "SELECT agent_id FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "system")
+
+    def test_store_relation_gate_skipped_for_existing_duplicate_edge(self):
+        """[R2 fix #4] regression: an existing active identical edge is a no-op, checked BEFORE
+        the gate -- re-submitting it (even a low-similarity strong-predicate edge accepted
+        before this gate existed) must never demand an override or emit an audit event."""
+        a, _ = self._mk_vector_entity("Dup Edge A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Dup Edge B", _axis_vector(1))  # low sim, seeded directly
+
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'elaborates_on', ?, ?, ?)",
+            (str(uuid.uuid4()), a, b, now, now, now),
+        )
+        self.conn.commit()
+
+        res = store_relation(
+            source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
+        )
+        self.assertTrue(res.startswith("Relation already exists (no-op)"), res)
+        self.assertEqual(self._override_events(), [])
+
+    def test_bulk_store_relations_gate_applies_per_item_and_aborts_batch(self):
+        a, _ = self._mk_vector_entity("Bulk Gate A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Bulk Gate B", _axis_vector(1))
+        c, _ = self._mk_vector_entity("Bulk Gate C", _axis_vector(2))
+        d, _ = self._mk_vector_entity("Bulk Gate D", _axis_vector(3))
+
+        batch = [
+            {"source_id": a, "target_id": b, "predicate": "depends_on"},  # ungated, would pass
+            {"source_id": c, "target_id": d, "predicate": "elaborates_on"},  # low sim, no override
+        ]
+        results = bulk_store_relations(relations=batch, db_connection=self.conn)
+        self.assertEqual(len(results), 1, results)
+        self.assertEqual(results[0]["status"], "error", results)
+
+        # All-or-nothing: item 1's own edge must have been rolled back too.
+        row = self.conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND target_id = ?", (a, b)
+        ).fetchone()
+        self.assertIsNone(row)
+
+    def test_bulk_store_relations_duplicate_item_resolves_as_no_op_alongside_passing_item(self):
+        """[R2 fix #4] extension: a batch item that duplicates an already-active edge resolves
+        as a no-op (not a gate failure), so a batch mixing it with a genuinely passing item
+        still succeeds as a whole."""
+        a, _ = self._mk_vector_entity("Bulk Dup A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Bulk Dup B", _axis_vector(1))  # low sim, seeded directly
+        e, _ = self._mk_vector_entity("Bulk Passing E", _axis_vector(2))
+        f, _ = self._mk_vector_entity("Bulk Passing F", _axis_vector(2))  # identical -> sim=1.0
+
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'elaborates_on', ?, ?, ?)",
+            (str(uuid.uuid4()), a, b, now, now, now),
+        )
+        self.conn.commit()
+
+        batch = [
+            {"source_id": a, "target_id": b, "predicate": "elaborates_on"},  # duplicate -> no-op
+            {"source_id": e, "target_id": f, "predicate": "resolves"},  # passes gate cleanly
+        ]
+        results = bulk_store_relations(relations=batch, db_connection=self.conn)
+        self.assertEqual(len(results), 2, results)
+        self.assertEqual(results[0]["status"], "duplicate", results)
+        self.assertEqual(results[1]["status"], "success", results)
+        self.assertEqual(self._override_events(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

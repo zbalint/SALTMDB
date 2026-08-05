@@ -148,3 +148,27 @@ SUPERSESSION_MIN_SIMILARITY_THRESHOLD = 0.7557
 # Promoted unchanged from the pre-rework hardcoded literal; matches
 # find_connected_vector_clusters' own min_cluster_size=3 default.
 SUPERSESSION_MIN_OVERLAP_COUNT = 3
+
+# Memory-core rework Phase 5 -- manage_relation governance gate (see
+# plans/structured-finding-matsumoto.md and SALTMDB memory `5c09effa`/`6490fe88`).
+# Locked from scripts/benchmarking/benchmark_relation_gate_threshold.py's real bge-small-en-v1.5
+# raw-entity-pair cosine measurements over hand-crafted positive (two texts about the SAME
+# specific fix/decision, the shape a strong predicate should concretely connect) and negative
+# (the confirmed `c0ebc365` fingerprint: same broad domain, different specific fact) classes --
+# 0% false-accept, 0% false-reject on the benchmark corpus -- do not re-tune without new
+# benchmark evidence. Structurally different comparison shape from COHESION_MIN_PAIRWISE_THRESHOLD
+# (whole parent SET, MIN pairwise) and SUPERSESSION_MIN_SIMILARITY_THRESHOLD (consolidated-summary
+# vs raw-fragment) -- this is exactly one raw-vs-raw pair per call -- so it is NOT aliased to
+# either.
+RELATION_GATE_MIN_SIMILARITY_THRESHOLD = 0.6505
+# Predicates treated as similarity/judgment claims (relation_service.py:store_relation's gate) --
+# exactly the three implicated in the `c0ebc365` incident. depends_on (structural, not a
+# similarity claim), consolidated_from (system-managed, gated separately by commit_consolidation
+# itself), and similar_to (already *defined* by a similarity score) are deliberately excluded.
+RELATION_GATE_STRONG_PREDICATES = frozenset({"elaborates_on", "resolves", "supersedes"})
+# Predicate pairs that must never coexist on the same directional (source_id, target_id) edge --
+# a structural contradiction, checked regardless of predicate strength. Scoped to same-direction
+# only; reverse-direction contradiction is a real but separate question, not sized here.
+RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
+    {frozenset({"supersedes", "elaborates_on"})}
+)

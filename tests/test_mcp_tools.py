@@ -697,6 +697,42 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("[Consolidation Override]", cd_content)
         self.assertNotIn("[Consolidation Override]", ef_content)
 
+    def test_manage_relation_tool_forwards_override_justification_and_owner_id(self):
+        """owner_id and override_justification must reach relation_service.store_relation's
+        governance gate through the actual MCP tool wrapper (memory-core rework Phase 5), not
+        just through direct service-level calls."""
+        dim = 384
+
+        def _axis(i):
+            v = [0.0] * dim
+            v[i] = 1.0
+            return v
+
+        a = self._mk_vector_entity("Relation Gate Tool A", _axis(0))
+        b = self._mk_vector_entity("Relation Gate Tool B", _axis(1))  # orthogonal -> low similarity
+
+        res_no_override = tools.manage_relation(source_id=a, target_id=b, predicate="elaborates_on")
+        self.assertTrue(
+            res_no_override.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res_no_override
+        )
+
+        res_with_override = tools.manage_relation(
+            source_id=a,
+            target_id=b,
+            predicate="elaborates_on",
+            owner_id="agent_mcp_owner",
+            override_justification="deliberately forcing a low-similarity relation via the MCP tool wrapper",
+        )
+        self.assertIn("Relation successfully stored", res_with_override)
+
+        event = self.conn.execute(
+            "SELECT agent_id, content FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "agent_mcp_owner")
+        self.assertIn(
+            "deliberately forcing a low-similarity relation via the MCP tool wrapper", event[1]
+        )
+
     def test_mcp_tool_count_regression_guard(self):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(

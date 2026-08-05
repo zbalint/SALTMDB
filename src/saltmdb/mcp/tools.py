@@ -331,9 +331,21 @@ def manage_relation(
     target_id: str = None,
     predicate: str = None,
     invalidate: bool = None,
+    override_justification: str = None,
+    owner_id: str = None,
     **kwargs,
 ) -> str | list:
-    """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True)."""
+    """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True).
+
+    A governance gate rejects "strong" predicates (elaborates_on/resolves/supersedes) whose
+    source/target chunk-embedding centroids fail a minimum similarity threshold
+    (REJECT_LOW_RELATION_SIMILARITY), and rejects a contradictory predicate pair on the same
+    directional edge (REJECT_CONTRADICTORY_PREDICATE), unless override_justification (a
+    non-throwaway string explaining why this relation should proceed anyway) is supplied to
+    force it through -- the override is atomically audited. For the bulk (`relations`) shape,
+    put `override_justification`/`owner_id` on each individual item that needs them, not at the
+    top level -- neither is shared across items in the same batch.
+    """
     kw = _unwrap_kwargs(kwargs)
     relations_ = _resolve(relations, kw, kwargs, "relations")
     if relations_:
@@ -353,8 +365,17 @@ def manage_relation(
         )
 
     valid_at_ = _resolve(None, kw, kwargs, "valid_at")
+    override_justification_ = _resolve(
+        override_justification, kw, kwargs, "override_justification", "override_reason"
+    )
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
     return relation_service.store_relation(
-        source_id=source_id_, target_id=target_id_, predicate=predicate_, valid_at=valid_at_
+        source_id=source_id_,
+        target_id=target_id_,
+        predicate=predicate_,
+        valid_at=valid_at_,
+        override_justification=override_justification_,
+        owner_id=owner_id_,
     )
 
 
