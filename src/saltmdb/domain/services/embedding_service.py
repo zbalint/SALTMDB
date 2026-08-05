@@ -78,6 +78,37 @@ def embed_text(text: str) -> list[float]:
     return embeddings[0].tolist()
 
 
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Encode a batch of texts to 384-dim vectors using fastembed's native batching.
+
+    Every chunk-based caller (compute_entity_chunk_embeddings and, eventually, whichever later
+    rework phase reranks/clusters on chunks) needs to embed many short strings per call --
+    looping embed_text() one-at-a-time here would reintroduce the exact unbatched-embedding
+    slowdown already fixed once elsewhere for store_memory's dedup path (a ~9x regression).
+    fastembed's TextEmbedding.embed() batches internally when given a list, so this is a single
+    model call regardless of len(texts).
+
+    Preserves embed_text's empty/whitespace-string contract (returns [0.0]*384, never fed to the
+    model -- the ONNX tokenizer's behavior on "" is untested territory here, not worth risking)
+    per item, while keeping the returned list's index alignment with `texts` intact regardless of
+    how many empty entries are interspersed among real ones.
+    """
+    if not texts:
+        return []
+
+    non_empty_idx = [i for i, t in enumerate(texts) if t and t.strip()]
+    results: list[list[float]] = [[0.0] * 384 for _ in texts]
+
+    if non_empty_idx:
+        model = get_model()
+        batch = [texts[i] for i in non_empty_idx]
+        embeddings = list(model.embed(batch))
+        for pos, idx in enumerate(non_empty_idx):
+            results[idx] = embeddings[pos].tolist()
+
+    return results
+
+
 def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: str) -> None:
     """Background thread target: generate and persist an embedding for one entity.
 
@@ -158,3 +189,180 @@ def backfill_pending_embeddings(db_path: str = None) -> int:
     for eid, title, content in rows:
         _embed_pool.submit(embed_entity_async, eid, title, content, db_path)
     return len(rows)
+
+
+def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[dict]:
+    """Chunk full_content and batch-embed each chunk. Pure, no DB I/O.
+
+    Returns dicts ready for insertion into entity_chunk_embeddings: {id, entity_id, embedding,
+    chunk_index, char_start, char_end}.
+
+    Chunks full_content ALONE -- deliberately not title-prefixed the way embed_entity_async's
+    entity-level text is (f"{title}\n\n{full_content}"). char_start/char_end are meant to be
+    directly usable offsets into full_content with no prefix-length arithmetic required by any
+    consumer. Whether/how title should factor into chunk-level retrieval is left to whichever
+    later rework phase first consumes this table.
+    """
+    from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS
+    from saltmdb.utils.chunking import chunk_text
+
+    chunks = chunk_text(full_content or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+    if not chunks:
+        return []
+
+    vectors = embed_texts([c["text"] for c in chunks])
+    return [
+        {
+            "id": f"{entity_id}::{i}",
+            "entity_id": entity_id,
+            "embedding": vec,
+            "chunk_index": i,
+            "char_start": c["char_start"],
+            "char_end": c["char_end"],
+        }
+        for i, (c, vec) in enumerate(zip(chunks, vectors))
+    ]
+
+
+def write_entity_chunk_embeddings(
+    entity_id: str,
+    full_content: str,
+    db_path: str,
+    expected_content_hash: str | None = None,
+) -> int:
+    """Compute and persist chunk-level embeddings for one entity: DELETE existing rows for
+    entity_id, then INSERT fresh ones, in one write_transaction_retrying call -- mirrors
+    embed_entity_async's DELETE+INSERT atomicity on entity_embeddings. Does NOT touch
+    entities.embedding_status -- that column tracks the existing entity-level embed path;
+    chunk-embedding freshness tracking is a decision for whichever later phase first consumes
+    this table.
+
+    Stale-write guard: when expected_content_hash is given (as backfill_chunk_embeddings does,
+    passing the hash it captured at selection time), the entity's CURRENT content_hash and
+    status are re-read fresh INSIDE this write transaction and compared against it before
+    writing anything. If the entity was edited (different content_hash) or archived since the
+    caller read its content, this is a no-op (returns 0, no rows written, any existing chunk
+    rows for this entity are left exactly as they were) -- closing the race window between
+    "caller read this entity's content" and "this transaction actually commits chunks for it".
+    Pass expected_content_hash=None (the default) to skip the guard entirely, e.g. for a caller
+    that just wrote/read the entity itself inside the same logical operation and already knows
+    it's current.
+
+    Returns the number of chunk rows written (0 on a guard skip or on empty/unchunkable content).
+    """
+    import sqlite_vec
+    from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+
+    rows = compute_entity_chunk_embeddings(entity_id, full_content)
+
+    conn = get_connection(db_path)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        def _write(c):
+            if expected_content_hash is not None:
+                current = c.execute(
+                    "SELECT content_hash, status FROM entities WHERE id = ?", (entity_id,)
+                ).fetchone()
+                if not current or current[1] == "archived" or current[0] != expected_content_hash:
+                    return 0
+
+            c.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id = ?", (entity_id,))
+            if rows:
+                c.executemany(
+                    "INSERT INTO entity_chunk_embeddings"
+                    "(id, entity_id, embedding, chunk_index, char_start, char_end)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            r["id"],
+                            r["entity_id"],
+                            sqlite_vec.serialize_float32(r["embedding"]),
+                            r["chunk_index"],
+                            r["char_start"],
+                            r["char_end"],
+                        )
+                        for r in rows
+                    ],
+                )
+            return len(rows)
+
+        return write_transaction_retrying(conn, _write)
+    finally:
+        close_connection(conn)
+
+
+def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
+    """Manually-invocable backfill: computes and stores chunk embeddings for active entities
+    that don't yet have rows in entity_chunk_embeddings.
+
+    NOT triggered by store_memory or any other existing write path -- invoke explicitly (e.g.
+    via `python -m saltmdb --backfill-chunk-embeddings`) to populate the table against a real DB
+    for testing/validation without live-wiring anything into the store_memory hot path yet. Runs
+    synchronously in-process (not via memory_service._embed_pool -- deliberately off-limits for
+    this phase).
+
+    Captures each candidate's content_hash at selection time and passes it through to
+    write_entity_chunk_embeddings as expected_content_hash, so the staleness guard there has
+    something real to compare against for this function's inherent read-then-write-later pattern
+    (a long backfill run scanning many entities gives real time for another writer to touch one
+    of them mid-run). Rows with a NULL/empty content_hash (schema.py's migration should populate
+    this for every active entity, but a caller running against a DB that hasn't been through a
+    current-code init_db() yet could still see one) are skipped rather than written: forwarding
+    None as expected_content_hash is write_entity_chunk_embeddings' explicit "skip the staleness
+    guard entirely" signal, and a locally-computed fingerprint can't substitute for it here --
+    the guard's write-time comparison reads the *stored* content_hash column fresh inside its own
+    transaction, so a value we only hold locally would never match it, silently discarding every
+    write. A skipped entity picks up a real content_hash (and becomes eligible again) on its next
+    store_memory write, or the next init_db() run.
+
+    Returns the count of entities actually written (excludes any skipped by the staleness guard
+    or by a still-missing content_hash).
+    """
+    import sqlite_vec
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+
+    db_path = db_path or get_db_path()
+    conn = get_connection(db_path)
+    try:
+        # The NOT EXISTS subquery below queries entity_chunk_embeddings, a vec0 virtual table --
+        # querying it (like any operation on it) requires sqlite_vec loaded on THIS connection
+        # object specifically, not just imported in-process (see init_vector_schema's docstring
+        # for why per-connection loading is a separate step from the module import).
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        query = (
+            "SELECT id, full_content, content_hash FROM entities e "
+            "WHERE status != 'archived' AND NOT EXISTS "
+            "(SELECT 1 FROM entity_chunk_embeddings WHERE entity_id = e.id)"
+        )
+        if limit:
+            rows = conn.execute(query + " LIMIT ?", (int(limit),)).fetchall()
+        else:
+            rows = conn.execute(query).fetchall()
+    finally:
+        conn.close()
+
+    written = 0
+    for eid, content, content_hash in rows:
+        if not content_hash:
+            # See docstring: forwarding this as expected_content_hash=None would silently
+            # disable the staleness guard for this entity (Codex re-review finding, Foundation
+            # phase) -- skip instead of writing unguarded.
+            logger.warning(
+                "Skipping chunk backfill for entity %s: content_hash not yet populated "
+                "(run init_db() to migrate legacy rows)",
+                eid,
+            )
+            continue
+        count = write_entity_chunk_embeddings(
+            eid, content, db_path, expected_content_hash=content_hash
+        )
+        if count > 0:
+            written += 1
+    return written

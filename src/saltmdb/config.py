@@ -50,6 +50,12 @@ DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate e
 DEDUP_DUPLICATE_THRESHOLD = 0.85  # >= this -> warn the caller of a likely duplicate
 DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
 
+# Sliding-window chunking for chunk-level embeddings (entity_chunk_embeddings).
+# Empirically settled across 3 benchmark rounds (see scripts/benchmarking/) -- do not re-tune
+# without new benchmark evidence.
+CHUNK_SIZE_CHARS = 1200
+CHUNK_OVERLAP_CHARS = 200
+
 # BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
 BM25_TITLE_WEIGHT = 10.0
 BM25_CONTENT_WEIGHT = 1.0

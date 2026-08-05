@@ -11,7 +11,24 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    if "--librarian" in sys.argv:
+    if "--backfill-chunk-embeddings" in sys.argv:
+        # Manual, opt-in entry point for the memory-core rework's Foundation phase (see
+        # plans/ and SALTMDB memory `5c09effa`): populates entity_chunk_embeddings against a
+        # real DB for testing/validation. Deliberately NOT run automatically on normal server
+        # startup (unlike backfill_pending_embeddings() below) -- no rework phase consumes this
+        # table yet, so there's no reason to pay a startup-latency cost for it by default. This
+        # is a local process flag, not an addition to the MCP tool surface.
+        from saltmdb.db.schema import init_db
+        from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
+
+        db_path = get_db_path()
+        conn = init_db(db_path)
+        conn.close()
+        logger.info("Starting entity_chunk_embeddings backfill on %s...", db_path)
+        count = backfill_chunk_embeddings(db_path)
+        logger.info("Chunk-embedding backfill complete: %d entities written.", count)
+        print(f"Chunk-embedding backfill complete: {count} entities written.", flush=True)
+    elif "--librarian" in sys.argv:
         from saltmdb.db.connection import close_connection
         from saltmdb.db.schema import init_db
         from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock

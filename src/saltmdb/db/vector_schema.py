@@ -52,3 +52,45 @@ def init_vector_schema(conn: sqlite3.Connection) -> None:
             embedding FLOAT[384]
         );
     """)
+
+
+def init_entity_chunk_vector_schema(conn: sqlite3.Connection) -> None:
+    """Create the entity_chunk_embeddings virtual table (chunk-level embeddings, memory-core
+    rework Foundation phase -- see plans/ and SALTMDB memory `5c09effa`).
+
+    Coexists with entity_embeddings (entity-level, one vector per entity); does NOT replace it.
+    Every existing entity_embeddings reader/writer is untouched by this table's existence.
+
+    `id` is a deterministic composite `f"{entity_id}::{chunk_index}"`, so re-embedding an entity
+    is a clean DELETE-then-INSERT by entity_id (see embedding_service.write_entity_chunk_embeddings).
+    `entity_id` is declared PARTITION KEY (not a plain column) so point-filtering, deleting, and
+    KNN-scoping all chunks belonging to one entity stay efficient -- this is the operation later
+    rework phases (search_memory, consolidate_vector_clusters) will lean on most. chunk_index,
+    char_start, char_end are auxiliary (`+`) columns: stored and retrievable, but not part of the
+    vector index itself.
+
+    Loads the sqlite_vec extension onto this connection itself (mirrors init_vector_schema and
+    every other vec0 call site in this codebase -- embed_entity_async, consolidate_vector_clusters,
+    scout_consolidated_supersessions all self-load defensively rather than assume a prior call
+    already attached the extension to this specific connection object). Loading twice on the same
+    connection is a harmless no-op, so calling this right after init_vector_schema(conn) (as
+    schema.py's init_db does) costs nothing extra while making this function safe to call
+    standalone -- from a test, a future script, or any other caller that never went through
+    init_vector_schema first.
+    """
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS entity_chunk_embeddings USING vec0(
+            id TEXT PRIMARY KEY,
+            entity_id TEXT PARTITION KEY,
+            embedding FLOAT[384],
+            +chunk_index INTEGER,
+            +char_start INTEGER,
+            +char_end INTEGER
+        );
+    """)

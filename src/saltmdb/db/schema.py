@@ -3,6 +3,7 @@ import logging
 import uuid
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying
+from saltmdb.utils.text import compute_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,27 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             )
         except sqlite3.OperationalError:
             pass
+
+        # Schema migration: backfill content_hash for legacy entities that predate the column.
+        # content_hash was added as a nullable ALTER TABLE column above, so every entity written
+        # before that migration ran started (and, until this backfill, stayed) NULL. That NULL
+        # is not just cosmetic: embedding_service.write_entity_chunk_embeddings' staleness guard
+        # is opt-in on expected_content_hash being non-None, and backfill_chunk_embeddings
+        # forwards the entities.content_hash column value verbatim as that argument -- so a NULL
+        # here silently disabled the exact stale-write guard the guard exists for, on every
+        # legacy entity (Codex re-review finding, Foundation phase). Idempotent and cheap in
+        # steady state: matches zero rows once every entity has a hash, since store_memory sets
+        # content_hash on every write from this point on.
+        try:
+            for _eid, _content in conn.execute(
+                "SELECT id, full_content FROM entities WHERE content_hash IS NULL OR content_hash = ''"
+            ).fetchall():
+                conn.execute(
+                    "UPDATE entities SET content_hash = ? WHERE id = ?",
+                    (compute_content_hash(_content or ""), _eid),
+                )
+        except sqlite3.OperationalError as e:
+            logger.warning("content_hash backfill migration skipped/failed: %s", e)
 
         # Schema migration: project_id is retired in favor of context_id (kept as a physical
         # column for compatibility, but no longer written/read by application code past this backfill)
@@ -300,10 +322,11 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         except sqlite3.OperationalError:
             pass
 
-        from saltmdb.db.vector_schema import init_vector_schema
+        from saltmdb.db.vector_schema import init_vector_schema, init_entity_chunk_vector_schema
 
         try:
             init_vector_schema(conn)
+            init_entity_chunk_vector_schema(conn)
         except Exception as e:
             logger.warning("Vector schema init deferred/failed: %s", e)
 
