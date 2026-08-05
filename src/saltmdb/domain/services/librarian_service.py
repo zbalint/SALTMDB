@@ -868,8 +868,28 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             close_connection(conn)
 
 
-def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901
-    """Scouts for consolidated entities that may be outdated due to new raw memories."""
+def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901, PLR0912, PLR0915
+    """Scouts for consolidated entities that may be outdated due to new raw memories.
+
+    Memory-core rework Phase 4: replaced the doc-level entity_embeddings join and
+    independent-membership similarity test (confirmed dilution bug -- same failure class Phase 3
+    fixed for consolidate_vector_clusters, and confirmed chaining bug, SALTMDB memory `3deae748`)
+    with entity_chunk_embeddings centroids (cohesion_service.get_fresh_entity_centroids, D0) and a
+    genuine mutual-cohesion requirement on the new-raw candidate set itself
+    (_find_best_cohesive_subset, D1) -- a proposal now requires the new raw fragments to be
+    related to EACH OTHER, not just individually close to the old consolidated node.
+
+    This is trigger condition #2 of the three distinct staleness-review triggers identified for
+    consolidated memories (SALTMDB memory `3cca4fda`) -- REACTIVE supersession only, firing when
+    new raw memories postdating a consolidated node's valid_from are semantically close to it.
+    Age-based staleness (trigger #3) and the one-time clustering-quality backfill audit (trigger
+    #1) are separate rollout tasks, out of scope here.
+
+    Never auto-commits, never archives, never touches weight/is_core -- only ever logs a
+    reviewable consolidation_request event. See memory_service._handle_supersession_candidate's
+    alpha.47 regression note: an automatic supersession/weight decision on an unreviewed signal is
+    the exact failure mode this function must never reproduce.
+    """
     should_close = False
     if not conn:
         db_path = db_path or get_db_path()
@@ -878,49 +898,97 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
 
     try:
         logger.info("Scouting Consolidated Memories for Supersession Candidates...")
-        try:
-            import sqlite_vec
 
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-        except Exception as e:
-            logger.debug("sqlite-vec extension not available for supersession scouting: %s", e)
+        from saltmdb.config import (
+            CLUSTER_MIN_PAIRWISE_THRESHOLD,
+            SUPERSESSION_MIN_OVERLAP_COUNT,
+            SUPERSESSION_MIN_SIMILARITY_THRESHOLD,
+        )
+        from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
+
+        consolidated_rows = conn.execute(
+            "SELECT id, title, owner_id, valid_from FROM entities WHERE status = 'consolidated'"
+        ).fetchall()
+        if not consolidated_rows:
             return
 
-        consolidated_cur = conn.execute("""
-            SELECT e.id, e.title, e.owner_id, e.valid_from
-            FROM entities e
-            JOIN entity_embeddings ee ON e.id = ee.entity_id
-            WHERE e.status = 'consolidated' AND e.embedding_status = 'ready'
-        """)
-        consolidated_nodes = consolidated_cur.fetchall()
-        if not consolidated_nodes:
+        raw_rows = conn.execute(
+            "SELECT id, created_at FROM entities WHERE status = 'raw'"
+        ).fetchall()
+        if len(raw_rows) < SUPERSESSION_MIN_OVERLAP_COUNT:
             return
 
-        to_insert = []
-        for cid, ctitle, cowner, cvalid_from in consolidated_nodes:
-            vec_row = conn.execute(
-                "SELECT embedding FROM entity_embeddings WHERE entity_id = ?", (cid,)
-            ).fetchone()
-            if not vec_row or not vec_row[0]:
-                continue
+        raw_created_at = {r[0]: r[1] for r in raw_rows}
+        all_raw_ids = list(raw_created_at.keys())
+        consolidated_ids = [r[0] for r in consolidated_rows]
 
-            vec_blob = vec_row[0]
-            new_raw_cur = conn.execute(
-                """
-                SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
-                FROM entity_embeddings ee
-                JOIN entities e ON ee.entity_id = e.id
-                WHERE e.status = 'raw' AND e.created_at > COALESCE(?, '1970-01-01T00:00:00')
-                ORDER BY distance ASC
-            """,
-                (vec_blob, cvalid_from),
+        centroids, unresolved, _observed_state = get_fresh_entity_centroids(
+            consolidated_ids + all_raw_ids, conn, db_path or get_db_path()
+        )
+        if unresolved:
+            logger.info(
+                "scout_consolidated_supersessions: excluding %d entities without a usable "
+                "centroid this pass: %s",
+                len(unresolved),
+                unresolved,
             )
 
-            overlapping_new_raw = [row[0] for row in new_raw_cur.fetchall() if row[1] <= 0.25]
-            if len(overlapping_new_raw) < 3:
+        import numpy as np
+
+        to_insert = []
+
+        for cid, ctitle, cowner, cvalid_from in consolidated_rows:
+            if cid not in centroids:
+                continue  # unresolved this pass -- already logged above
+
+            candidate_ids = [
+                rid
+                for rid in all_raw_ids
+                if rid in centroids
+                and raw_created_at.get(rid, "") > (cvalid_from or "1970-01-01T00:00:00")
+            ]
+            if len(candidate_ids) < SUPERSESSION_MIN_OVERLAP_COUNT:
                 continue
+
+            # Stage 1 (D1): consolidated-vs-raw similarity filter.
+            consolidated_vec = np.array(centroids[cid], dtype=np.float64)
+            consolidated_vec = consolidated_vec / max(np.linalg.norm(consolidated_vec), 1e-10)
+            candidate_matrix = np.vstack([centroids[rid] for rid in candidate_ids]).astype(
+                np.float64
+            )
+            candidate_norms = np.linalg.norm(candidate_matrix, axis=1, keepdims=True)
+            candidate_norms[candidate_norms == 0] = 1e-10
+            candidate_matrix = candidate_matrix / candidate_norms
+            sims = candidate_matrix @ consolidated_vec
+
+            overlapping = [
+                rid
+                for rid, sim in zip(candidate_ids, sims)
+                if sim >= SUPERSESSION_MIN_SIMILARITY_THRESHOLD
+            ]
+            if len(overlapping) < SUPERSESSION_MIN_OVERLAP_COUNT:
+                continue
+
+            # Stage 2 (D1, the chaining fix): overlapping raw fragments must also be mutually
+            # cohesive with EACH OTHER, reusing the same greedy-peel heuristic
+            # consolidate_vector_clusters already relies on.
+            sub_vectors = np.vstack([centroids[rid] for rid in overlapping]).astype(np.float64)
+            sub_norms = np.linalg.norm(sub_vectors, axis=1, keepdims=True)
+            sub_norms[sub_norms == 0] = 1e-10
+            sub_vectors = sub_vectors / sub_norms
+            sub_sim_matrix = sub_vectors @ sub_vectors.T
+
+            best = _find_best_cohesive_subset(
+                list(range(len(overlapping))),
+                sub_sim_matrix,
+                overlapping,
+                CLUSTER_MIN_PAIRWISE_THRESHOLD,
+                SUPERSESSION_MIN_OVERLAP_COUNT,
+            )
+            if best is None:
+                continue
+            subset_idx, min_intra_cohesion = best
+            final_raw_ids = sorted(overlapping[i] for i in subset_idx)
 
             if _pending_request_exists(conn, "supersession_candidate", consolidated_entity_id=cid):
                 continue
@@ -928,12 +996,19 @@ def scout_consolidated_supersessions(conn: sqlite3.Connection = None, db_path: s
             event_id = str(uuid.uuid4())
             now = datetime.now(UTC).isoformat()
             target_agent = cowner or "librarian"
+            sim_by_id = dict(zip(candidate_ids, (float(s) for s in sims)))
+            similarity_scores = {rid: round(sim_by_id[rid], 4) for rid in final_raw_ids}
+
             content = json.dumps(
                 {
                     "target": "supersession_candidate",
                     "consolidated_entity_id": cid,
                     "consolidated_title": ctitle,
-                    "new_raw_entity_ids": overlapping_new_raw,
+                    "new_raw_entity_ids": final_raw_ids,
+                    "similarity_to_consolidated": similarity_scores,
+                    "min_intra_raw_cohesion": round(min_intra_cohesion, 4),
+                    "similarity_threshold": SUPERSESSION_MIN_SIMILARITY_THRESHOLD,
+                    "cohesion_threshold": CLUSTER_MIN_PAIRWISE_THRESHOLD,
                 }
             )
             to_insert.append((event_id, now, target_agent, content, ctitle, cid))

@@ -70,13 +70,18 @@ def init_entity_chunk_vector_schema(conn: sqlite3.Connection) -> None:
     vector index itself.
 
     Loads the sqlite_vec extension onto this connection itself (mirrors init_vector_schema and
-    every other vec0 call site in this codebase -- embed_entity_async, consolidate_vector_clusters,
-    scout_consolidated_supersessions all self-load defensively rather than assume a prior call
-    already attached the extension to this specific connection object). Loading twice on the same
-    connection is a harmless no-op, so calling this right after init_vector_schema(conn) (as
-    schema.py's init_db does) costs nothing extra while making this function safe to call
-    standalone -- from a test, a future script, or any other caller that never went through
-    init_vector_schema first.
+    every other vec0 call site in this codebase that self-loads defensively rather than assume a
+    prior call already attached the extension to this specific connection object -- e.g.
+    embed_entity_async). Loading twice on the same connection is a harmless no-op, so calling this
+    right after init_vector_schema(conn) (as schema.py's init_db does) costs nothing extra while
+    making this function safe to call standalone -- from a test, a future script, or any other
+    caller that never went through init_vector_schema first.
+
+    Memory-core rework Phase 4: consolidate_vector_clusters and scout_consolidated_supersessions no
+    longer self-load the extension directly here -- both go through
+    cohesion_service.get_fresh_entity_centroids, which calls try_load_vector_extension internally
+    and degrades to a per-entity fallback (on-demand embedding) rather than raising if the load
+    fails, instead of the old bespoke try/except that silently abandoned the whole pass.
     """
     conn.enable_load_extension(True)
     import sqlite_vec

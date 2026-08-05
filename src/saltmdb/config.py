@@ -132,3 +132,19 @@ COHESION_OVERRIDE_MIN_LENGTH = 20  # mirrors QG_MIN_LENGTH's "not a throwaway st
 # comfortably above that with headroom. Components larger than this are skipped (logged, not
 # proposed) rather than run through the full extraction.
 COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION = 75
+
+# Memory-core rework Phase 4 -- see plans/eager-beaming-hippo.md and SALTMDB memory `32f9ac84`.
+# Locked from scripts/benchmarking/benchmark_supersession_threshold.py's real bge-small-en-v1.5
+# consolidated-summary-vs-raw-fragment cosine measurements over hand-crafted positive (a raw
+# fragment concretely updating/extending the SAME specific fact a consolidated summary describes)
+# and negative (a raw fragment from the same broad domain but a DIFFERENT specific fact) classes --
+# 0% false-accept, 0% false-reject on the benchmark corpus -- do not re-tune without new benchmark
+# evidence. This is a structurally different comparison shape from COHESION_MIN_PAIRWISE_THRESHOLD/
+# CLUSTER_MIN_PAIRWISE_THRESHOLD (post-merge synthesis centroid vs raw fragment, not raw-vs-raw),
+# so it is NOT aliased to either.
+SUPERSESSION_MIN_SIMILARITY_THRESHOLD = 0.7557
+# Cardinality floor (policy, not benchmarked) for scout_consolidated_supersessions: minimum
+# number of mutually-cohesive new raw fragments required to propose a supersession candidate.
+# Promoted unchanged from the pre-rework hardcoded literal; matches
+# find_connected_vector_clusters' own min_cluster_size=3 default.
+SUPERSESSION_MIN_OVERLAP_COUNT = 3
