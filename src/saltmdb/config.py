@@ -133,6 +133,18 @@ COHESION_OVERRIDE_MIN_LENGTH = 20  # mirrors QG_MIN_LENGTH's "not a throwaway st
 # proposed) rather than run through the full extraction.
 COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION = 75
 
+# Review-safety cap on a single emitted vector_cluster consolidation_request, distinct from
+# COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION above (a compute-cost cap on the *component* fed
+# into extraction, not a review-size cap on what gets extracted out of it). An extracted subset
+# that itself clears CLUSTER_MIN_PAIRWISE_THRESHOLD can still be large -- up to
+# COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION members -- and asking an agent to review/synthesize
+# that many memories in one commit_consolidation call creates excessive cognitive pressure and
+# encourages shallow acceptance (confirmed failure mode, the prior 37-item omnibus merge
+# incident). consolidate_vector_clusters splits any oversized extracted group into several
+# disjoint, individually-reviewable requests of this size or smaller instead of emitting it
+# whole. Policy choice, not benchmarked -- no re-tuning evidence needed to change it.
+MAX_CONSOLIDATION_REQUEST_SIZE = 8
+
 # Memory-core rework Phase 4 -- see plans/eager-beaming-hippo.md and SALTMDB memory `32f9ac84`.
 # Locked from scripts/benchmarking/benchmark_supersession_threshold.py's real bge-small-en-v1.5
 # consolidated-summary-vs-raw-fragment cosine measurements over hand-crafted positive (a raw

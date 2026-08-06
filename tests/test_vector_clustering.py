@@ -13,11 +13,16 @@ from saltmdb.db.connection import get_connection
 from saltmdb.db.schema import init_db
 from saltmdb.db.vector_schema import init_vector_schema
 from saltmdb.domain.services import embedding_service
-from saltmdb.config import COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION
+from saltmdb.config import (
+    COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION,
+    MAX_CONSOLIDATION_REQUEST_SIZE,
+)
 from saltmdb.domain.services.librarian_service import (
     extract_c_tfidf_tags,
     find_connected_vector_clusters,
     consolidate_vector_clusters,
+    _partition_balanced,
+    _mean_pairwise_similarity,
 )
 
 DIM = 384
@@ -267,6 +272,62 @@ class TestConnectedComponentsVectorClustering(unittest.TestCase):
         self.assertGreaterEqual(score, 0.5)
 
 
+class TestPartitionBalanced(unittest.TestCase):
+    """Pure-function tests for _partition_balanced -- no DB involved (memory-core rework,
+    MAX_CONSOLIDATION_REQUEST_SIZE review-safety split, see config.py)."""
+
+    def test_partition_balanced_worked_examples(self):
+        cases = {9: [5, 4], 10: [5, 5], 11: [6, 5], 17: [6, 6, 5]}
+        for n, expected_sizes in cases.items():
+            ids = [f"id{i:03d}" for i in range(n)]
+            groups = _partition_balanced(ids, max_size=8, min_size=3)
+            self.assertEqual(
+                [len(g) for g in groups],
+                expected_sizes,
+                f"n={n} produced group sizes {[len(g) for g in groups]}, expected {expected_sizes}",
+            )
+
+    def test_partition_balanced_no_op_when_within_max_size(self):
+        ids = [f"id{i:03d}" for i in range(6)]
+        groups = _partition_balanced(ids, max_size=8, min_size=3)
+        self.assertEqual(groups, [sorted(ids)])
+
+    def test_partition_balanced_property_over_full_extraction_range(self):
+        # Every size from min_cluster_size(3) up through COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION
+        # must split into disjoint, size-bounded groups whose union is exactly the input set.
+        for n in range(9, COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION + 1):
+            ids = [f"id{i:03d}" for i in range(n)]
+            groups = _partition_balanced(ids, max_size=8, min_size=3)
+            sizes = [len(g) for g in groups]
+            self.assertTrue(all(3 <= s <= 8 for s in sizes), f"n={n} produced sizes {sizes}")
+            flat = [eid for g in groups for eid in g]
+            self.assertEqual(len(flat), len(set(flat)), f"n={n} produced overlapping groups")
+            self.assertEqual(set(flat), set(ids), f"n={n} lost or invented ids")
+
+    def test_partition_balanced_is_deterministic_regardless_of_input_order(self):
+        ids = [f"id{i:03d}" for i in range(17)]
+        result_sorted = _partition_balanced(ids, max_size=8, min_size=3)
+        result_again = _partition_balanced(ids, max_size=8, min_size=3)
+        self.assertEqual(result_sorted, result_again)
+
+        shuffled = list(reversed(ids))
+        result_shuffled = _partition_balanced(shuffled, max_size=8, min_size=3)
+        self.assertEqual(result_sorted, result_shuffled)
+
+
+class TestMeanPairwiseSimilarity(unittest.TestCase):
+    def test_mean_pairwise_similarity_known_value(self):
+        # Same 3-vector fixture as test_find_connected_vector_clusters_off_diagonal_mean --
+        # off-diagonal mean should land around 0.7467, not be inflated by 1.0 diagonals.
+        centroids = {
+            "e1": [1.0, 0.0, 0.0],
+            "e2": [0.8, 0.6, 0.0],
+            "e3": [0.8, 0.0, 0.6],
+        }
+        mean_sim = _mean_pairwise_similarity(["e1", "e2", "e3"], centroids)
+        self.assertAlmostEqual(mean_sim, 0.7467, places=3)
+
+
 class TestConsolidateVectorClusters(unittest.TestCase):
     """Memory-core rework Phase 3, Part B (see plans/ and SALTMDB memory `5c09effa`):
     consolidate_vector_clusters rewritten onto entity_chunk_embeddings centroids instead of the
@@ -448,6 +509,146 @@ class TestConsolidateVectorClusters(unittest.TestCase):
         ).fetchall()
         event_types = [r[0] for r in rows]
         self.assertIn("consolidation_request", event_types)
+
+    def _consolidation_request_rows(self):
+        rows = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'consolidation_request'"
+        ).fetchall()
+        return [json.loads(content) for (content,) in rows]
+
+    @patch("saltmdb.domain.services.librarian_service.trigger_librarian")
+    def test_consolidate_vector_clusters_splits_oversized_9_item_cluster_into_5_and_4(
+        self, mock_trigger
+    ):
+        ids = [f"nine-{i:02d}" for i in range(9)]
+        for i, eid in enumerate(ids):
+            self._insert_raw_chunk_entity(eid, f"Cohesive Nine {i}", _axis_vector(0))
+        consolidate_vector_clusters(self.conn)
+
+        events = self._consolidation_request_rows()
+        clusters = [e["entity_ids"] for e in events]
+        self.assertEqual(len(clusters), 2)
+        self.assertEqual(sorted(len(c) for c in clusters), [4, 5])
+
+        union = set()
+        for c in clusters:
+            self.assertGreaterEqual(len(c), 3)
+            self.assertLessEqual(len(c), MAX_CONSOLIDATION_REQUEST_SIZE)
+            self.assertTrue(union.isdisjoint(c), "split clusters must be disjoint")
+            union.update(c)
+        self.assertEqual(union, set(ids))
+
+    @patch("saltmdb.domain.services.librarian_service.trigger_librarian")
+    def test_consolidate_vector_clusters_splits_oversized_17_item_cluster_into_6_6_5(
+        self, mock_trigger
+    ):
+        ids = [f"seventeen-{i:02d}" for i in range(17)]
+        for i, eid in enumerate(ids):
+            self._insert_raw_chunk_entity(eid, f"Cohesive Seventeen {i}", _axis_vector(0))
+        consolidate_vector_clusters(self.conn)
+
+        events = self._consolidation_request_rows()
+        clusters = [e["entity_ids"] for e in events]
+        self.assertEqual(len(clusters), 3)
+        self.assertEqual(sorted(len(c) for c in clusters), [5, 6, 6])
+
+        union = set()
+        for c in clusters:
+            self.assertGreaterEqual(len(c), 3)
+            self.assertLessEqual(len(c), MAX_CONSOLIDATION_REQUEST_SIZE)
+            self.assertTrue(union.isdisjoint(c), "split clusters must be disjoint")
+            union.update(c)
+        self.assertEqual(union, set(ids))
+
+    @patch("saltmdb.domain.services.librarian_service.trigger_librarian")
+    def test_consolidate_vector_clusters_split_subgroups_have_independent_tags_and_confidence(
+        self, mock_trigger
+    ):
+        # 5 entities dominated by "docker", 4 dominated by "kubernetes" -- ids sorted so the
+        # docker group (00-04) and kubernetes group (05-08) land in separate 5/4 sub-clusters,
+        # letting per-subgroup c-TF-IDF diverge.
+        docker_ids = [f"tagsplit-{i:02d}" for i in range(5)]
+        k8s_ids = [f"tagsplit-{i:02d}" for i in range(5, 9)]
+        for i, eid in enumerate(docker_ids):
+            self._insert_raw_chunk_entity(
+                eid, f"Docker Docker Container Registry {i}", _axis_vector(0)
+            )
+        for i, eid in enumerate(k8s_ids):
+            self._insert_raw_chunk_entity(
+                eid, f"Kubernetes Kubernetes Cluster Scheduling {i}", _axis_vector(0)
+            )
+
+        consolidate_vector_clusters(self.conn)
+
+        sug_rows = self.conn.execute(
+            "SELECT content FROM events WHERE type = 'domain_suggestion'"
+        ).fetchall()
+        suggestions = [json.loads(c) for (c,) in sug_rows]
+        self.assertEqual(len(suggestions), 2)
+
+        for sug in suggestions:
+            subgroup_ids = sug["cluster_entity_ids"]
+            expected_tags, expected_tfidf_conf = extract_c_tfidf_tags(
+                self.conn, subgroup_ids, top_k=3
+            )
+            # All member vectors are identical -> recomputed mean pairwise similarity is 1.0
+            expected_confidence = round(0.5 * 1.0 + 0.5 * expected_tfidf_conf, 2)
+            self.assertEqual(sug["suggested_tags"], expected_tags)
+            self.assertEqual(sug["confidence_score"], expected_confidence)
+
+    @patch("saltmdb.domain.services.librarian_service.trigger_librarian")
+    def test_consolidate_vector_clusters_split_subgroup_pending_suppression_is_independent(
+        self, mock_trigger
+    ):
+        ids = [f"pending-{i:02d}" for i in range(9)]
+        for i, eid in enumerate(ids):
+            self._insert_raw_chunk_entity(eid, f"Cohesive Pending {i}", _axis_vector(0))
+
+        # The eventual split is deterministic (sorted ids, 5+4): group_a = first 5, group_b =
+        # last 4. Pre-seed a pending consolidation_request covering exactly group_b's future
+        # membership, before consolidate_vector_clusters ever runs.
+        group_a = sorted(ids)[:5]
+        group_b = sorted(ids)[5:]
+        pending_content = json.dumps(
+            {"target": "vector_cluster", "owner_id": "shared_owner", "entity_ids": group_b}
+        )
+        self.conn.execute(
+            "INSERT INTO events (id, timestamp, agent_id, type, content) "
+            "VALUES (?, ?, ?, 'consolidation_request', ?)",
+            (
+                str(uuid.uuid4()),
+                datetime.now(UTC).isoformat(),
+                "shared_owner",
+                pending_content,
+            ),
+        )
+        self.conn.commit()
+
+        consolidate_vector_clusters(self.conn)
+
+        events = self._consolidation_request_rows()
+        clusters = [e["entity_ids"] for e in events]
+        # Only the pre-seeded group_b request exists for that subgroup -- no duplicate emitted.
+        self.assertEqual(sum(1 for c in clusters if set(c) == set(group_b)), 1)
+        # group_a has no pending coverage of its own and must still be proposed.
+        self.assertTrue(
+            any(set(c) == set(group_a) for c in clusters),
+            f"expected an independent proposal for group_a={group_a}, got {clusters}",
+        )
+
+    @patch("saltmdb.domain.services.librarian_service.trigger_librarian")
+    def test_consolidate_vector_clusters_leaves_in_bounds_6_item_cluster_unsplit(
+        self, mock_trigger
+    ):
+        ids = [f"six-{i:02d}" for i in range(6)]
+        for i, eid in enumerate(ids):
+            self._insert_raw_chunk_entity(eid, f"Cohesive Six {i}", _axis_vector(0))
+        consolidate_vector_clusters(self.conn)
+
+        events = self._consolidation_request_rows()
+        clusters = [e["entity_ids"] for e in events]
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(sorted(clusters[0]), sorted(ids))
 
 
 if __name__ == "__main__":

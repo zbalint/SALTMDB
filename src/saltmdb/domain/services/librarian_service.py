@@ -736,6 +736,93 @@ def find_connected_vector_clusters(
         return []
 
 
+def _partition_balanced(ids: list[str], max_size: int, min_size: int = 3) -> list[list[str]]:
+    """Splits a sorted id list into near-equal-sized disjoint groups, each within
+    [min_size, max_size], for MAX_CONSOLIDATION_REQUEST_SIZE-driven review-safety splitting
+    (see config.py:MAX_CONSOLIDATION_REQUEST_SIZE).
+
+    Sorts `ids` first -- determinism requirement, not relying on upstream ordering. If
+    `len(ids) <= max_size`, returns `[ids]` unchanged (single group, no-op case). Otherwise
+    divides into `g = ceil(len(ids) / max_size)` near-equal groups (`base, rem =
+    divmod(len(ids), g)`: `rem` groups of `base + 1`, the rest `base`) -- the standard balanced-
+    partition shape, producing e.g. 9->5+4, 10->5+5, 11->6+5, 17->6+6+5.
+
+    For the current max_size=8/min_size=3 pair this never yields a group under min_size (worst
+    case is len(ids)=9 -> groups of 5,4). That invariant depends on max_size/min_size staying in
+    a sane ratio -- if MAX_CONSOLIDATION_REQUEST_SIZE is ever retuned such that it could break,
+    fail loudly (defensive assert) rather than silently emit an invalid undersized group.
+    """
+    sorted_ids = sorted(ids)
+    if len(sorted_ids) <= max_size:
+        return [sorted_ids]
+
+    g = math.ceil(len(sorted_ids) / max_size)
+    base, rem = divmod(len(sorted_ids), g)
+    sizes = [base + 1] * rem + [base] * (g - rem)
+    assert all(min_size <= s <= max_size for s in sizes), (
+        f"_partition_balanced produced an out-of-bounds group size {sizes} for "
+        f"len={len(sorted_ids)}, max_size={max_size}, min_size={min_size} -- "
+        "max_size/min_size ratio no longer guarantees valid groups"
+    )
+
+    groups = []
+    offset = 0
+    for size in sizes:
+        groups.append(sorted_ids[offset : offset + size])
+        offset += size
+    return groups
+
+
+def _mean_pairwise_similarity(ids: list[str], centroids: dict[str, Any]) -> float:
+    """Recomputes the off-diagonal mean pairwise cosine similarity for a subgroup of ids,
+    formula-identical to find_connected_vector_clusters' own mean_sim (lines above) so a split
+    subgroup's recomputed value is directly comparable to an unsplit cluster's.
+    """
+    import numpy as np  # local import: see module-level note above find_connected_vector_clusters
+
+    if len(ids) <= 1:
+        return 1.0
+
+    X = np.vstack([np.array(centroids[eid], dtype=np.float32) for eid in ids])
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-10
+    X_norm = X / norms
+    sim_matrix = np.dot(X_norm, X_norm.T)
+
+    k = len(ids)
+    mean_sim = float(np.sum(sim_matrix[~np.eye(k, dtype=bool)])) / (k * (k - 1))
+    return round(mean_sim, 4)
+
+
+def _split_oversized_clusters(
+    cluster_data: list[tuple[list[str], float]],
+    centroids: dict[str, Any],
+    max_size: int,
+    min_size: int = 3,
+) -> list[tuple[list[str], float]]:
+    """Post-processes find_connected_vector_clusters' output, breaking any entry over max_size
+    into several disjoint, individually-reviewable (ids, mean_sim) tuples -- see
+    config.py:MAX_CONSOLIDATION_REQUEST_SIZE. Entries already within bounds are returned
+    unchanged (preserves current behavior/values for every existing 3-8-item cluster).
+    """
+    result: list[tuple[list[str], float]] = []
+    for ids, mean_sim in cluster_data:
+        if len(ids) <= max_size:
+            result.append((ids, mean_sim))
+            continue
+
+        parts = _partition_balanced(ids, max_size, min_size)
+        logger.info(
+            "Splitting oversized cohesive cluster of size %d into %d sub-requests (sizes: %s)",
+            len(ids),
+            len(parts),
+            [len(p) for p in parts],
+        )
+        for part in parts:
+            result.append((part, _mean_pairwise_similarity(part, centroids)))
+    return result
+
+
 def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = None):  # noqa: C901, PLR0912, PLR0915
     """Discovers topically related raw memories via chunk-embedding centroids and logs
     consolidation request events for genuinely cohesive multi-subset extractions.
@@ -793,6 +880,12 @@ def consolidate_vector_clusters(conn: sqlite3.Connection = None, db_path: str = 
             min_cluster_size=3,
             similarity_threshold=0.75,
             min_pairwise_cohesion=CLUSTER_MIN_PAIRWISE_THRESHOLD,
+        )
+
+        from saltmdb.config import MAX_CONSOLIDATION_REQUEST_SIZE
+
+        cluster_data = _split_oversized_clusters(
+            cluster_data, centroids, MAX_CONSOLIDATION_REQUEST_SIZE
         )
 
         to_insert = []
