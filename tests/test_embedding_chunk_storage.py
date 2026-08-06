@@ -289,6 +289,16 @@ class TestEmbeddingChunkStorage(unittest.TestCase):
         'not yet' rather than a permanent dead end."""
         content = "Legacy entity content that becomes backfillable once migrated."
         legacy_id = self._store("Legacy Null Content Hash Recovery", content)
+        # store_memory's live async chunk-write trigger (Part A1) can land between _store() and
+        # the NULLing below -- wait for it, then clear it, so "starts with zero chunk rows" is
+        # deterministic rather than racing the background pool (same fix as
+        # test_staleness_guard_skips_on_content_hash_mismatch; became newly reproducible in
+        # practice once the entity_chunk_embeddings PARTITION KEY removal made the background
+        # write meaningfully faster, narrowing the window this was always racing in).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not self._chunk_rows(legacy_id):
+            time.sleep(0.05)
+        self.conn.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id = ?", (legacy_id,))
         self.conn.execute("UPDATE entities SET content_hash = NULL WHERE id = ?", (legacy_id,))
 
         written_before = backfill_chunk_embeddings(self.db_path)

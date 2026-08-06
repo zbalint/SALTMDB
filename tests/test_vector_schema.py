@@ -130,30 +130,36 @@ class TestEntityChunkVectorSchema(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_knn_scoped_to_partition_only_returns_that_entitys_chunks(self):
+    def test_physical_chunk_count_stays_flat_as_entity_count_grows(self):
+        """Regression coverage for the PARTITION KEY storage-blowup bug (SALTMDB memory
+        `3e0c7a1e`): with `entity_id` as a plain auxiliary column (not PARTITION KEY), all
+        entities share the table's normal global vec0 chunk allocation instead of each getting
+        an isolated, near-empty one. Asserts the physical `entity_chunk_embeddings_chunks`
+        shadow-table row count -- the same signal the original bug repro used -- stays small and
+        constant as entity count grows, rather than growing 1:1 with entity count the way it did
+        under PARTITION KEY (150 entities -> 150 physical chunks / ~228MB, empirically). Uses a
+        modest N (30) that's already enough to distinguish flat (O(1)) from linear (O(entities))
+        growth without the full repro's runtime cost."""
         conn = sqlite3.connect(":memory:")
         try:
             init_entity_chunk_vector_schema(conn)
-            conn.execute(
-                "INSERT INTO entity_chunk_embeddings"
-                "(id, entity_id, embedding, chunk_index, char_start, char_end)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                ("e1::0", "e1", _vec([1.0, 0.0, 0.0, 0.0] * 96), 0, 0, 1200),
+            for i in range(30):
+                conn.execute(
+                    "INSERT INTO entity_chunk_embeddings"
+                    "(id, entity_id, embedding, chunk_index, char_start, char_end)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (f"e{i}::0", f"e{i}", _vec([1.0, 0.0, 0.0, 0.0] * 96), 0, 0, 500),
+                )
+            chunk_count = conn.execute(
+                "SELECT COUNT(*) FROM entity_chunk_embeddings_chunks"
+            ).fetchone()[0]
+            self.assertLessEqual(
+                chunk_count,
+                2,
+                "30 distinct entity_ids should share a small, constant number of physical vec0 "
+                "chunks -- a count scaling with entity count would mean PARTITION KEY-style "
+                "per-entity storage blowup has regressed",
             )
-            conn.execute(
-                "INSERT INTO entity_chunk_embeddings"
-                "(id, entity_id, embedding, chunk_index, char_start, char_end)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                ("e2::0", "e2", _vec([1.0, 0.0, 0.0, 0.0] * 96), 0, 0, 500),
-            )
-
-            query_vec = _vec([1.0, 0.0, 0.0, 0.0] * 96)
-            rows = conn.execute(
-                "SELECT id FROM entity_chunk_embeddings "
-                "WHERE embedding MATCH ? AND k = 5 AND entity_id = ? ORDER BY distance",
-                (query_vec, "e1"),
-            ).fetchall()
-            self.assertEqual(rows, [("e1::0",)])
         finally:
             conn.close()
 
@@ -185,7 +191,7 @@ class TestEntityChunkVectorSchema(unittest.TestCase):
 
 class TestContentHashMigration(unittest.TestCase):
     """Codex-required regression coverage for
-    vector_schema.migrate_entity_chunk_embeddings_content_hash (Phase 2 Part A0): builds a
+    vector_schema.migrate_entity_chunk_embeddings_schema (Phase 2 Part A0): builds a
     Foundation-era columnless entity_chunk_embeddings table by hand, runs the real init_db()
     migration path over it end-to-end, and asserts all three of the migration's documented
     guarantees -- the new column exists, old (pre-migration) rows are intentionally reset rather
@@ -323,6 +329,108 @@ class TestContentHashMigration(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertIn("content_hash", row[0])
+        finally:
+            conn.close()
+
+    def _build_partitioned_with_content_hash_db(self) -> None:
+        """Hand-builds TODAY'S ACTUAL PRODUCTION shape (SALTMDB memory `76da44ca`): the Phase 2
+        Part A0 migration already ran at some point in the past, so `content_hash` IS present --
+        but the table still declares `entity_id TEXT PARTITION KEY`, since that removal is the
+        migration behavior under test here. Codex review (2026-08-06) flagged that the older
+        `_build_foundation_era_db` fixture predates content_hash entirely, so it can't exercise
+        the `"content_hash" in sql and "PARTITION KEY" not in sql` no-op check's PARTITION KEY
+        half -- this fixture closes that gap by combining both conditions the way the real
+        pre-fix live/dev DB actually does."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            conn.execute("""
+                CREATE TABLE entities (
+                    id TEXT PRIMARY KEY,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    last_accessed_at DATETIME NOT NULL,
+                    owner_id TEXT,
+                    scope TEXT DEFAULT 'shared',
+                    is_core BOOLEAN DEFAULT 0,
+                    weight INTEGER DEFAULT 1,
+                    status TEXT DEFAULT 'raw',
+                    parent_ids TEXT,
+                    title TEXT NOT NULL,
+                    full_content TEXT NOT NULL,
+                    valid_from DATETIME,
+                    valid_to DATETIME,
+                    metadata TEXT,
+                    content_hash TEXT
+                );
+            """)
+            conn.execute(
+                "INSERT INTO entities"
+                " (id, created_at, updated_at, last_accessed_at, title, full_content, content_hash)"
+                " VALUES ('partitioned-entity', datetime('now'), datetime('now'), datetime('now'),"
+                " 'Partitioned Entity', 'Content for the still-partitioned Phase 2 shape.', 'abc123')"
+            )
+            # Today's actual pre-fix production shape: content_hash present, still partitioned.
+            conn.execute("""
+                CREATE VIRTUAL TABLE entity_chunk_embeddings USING vec0(
+                    id TEXT PRIMARY KEY,
+                    entity_id TEXT PARTITION KEY,
+                    embedding FLOAT[384],
+                    +chunk_index INTEGER,
+                    +char_start INTEGER,
+                    +char_end INTEGER,
+                    +content_hash TEXT
+                );
+            """)
+            conn.execute(
+                "INSERT INTO entity_chunk_embeddings"
+                " (id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "partitioned-entity::0",
+                    "partitioned-entity",
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0] * 96),
+                    0,
+                    0,
+                    100,
+                    "abc123",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_migration_drops_partition_key_when_content_hash_already_present(self):
+        """The detection branch Codex required coverage for: a table with content_hash already
+        present but STILL declaring PARTITION KEY (today's real pre-fix shape) must still be
+        drop+recreated -- the old check (`"content_hash" in sql` alone) would have wrongly
+        treated this as already-migrated and left the PARTITION KEY storage bug in place."""
+        from saltmdb.db.schema import init_db
+
+        self._build_partitioned_with_content_hash_db()
+
+        conn = init_db(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'entity_chunk_embeddings'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertNotIn(
+                "PARTITION KEY",
+                row[0],
+                "migration must drop+recreate a still-partitioned table even when content_hash "
+                "is already present",
+            )
+            self.assertIn("content_hash", row[0])
+
+            # Old (pre-migration) rows are intentionally reset, not carried forward -- same
+            # atomic-clear guarantee as the content_hash migration this folds together with.
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id = 'partitioned-entity'"
+            ).fetchone()[0]
+            self.assertEqual(remaining, 0)
         finally:
             conn.close()
 

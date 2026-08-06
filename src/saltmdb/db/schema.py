@@ -325,7 +325,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         from saltmdb.db.vector_schema import (
             init_vector_schema,
             init_entity_chunk_vector_schema,
-            migrate_entity_chunk_embeddings_content_hash,
+            migrate_entity_chunk_embeddings_schema,
         )
 
         # Codex-mandated (Phase 2 Part A0): this destructive drop+recreate migration must NOT
@@ -336,8 +336,10 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # entity_chunk_embeddings table at all. A failure here aborts init_db() loudly instead.
         # Runs inside this same _write closure / write_transaction_retrying transaction, so a
         # raised exception here still triggers the outer ROLLBACK -- the DROP never commits
-        # without its recreate landing in the same transaction.
-        migrate_entity_chunk_embeddings_content_hash(conn)
+        # without its recreate landing in the same transaction. Also covers the later
+        # PARTITION KEY removal migration (SALTMDB memory `3e0c7a1e`) -- same drop+recreate
+        # mechanism, same non-swallowed placement, now detecting either legacy-shape condition.
+        migrate_entity_chunk_embeddings_schema(conn)
 
         try:
             init_vector_schema(conn)
