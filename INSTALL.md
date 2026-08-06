@@ -38,7 +38,7 @@ pip install -e .
 ### Environment Variables
 
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
-- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search.
+- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search -- note that with it disabled, `search_memory` calls that pass `query_keywords` return an error (`[{"error": "..."}]`) rather than falling back to FTS-only results; filter/tag-only browsing without `query_keywords` still works.
 - `SALTMDB_VIEWER_PORT`: Custom port for the database dashboard viewer (default: `8080`). Can also be set per-invocation via the `--port` CLI flag (see §5).
 - `SALTMDB_VIEWER_HOST`: Bind host for the database viewer (default: `127.0.0.1`, loopback only). Set to `0.0.0.0` to expose on the local network.
 - `SALTMDB_VIEWER_ENABLED`: Set to `false` (or `0`/`off`/`no`) to disable auto-start of the web viewer on MCP server startup (default: `true`).

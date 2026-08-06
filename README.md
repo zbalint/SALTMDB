@@ -72,7 +72,7 @@ SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in para
 * Semantic search uses `fastembed` (`BAAI/bge-small-en-v1.5`, 384-dim ONNX, ~66MB pre-bundled model weights) stored in a `sqlite-vec` `vec0` virtual table. The query text is `{title}\n\n{full_content}` concatenated for embedding.
 * RRF merges on rank position (not raw scores) with `k=60`, keeping the existing BM25 tuning intact. Rows that matched via FTS5 carry a query-centered `fts_snippet` excerpt with `<mark>`/`</mark>` highlighting; rows that only surfaced via semantic search fall back to the heuristic snippet extractor.
 * Relation count is factored into FTS5 ranking as a small boost: `ORDER BY (bm25 * weight + rel_count * 0.1) ASC`.
-* Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search.
+* Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search. **Note**: `search_memory` no longer has an FTS-only fallback for query-based calls -- with semantic search disabled, a call that passes `query_keywords` returns `[{"error": "..."}]` instead of degraded FTS-only results. Filter/tag-only browsing (no `query_keywords`) is unaffected.
 * Duplicate checks (`check_duplicate_memories`) use batched precomputed vector lookups (`_batch_semantic_similarities`) to avoid re-embedding each candidate, with FTS5 pre-filtering to cap candidates at ~30 before the similarity pass.
 
 > [!NOTE]
@@ -186,7 +186,7 @@ $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `SALTMDB_DB_PATH` | `~/.saltmdb/saltmdb.db` | Path to the SQLite database file. |
-| `SALTMDB_ENABLE_SEMANTIC` | `true` | Set to `false`/`0`/`off`/`no` to disable vector search and use FTS5 only. |
+| `SALTMDB_ENABLE_SEMANTIC` | `true` | Set to `false`/`0`/`off`/`no` to disable vector search. Query-based `search_memory` calls then return an error instead of an FTS-only fallback -- see the Search Architecture section above. |
 | `SALTMDB_VIEWER_PORT` | `8080` | Port for the database dashboard viewer. |
 | `SALTMDB_VIEWER_HOST` | `127.0.0.1` | Bind host for the viewer (loopback-only by default). |
 | `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable auto-start of the viewer on MCP server startup. |

@@ -591,6 +591,17 @@ def semantic_search(
 
     Opens its own dedicated connection so it can safely load the sqlite_vec
     extension without conflicting with a concurrent FTS search on a shared conn.
+
+    Raises on failure (post-Codex-review fix, P0): model loading, embedding,
+    sqlite-vec extension loading, or the vector SQL query all propagate their
+    exception to the caller instead of being swallowed into an empty result. A
+    caller-side `except -> []` here would be indistinguishable from a genuinely
+    successful query that just found zero candidates -- search_memory's RRF merge
+    would then quietly present ordinary-looking FTS-only results, which is
+    exactly the silent-fallback failure mode Part 0 already retired for the
+    semantic-disabled case. search_memory() is expected to let this exception
+    propagate up to its own top-level `except Exception -> [{"error": ...}]`
+    handler rather than catching it locally.
     """
     conn = None
     try:
@@ -616,9 +627,6 @@ def semantic_search(
         exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit, offset]
         rows = conn.execute(sql, exec_params).fetchall()
         return [(row[0], row[1]) for row in rows]
-    except Exception as e:
-        logger.warning("Semantic search failed, falling back to FTS5 only: %s", e)
-        return []
     finally:
         if conn:
             close_connection(conn)
@@ -784,6 +792,76 @@ def reciprocal_rank_fusion(
     return dict(ranked[:limit])
 
 
+def _rrf_gap_confident(rrf_score_map: dict[str, float], fts_ids: set, semantic_ids: set) -> bool:
+    """True when RRF's top1 candidate is (a) matched by BOTH the FTS and dense-vector channels
+    and (b) separated from top2 by RERANK_GAP_SKIP_RATIO or more -- hybrid search already has a
+    decisive, corroborated winner and Stage-2 rerank_by_topic has no signal worth adding (see
+    SALTMDB memory 870a1d4e, Q8: rerank overrode a dual-channel, ~2x-margin decisive winner with a
+    noise-level embedding-cosine call). A tie (Q1-style, ~1.0x, or a top1 matched by only one
+    channel) still falls through to rerank -- exactly the ambiguous case rerank helps with.
+    Requiring dual-channel support, not ratio alone, avoids trusting a numeric gap that isn't
+    actually backed by real retrieval agreement (see RERANK_GAP_SKIP_RATIO's config.py comment for
+    the calibration data behind this).
+    """
+    ids = list(rrf_score_map.keys())
+    scores = list(rrf_score_map.values())
+    if len(scores) < 2 or scores[1] <= 0:
+        return False
+    top1_id = ids[0]
+    if top1_id not in fts_ids or top1_id not in semantic_ids:
+        return False
+    from saltmdb.config import RERANK_GAP_SKIP_RATIO
+
+    return (scores[0] / scores[1]) >= RERANK_GAP_SKIP_RATIO
+
+
+def _apply_type_bias(ordered_ids: list, conn) -> list:
+    """Part 2 (SALTMDB memory 870a1d4e, prefer_durable_types): stable-partitions `event`-typed
+    candidates to the back of ordered_ids, preserving relative order within each group. `event`
+    memories are working/session notes prone to staleness by design (see SALTMDB memory 870a1d4e's
+    Q12 case) -- the other four memory_type values (fact/decision/procedure/preference) are
+    treated as durable and kept in front. No-op on an empty pool.
+    """
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"SELECT id, memory_type FROM entities WHERE id IN ({placeholders})", ordered_ids
+    ).fetchall()
+    event_ids = {row[0] for row in rows if row[1] == "event"}
+    return [eid for eid in ordered_ids if eid not in event_ids] + [
+        eid for eid in ordered_ids if eid in event_ids
+    ]
+
+
+def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
+    """Part 2 (SALTMDB memory 870a1d4e, demote_superseded): stable-partitions candidates that are
+    the TARGET of a currently-valid outgoing `supersedes` edge to the back of ordered_ids,
+    preserving relative order within each group. `A supersedes B` means A (source) is the
+    new/authoritative memory and B (target) is the old one it replaces -- matching this codebase's
+    `consolidated_from` precedent (source = new summary, target = old raw parent) -- so it is the
+    target side that gets demoted here, not the source (corrects a direction bug in 870a1d4e's own
+    original wording, confirmed during implementation review). Uses this file's own existing
+    "currently valid" literal idiom (see the related_map query above) rather than
+    relation_service's separate point-in-time parameter style. No-op on an empty pool.
+    """
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT target_id FROM relations
+        WHERE target_id IN ({placeholders}) AND predicate = 'supersedes'
+          AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+        """,
+        ordered_ids,
+    ).fetchall()
+    superseded_ids = {row[0] for row in rows}
+    return [eid for eid in ordered_ids if eid not in superseded_ids] + [
+        eid for eid in ordered_ids if eid in superseded_ids
+    ]
+
+
 def search_memory(  # noqa: C901, PLR0912, PLR0915
     owner_id: str = None,
     query_keywords: str = None,
@@ -798,6 +876,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     cursor: str = None,
     include_related: bool = True,
     rerank_by_topic: bool = False,
+    prefer_durable_types: bool = False,
+    demote_superseded: bool = False,
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
@@ -949,7 +1029,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
-                if rerank_by_topic:
+                if rerank_by_topic or prefer_durable_types or demote_superseded:
+                    # Widen the pool for rerank_by_topic AND Part 2's two opt-in ranking flags --
+                    # otherwise there's nothing meaningful to reorder within (a plain search's
+                    # pool is just offset+limit, often smaller than what's worth considering).
                     from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
 
                     candidate_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
@@ -976,12 +1059,33 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     0,
                 )
                 fts_rows = fts_future.result()
+                # semantic_future.result() re-raises any exception semantic_search() raised in the
+                # worker thread (post-Codex-review P0 fix) -- a real embedding/vector failure must
+                # propagate out to this function's own top-level except-Exception handler and come
+                # back as an error item, never get silently RRF-merged as if it were a genuinely
+                # empty (but successful) semantic result.
                 semantic_rows = semantic_future.result()
 
                 rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, candidate_window)
+                fts_ids = {r[0] for r in fts_rows}
+                semantic_ids = {eid for eid, _ in semantic_rows}
 
                 if rrf_score_map:
-                    if rerank_by_topic:
+                    # Part 1 gap gate (SALTMDB memory 870a1d4e): skip Stage 2 entirely when
+                    # hybrid search already has a decisive, dual-channel-corroborated winner --
+                    # trust it instead of letting rerank second-guess it with noisier signal. Falls
+                    # through to the plain RRF-order `else` branch below exactly like every other
+                    # existing "rerank_by_topic requested but gated off" path (explain_mode,
+                    # semantic-disabled, empty query -- see the topic_scores_map comment above).
+                    gap_confident = rerank_by_topic and _rrf_gap_confident(
+                        rrf_score_map, fts_ids, semantic_ids
+                    )
+                    if gap_confident:
+                        logger.debug(
+                            "rerank_by_topic skipped: RRF top1/top2 gap already decisive "
+                            "(dual-channel top1, ratio >= RERANK_GAP_SKIP_RATIO)."
+                        )
+                    if rerank_by_topic and not gap_confident:
                         # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks the
                         # whole candidate_window, then offset/limit slices the RERANKED order.
                         pool_ids = list(rrf_score_map.keys())
@@ -1016,9 +1120,23 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                         ranked_pool = sorted(
                             pool_ids, key=lambda eid: -topic_scores[eid]["topic_score"]
                         )
+                        # Part 2 (SALTMDB memory 870a1d4e): type bias first, then supersession
+                        # demotion -- ensures an explicitly-superseded item always sinks below a
+                        # merely-event-typed one, not the reverse. Applied to the FULL reranked
+                        # pool, before the offset/limit slice, same as rerank_by_topic's own
+                        # override above.
+                        if prefer_durable_types:
+                            ranked_pool = _apply_type_bias(ranked_pool, conn)
+                        if demote_superseded:
+                            ranked_pool = _apply_supersession_demotion(ranked_pool, conn)
                         merged_ids = ranked_pool[offset : offset + limit]
                     else:
-                        merged_ids = list(rrf_score_map.keys())[offset : offset + limit]
+                        pool_order = list(rrf_score_map.keys())
+                        if prefer_durable_types:
+                            pool_order = _apply_type_bias(pool_order, conn)
+                        if demote_superseded:
+                            pool_order = _apply_supersession_demotion(pool_order, conn)
+                        merged_ids = pool_order[offset : offset + limit]
                     if merged_ids:
                         placeholders = ",".join("?" for _ in merged_ids)
                         id_order = {eid: i for i, eid in enumerate(merged_ids)}
@@ -1049,9 +1167,19 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 else:
                     rows = fts_rows[offset : offset + limit]
             else:
-                if rerank_by_topic:
-                    logger.debug("rerank_by_topic ignored: semantic search is disabled.")
-                rows = _run_fts_search(conn, sanitized_query, where_clauses, params, limit, offset)
+                # Part 0 (SALTMDB memory 870a1d4e follow-on): FTS-only query retrieval is
+                # retired, not silently substituted -- search_memory is a hybrid FTS+dense-vector
+                # tool, and returning lower-quality FTS-only results as if nothing changed hid a
+                # real precision regression from the caller. Fails loud via the function's own
+                # existing except-Exception handler below instead. Empty-query browsing (no
+                # query_keywords, the final `else` further down) is unaffected -- it never reaches
+                # this branch.
+                raise RuntimeError(
+                    "Semantic search is disabled (SALTMDB_ENABLE_SEMANTIC=false); search_memory "
+                    "requires the hybrid FTS+dense-vector pipeline for query-based search. Unset "
+                    "SALTMDB_ENABLE_SEMANTIC (or set it to true), or call search_memory without "
+                    "query_keywords to browse via tags/filters only."
+                )
         else:
             if rerank_by_topic:
                 logger.debug("rerank_by_topic ignored: query_keywords is empty.")

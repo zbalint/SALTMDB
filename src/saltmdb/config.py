@@ -68,6 +68,30 @@ RERANK_BROAD_THEME_THRESHOLD = (
     0.5322  # topic_score >= this (and below SAME_TOPIC) -> "BROADLY_RELATED_THEMES"
 )
 
+# Confidence gate on rerank_by_topic itself (search_memory's _rrf_gap_confident, see
+# memory_service.py). A structurally different axis from the two RERANK_* thresholds above: those
+# score topic *purity* via raw cosine similarity, this scores hybrid-search *confidence* via
+# fused RRF rank-position scores (see reciprocal_rank_fusion, k=60) -- do not alias to either.
+# Locked from scripts/benchmarking/benchmark_rerank_gap_gate.py's real live-corpus run (SALTMDB
+# memory 870a1d4e, elaborated by the calibration write-up stored after this run): a 12-query
+# calibration set (2 fixed regression anchors from 021eb8ee's original battery, plus 10 newly
+# hand-picked real queries -- not a replay of that original 12-query battery itself) showed real
+# "decisive" (human-judged, clean single-topic hit) queries split into two
+# bands -- 2 queries with full dual-channel rank-0 agreement (both FTS and vector search picked
+# the same top-1) at a clean ratio of ~2.03, and 5 "soft decisive" queries at 1.02-1.12 where RRF's
+# harmonic rank decay compresses the margin even for a genuinely correct, unambiguous winner.
+# Real "ambiguous" queries (near-duplicate/broad/recency-prone topics) measured 1.03-1.08,
+# overlapping the soft-decisive band -- so a naive midpoint-of-bucket-extremes threshold (~1.05)
+# would misfire on real ambiguous queries. The one incident this gate is meant to prevent (SALTMDB
+# memory 870a1d4e's Q8 regression) was specifically the clean dual-rank-0-agreement pattern, and
+# running rerank on a "soft decisive" query is empirically harmless (021eb8ee: rerank preserved the
+# correct top-1 in 8/8 already-unambiguous ties) -- so the threshold is set just below the clean
+# dual-rank-0-agreement value, not at the overlapping midpoint, erring toward "still rerank" on
+# anything short of the sharpest signal. Combined with the dual-channel-membership check in
+# _rrf_gap_confident (top1 must appear in BOTH channels' result sets, not just have a high ratio)
+# -- do not re-tune without new benchmark evidence.
+RERANK_GAP_SKIP_RATIO = 1.9  # rrf_top1/rrf_top2 >= this (AND top1 dual-channel) -> skip rerank
+
 # BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
 BM25_TITLE_WEIGHT = 10.0
 BM25_CONTENT_WEIGHT = 1.0

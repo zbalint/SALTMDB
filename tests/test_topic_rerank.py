@@ -11,11 +11,17 @@ import sqlite_vec
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import embedding_service
 from saltmdb.domain.services.memory_service import (
+    _rrf_gap_confident,
     rerank_candidates_by_topic,
     search_memory,
+    semantic_search,
     store_memory,
 )
-from saltmdb.config import RERANK_SAME_TOPIC_THRESHOLD, RERANK_BROAD_THEME_THRESHOLD
+from saltmdb.config import (
+    RERANK_SAME_TOPIC_THRESHOLD,
+    RERANK_BROAD_THEME_THRESHOLD,
+    RERANK_GAP_SKIP_RATIO,
+)
 
 DIM = 384
 
@@ -302,7 +308,10 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
             "candidate with no chunk rows must still appear via the fallback tier, not vanish",
         )
 
-    def test_rerank_degrades_gracefully_when_semantic_search_disabled(self):
+    def test_search_memory_errors_when_semantic_search_disabled(self):
+        """Part 0 (SALTMDB memory 870a1d4e follow-on): FTS-only fallback is retired -- a
+        query-bearing search_memory call with semantic search disabled must fail loud (an
+        error item), not silently degrade to FTS-only results presented as normal."""
         self._store(
             "Rerank Semantic Disabled", "Content for the semantic-search-disabled degrade test."
         )
@@ -316,9 +325,230 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
             )
 
         self.assertTrue(isinstance(results, list))
+        self.assertEqual(len(results), 1)
+        self.assertIn("error", results[0])
+        self.assertIn("Semantic search is disabled", results[0]["error"])
+
+    def test_search_memory_errors_when_semantic_search_raises(self):
+        """P0 fix (Codex implementation review): a genuine semantic-search failure (embedding
+        outage, sqlite-vec load failure, a bad vector SQL query, ...) must propagate to an error
+        item exactly like the semantic-disabled case above -- never get silently RRF-merged with
+        the (real, successful) FTS results and presented as ordinary hybrid results. Before this
+        fix, semantic_search() caught the exception internally and returned [], so this call would
+        have quietly succeeded with FTS-only results instead of failing loud."""
+        self._store(
+            "Rerank Semantic Failure", "Content for the semantic-search-raises degrade test."
+        )
+        time.sleep(0.5)
+
+        with patch(
+            "saltmdb.domain.services.memory_service.semantic_search",
+            side_effect=RuntimeError("simulated embedding outage"),
+        ):
+            results = search_memory(
+                query_keywords="semantic failure degrade test",
+                db_path=self.db_path,
+            )
+
+        self.assertTrue(isinstance(results, list))
+        self.assertEqual(len(results), 1)
+        self.assertIn("error", results[0])
+        self.assertIn("simulated embedding outage", results[0]["error"])
+
+    def test_empty_query_browsing_unaffected_by_semantic_disabled(self):
+        """Filter/tag-only browsing (no query_keywords) never reaches the hybrid pipeline, so it
+        must keep working normally even when semantic search is disabled."""
+        self._store("Browsable Entry", "Content for the empty-query browsing test.")
+        time.sleep(0.5)
+
+        with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
+            results = search_memory(db_path=self.db_path, limit=5)
+
+        self.assertTrue(isinstance(results, list))
+        self.assertNotIn("error", results[0] if results else {})
+
+
+class TestSemanticSearchFailurePropagation(unittest.TestCase):
+    """Direct unit test for semantic_search() itself (Codex implementation review, P0, required
+    test #2): an embedding/vector failure must raise out of the function, not be caught internally
+    and converted to []. See TestSearchMemoryRerankRobustness's
+    test_search_memory_errors_when_semantic_search_raises above for the search_memory()-level seam
+    proof of the same fix."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_embedding_failure_propagates_instead_of_returning_empty(self):
+        with patch(
+            "saltmdb.domain.services.embedding_service.embed_text",
+            side_effect=RuntimeError("simulated embedding outage"),
+        ):
+            with self.assertRaises(RuntimeError):
+                semantic_search("query text", [], [], limit=5, db_path=self.db_path)
+
+
+class TestRrfGapConfident(unittest.TestCase):
+    """Pure unit tests for Part 1's rerank score-gap gate (_rrf_gap_confident, SALTMDB memory
+    870a1d4e). Hand-built rrf_score_map/fts_ids/semantic_ids inputs -- doesn't exercise real RRF
+    or the DB at all, purely the gate function's own decision logic."""
+
+    def test_decisive_dual_channel_win_gates_off_rerank(self):
+        # top1 present in both channels, ratio 2.0 (both rank-0) clears RERANK_GAP_SKIP_RATIO.
+        rrf_score_map = {"a": 2 / 61, "b": 1 / 61}
+        self.assertTrue(_rrf_gap_confident(rrf_score_map, {"a", "b"}, {"a", "b"}))
+
+    def test_genuine_tie_falls_through_to_rerank(self):
+        # top1 ("a") matched by FTS only, top2 ("b") matched by semantic only -- ratio 1.0.
+        rrf_score_map = {"a": 1 / 61, "b": 1 / 61}
+        self.assertFalse(_rrf_gap_confident(rrf_score_map, {"a"}, {"b"}))
+
+    def test_high_ratio_alone_is_not_enough_without_dual_channel_top1(self):
+        # Ratio alone clears the threshold, but top1 ("a") isn't in fts_ids -- must still gate
+        # off (fall through to rerank), proving the dual-channel requirement actually bites
+        # independently of the numeric ratio (Codex review: "an RRF ratio alone is not always a
+        # universal confidence signal").
+        rrf_score_map = {"a": 3.0, "b": 1.0}
+        self.assertFalse(_rrf_gap_confident(rrf_score_map, {"b"}, {"a", "b"}))
+
+    def test_single_candidate_cannot_be_gap_confident(self):
+        self.assertFalse(_rrf_gap_confident({"a": 1 / 61}, {"a"}, {"a"}))
+
+    def test_zero_or_negative_second_score_cannot_be_gap_confident(self):
+        self.assertFalse(_rrf_gap_confident({"a": 1 / 61, "b": 0.0}, {"a", "b"}, {"a", "b"}))
+
+    def test_ratio_just_below_threshold_falls_through(self):
+        rrf_score_map = {"a": RERANK_GAP_SKIP_RATIO - 0.01, "b": 1.0}
+        self.assertFalse(_rrf_gap_confident(rrf_score_map, {"a", "b"}, {"a", "b"}))
+
+
+class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
+    """Controlled-seam integration test (Codex review): patches the FTS/semantic channels and
+    rerank_candidates_by_topic directly so the RRF gap is exactly deterministic, rather than
+    relying on real embedding output to land on a precise decisive-vs-ambiguous margin. Proves
+    both paths exactly: a decisive dual-channel winner skips rerank_candidates_by_topic entirely;
+    an ambiguous (single-channel-per-candidate) result still calls it."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _store(self, title: str, content: str) -> str:
+        res = store_memory(
+            title=title,
+            content=content,
+            owner_id="test_user",
+            skip_duplicate_check=True,
+            db_path=self.db_path,
+        )
+        return _extract_id(res)
+
+    def test_decisive_dual_channel_winner_skips_rerank(self):
+        entity_a = self._store("Gap Gate Decisive A", "First entity for the gap gate seam test.")
+        entity_b = self._store("Gap Gate Decisive B", "Second entity for the gap gate seam test.")
+
+        # Both channels agree entity_a is rank 0 -> RRF ratio 2.0, dual-channel top1.
+        fts_rows = [(entity_a, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)]
+        semantic_rows = [(entity_a, 0.1), (entity_b, 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic"
+            ) as mock_rerank,
+        ):
+            results = search_memory(
+                query_keywords="gap gate seam test",
+                rerank_by_topic=True,
+                db_path=self.db_path,
+            )
+
+        mock_rerank.assert_not_called()
         self.assertNotIn("error", results[0] if results else {})
         for item in results:
             self.assertNotIn("topic_score", item)
+
+    def test_ambiguous_single_channel_result_still_reranks(self):
+        entity_a = self._store("Gap Gate Ambiguous A", "First entity for the ambiguous seam test.")
+        entity_b = self._store("Gap Gate Ambiguous B", "Second entity for the ambiguous seam test.")
+
+        # entity_a matched by FTS only, entity_b matched by semantic only -> RRF tie, ratio 1.0.
+        fts_rows = [(entity_a, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)]
+        semantic_rows = [(entity_b, 0.1)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                return_value={
+                    entity_a: {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
+                    entity_b: {"topic_score": 0.1, "semantic_verdict": "DIFFERENT_TOPICS"},
+                },
+            ) as mock_rerank,
+        ):
+            results = search_memory(
+                query_keywords="ambiguous seam test",
+                rerank_by_topic=True,
+                db_path=self.db_path,
+            )
+
+        mock_rerank.assert_called_once()
+        self.assertNotIn("error", results[0] if results else {})
+
+
+class TestRrfGapGateSmoke(unittest.TestCase):
+    """Lightweight real-model smoke coverage only (Codex review: real-model tests are retained as
+    smoke coverage, not the primary correctness proof for the gate -- see
+    TestRrfGapGateSearchMemorySeam above for that). Just confirms rerank_by_topic=True doesn't
+    crash and returns sane results against a real (if tiny) corpus."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _store(self, title: str, content: str) -> str:
+        res = store_memory(
+            title=title,
+            content=content,
+            owner_id="test_user",
+            skip_duplicate_check=True,
+            db_path=self.db_path,
+        )
+        return _extract_id(res)
+
+    def test_gap_gate_does_not_crash_real_search(self):
+        self._store("Gap Gate Smoke A", "Some real content for the gap gate smoke test.")
+        self._store("Gap Gate Smoke B", "Some other real content, a different topic entirely.")
+        time.sleep(0.5)
+
+        results = search_memory(
+            query_keywords="gap gate smoke test", rerank_by_topic=True, db_path=self.db_path
+        )
+        self.assertTrue(isinstance(results, list))
+        self.assertNotIn("error", results[0] if results else {})
 
 
 if __name__ == "__main__":

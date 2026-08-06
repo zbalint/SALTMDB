@@ -221,9 +221,23 @@ def store_memory(
     to mention the same words in passing. When enabled, each result item gains a `topic_score`
     (0-1, higher = more topically specific to the query) and a `semantic_verdict`
     ("SAME_SPECIFIC_TOPIC" / "BROADLY_RELATED_THEMES" / "DIFFERENT_TOPICS"), and result ordering
-    is fully reranked by topic_score instead of the normal hybrid-search order. Has no effect
-    (silently ignored) when semantic search is disabled, the query is empty, or explain_mode is
-    used.
+    is fully reranked by topic_score instead of the normal hybrid-search order. A built-in
+    confidence gate skips this Stage-2 rerank automatically whenever the hybrid search already has
+    a decisive, dual-channel-confirmed top result -- rerank_by_topic=True still requests reranking,
+    but the gate may decide it isn't needed for a given query.
+
+    prefer_durable_types (opt-in, default False): stable-reorders results so `event`-typed memories
+    (session notes/handovers, prone to staleness) sink behind the four durable types
+    (fact/decision/procedure/preference), within the widened hybrid candidate pool.
+
+    demote_superseded (opt-in, default False): stable-reorders results so a memory that is the
+    target of a currently-valid `supersedes` relation (i.e. explicitly marked replaced by a newer
+    memory) sinks to the back of the widened hybrid candidate pool.
+
+    Both `prefer_durable_types` and `demote_superseded` only affect the hybrid FTS+dense-vector
+    pipeline; they have no effect when semantic search is disabled (which now makes query-based
+    search_memory calls return an error rather than falling back to FTS-only results -- see
+    SALTMDB_ENABLE_SEMANTIC) or on empty-query filter/tag-only browsing.
     """
 )
 def search_memory(
@@ -239,6 +253,8 @@ def search_memory(
     cursor: str = None,
     include_related: bool = None,
     rerank_by_topic: bool | None = None,
+    prefer_durable_types: bool | None = None,
+    demote_superseded: bool | None = None,
     **kwargs,
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
@@ -271,6 +287,14 @@ def search_memory(
     # sentinel) would never see the "rerank" kwarg alias if that pattern were copied here.
     rerank_by_topic_ = _resolve(rerank_by_topic, kw, kwargs, "rerank_by_topic", "rerank")
     rerank_by_topic_ = rerank_by_topic_ if rerank_by_topic_ is not None else False
+    # Same two-line shape as rerank_by_topic_ above, for the same reason (bool = False declared
+    # defaults are never None, so _resolve's kwarg-alias fallback needs a None sentinel first).
+    prefer_durable_types_ = _resolve(
+        prefer_durable_types, kw, kwargs, "prefer_durable_types", "prefer_durable"
+    )
+    prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else False
+    demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
+    demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else False
 
     return memory_service.search_memory(
         owner_id=owner_id_,
@@ -286,6 +310,8 @@ def search_memory(
         cursor=cursor_,
         include_related=include_related_,
         rerank_by_topic=rerank_by_topic_,
+        prefer_durable_types=prefer_durable_types_,
+        demote_superseded=demote_superseded_,
     )
 
 
