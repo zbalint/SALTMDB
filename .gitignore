@@ -36,3 +36,4 @@ BUG_REPORT*.md
 # Test artifact databases
 test_*.db
 *.db.bakbuild/
+test_data/

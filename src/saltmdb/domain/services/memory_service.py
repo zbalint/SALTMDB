@@ -61,6 +61,7 @@ def _handle_supersession_candidate(
     matched_sim_score: float,
     owner_id: str | None,
     context_id: str | None,
+    event_run_id: str | None = None,
 ) -> None:
     """Logs a reviewable supersession_candidate event and, above the stricter duplicate
     band, auto-links a 'similar_to' relation edge -- additive only (no weight/is_core change,
@@ -70,6 +71,10 @@ def _handle_supersession_candidate(
     silently buried an unreviewed memory). The judgment call of whether to also add a
     directional 'supersedes' edge stays with whoever reviews the supersession_candidate event.
     Must be called inside the caller's open write transaction (mirrors resolve_or_create_tag).
+
+    event_run_id: optional, forwarded from store_memory(). Written into the payload as "run_id"
+    only when not None -- see store_memory's docstring for why this lives in the immutable event
+    payload rather than on the entity's (upsertable) metadata.
     """
     try:
         from saltmdb.domain.services.event_service import log_event
@@ -80,6 +85,7 @@ def _handle_supersession_candidate(
                 "target_entity_id": matched_supersession_id,
                 "similarity_score": matched_sim_score,
                 "target_title": matched_supersession_title,
+                **({"run_id": event_run_id} if event_run_id is not None else {}),
             }
         )
         log_event(
@@ -132,8 +138,19 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     context_id: str = None,
     db_connection=None,
     db_path: str = None,
+    *,
+    event_run_id: str | None = None,
 ) -> str:
-    """Stores a consolidated Markdown fact chunk as a long-term memory."""
+    """Stores a consolidated Markdown fact chunk as a long-term memory.
+
+    event_run_id: optional, keyword-only. When given, written verbatim into the
+    supersession_candidate event's own JSON payload (as "run_id") at the moment it's appended to
+    the append-only events ledger -- never onto the entity/metadata, which a later temporal
+    upsert could overwrite. Lets a batch caller (e.g. an ingestion script) durably attribute
+    supersession-candidate counts to a specific run even across resumed/retried invocations that
+    upsert the same entity. Defaults to None, in which case the payload's "run_id" key is omitted
+    entirely -- identical to pre-existing behavior for every caller that doesn't pass it.
+    """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
 
@@ -437,6 +454,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     matched_sim_score=matched_sim_score,
                     owner_id=owner_id,
                     context_id=context_id,
+                    event_run_id=event_run_id,
                 )
 
             return existing
