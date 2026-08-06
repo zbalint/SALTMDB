@@ -6,7 +6,7 @@ This guide details how to build and configure AI agents to utilize the **SALTMDB
 
 ## 1. Core Integration Architecture
 
-Agents interface with SALTMDB via **12 consolidated MCP tools** exposed by the `saltmdb` package ([tools.py](src/saltmdb/mcp/tools.py)):
+Agents interface with SALTMDB via **13 consolidated MCP tools** exposed by the `saltmdb` package ([tools.py](src/saltmdb/mcp/tools.py)):
 
 ```mermaid
 graph TD
@@ -137,10 +137,10 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 ---
 
-## 2. Available Tools Overview (12 Consolidated Tools)
+## 2. Available Tools Overview (13 Consolidated Tools)
 
 > [!NOTE]
-> The server registers exactly **12 MCP tools**: `search_memory`, `store_memory`, `get_canonical_tags`, `get_canonical_predicates`, `merge_tags`, `log_event`, `get_events`, `archive_memory`, `manage_relation`, `commit_consolidation`, `inspect_graph`, `ephemeral_memory`. Any tool count listed as "10" in older references or memory is stale and incorrect.
+> The server registers exactly **13 MCP tools**: `search_memory`, `store_memory`, `get_canonical_tags`, `get_canonical_predicates`, `merge_tags`, `log_event`, `get_events`, `archive_memory`, `manage_relation`, `commit_consolidation`, `inspect_graph`, `ephemeral_memory`, `dismiss_event`. Any tool count listed as "10" or "12" in older references or memory is stale and incorrect.
 
 > [!NOTE]
 > **MCP Tool Schema Compliance**: FastMCP servers auto-generate a `kwargs` parameter in JSON schemas. If your MCP client validator enforces `required: ["kwargs"]`, include `kwargs={}` in your tool call payload to satisfy strict schema validation. `kwargs={}` also supports nesting parameter values (e.g. `kwargs={"context_id": "..."}`) for clients that require every argument inside a single object; a bare `kwargs=""` only satisfies the required-field check and cannot carry nested parameter values.
@@ -157,6 +157,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 * `commit_consolidation(consolidations, parent_ids, title, content, tags, owner_id, context_id, override_justification)`: Polymorphic tool to commit single or multiple synthesized consolidations, soft-archiving parent raw nodes and creating `consolidated_from` lineage edges. Can accept a single parent ID to promote a self-contained raw node directly — but `title` and `content` are mandatory on every call regardless of parent count; there is no ID-only shortcut, so re-supply the source's own title/content verbatim when promoting without rewording. **Cohesion gate**: for 2+ parents, the call is rejected (`REJECT_LOW_COHESION`) when the parents aren't actually a cohesive group — their minimum pairwise centroid similarity falls below threshold (an unresolved/unembeddable parent forces rejection). This exists specifically to stop the failure mode it's named after: force-merging loosely-related raw memories into one synthesized document just because they shared a tag or arrived in the same `consolidation_request`. Only pass `override_justification` (≥20 characters) after you've actually verified the parents belong together despite the low score — the text is appended verbatim into the committed entity's `content` as a permanent `[Consolidation Override]` block (not just an audit trail), so a rubber-stamp justification becomes part of the permanent record. Every override also atomically logs a `consolidation_gate_override` audit event alongside the commit. For the bulk `consolidations` shape, `override_justification` goes on each individual item that needs it, never at the top level.
 * `inspect_graph(entity_id, mode, max_depth, owner_id, point_in_time)`: Unifies graph inspection (`mode='dependencies'`, `mode='lineage'`, or `mode='orphans'`). `entity_id` is optional when `mode='orphans'`. `point_in_time` (aliases `as_of`, `at`) restricts `dependencies`/`lineage` traversal to relation edges valid as of a past ISO timestamp; ignored for `mode='orphans'`.
 * `ephemeral_memory(action, key, value)`: Unified volatile in-memory secret manager (`action='get'` or `action='store'`).
+* `dismiss_event(event_id, reason, agent_id)`: Appends an `event_dismissed` record to safely mark one or multiple pending review signals — `consolidation_request` (covers the `vector_cluster`, `supersession_candidate`, and historical tag/general `content.target` flavors) or the top-level `supersession_candidate` *event type* (the live signal fired by `store_memory`'s dedup path, distinct from the `content.target` label above) — as dismissed. This allows cleaning up obsolete operational backlogs without mutating live entities or deleting original events. Idempotent and atomic in bulk mode.
 
 ---
 
@@ -194,7 +195,7 @@ Immediately upon initialization, before answering the user:
 0. **MANDATORY, unconditional, every session — no self-judgment call**: check whether your available-tools list includes a tool-discovery/search mechanism (e.g. Claude Code's `ToolSearch`, Copilot CLI's `search_tool`). If it does, invoke it now targeting the `saltmdb` tools to load their full schemas, before proceeding to step 1 — do this even if you believe schemas are already loaded, since that belief is exactly what causes this step to get silently skipped. Only skip this step if no such discovery mechanism exists in your tool list at all.
 1. Call `search_memory` filtering by `is_core=True` (e.g., `search_memory(is_core=True)`). This loads your persona, behavioral constraints, and user rules. On harnesses with lifecycle hooks configured (see Section 7 below), this bootstrap step normally already ran automatically before the session started via a `SessionStart` hook; this manual step is a fallback for when no such hook exists or fired.
 2. Run a keyword search matching the active repository, folder, or project name (e.g. `query_keywords = 'SALTMDB'`) and task domain (`context_id = 'my-task'`) to gather project intel, past decisions, and component constraints.
-3. Call `get_events` with `type_filter = 'consolidation_request'` to check for pending Librarian merge requests. `get_events` already computes this for you: each `consolidation_request` event item carries a top-level `status` field (`'resolved'` once every entity ID in the event's `content.entity_ids` is no longer `'raw'`, `'pending'` otherwise) — no need to manually cross-check entity statuses yourself.
+3. Call `get_events(status_filter='pending')` to check for pending Librarian merge requests without manually cross-checking entity statuses yourself. `get_events` computes a top-level `status` on every reviewable `consolidation_request`/`supersession_candidate` event: `'dismissed'` wins if an `event_dismissed` record targets it, else `'resolved'` once its relevant source entities (`content.entity_ids`, falling back to `content.new_raw_entity_ids` for `consolidation_request`; `content.new_entity_id` for the top-level `supersession_candidate` event type) are no longer `'raw'`, else `'pending'`. Use `dismiss_event` to retire obsolete `consolidation_request` or top-level `supersession_candidate` backlog items you've reviewed and decided not to act on — it's append-only and never touches the source event or entities.
 4. **Think Before You Leap:** Before executing any sub-task, modifying a file, or running commands, call `search_memory` with keywords matching the target component, command, or error string. You must actively search for past constraints, bug fixes, or design parameters before writing code.
 
 ### Phase B: In-Session Logging & Active Memory Capture

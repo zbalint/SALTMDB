@@ -498,6 +498,28 @@ def get_events(
     else:
         agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent")
         type_filter_ = _resolve(type_filter, kw, kwargs, "type_filter", "type")
+        status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
         return event_service.get_recent_events(
-            agent_id=agent_id_, type_filter=type_filter_, limit=limit_
+            agent_id=agent_id_,
+            type_filter=type_filter_,
+            limit=limit_,
+            offset=offset_,
+            status_filter=status_filter_,
         )
+
+
+@mcp.tool()
+def dismiss_event(
+    event_id: str | list[str] | None = None,
+    reason: str | None = None,
+    agent_id: str | None = None,
+    **kwargs,
+) -> str:
+    """Dismisses review events to prevent them from remaining pending."""
+    kw = _unwrap_kwargs(kwargs)
+    event_ids_ = _resolve(event_id, kw, kwargs, "event_id", "event_ids", "id", "ids")
+    reason_ = _resolve(reason, kw, kwargs, "reason")
+    agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent", "owner_id", "owner") or "system"
+    if not event_ids_:
+        raise ValueError("Missing 'event_id' parameter.")
+    return event_service.dismiss_events(event_ids_, reason_, agent_id_)

@@ -733,12 +733,262 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "deliberately forcing a low-similarity relation via the MCP tool wrapper", event[1]
         )
 
+    def test_dismiss_event_invalid(self):
+        # Test blank reason
+        with self.assertRaises(ValueError) as ctx:
+            tools.dismiss_event(event_id="some-id", reason="   ")
+        self.assertIn("cannot be empty", str(ctx.exception))
+
+        # Test invalid type
+        res = tools.log_event(agent_id="agent1", type="decision", content="foo")
+        eid = res.split("ID: ")[1].strip()
+
+        with self.assertRaises(ValueError) as ctx:
+            tools.dismiss_event(event_id=eid, reason="bad type")
+        self.assertIn("not dismissible types", str(ctx.exception))
+
+        # Test nonexistent ID
+        with self.assertRaises(ValueError) as ctx:
+            tools.dismiss_event(event_id="fake-id", reason="missing")
+        self.assertIn("Events not found", str(ctx.exception))
+
+        # Test bulk atomicity rollback
+        res2 = tools.log_event(agent_id="agent1", type="consolidation_request", content="{}")
+        eid2 = res2.split("ID: ")[1].strip()
+
+        with self.assertRaises(ValueError):
+            tools.dismiss_event(event_id=[eid2, "fake-id2"], reason="rollback test")
+
+        # Verify eid2 is not dismissed (no event_dismissed in db)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE type='event_dismissed'"
+        ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_dismiss_event_success_and_idempotency(self):
+        mem1 = tools.store_memory(
+            content="# Valid Test Memory 1\nThis is a long enough markdown content to pass the quality gate and not get rejected.\n- Bullet point 1\n- Bullet point 2",
+            title="Valid Memory 1",
+            owner_id="a",
+            skip_duplicate_check=True,
+        )
+        raw_id1 = mem1.split("ID: ")[1].strip()
+
+        mem2 = tools.store_memory(
+            content="# Valid Test Memory 2\nThis is another long enough markdown content to pass the quality gate.\n- Bullet point 1\n- Bullet point 2",
+            title="Valid Memory 2",
+            owner_id="a",
+            skip_duplicate_check=True,
+        )
+        raw_id2 = mem2.split("ID: ")[1].strip()
+
+        res1 = tools.log_event(
+            agent_id="a", type="consolidation_request", content=f'{{"entity_ids":["{raw_id1}"]}}'
+        )
+        eid1 = res1.split("ID: ")[1].strip()
+
+        # eid2 is a top-level `supersession_candidate` EVENT TYPE (the live
+        # store_memory-dedup-path signal), distinct from a `consolidation_request`
+        # whose `content.target` happens to be the string "supersession_candidate".
+        # Per the approved feature contract it IS dismissible, same as
+        # `consolidation_request`.
+        res2 = tools.log_event(
+            agent_id="a", type="supersession_candidate", content=f'{{"new_entity_id":"{raw_id2}"}}'
+        )
+        eid2 = res2.split("ID: ")[1].strip()
+
+        # Initial status
+        events_pre = tools.get_events(status_filter="pending")
+        self.assertTrue(any(e["id"] == eid1 for e in events_pre))
+        self.assertTrue(any(e["id"] == eid2 for e in events_pre))
+
+        # Dismiss both
+        out = tools.dismiss_event(event_id=[eid1, eid1, eid2], reason="obsolete")
+        self.assertEqual(out, "Events dismissed successfully")
+
+        # Check status changed
+        events_post = tools.get_events(status_filter="dismissed")
+        self.assertTrue(any(e["id"] == eid1 for e in events_post))
+        self.assertTrue(any(e["id"] == eid2 for e in events_post))
+
+        events_pending = tools.get_events(status_filter="pending")
+        self.assertFalse(any(e["id"] == eid1 for e in events_pending))
+
+        # Check idempotency
+        out2 = tools.dismiss_event(event_id=eid1, reason="again")
+        self.assertEqual(out2, "Events dismissed successfully")
+
+        # Check owner_id alias resolution
+        res3 = tools.log_event(
+            agent_id="a", type="consolidation_request", content='{"entity_ids":["dummy"]}'
+        )
+        eid3 = res3.split("ID: ")[1].strip()
+        tools.dismiss_event(event_id=eid3, reason="owner test", owner_id="review-owner")
+        owner = self.conn.execute(
+            "SELECT agent_id FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id')=? ORDER BY rowid DESC LIMIT 1",
+            (eid3,),
+        ).fetchone()[0]
+        self.assertEqual(owner, "review-owner")
+
+    def test_get_events_status_derivation_malformed_and_resolved(self):
+        # Empty payload
+        res_empty = tools.log_event(agent_id="a", type="consolidation_request", content="{}")
+        eid_empty = res_empty.split("ID: ")[1].strip()
+
+        events = tools.get_events()
+        empty_event = next(e for e in events if e["id"] == eid_empty)
+        self.assertEqual(empty_event["status"], "pending")
+
+        # Resolved naturally
+        mem = tools.store_memory(
+            content="# Quality Valid Content\nThis is a test content for resolution that is long enough and formatted nicely.\n- Point A\n- Point B",
+            title="Test Res",
+            owner_id="x",
+            skip_duplicate_check=True,
+        )
+        raw_id = mem.split("ID: ")[1].strip()
+
+        res_cr = tools.log_event(
+            agent_id="a", type="consolidation_request", content=f'{{"entity_ids":["{raw_id}"]}}'
+        )
+        eid_cr = res_cr.split("ID: ")[1].strip()
+
+        # Should be pending while raw
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "pending"
+        )
+
+        # Archive it to resolve
+        tools.archive_memory(entity_id=raw_id)
+
+        # Should be resolved now
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "resolved"
+        )
+
+        # But if we dismiss it, dismissal takes precedence
+        tools.dismiss_event(event_id=eid_cr, reason="dismissed over resolved")
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "dismissed"
+        )
+
+        # Test legacy new_raw_entity_ids resolution
+        res_legacy = tools.log_event(
+            agent_id="a",
+            type="consolidation_request",
+            content=f'{{"new_raw_entity_ids":["{raw_id}"]}}',
+        )
+        eid_legacy = res_legacy.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_legacy)["status"], "resolved"
+        )
+
+        # Test supersession natural resolution
+        res_sup = tools.log_event(
+            agent_id="a", type="supersession_candidate", content=f'{{"new_entity_id":"{raw_id}"}}'
+        )
+        eid_sup = res_sup.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_sup)["status"], "resolved"
+        )
+
+        # Test malformed payload types
+        res_malf1 = tools.log_event(
+            agent_id="a", type="consolidation_request", content='{"entity_ids": "not-a-list"}'
+        )
+        eid_malf1 = res_malf1.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_malf1)["status"], "pending"
+        )
+
+        # Test empty/whitespace IDs list
+        res_empty_list = tools.log_event(
+            agent_id="a", type="consolidation_request", content='{"entity_ids": ["", "   "]}'
+        )
+        eid_empty_list = res_empty_list.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_empty_list)["status"], "pending"
+        )
+
+        # Test mixed-type IDs list: a non-string member must invalidate the whole list
+        # rather than being silently filtered out (regression guard for a bug where a
+        # payload like {"entity_ids": ["non-raw-id", 7]} was sanitized down to
+        # ["non-raw-id"] and incorrectly reported as "resolved").
+        res_mixed = tools.log_event(
+            agent_id="a",
+            type="consolidation_request",
+            content='{"entity_ids": ["non-raw-id", 7]}',
+        )
+        eid_mixed = res_mixed.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_mixed)["status"], "pending"
+        )
+
+        # Test valid fallback when entity_ids is empty
+        res_fallback = tools.log_event(
+            agent_id="a",
+            type="consolidation_request",
+            content=f'{{"entity_ids": [], "new_raw_entity_ids": ["{raw_id}"]}}',
+        )
+        eid_fallback = res_fallback.split("ID: ")[1].strip()
+        self.assertEqual(
+            next(e for e in tools.get_events() if e["id"] == eid_fallback)["status"], "resolved"
+        )
+
+        # Verify source immutability
+        tools.dismiss_event(event_id=eid_malf1, reason="dismiss")
+        orig_content = self.conn.execute(
+            "SELECT content FROM events WHERE id=?", (eid_malf1,)
+        ).fetchone()[0]
+        self.assertEqual(orig_content, '{"entity_ids": "not-a-list"}')
+
+    def test_get_events_pagination_and_filtering(self):
+        # Add a bunch of events
+        for _ in range(5):
+            tools.log_event(agent_id="pag_test", type="consolidation_request", content="{}")
+
+        # Get only pending
+        pending = tools.get_events(status_filter="pending", limit=2, offset=0, agent_id="pag_test")
+        self.assertEqual(len(pending), 2)
+
+        pending_page2 = tools.get_events(
+            status_filter="pending", limit=2, offset=2, agent_id="pag_test"
+        )
+        self.assertEqual(len(pending_page2), 2)
+
+        self.assertNotEqual(pending[0]["id"], pending_page2[0]["id"])
+
+        # Test filtering through nonmatching rows before matching results
+        # We add 150 resolved events (which means they have no source IDs)
+        # and interleave some pending ones to force multiple batches
+        for i in range(120):
+            tools.log_event(
+                agent_id="pag_deep", type="consolidation_request", content="{}"
+            )  # pending
+            tools.dismiss_event(
+                event_id=tools.get_events(limit=1, type_filter="consolidation_request")[0]["id"],
+                reason="resolved",
+            )  # make it dismissed
+            if i % 30 == 0:
+                tools.log_event(
+                    agent_id="pag_deep", type="consolidation_request", content='{"malformed": true}'
+                )  # pending
+
+        deep_pending = tools.get_events(agent_id="pag_deep", status_filter="pending", limit=2)
+        self.assertEqual(len(deep_pending), 2)
+
+        deep_pending_page2 = tools.get_events(
+            agent_id="pag_deep", status_filter="pending", limit=2, offset=2
+        )
+        self.assertEqual(len(deep_pending_page2), 2)
+        self.assertNotEqual(deep_pending[0]["id"], deep_pending_page2[0]["id"])
+
     def test_mcp_tool_count_regression_guard(self):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            12,
-            f"MCP server tool count must be exactly 12, got {registered_count}",
+            13,
+            f"MCP server tool count must be exactly 13, got {registered_count}",
         )
 
 

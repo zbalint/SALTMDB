@@ -84,10 +84,12 @@ def log_event(
             close_connection(conn)
 
 
-def get_recent_events(  # noqa: PLR0912
+def get_recent_events(  # noqa: PLR0912, C901, PLR0915
     agent_id: str = None,
     type_filter: str = None,
     limit: int = 20,
+    offset: int = 0,
+    status_filter: str = None,
     db_connection=None,
     db_path: str = None,
 ) -> list:
@@ -111,59 +113,132 @@ def get_recent_events(  # noqa: PLR0912
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-        cursor = conn.execute(
-            f"""
-            SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
-            FROM events
-            {where_sql}
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """,
-            params + [limit],
-        )
+        # We need to fetch batches to handle status_filter and pagination correctly
+        batch_size = max(100, limit + offset)
+        sql_offset = 0
+        filtered_results: list[dict] = []
 
-        rows = cursor.fetchall()
-        events = []
-        for r in rows:
-            eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
+        while len(filtered_results) < limit + offset:
+            cursor = conn.execute(
+                f"""
+                SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
+                FROM events
+                {where_sql}
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+            """,
+                params + [batch_size, sql_offset],
+            )
 
-            # Truncate content for non-consolidation_request events if longer than 1000 chars
-            if etype != "consolidation_request" and len(econtent) > 1000:
-                display_content = econtent[:1000] + " [TRUNCATED]"
-            else:
-                display_content = econtent
+            rows = cursor.fetchall()
+            if not rows:
+                break
 
-            item = {
-                "id": eid,
-                "timestamp": etime,
-                "agent_id": eagent,
-                "type": etype,
-                "content": display_content,
-                "error_code": ecode,
-                "session_id": esess,
-                "context_id": ectx,
-            }
+            sql_offset += batch_size
 
-            # Dynamic status check for consolidation_request events
-            if etype == "consolidation_request":
-                try:
-                    data = json.loads(econtent)
-                    raw_ids = data.get("entity_ids", [])
-                    if raw_ids:
-                        placeholders = ",".join("?" for _ in raw_ids)
-                        st_cursor = conn.execute(
-                            f"SELECT COUNT(*) FROM entities WHERE id IN ({placeholders}) AND status = 'raw'",
-                            raw_ids,
-                        )
-                        unresolved_count = st_cursor.fetchone()[0]
-                        item["status"] = "resolved" if unresolved_count == 0 else "pending"
+            # Pre-fetch dismissals for all relevant events in this batch
+            review_event_ids = [
+                r[0] for r in rows if r[3] in ("consolidation_request", "supersession_candidate")
+            ]
+            dismissed_event_ids = set()
+            if review_event_ids:
+                ph = ",".join("?" for _ in review_event_ids)
+                dismiss_cursor = conn.execute(
+                    f"SELECT json_extract(content, '$.target_event_id') FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id') IN ({ph})",
+                    review_event_ids,
+                )
+                dismissed_event_ids = {r[0] for r in dismiss_cursor.fetchall() if r[0]}
+
+            # Pre-fetch entity statuses
+            all_source_entity_ids = set()
+            row_entities_map = {}
+            for r in rows:
+                etype = r[3]
+                if etype in ("consolidation_request", "supersession_candidate"):
+                    try:
+                        data = json.loads(r[4])
+                        source_ids: list[str] | None = []
+                        if etype == "consolidation_request":
+
+                            def _get_valid(lst):
+                                # Reject the whole list if it's malformed (wrong container
+                                # type, empty, or any member isn't a non-blank string)
+                                # rather than silently sanitizing bad members out --
+                                # a partially-typed payload must stay "pending", never
+                                # be treated as if the bad members were never there.
+                                if not isinstance(lst, list) or not lst:
+                                    return None
+                                valid = []
+                                for x in lst:
+                                    if not isinstance(x, str) or not x.strip():
+                                        return None
+                                    valid.append(x.strip())
+                                return valid
+
+                            valid_ids = _get_valid(data.get("entity_ids"))
+                            if not valid_ids:
+                                valid_ids = _get_valid(data.get("new_raw_entity_ids"))
+                            source_ids = valid_ids
+                        elif etype == "supersession_candidate":
+                            new_entity = data.get("new_entity_id")
+                            if isinstance(new_entity, str) and new_entity.strip():
+                                source_ids = [new_entity.strip()]
+                            else:
+                                source_ids = None
+
+                        row_entities_map[r[0]] = source_ids
+                        if source_ids:
+                            all_source_entity_ids.update(source_ids)
+                    except Exception:
+                        row_entities_map[r[0]] = None
+
+            raw_entities = set()
+            if all_source_entity_ids:
+                ph = ",".join("?" for _ in all_source_entity_ids)
+                raw_cursor = conn.execute(
+                    f"SELECT id FROM entities WHERE id IN ({ph}) AND status = 'raw'",
+                    list(all_source_entity_ids),
+                )
+                raw_entities = {r[0] for r in raw_cursor.fetchall()}
+
+            for r in rows:
+                eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
+
+                # Truncate content for non-consolidation_request events if longer than 1000 chars
+                if etype != "consolidation_request" and len(econtent) > 1000:
+                    display_content = econtent[:1000] + " [TRUNCATED]"
+                else:
+                    display_content = econtent
+
+                item = {
+                    "id": eid,
+                    "timestamp": etime,
+                    "agent_id": eagent,
+                    "type": etype,
+                    "content": display_content,
+                    "error_code": ecode,
+                    "session_id": esess,
+                    "context_id": ectx,
+                }
+
+                # Dynamic status check
+                if etype in ("consolidation_request", "supersession_candidate"):
+                    if eid in dismissed_event_ids:
+                        item["status"] = "dismissed"
                     else:
-                        item["status"] = "resolved"
-                except Exception:
-                    item["status"] = "pending"
+                        source_ids = row_entities_map.get(eid, [])
+                        if not source_ids:
+                            item["status"] = "pending"
+                        else:
+                            has_raw = any(sid in raw_entities for sid in source_ids)
+                            item["status"] = "pending" if has_raw else "resolved"
 
-            events.append(item)
-        return events
+                if status_filter and item.get("status") != status_filter:
+                    continue
+
+                filtered_results.append(item)
+
+        return filtered_results[offset : offset + limit]
     except Exception as e:
         logger.error("Error fetching recent events: %s", e)
         return [{"error": str(e)}]
@@ -209,6 +284,99 @@ def get_session_summary(session_id: str, db_connection=None, db_path: str = None
     except Exception as e:
         logger.error("Error fetching session summary: %s", e)
         return [{"error": str(e)}]
+    finally:
+        if should_close:
+            close_connection(conn)
+
+
+def dismiss_events(
+    event_ids: str | list[str],
+    reason: str,
+    agent_id: str = "system",
+    db_connection=None,
+    db_path: str = None,
+) -> str:
+    """Dismisses review events to prevent them from remaining pending."""
+    if isinstance(event_ids, str):
+        event_ids = [event_ids]
+
+    # Deduplicate event IDs, preserving order
+    seen: set[str] = set()
+    unique_ids = []
+    for x in event_ids:
+        if x not in seen:
+            unique_ids.append(x)
+            seen.add(x)
+    event_ids = unique_ids
+
+    if not reason or not reason.strip():
+        raise ValueError("Dismissal reason cannot be empty")
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    try:
+
+        def _write(c):
+            # 1. Fetch existing events
+            ph = ",".join("?" for _ in event_ids)
+            cursor = c.execute(f"SELECT id, type FROM events WHERE id IN ({ph})", event_ids)
+            found = {row[0]: row[1] for row in cursor.fetchall()}
+
+            missing = [eid for eid in event_ids if eid not in found]
+            if missing:
+                raise ValueError(f"Events not found: {missing}")
+
+            # Dismissible: any `consolidation_request` (covers the vector_cluster/
+            # supersession_candidate/tag/general `content.target` flavors) and the
+            # top-level `supersession_candidate` EVENT TYPE (the live signal fired by
+            # store_memory's dedup path) -- per the approved feature contract.
+            invalid_types = [
+                eid
+                for eid, etype in found.items()
+                if etype not in ("consolidation_request", "supersession_candidate")
+            ]
+            if invalid_types:
+                raise ValueError(f"Events are not dismissible types: {invalid_types}")
+
+            # 2. Check which are already dismissed
+            dismiss_cursor = c.execute(
+                f"SELECT json_extract(content, '$.target_event_id') FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id') IN ({ph})",
+                event_ids,
+            )
+            already_dismissed = {row[0] for row in dismiss_cursor.fetchall() if row[0]}
+
+            to_dismiss = [eid for eid in event_ids if eid not in already_dismissed]
+            if not to_dismiss:
+                return
+
+            # 3. Insert dismissals
+            now = datetime.now(UTC).isoformat()
+            for eid in to_dismiss:
+                dismissal_id = str(uuid.uuid4())
+                content_json = json.dumps(
+                    {
+                        "target_event_id": eid,
+                        "reason": reason,
+                        "target_type": found[eid],
+                        "dismissed_by": agent_id,
+                    }
+                )
+
+                c.execute(
+                    """
+                    INSERT INTO events (id, timestamp, agent_id, type, content)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (dismissal_id, now, agent_id, "event_dismissed", content_json),
+                )
+
+        write_transaction_retrying(conn, _write)
+        return "Events dismissed successfully"
     finally:
         if should_close:
             close_connection(conn)
