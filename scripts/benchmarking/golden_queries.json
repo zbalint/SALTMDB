@@ -1,0 +1,153 @@
+{
+    "_meta": {
+        "description": "Golden query set for benchmark_precision_snapshot.py / compare_benchmark_runs.py -- a before/after precision-and-latency regression harness for search_memory(), run against a throwaway copy of the live SALTMDB corpus (never ~/.saltmdb/saltmdb.db itself). Distinct from scripts/benchmarking/benchmark_rerank_gap_gate.py's QUERIES list (which measures raw RRF-fusion score ratios for gap-gate threshold calibration) -- this set measures end-to-end search_memory() ranking correctness across code changes, not a single internal ratio.",
+        "provenance": "Each query is real and hand-picked against known live-corpus content as of 2026-08-06 (not synthetic). expected_entity_id is the entity that should rank first (or within top_k for ambiguous/near-duplicate cases) as judged by a human/agent reading the actual memory content at curation time -- there is no ground-truth oracle table in SALTMDB, so this file IS the oracle. Two entries (chunk-embed-backfill-timing, dismiss-event-mixed-type-bug) are the same two fixed regression anchors used in benchmark_rerank_gap_gate.py's QUERIES (021eb8ee's original 12-query battery Q1/Q8).",
+        "category_meanings": {
+            "decisive": "Clean, specific phrasing with one clearly-correct answer -- expected to rank 1st regardless of ranking-flag settings. A regression here means something broke, not a legitimate ranking trade-off.",
+            "ambiguous_near_duplicate": "A correction/near-duplicate pair exists on the same narrow topic (e.g. a bug-fix memo and a later correction memo about a related but distinct claim). top_k tolerance is 2 instead of 1 -- these are exactly the cases where rerank_by_topic/demote_superseded can legitimately swap ordering without it being a real precision loss, per 021eb8ee's finding."
+        },
+        "maintenance_note": "Entries reference real entity IDs -- if a referenced memory is ever archived/superseded/consolidated away, its query stops being meaningful and should be re-pointed at the successor or retired. Re-verify expected_entity_id still resolves before trusting a comparison run.",
+        "held_out_meaning": "4 entries carry \"held_out\": true. All entries here were sanity-checked once against real search_memory() output at curation time (that pass is what caught 5 initially-mislabeled 'decisive' entries below and reclassified them). The held_out/primary split is about what happens AFTER curation: if RERANK_GAP_SKIP_RATIO or any other threshold/config value is ever re-tuned in the future, only the primary set should inform that decision -- held_out entries are reported (and still count toward compare_benchmark_runs.py's regression exit code) but must never be the thing a threshold gets adjusted to satisfy, or this file stops being an independent check and becomes circular."
+    },
+    "queries": [
+        {
+            "id": "chunk-embed-backfill-timing",
+            "query": "chunk embedding backfill timing seconds",
+            "expected_entity_id": "3e4f1ecf-7217-4847-bd6b-1f66fe316cff",
+            "expected_title": "[SALTMDB Rework] Chunk-embedding backfill timing on real live data: 264 entities / 908 chunks / 136.8s",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "021eb8ee/gap-gate Q1 anchor -- length-dilution case, a long meta-handover discussing this same measurement can crowd it out."
+        },
+        {
+            "id": "dismiss-event-mixed-type-bug",
+            "query": "dismiss_event mixed-type ID sanitization bug fix",
+            "expected_entity_id": "bfb674a6-b4ce-40ec-a8ed-8b17c4e87116",
+            "expected_title": "[SALTMDB Bug Fix] dismiss_event: mixed-type ID sanitization + wrongly-permitted supersession_candidate dismissal",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "021eb8ee/gap-gate Q8 anchor -- near-duplicate partner is 9ec38342 (below); rerank has historically flipped this pair on noise-level margins."
+        },
+        {
+            "id": "dismiss-event-supersession-correction",
+            "query": "dismiss_event supersession_candidate dismissal correction",
+            "expected_entity_id": "9ec38342-c5e2-47f3-b5a2-278c18779c4b",
+            "expected_title": "[SALTMDB Correction] dismiss_event DOES permit top-level supersession_candidate dismissal",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "held_out": true,
+            "note": "Near-duplicate partner of dismiss-event-mixed-type-bug above -- same topic, different claim. Tests whether the two get confused in either direction."
+        },
+        {
+            "id": "title-max-length-bump",
+            "query": "TITLE_MAX_LENGTH 120 character limit bump to 150",
+            "expected_entity_id": "f2eec735-b51b-4fa7-a345-78b3dad33263",
+            "expected_title": "[SALTMDB Dev Note] TITLE_MAX_LENGTH=120 Hit Twice — Bump to 150 Confirmed Worth Doing",
+            "category": "decisive",
+            "top_k": 1,
+            "note": "Specific numeric-constant phrase, strong literal FTS match expected."
+        },
+        {
+            "id": "partition-key-fragmentation-bug",
+            "query": "entity_chunk_embeddings PARTITION KEY vec0 chunk fragmentation bug",
+            "expected_entity_id": "3e0c7a1e-ebbc-4ba0-b706-416c5f438cbc",
+            "expected_title": "[SALTMDB CRITICAL] entity_chunk_embeddings PARTITION KEY causes ~1500x vec0 chunk fragmentation, WILL recur",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "Curation-time measurement: session-handover memo 76da44ca (same bug, narrated) reliably outranks this one by a hair. Genuine lineage-cluster pair, not a clean single-answer topic -- reclassified from an initial 'decisive' guess after live validation."
+        },
+        {
+            "id": "supersession-threshold-lock",
+            "query": "supersession similarity threshold locked value Phase 4",
+            "expected_entity_id": "2765b632-e263-4b5e-831f-8b449656ade5",
+            "expected_title": "[SALTMDB Benchmark] Phase 4 Supersession Threshold Lock (0.7557 / overlap=3) + Stage-2 Separation Proof",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "Curation-time measurement: sibling threshold-lock memo 181117b2 (Phase 5, near-identical phrasing pattern) reliably outranks this one by a hair. Reclassified from an initial 'decisive' guess after live validation."
+        },
+        {
+            "id": "cohesion-threshold-lock",
+            "query": "pairwise cohesion gate threshold lock Phase 3",
+            "expected_entity_id": "d2d7cf85-7917-42be-9bde-d2537da30dc0",
+            "expected_title": "[SALTMDB Benchmark] Phase 3 Cohesion Threshold Lock (0.6547 / 0.5108)",
+            "category": "decisive",
+            "top_k": 1,
+            "note": "Specific numeric-constant phrase. Confirmed rank-1 at curation time despite sibling threshold-lock memos existing (Phase 3's phrasing is distinctive enough to avoid the Phase 4/5 pair's confusion)."
+        },
+        {
+            "id": "relation-gate-threshold-lock",
+            "query": "relation gate minimum similarity threshold locked Phase 5",
+            "expected_entity_id": "181117b2-616a-4dcf-a3c5-28613f41ae0c",
+            "expected_title": "[Memory-Core Rework Phase 5] RELATION_GATE_MIN_SIMILARITY_THRESHOLD locked at 0.6505",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "Curation-time measurement: a related relation-gate design memo (e457617d) reliably outranks this one by a hair. Reclassified from an initial 'decisive' guess after live validation."
+        },
+        {
+            "id": "live-db-bloat-root-cause",
+            "query": "live database 425MB bloat root cause investigation",
+            "expected_entity_id": "4ab4cbc9-7849-4596-af73-b8c5c6a916ea",
+            "expected_title": "[SALTMDB Critical] Live DB 425MB bloat root-caused: rework code wrote to live DB path pre-deploy",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "Curation-time measurement: b9de39fe (an EARLIER, CONFIRMED-SUPERSEDED memo on the same incident -- 3e0c7a1e supersedes it) reliably outranks this one without demote_superseded=True. Reclassified from an initial 'decisive' guess after live validation. Good future candidate for a dedicated demote_superseded=True variant of this same query, expected to flip to rank 1."
+        },
+        {
+            "id": "cadet-venv-symlink-corruption",
+            "query": "CADET agy job corrupted venv python symlink container path",
+            "expected_entity_id": "0f5408e6-4d43-4e46-b458-bb2856855190",
+            "expected_title": "CADET agy Job Corrupted Host .venv/bin/python Symlink to a Container-Only Path",
+            "category": "decisive",
+            "top_k": 1,
+            "held_out": true,
+            "note": "Distinctive incident memo, strong literal match expected."
+        },
+        {
+            "id": "short-id-prefix-feature-idea",
+            "query": "search_memory entity_id short prefix feature idea",
+            "expected_entity_id": "c36c8965-fe20-4288-9af8-25cf06503003",
+            "expected_title": "[SALTMDB Feature Idea] search_memory/entity_id Should Accept Short (8-char) ID Prefixes",
+            "category": "decisive",
+            "top_k": 1,
+            "note": "Very recent memory (2026-08-06) -- low interference risk, good freshness-independent baseline."
+        },
+        {
+            "id": "zbalint-pushes-himself",
+            "query": "user always pushes to origin himself never push on his behalf",
+            "expected_entity_id": "67a41488-ad7c-450b-9e9e-f891ecff5929",
+            "expected_title": "[User Preference] zbalint Always Pushes to Origin Himself — Never Push On His Behalf",
+            "category": "decisive",
+            "top_k": 1,
+            "held_out": true,
+            "note": "Only preference-type memory in the set -- checks memory_type diversity, not just fact/decision/event."
+        },
+        {
+            "id": "rerank-net-neutral-battery",
+            "query": "rerank_by_topic live data accuracy test 12 query battery net neutral",
+            "expected_entity_id": "021eb8ee-372a-4226-888c-0bd36536c0ca",
+            "expected_title": "[SALTMDB Benchmark] rerank_by_topic Live-Data Accuracy Test — 12-Query Battery, Net-Neutral Top-1 Accuracy",
+            "category": "decisive",
+            "top_k": 1,
+            "note": "Distinctive benchmark writeup, strong literal match expected."
+        },
+        {
+            "id": "live-deploy-on-hold-antigravity",
+            "query": "live deploy on hold antigravity benchmark download huggingface",
+            "expected_entity_id": "c7dc403e-035c-45a0-bd76-8a81b614263b",
+            "expected_title": "[SALTMDB Rework] Session Handover — 1d1cf30 Committed, Live Deploy On Hold (Antigravity Benchmark)",
+            "category": "decisive",
+            "top_k": 1,
+            "held_out": true,
+            "note": "Most recent session-handover memory at curation time -- exercises recency vs. older similar handovers in the same lineage chain."
+        },
+        {
+            "id": "rrf-gap-gate-ratio",
+            "query": "search_memory precision fixes gap gate ranking flags hybrid-only enforcement",
+            "expected_entity_id": "b1330527-9e7c-4512-8cf9-9257e633dc6a",
+            "expected_title": "[SALTMDB Rework] search_memory Precision Fixes — Gap Gate (1.9), Type-Bias/Supersession Demotion",
+            "category": "ambiguous_near_duplicate",
+            "top_k": 2,
+            "note": "Curation-time measurement: the session-handover memo c7dc403e that elaborates_on this same decision memo reliably outranks it by a hair. Reclassified from an initial 'decisive' guess after live validation."
+        }
+    ]
+}
