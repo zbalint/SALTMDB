@@ -238,8 +238,9 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         return (entity_id, "t", "c", 1, 0, -1.0, "", "", "u", "s", "{}", None, "fact", 0, None)
 
     def test_strict_forces_type_bias_and_safety_demotion_without_opt_in_flags(self):
-        """prefer_durable_types/demote_superseded both omitted (default False) -- mode="strict"
-        must still reorder: durable types first, then the corrects-targeted stale item last."""
+        """prefer_durable_types/demote_superseded both explicitly set to False (independent of
+        search_memory's own default, which is True as of v0.1.0-alpha.70) -- mode="strict" must
+        still reorder: durable types first, then the corrects-targeted stale item last."""
         self._insert_entity("event_entity", "event")
         self._insert_entity("wrong_fact", "fact")
         self._insert_entity("corrector", "fact")
@@ -292,12 +293,30 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
                 return_value=semantic_rows,
             ),
         ):
+            # prefer_durable_types/demote_superseded pinned False explicitly (not omitted): this
+            # test's whole point is "untouched under broad and history" regardless of the corrects
+            # edge -- pinning False keeps that intent legible now that omission would mean True
+            # (v0.1.0-alpha.70 default flip) instead of incidentally not mattering here (neither
+            # entity is event-typed, and demote_superseded only checks `supersedes`, not
+            # `corrects`, so the True default wouldn't have changed this test's outcome either way
+            # -- pinned anyway for clarity, not because the outcome depends on it).
             broad_results = search_memory(
-                query_keywords="q", db_path=self.db_path, include_related=False
+                query_keywords="q",
+                db_path=self.db_path,
+                include_related=False,
+                prefer_durable_types=False,
+                demote_superseded=False,
             )
             history_results = search_memory(
-                query_keywords="q", db_path=self.db_path, include_related=False, mode="history"
+                query_keywords="q",
+                db_path=self.db_path,
+                include_related=False,
+                mode="history",
+                prefer_durable_types=False,
+                demote_superseded=False,
             )
+            # mode="strict" forces its own durable-type/demotion policy unconditionally,
+            # ignoring the caller's own flag values -- omitting them here is intentionally inert.
             strict_results = search_memory(
                 query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
             )
@@ -398,6 +417,9 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
                 return_value=semantic_rows,
             ),
         ):
+            # prefer_durable_types/demote_superseded omitted -- intentionally inert under
+            # mode="strict", which forces its own durable-type/demotion policy unconditionally
+            # regardless of the caller's own flag values (or their absence).
             results = search_memory(
                 query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
             )

@@ -380,15 +380,28 @@ if __name__ == "__main__":
         "--top-n", type=int, default=5, help="Result window passed to search_memory (default 5)."
     )
     parser.add_argument("--rerank-by-topic", action="store_true")
-    parser.add_argument("--prefer-durable-types", action="store_true")
-    parser.add_argument("--demote-superseded", action="store_true")
+    # BooleanOptionalAction (not store_true) with default=None: an unspecified
+    # --prefer-durable-types/--demote-superseded must mean "don't pass this kwarg at all" so
+    # search_memory's own signature default (True as of v0.1.0-alpha.70) applies -- store_true's
+    # implicit default=False would otherwise silently pin every default benchmark run to the OLD
+    # False behavior forever, defeating the point of a before/after regression harness. Explicit
+    # --prefer-durable-types/--no-prefer-durable-types (and the demote_superseded pair) still let
+    # a future comparison deliberately pin either value.
+    parser.add_argument(
+        "--prefer-durable-types", action=argparse.BooleanOptionalAction, default=None
+    )
+    parser.add_argument("--demote-superseded", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
     _refuse_live_db(args.db_path)
 
     flags = {
-        "rerank_by_topic": args.rerank_by_topic,
-        "prefer_durable_types": args.prefer_durable_types,
-        "demote_superseded": args.demote_superseded,
+        k: v
+        for k, v in {
+            "rerank_by_topic": args.rerank_by_topic,
+            "prefer_durable_types": args.prefer_durable_types,
+            "demote_superseded": args.demote_superseded,
+        }.items()
+        if v is not None
     }
     snapshot = run_snapshot(
         args.db_path, args.golden_set, args.label, top_n=args.top_n, search_flags=flags

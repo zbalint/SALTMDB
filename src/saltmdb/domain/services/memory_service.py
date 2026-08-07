@@ -968,7 +968,7 @@ def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     "currently valid" literal idiom (see the related_map query above) rather than
     relation_service's separate point-in-time parameter style. No-op on an empty pool.
 
-    This is single-hop, sink-to-bottom, opt-in demotion -- structurally separate from the
+    This is single-hop, sink-to-bottom, independently-togglable demotion -- structurally separate from the
     multi-hop chain-resolution *substitution* `_resolve_supersession_chains` performs for
     mode="strict" below (Part A of plans/scalable-strolling-stallman.md); this flag/function is
     unchanged by that work.
@@ -985,7 +985,7 @@ def _apply_strict_ranking_defaults(ordered_ids: list, conn) -> list:
     """mode="strict"-only forced ranking defaults (SALTMDB roadmap ba2cf66f P1#6, design 1fddc04a):
     durable-type preference + a residual-supersession/correction safety-net demotion, applied
     unconditionally regardless of the caller's own prefer_durable_types/demote_superseded flags
-    (which keep their existing, independent, opt-in meaning for broad/history -- untouched by this
+    (which keep their existing, independently-togglable meaning for broad/history -- untouched by this
     function). Order matches _apply_type_bias-then-demotion's existing precedent (Part 2, SALTMDB
     memory 870a1d4e): type bias first, so an explicitly stale/wrong item always sinks below a
     merely-event-typed one, not the reverse.
@@ -1378,8 +1378,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     cursor: str = None,
     include_related: bool = True,
     rerank_by_topic: bool = False,
-    prefer_durable_types: bool = False,
-    demote_superseded: bool = False,
+    prefer_durable_types: bool = True,
+    demote_superseded: bool = True,
     use_cross_encoder: bool = False,
     mode: Literal["strict", "broad", "history"] = "broad",
     db_connection=None,
@@ -1786,7 +1786,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             ranked_pool_ = _apply_supersession_demotion(ranked_pool_, conn)
                         # Roadmap ba2cf66f P1#6 / design 1fddc04a: durable-type preference and a
                         # supersession/correction safety-net demotion are forced, unconditional
-                        # defaults under mode="strict", independent of the two opt-in flags above
+                        # defaults under mode="strict", independent of the two independently-togglable flags above
                         # (which keep their existing, narrower, mode-agnostic meaning and may have
                         # already run a second time here -- harmless, a stable partition on the
                         # same criterion applied twice is a no-op the second time). broad/history
@@ -1828,7 +1828,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     or mode == "strict"
                 ):
                     # Widen the pool for rerank_by_topic, use_cross_encoder (roadmap ba2cf66f
-                    # P1#7), Part 2's two opt-in ranking flags, AND mode="strict" (Part B
+                    # P1#7), Part 2's two independently-togglable ranking flags, AND mode="strict" (Part B
                     # pool-widening requirement) -- otherwise there's nothing meaningful to
                     # reorder/resolve/gate within (a plain search's pool is just offset+limit,
                     # often smaller than what's worth considering).

@@ -226,13 +226,18 @@ def store_memory(
     a decisive, dual-channel-confirmed top result -- rerank_by_topic=True still requests reranking,
     but the gate may decide it isn't needed for a given query.
 
-    prefer_durable_types (opt-in, default False): stable-reorders results so `event`-typed memories
-    (session notes/handovers, prone to staleness) sink behind the four durable types
-    (fact/decision/procedure/preference), within the widened hybrid candidate pool.
+    prefer_durable_types (on by default; pass False to opt out): stable-reorders results so
+    `event`-typed memories (session notes/handovers, prone to staleness) sink behind the four
+    durable types (fact/decision/procedure/preference), within the widened hybrid candidate pool.
 
-    demote_superseded (opt-in, default False): stable-reorders results so a memory that is the
-    target of a currently-valid `supersedes` relation (i.e. explicitly marked replaced by a newer
-    memory) sinks to the back of the widened hybrid candidate pool.
+    demote_superseded (on by default; pass False to opt out): stable-reorders results so a memory
+    that is the target of a `supersedes` relation whose `valid_to` is unset or still in the future
+    sinks to the back of the widened hybrid candidate pool. This is a narrower, single-column check
+    than the full four-column bitemporal validity (`valid_from`/`valid_to`/`valid_at`/`invalid_at`)
+    `mode="strict"`'s resolver and `mode="history"`'s own `is_superseded` tagging use elsewhere --
+    a `supersedes` edge with a future `valid_from`, or one already invalidated via `invalid_at`, is
+    still demoted by this flag (pre-existing behavior, unchanged by this default flip; Codex
+    diff-review finding, roadmap `ba2cf66f`).
 
     Both `prefer_durable_types` and `demote_superseded` only affect the hybrid FTS+dense-vector
     pipeline; they have no effect when semantic search is disabled (which now makes query-based
@@ -251,7 +256,12 @@ def store_memory(
     falls back deterministically to whatever ordering would exist without it -- never an error,
     never a widened result count.
 
-    mode (opt-in, default "broad" -- identical to this tool's pre-existing behavior): "strict"
+    mode (opt-in, default "broad"): "broad" itself adds no filtering, resolution, or gating beyond
+    what `rerank_by_topic`/`prefer_durable_types`/`demote_superseded`/`use_cross_encoder` already
+    do -- it was byte-identical to this tool's behavior before `mode` existed, back when those four
+    flags all defaulted off; that is no longer the same claim as "identical to today's other
+    defaults" now that `prefer_durable_types`/`demote_superseded` default `True` (v0.1.0-alpha.70).
+    "strict"
     resolves a matched-but-superseded candidate to its live, multi-hop `supersedes` successor and
     requires every surviving candidate to independently clear a calibrated relevance-abstention
     gate -- an empty list is then a normal, successful "nothing sufficiently relevant" result, not
@@ -259,8 +269,11 @@ def store_memory(
     surviving candidate that's still the target of a currently-valid `supersedes` edge the
     resolver couldn't cleanly resolve, or of a currently-valid `corrects` edge -- unconditionally,
     regardless of `prefer_durable_types`/`demote_superseded` above. "history" leaves every
-    candidate visible (like "broad") but tags a candidate that is the target of a currently-valid
-    `supersedes` edge with `"is_superseded": true`, without hiding or reordering it. Neither
+    candidate visible (like "broad") and tags a candidate that is the target of a currently-valid
+    `supersedes` edge with `"is_superseded": true` -- the tagging step itself never hides or
+    reorders anything, but `prefer_durable_types`/`demote_superseded` (on by default) still apply
+    under "history" exactly as they do under "broad" and can reorder its results independently of
+    the tagging. Neither
     "strict" nor "history" ever exposes archived material -- both still require
     `status != 'archived'` like "broad" already does. Only affects the hybrid query-keyword
     pipeline, same scope as `rerank_by_topic`/`prefer_durable_types`/`demote_superseded` above.
@@ -315,14 +328,17 @@ def search_memory(
     # sentinel) would never see the "rerank" kwarg alias if that pattern were copied here.
     rerank_by_topic_ = _resolve(rerank_by_topic, kw, kwargs, "rerank_by_topic", "rerank")
     rerank_by_topic_ = rerank_by_topic_ if rerank_by_topic_ is not None else False
-    # Same two-line shape as rerank_by_topic_ above, for the same reason (bool = False declared
-    # defaults are never None, so _resolve's kwarg-alias fallback needs a None sentinel first).
+    # Same two-line shape as rerank_by_topic_ above, for the same reason (a plain `bool`
+    # declared-parameter default is never None, regardless of which literal it is, so _resolve's
+    # kwarg-alias fallback needs a None sentinel first). This fallback resolves to True, not
+    # False -- matching memory_service.search_memory's own signature default, which flipped
+    # (roadmap ba2cf66f, benchmark 1d886a43); the raw parameters here stay `bool | None = None`.
     prefer_durable_types_ = _resolve(
         prefer_durable_types, kw, kwargs, "prefer_durable_types", "prefer_durable"
     )
-    prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else False
+    prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else True
     demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
-    demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else False
+    demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else True
     # Same two-line shape again, for the same reason.
     use_cross_encoder_ = _resolve(
         use_cross_encoder, kw, kwargs, "use_cross_encoder", "cross_encoder"
