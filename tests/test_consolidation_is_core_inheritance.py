@@ -87,16 +87,21 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         self.assertTrue(self._has_core_tag(consolidated_id))
 
     def test_non_core_parents_stay_non_core(self):
+        # skip_duplicate_check=True: these two fixtures are deliberately near-identical
+        # templated content (this test is about is_core inheritance, not dedup behavior) and
+        # would otherwise trip Track A's store-time disposition preflight against each other.
         p1 = store_memory(
             title="Plain Fact One",
             content="An ordinary non-core fact, part one.",
             owner_id="agent_c",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         ).split("ID: ")[1]
         p2 = store_memory(
             title="Plain Fact Two",
             content="An ordinary non-core fact, part two.",
             owner_id="agent_c",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         ).split("ID: ")[1]
 

@@ -18,17 +18,22 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
 
-        # Store two entities to use for relation tests
+        # Store two entities to use for relation tests. skip_duplicate_check=True: these two
+        # fixtures are structurally near-identical templated content (by design, for simple
+        # relation-mechanics tests unrelated to dedup behavior) and would otherwise trip Track
+        # A's store-time disposition preflight against each other.
         m1 = store_memory(
             title="[SALTMDB] Entity Alpha",
             content="# Entity Alpha\n\nContent for alpha entity.",
             owner_id="user1",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         m2 = store_memory(
             title="[SALTMDB] Entity Beta",
             content="# Entity Beta\n\nContent for beta entity.",
             owner_id="user1",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.id_alpha = m1.split("ID: ")[1].split()[0]
@@ -456,12 +461,16 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.assertEqual(tag_name, "episodic")
 
     def test_store_memory_nudge_suffix(self):
-        # (a) Brand-new entity WITH tags -> receives tip suffix
+        # (a) Brand-new entity WITH tags -> receives tip suffix. skip_duplicate_check=True: (a)
+        # and (b)'s content is deliberately near-identical (this test is about the tip suffix,
+        # not dedup behavior) and would otherwise trip Track A's store-time disposition preflight
+        # against each other.
         res1 = store_memory(
             title="[SALTMDB] Brand New Entity With Tags",
             content="# New Entity\n\nSome body text for new entity with tags.",
             tags=["semantic"],
             owner_id="user1",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertTrue(res1.startswith("Knowledge stored successfully with ID: "))
@@ -476,6 +485,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# New Entity\n\nSome body text for new entity without tags.",
             tags=[],
             owner_id="user1",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertTrue(res2.startswith("Knowledge stored successfully with ID: "))
@@ -494,18 +504,23 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.assertTrue(res3.startswith("Knowledge stored successfully with ID: "))
         self.assertNotIn("[Tip: consider calling manage_relation", res3)
 
-    def test_store_memory_duplicate_warning_and_nudge_suffix_coexist(self):
+    def test_store_memory_near_duplicate_triggers_review_required_not_silent_persist(self):
+        """Track A successor to the pre-rework "duplicate_warning_str + tip coexist" test: a
+        near-duplicate pair no longer persists with a warning annotation -- it doesn't persist at
+        all until disposed. See scratch/plans/track_a_disposition_detailed.md."""
         # First memory
         res1 = store_memory(
             title="[SALTMDB] Quantum Encryption Standard Protocol",
             content="# Quantum Encryption\n\nQuantum key distribution uses polarized photons to establish secure shared keys.",
             tags=["semantic"],
             owner_id="user1",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        res1.split("ID: ")[1].split()[0]
+        entity_id_1 = res1.split("ID: ")[1].split()[0]
 
-        # Second memory with different content hash and tags to verify success message and tip
+        # Second memory, deliberately near-duplicate content -- must flag, not silently persist
+        # with a warning suffix the way the pre-Track-A contract did.
         res2 = store_memory(
             title="[SALTMDB] Quantum Key Distribution Protocol Variant",
             content="# Quantum Encryption Variant\n\nQuantum key distribution utilizes polarized photons to establish safe shared keys.",
@@ -513,11 +528,33 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             owner_id="user1",
             db_connection=self.conn,
         )
-        prefix = "Knowledge stored successfully with ID: "
-        self.assertTrue(res2.startswith(prefix))
+        self.assertIsInstance(res2, dict)
+        self.assertEqual(res2["status"], "REVIEW_REQUIRED")
+        self.assertIn("review_token", res2)
+        self.assertEqual(len(res2["candidates"]), 1)
+        self.assertEqual(res2["candidates"][0]["target_entity_id"], entity_id_1)
+        self.assertEqual(res2["candidates"][0]["suggested_label"], "possible_duplicate")
+
+        # Resolving it "distinct" (false alarm) commits the write, tip suffix included.
+        res3 = store_memory(
+            title="[SALTMDB] Quantum Key Distribution Protocol Variant",
+            content="# Quantum Encryption Variant\n\nQuantum key distribution utilizes polarized photons to establish safe shared keys.",
+            tags=["semantic"],
+            owner_id="user1",
+            db_connection=self.conn,
+            review_token=res2["review_token"],
+            dispositions=[
+                {"candidate_id": res2["candidates"][0]["candidate_id"], "disposition": "distinct"}
+            ],
+        )
+        self.assertTrue(res3.startswith("Knowledge stored successfully with ID: "))
+        # The all-"distinct" degenerate case is byte-identical to a normal unflagged store,
+        # including the tip suffix (reconciliation §1.3: "the result degenerates to a plain
+        # distinct store, original A case, unchanged" -- caught by Codex implementation review
+        # after an earlier draft of this code path incorrectly suppressed it).
         self.assertIn(
             "[Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]",
-            res2,
+            res3,
         )
 
 

@@ -23,10 +23,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
 
     def test_tc_cons_01_fluff_rejection(self):
         """TC-CONS-01: Rejection of low-quality fluff content during consolidation"""
+        # skip_duplicate_check=True: these two fixtures are deliberately near-identical templated
+        # content (this test is about consolidation quality gating, not dedup behavior) and would
+        # otherwise trip Track A's store-time disposition preflight against each other.
         p1 = store_memory(
             title="Raw Fact Alpha",
             content="Detailed raw fact content alpha for consolidation testing",
             owner_id="agent_c",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         ).split("ID: ")[1]
 
@@ -34,6 +38,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             title="Raw Fact Beta",
             content="Detailed raw fact content beta for consolidation testing",
             owner_id="agent_c",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         ).split("ID: ")[1]
 

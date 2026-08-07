@@ -35,8 +35,6 @@ def main():  # noqa: PLR0915
         from saltmdb.db.locks import acquire_librarian_lock, release_librarian_lock
         from saltmdb.domain.services.librarian_service import (
             merge_tags_heuristics,
-            consolidate_vector_clusters,
-            scout_consolidated_supersessions,
             _run_librarian_maintenance,
         )
 
@@ -49,9 +47,11 @@ def main():  # noqa: PLR0915
             sys.exit(0)
         try:
             logger.info("Starting SALTMDB Librarian on %s...", db_path)
+            # Track A store-time disposition rewrite (see
+            # scratch/plans/track_a_disposition_detailed.md §1.1/§6): consolidate_vector_clusters
+            # and scout_consolidated_supersessions retired outright, no replacement scan --
+            # merge_tags_heuristics is Librarian's only remaining consolidation-adjacent job.
             merge_tags_heuristics(conn)
-            consolidate_vector_clusters(conn)
-            scout_consolidated_supersessions(conn)
         finally:
             # Runs unconditionally (even if a consolidation pass above raised) as long as we
             # still hold the leader lock -- checkpoint/optimize maintenance shouldn't be skipped

@@ -46,17 +46,23 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         self.assertEqual(formatted_once, formatted_twice)
 
     def test_tc_adv_04_calibrated_auto_supersession(self):
-        """TC-ADV-04: Calibrated Auto-Supersession (similarity >= 0.88) auto-stores 'supersedes' relation edge and lowers old weight"""
+        """TC-ADV-04 (Track A successor, see scratch/plans/track_a_disposition_detailed.md): a
+        near-duplicate write (similarity >= 0.88) no longer auto-persists at all -- it is flagged
+        REVIEW_REQUIRED before persistence, never auto-linked/auto-weight-demoted either way (that
+        was never this codebase's actual behavior even pre-Track-A -- see the retired
+        _handle_supersession_candidate's own docstring: the supersedes-edge decision was always
+        left to whoever reviews the flag, not automatic)."""
         original_content = "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings."
         res1 = memory_service.store_memory(
             content=original_content,
             title="SALTMDB Core Architecture Spec",
             owner_id="test_agent",
             weight=5.0,
+            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertIn("Knowledge stored successfully", res1)
-        res1.split("ID: ")[1].strip()
+        entity_id_1 = res1.split("ID: ")[1].strip()
 
         # Near duplicate text with 1 word added out of 10 stemmed tokens (Jaccard sim = 9/10 = 0.90 >= 0.88)
         updated_content = "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings extra."
@@ -67,7 +73,15 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
             skip_duplicate_check=False,
             db_connection=self.conn,
         )
-        self.assertIn("Knowledge stored successfully", res2)
+        self.assertIsInstance(res2, dict)
+        self.assertEqual(res2["status"], "REVIEW_REQUIRED")
+        self.assertEqual(res2["candidates"][0]["target_entity_id"], entity_id_1)
+
+        # Original memory's weight is untouched -- no auto-demotion on an unreviewed signal.
+        row = self.conn.execute(
+            "SELECT weight FROM entities WHERE id = ?", (entity_id_1,)
+        ).fetchone()
+        self.assertEqual(row[0], 5)
 
     def test_tc_adv_05_non_technical_prose_not_penalized(self):
         """TC-ADV-05: Long, code-free narrative prose (e.g. a story/roleplay excerpt) is not

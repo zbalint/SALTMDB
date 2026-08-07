@@ -138,6 +138,18 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
     do not set '#core' via the tags list, it will be silently overridden to match is_core.
 
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
+
+    Store-time disposition (Track A): every call is preflighted before persistence. If
+    evidence-gathering finds no flagged candidates, this behaves exactly as always -- a single
+    call, plain string result. If it finds one or more (a possible duplicate, supersession, or
+    stale-consolidated-node signal), nothing is written; instead this returns a dict with
+    `status: "REVIEW_REQUIRED"`, an opaque `review_token`, and the flagged `candidates`, each with
+    an advisory `suggested_label` (never authoritative -- use your own judgment, including calling
+    it a false alarm) and the `available_dispositions` for it. Resend the identical call with
+    `review_token` and `dispositions` (one `{"candidate_id": ..., "disposition": "distinct" |
+    "supersede" | "consolidate" | "elaborate"}` per flagged candidate) to commit. A stale/expired
+    token, or a resend that no longer matches what was previewed, returns `status: "REVIEW_STALE"`
+    instead -- call again without `review_token` for a fresh preflight.
     """
 )
 def store_memory(
@@ -150,6 +162,8 @@ def store_memory(
     context_id: str = None,
     scope: Literal["private", "shared"] = None,
     check_duplicates_only: bool = False,
+    review_token: str = None,
+    dispositions: list = None,
     **kwargs,
 ) -> str | dict:
     kw = _unwrap_kwargs(kwargs)
@@ -183,6 +197,8 @@ def store_memory(
     actionability = _resolve(None, kw, kwargs, "actionability")
     metadata = _resolve(None, kw, kwargs, "metadata")
     skip_duplicate_check = _resolve(None, kw, kwargs, "skip_duplicate_check") or False
+    review_token_ = _resolve(review_token, kw, kwargs, "review_token")
+    dispositions_ = _resolve(dispositions, kw, kwargs, "dispositions")
 
     return memory_service.store_memory(
         content=content_,
@@ -201,6 +217,8 @@ def store_memory(
         metadata=metadata,
         skip_duplicate_check=skip_duplicate_check,
         context_id=context_id_,
+        review_token=review_token_,
+        dispositions=dispositions_,
     )
 
 

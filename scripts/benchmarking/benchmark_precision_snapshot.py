@@ -117,7 +117,9 @@ def _config_snapshot() -> dict:
         "rerank_candidate_pool_size": config.RERANK_CANDIDATE_POOL_SIZE,
         "rerank_broad_theme_threshold": config.RERANK_BROAD_THEME_THRESHOLD,
         "cohesion_min_pairwise_threshold": config.COHESION_MIN_PAIRWISE_THRESHOLD,
-        "supersession_min_similarity_threshold": config.SUPERSESSION_MIN_SIMILARITY_THRESHOLD,
+        # supersession_min_similarity_threshold retired -- Track A (memory-core rework) deleted
+        # SUPERSESSION_MIN_SIMILARITY_THRESHOLD along with scout_consolidated_supersessions, the
+        # only thing it ever calibrated (see scratch/plans/track_a_disposition_detailed.md).
         "relation_gate_min_similarity_threshold": config.RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
         "embedding_model": EMBEDDING_MODEL_NAME,
     }

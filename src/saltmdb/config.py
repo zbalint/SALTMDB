@@ -135,55 +135,34 @@ LIBRARIAN_TRIGGER_COOLDOWN_S = (
 )
 
 # Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py,
-# relation_service.py:commit_consolidation, librarian_service.py:consolidate_vector_clusters).
-# Memory-core rework Phase 3 -- see plans/ and SALTMDB memory `5c09effa`. Locked from
-# scripts/benchmarking/benchmark_cohesion_threshold.py's real bge-small-en-v1.5 MIN-pairwise-
-# cosine measurements over hand-crafted positive (genuinely related fragment groups) and negative
-# (the confirmed `6a8fec3d` 37-way-omnibus and `3deae748` chaining-incident shapes) classes --
-# do not re-tune without new benchmark evidence.
+# relation_service.py:commit_consolidation, and, since Track A, disposition_service.py's
+# consolidate-disposition path). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory
+# `5c09effa`. Locked from scripts/benchmarking/benchmark_cohesion_threshold.py's real
+# bge-small-en-v1.5 MIN-pairwise-cosine measurements over hand-crafted positive (genuinely related
+# fragment groups) and negative (the confirmed `6a8fec3d` 37-way-omnibus and `3deae748`
+# chaining-incident shapes) classes -- do not re-tune without new benchmark evidence.
 COHESION_MIN_PAIRWISE_THRESHOLD = 0.6547
-# Separate, lower operating point for consolidate_vector_clusters: the benchmark's Population B
-# (larger, 6-8-item Librarian candidate-pool clusters) measured a meaningfully lower positive/
-# negative separation band than Population A's smaller commit-gate parent sets (2-4 items) --
-# MIN over more items has more chances of hitting a weaker pair even within a genuinely cohesive
-# group -- so this is intentionally NOT aliased to COHESION_MIN_PAIRWISE_THRESHOLD (see
-# librarian_service.py:B3).
-CLUSTER_MIN_PAIRWISE_THRESHOLD = 0.5108
 COHESION_OVERRIDE_MIN_LENGTH = 20  # mirrors QG_MIN_LENGTH's "not a throwaway string" floor
-# Defensive cap on find_connected_vector_clusters' multi-subset cohesive extraction, whose
-# worst-case cost is O(k^4) per connected component (see librarian_service.py:B1). A prior
-# benchmark (SALTMDB memory `760e8ee1`) found real Librarian batches run ~28-35 entities; 75 is
-# comfortably above that with headroom. Components larger than this are skipped (logged, not
-# proposed) rather than run through the full extraction.
-COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION = 75
 
-# Review-safety cap on a single emitted vector_cluster consolidation_request, distinct from
-# COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION above (a compute-cost cap on the *component* fed
-# into extraction, not a review-size cap on what gets extracted out of it). An extracted subset
-# that itself clears CLUSTER_MIN_PAIRWISE_THRESHOLD can still be large -- up to
-# COHESION_MAX_COMPONENT_SIZE_FOR_EXTRACTION members -- and asking an agent to review/synthesize
-# that many memories in one commit_consolidation call creates excessive cognitive pressure and
-# encourages shallow acceptance (confirmed failure mode, the prior 37-item omnibus merge
-# incident). consolidate_vector_clusters splits any oversized extracted group into several
-# disjoint, individually-reviewable requests of this size or smaller instead of emitting it
-# whole. Policy choice, not benchmarked -- no re-tuning evidence needed to change it.
+# Cap on how many entities a single commit_consolidation-family call may archive as parents in one
+# commit. Track A (see scratch/plans/track_a_disposition_detailed.md §3) enforces this as new
+# server-side gate logic in disposition_service.py's consolidate-disposition path -- previously
+# just a Librarian request-size splitting policy for the now-retired `consolidate_vector_clusters`,
+# not an enforced cap on `commit_consolidation` itself.
 MAX_CONSOLIDATION_REQUEST_SIZE = 8
 
-# Memory-core rework Phase 4 -- see plans/eager-beaming-hippo.md and SALTMDB memory `32f9ac84`.
-# Locked from scripts/benchmarking/benchmark_supersession_threshold.py's real bge-small-en-v1.5
-# consolidated-summary-vs-raw-fragment cosine measurements over hand-crafted positive (a raw
-# fragment concretely updating/extending the SAME specific fact a consolidated summary describes)
-# and negative (a raw fragment from the same broad domain but a DIFFERENT specific fact) classes --
-# 0% false-accept, 0% false-reject on the benchmark corpus -- do not re-tune without new benchmark
-# evidence. This is a structurally different comparison shape from COHESION_MIN_PAIRWISE_THRESHOLD/
-# CLUSTER_MIN_PAIRWISE_THRESHOLD (post-merge synthesis centroid vs raw fragment, not raw-vs-raw),
-# so it is NOT aliased to either.
-SUPERSESSION_MIN_SIMILARITY_THRESHOLD = 0.7557
-# Cardinality floor (policy, not benchmarked) for scout_consolidated_supersessions: minimum
-# number of mutually-cohesive new raw fragments required to propose a supersession candidate.
-# Promoted unchanged from the pre-rework hardcoded literal; matches
-# find_connected_vector_clusters' own min_cluster_size=3 default.
-SUPERSESSION_MIN_OVERLAP_COUNT = 3
+# Track A store-time disposition rewrite (see scratch/plans/track_a_disposition_detailed.md §1).
+# Worst-case cap on how many flagged candidates a single store_memory preflight returns in one
+# REVIEW_REQUIRED response -- each candidate already cleared the strict multi-signal bar, so
+# exceeding this should be rare; truncates to the top N by similarity_score and logs a
+# review_candidates_truncated event rather than silently dropping the rest. Policy choice, not
+# benchmarked.
+MAX_REVIEW_CANDIDATES = 5
+# How long a REVIEW_REQUIRED review_token stays valid before a commit call must re-preflight.
+# Generous for an LLM tool-call round trip (typically seconds) while bounding the staleness
+# window the token's fingerprint/revalidation logic has to reason about. Policy choice, not
+# benchmarked.
+REVIEW_TOKEN_TTL_SECONDS = 900
 
 # Memory-core rework Phase 5 -- manage_relation governance gate (see
 # plans/structured-finding-matsumoto.md and SALTMDB memory `5c09effa`/`6490fe88`).
@@ -193,9 +172,8 @@ SUPERSESSION_MIN_OVERLAP_COUNT = 3
 # (the confirmed `c0ebc365` fingerprint: same broad domain, different specific fact) classes --
 # 0% false-accept, 0% false-reject on the benchmark corpus -- do not re-tune without new
 # benchmark evidence. Structurally different comparison shape from COHESION_MIN_PAIRWISE_THRESHOLD
-# (whole parent SET, MIN pairwise) and SUPERSESSION_MIN_SIMILARITY_THRESHOLD (consolidated-summary
-# vs raw-fragment) -- this is exactly one raw-vs-raw pair per call -- so it is NOT aliased to
-# either.
+# (whole parent SET, MIN pairwise) -- this is exactly one raw-vs-raw pair per call -- so it is NOT
+# aliased to it.
 RELATION_GATE_MIN_SIMILARITY_THRESHOLD = 0.6505
 # Predicates treated as similarity/judgment claims (relation_service.py:store_relation's gate) --
 # exactly the three implicated in the `c0ebc365` incident. depends_on (structural, not a

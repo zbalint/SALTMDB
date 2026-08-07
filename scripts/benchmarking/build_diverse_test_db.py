@@ -345,13 +345,26 @@ def build_metadata(doc: ParsedDoc, run_id: str) -> dict:
 # --------------------------------------------------------------------------------------------
 
 
-def classify_store_result(result: str) -> tuple[str, str | None]:
-    """Classify store_memory()'s plain-string return into a checkpoint outcome. Returns
-    (outcome, error_detail).
+def classify_store_result(result: str | dict) -> tuple[str, str | None]:
+    """Classify store_memory()'s return into a checkpoint outcome. Returns (outcome, error_detail).
+
+    Track A compatibility note (memory-core rework, see
+    scratch/plans/track_a_disposition_detailed.md): store_memory now runs a store-time preflight
+    and returns a dict instead of a string whenever it flags one or more candidates -- the old
+    "[WARNING: Potential duplicate...]" string suffix (and the "stored_with_duplicate_warning"
+    outcome it fed) no longer exists; anything that would have triggered it now surfaces as
+    REVIEW_REQUIRED before persistence instead. This is a minimal compatibility fix (classify the
+    new shapes without crashing) not a redesign of this script's checkpoint/stats semantics --
+    callers that need the old duplicate-warning breakdown must be updated deliberately.
     """
+    if isinstance(result, dict):
+        status = result.get("status")
+        if status == "REVIEW_REQUIRED":
+            return "review_required", None
+        if status == "REVIEW_STALE":
+            return "review_stale", str(result)
+        return "other_error", str(result)
     if result.startswith("Knowledge stored successfully"):
-        if "[WARNING: Potential duplicate" in result:
-            return "stored_with_duplicate_warning", None
         return "stored_clean", None
     if "REJECT_EXACT_DUPLICATE" in result:
         return "exact_duplicate_rejected", result
@@ -527,12 +540,11 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
                         # `db_path or get_db_path()` -- would silently target the LIVE default
                         # DB instead of this destination copy. Must pass both explicitly.
                         db_path=dest_db_path,
-                        event_run_id=run_id,
                     )
                     outcome, error_detail = classify_store_result(result)
                     outcome_record["outcome"] = outcome
                     outcome_record["error_detail"] = error_detail
-                    if outcome in ("stored_clean", "stored_with_duplicate_warning"):
+                    if outcome == "stored_clean":
                         entity_id = _extract_entity_id(result)
                         outcome_record["entity_id"] = entity_id
                         stats["split_group_ids"].add(metadata["split_group_id"])

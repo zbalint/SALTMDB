@@ -466,5 +466,40 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
                 if "already exists" not in msg and "already an index" not in msg:
                     logger.error("Failed to create index (%s): %s", index_sql, e)
 
+        # Track A store-time disposition rewrite (memory-core rework, see
+        # scratch/plans/track_a_disposition_detailed.md §5): one-time retirement of the legacy
+        # `consolidation_request`/`supersession_candidate` event backlog, now that store_memory no
+        # longer emits either type. Reuses the existing `dismiss_events` mechanism (an
+        # `event_dismissed` audit record per event, reason="track_a_migration") rather than
+        # introducing new event-type/status-derivation logic -- get_recent_events'/dismiss_events'
+        # own dismissed-suppression logic already treats a dismissed event as no longer pending.
+        # Gated on PRAGMA user_version (unused elsewhere in this codebase) so this genuinely runs
+        # once, ever, per DB -- NOT on every init_db() call -- otherwise it would silently
+        # auto-dismiss any future legitimate event of either type too, not just this one-time
+        # legacy backlog (Codex Track-A plan review round 2 finding). A crash mid-sweep leaves
+        # user_version at 0 and the sweep safely retries next startup; a completed sweep never
+        # re-runs and never touches a future event again.
+        try:
+            if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+                legacy_ids = [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT id FROM events WHERE type IN ('consolidation_request', 'supersession_candidate')"
+                    ).fetchall()
+                ]
+                if legacy_ids:
+                    from saltmdb.domain.services.event_service import dismiss_events
+
+                    dismiss_events(
+                        event_ids=legacy_ids,
+                        reason="track_a_migration",
+                        agent_id="system",
+                        db_connection=conn,
+                        _in_transaction=True,
+                    )
+                conn.execute("PRAGMA user_version = 1")
+        except sqlite3.OperationalError as e:
+            logger.warning("Track A migration sweep skipped/failed (will retry next startup): %s", e)
+
     write_transaction_retrying(conn, _write)
     return conn

@@ -55,70 +55,215 @@ def validate_memory_input(title: str, content: str, metadata: dict | None) -> No
             )
 
 
-def _handle_supersession_candidate(
-    conn,
-    entity_id: str,
-    matched_supersession_id: str,
-    matched_supersession_title: str | None,
-    matched_sim_score: float,
-    owner_id: str | None,
-    context_id: str | None,
-    event_run_id: str | None = None,
-) -> None:
-    """Logs a reviewable supersession_candidate event and, above the stricter duplicate
-    band, auto-links a 'similar_to' relation edge -- additive only (no weight/is_core change,
-    no suppression from search). A cosine score above the duplicate threshold is a defensible
-    claim of "these are semantically close"; it is NOT a defensible claim of "this replaces
-    that" (see alpha.47 regression: auto-supersedes + weight demotion on the weaker signal
-    silently buried an unreviewed memory). The judgment call of whether to also add a
-    directional 'supersedes' edge stays with whoever reviews the supersession_candidate event.
-    Must be called inside the caller's open write transaction (mirrors resolve_or_create_tag).
+def _resolve_existing_entity_id(
+    conn, entity_id: str | None, title: str, owner_id: str, scope: str, content_hash: str
+) -> tuple[str | None, str | None]:
+    """Resolves what entity id a `store_memory` call will target, before persistence.
 
-    event_run_id: optional, forwarded from store_memory(). Written into the payload as "run_id"
-    only when not None -- see store_memory's docstring for why this lives in the immutable event
-    payload rather than on the entity's (upsertable) metadata.
+    Returns (resolved_entity_id, error_message). error_message is only ever set for an exact
+    content-hash collision (REJECT_EXACT_DUPLICATE) -- callers must return it immediately, same as
+    always. resolved_entity_id is None for a fresh insert (no explicit entity_id, no hash
+    collision, no same-title match); non-None means either the caller's own explicit entity_id, or
+    a same-title/owner/scope temporal-upsert match.
+
+    Track A (memory-core rework, see scratch/plans/track_a_disposition_detailed.md §0/§3):
+    extracted out of `store_memory`'s body so `disposition_service.evaluate_store_preflight`/
+    `commit_disposed_write` can determine the identical resolved target without duplicating this
+    SQL, and so the exact same resolution can be re-run at both preflight and commit time for the
+    review-token binding check.
     """
+    if entity_id:
+        return entity_id, None
     try:
-        from saltmdb.domain.services.event_service import log_event
-
-        candidate_payload = json.dumps(
-            {
-                "new_entity_id": entity_id,
-                "target_entity_id": matched_supersession_id,
-                "similarity_score": matched_sim_score,
-                "target_title": matched_supersession_title,
-                **({"run_id": event_run_id} if event_run_id is not None else {}),
-            }
-        )
-        log_event(
-            agent_id=owner_id or "system",
-            type="supersession_candidate",
-            content=candidate_payload,
-            context_id=context_id,
-            db_connection=conn,
-            _in_transaction=True,
-        )
-        logger.info(
-            "Auto-Supersession: Logged 'supersession_candidate' event for new memory %s -> target %s",
-            entity_id,
-            matched_supersession_id,
-        )
-    except Exception as ex:
-        logger.warning("Failed to log supersession_candidate event: %s", ex)
-
-    if matched_sim_score >= DEDUP_DUPLICATE_THRESHOLD:
-        try:
-            from saltmdb.domain.services.relation_service import store_relation
-
-            store_relation(
-                source_id=entity_id,
-                target_id=matched_supersession_id,
-                predicate="similar_to",
-                db_connection=conn,
-                _in_transaction=True,
+        row = conn.execute(
+            """
+            SELECT id FROM entities
+            WHERE content_hash = ? AND (owner_id = ? OR scope = 'shared') AND status != 'archived'
+        """,
+            (content_hash, owner_id),
+        ).fetchone()
+        if row:
+            return (
+                None,
+                f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}",
             )
-        except Exception as ex:
-            logger.warning("Failed to auto-link similar_to relation: %s", ex)
+    except Exception:
+        pass
+    try:
+        row = conn.execute(
+            """
+            SELECT id FROM entities
+            WHERE title = ? AND owner_id = ? AND scope = ? AND status != 'archived'
+        """,
+            (title, owner_id, scope),
+        ).fetchone()
+        if row:
+            return row[0], None
+    except Exception:
+        pass
+    return None, None
+
+
+def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
+    """Persists `proposed` as a plain raw entity (a temporal upsert if `resolved_entity_id` names
+    an already-existing row, otherwise a fresh insert) -- the same insert/tag/`#core`-sync logic
+    `store_memory` has always run, factored out so `disposition_service.commit_disposed_write`'s
+    no-`consolidate`-disposition path reuses it rather than duplicating it (Track A, see
+    scratch/plans/track_a_disposition_detailed.md §0/§3). Must run inside the caller's own write
+    transaction. Returns (entity_id, was_existing) -- `was_existing` gates the "[Tip: ...]" suffix
+    the same way the pre-Track-A code's local `existing` variable did.
+    """
+    entity_id = proposed.get("resolved_entity_id") or str(uuid.uuid4())
+    title = proposed["title"]
+    redacted_content = proposed["content"]
+    owner_id = proposed["owner_id"]
+    scope = proposed["scope"]
+    weight = proposed.get("weight") or 1
+    is_core = proposed.get("is_core")
+    memory_type = proposed.get("memory_type")
+    metadata = proposed.get("metadata")
+    context_id = proposed.get("context_id")
+    content_hash = proposed["content_hash"]
+    quality_score = proposed["quality_score"]
+    quality_status = proposed["quality_status"]
+    quality_flags_str = proposed["quality_flags_str"]
+    tags = proposed.get("tags")
+    now = datetime.now(UTC).isoformat()
+
+    cursor = conn.execute(
+        "SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,)
+    )
+    existing = cursor.fetchone()
+    if existing:
+        created_at, owner, valid_from = existing
+        hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
+
+        conn.execute(
+            """
+             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
+             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
+             FROM entities WHERE id = ?
+         """,
+            (hist_id, valid_from if valid_from else created_at, now, entity_id),
+        )
+
+        conn.execute(
+            """
+             INSERT INTO entity_tags (entity_id, tag_id)
+             SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
+         """,
+            (hist_id, entity_id),
+        )
+
+    if tags is not None:
+        conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
+
+    metadata_str = json.dumps(metadata) if metadata else None
+    if is_core is None:
+        is_core_val = None
+    else:
+        is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
+
+    conn.execute(
+        """
+        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
+        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
+        ON CONFLICT(id) DO UPDATE SET
+            updated_at = excluded.updated_at,
+            last_accessed_at = excluded.last_accessed_at,
+            owner_id = COALESCE(excluded.owner_id, entities.owner_id),
+            scope = excluded.scope,
+            is_core = COALESCE(?, entities.is_core),
+            weight = excluded.weight,
+            status = entities.status,
+            title = excluded.title,
+            full_content = excluded.full_content,
+            valid_from = excluded.valid_from,
+            valid_to = CASE WHEN entities.status IN ('consolidated', 'archived')
+                             THEN entities.valid_to ELSE NULL END,
+            metadata = excluded.metadata,
+            context_id = COALESCE(excluded.context_id, entities.context_id),
+            content_hash = excluded.content_hash,
+            quality_score = excluded.quality_score,
+            quality_status = excluded.quality_status,
+            quality_flags = excluded.quality_flags,
+            memory_type = COALESCE(?, entities.memory_type)
+    """,
+        (
+            entity_id,
+            now,
+            now,
+            now,
+            owner_id,
+            scope,
+            is_core_val,
+            weight,
+            json.dumps([]),
+            title,
+            redacted_content,
+            now,
+            metadata_str,
+            context_id,
+            content_hash,
+            quality_score,
+            quality_status,
+            quality_flags_str,
+            memory_type,
+            is_core_val,
+            memory_type,
+        ),
+    )
+
+    if tags is not None:
+        tag_lookup: dict[str, str] = {}  # norm -> resolved tag_id, cached per-call to avoid
+        # re-resolving the same tag string twice within one store_memory
+        for tag_name in tags:
+            tag_name = tag_name.strip()
+            if not tag_name:
+                continue
+
+            norm_input = tag_name.lower().lstrip("#")
+            norm_input = re.sub(r"[-_\s]+", "", norm_input)
+
+            # Use cached result if we already resolved an equivalent tag string
+            tag_id: str | None
+            if norm_input in tag_lookup:
+                tag_id = tag_lookup[norm_input]
+            else:
+                tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_id)
+                if tag_id:
+                    tag_lookup[norm_input] = tag_id
+
+            if not tag_id:
+                continue
+
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                (entity_id, tag_id),
+            )
+
+    # Stage 4.5: is_core -> #core tag sync. is_core is the single writable source of
+    # truth; #core is a derived label the server maintains so the two can never drift
+    # apart again. Runs on every write (even calls that touch neither is_core nor tags),
+    # which also self-heals any pre-existing drift the next time an entity is touched.
+    resolved_row = conn.execute(
+        "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
+    ).fetchone()
+    resolved_is_core = bool(resolved_row[0]) if resolved_row else False
+    core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=owner_id)
+    if core_tag_id:
+        if resolved_is_core:
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                (entity_id, core_tag_id),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
+                (entity_id, core_tag_id),
+            )
+
+    return entity_id, bool(existing)
 
 
 def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -141,17 +286,26 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     db_connection=None,
     db_path: str = None,
     *,
-    event_run_id: str | None = None,
-) -> str:
+    review_token: str | None = None,
+    dispositions: list | None = None,
+) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
-    event_run_id: optional, keyword-only. When given, written verbatim into the
-    supersession_candidate event's own JSON payload (as "run_id") at the moment it's appended to
-    the append-only events ledger -- never onto the entity/metadata, which a later temporal
-    upsert could overwrite. Lets a batch caller (e.g. an ingestion script) durably attribute
-    supersession-candidate counts to a specific run even across resumed/retried invocations that
-    upsert the same entity. Defaults to None, in which case the payload's "run_id" key is omitted
-    entirely -- identical to pre-existing behavior for every caller that doesn't pass it.
+    Track A (memory-core rework, see scratch/plans/track_a_disposition_detailed.md): every call
+    runs a side-effect-free preflight before persistence. If evidence-gathering finds no flagged
+    candidates, this behaves exactly as before -- a single call, same string return. If it finds
+    one or more (a possible duplicate, supersession, or stale-consolidated-node signal), nothing
+    is persisted; instead this returns a `REVIEW_REQUIRED` dict carrying an opaque `review_token`
+    and the flagged candidates, each with an advisory (never authoritative) `suggested_label` and
+    the disposition options available for it. Resend the identical call with `review_token` and
+    `dispositions` (`[{"candidate_id": ..., "disposition": "distinct"|"supersede"|"consolidate"|
+    "elaborate"}, ...]`, one entry per flagged candidate) to commit. A stale/expired token or a
+    proposed write that no longer matches what was previewed returns `REVIEW_STALE` instead of
+    persisting anything -- call again without `review_token` to get a fresh preflight.
+
+    `skip_duplicate_check=True` bypasses the preflight entirely (same as before Track A), same as
+    an explicit `entity_id` or a same-title/owner/scope match already resolving this call to an
+    existing entity -- in both cases this is a direct write, not a create-or-flag decision.
     """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
@@ -190,289 +344,119 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         conn = get_connection(db_path)
         should_close = True
 
-    redacted_content = redact_secrets(content)
-    now = datetime.now(UTC).isoformat()
-
-    if not title:
-        title, _ = extract_title_and_snippet(redacted_content)
-    else:
-        title = redact_secrets(title)
-
-    if not title or not title.strip():
-        return "Error: title is mandatory and cannot be empty."
-
     try:
-        validate_memory_input(title, redacted_content, metadata)
-    except ValueError as e:
-        if should_close:
-            close_connection(conn)
-        return str(e)
+        redacted_content = redact_secrets(content)
 
-    # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
-    from saltmdb.utils.nlp import auto_format_markdown
+        if not title:
+            title, _ = extract_title_and_snippet(redacted_content)
+        else:
+            title = redact_secrets(title)
 
-    redacted_content = auto_format_markdown(redacted_content)
+        if not title or not title.strip():
+            return "Error: title is mandatory and cannot be empty."
 
-    if not context_id and metadata and isinstance(metadata, dict):
-        context_id = metadata.get("project") or metadata.get("project_id")
-
-    # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
-    quality_res = evaluate_memory_quality(redacted_content, title)
-    if quality_res["status"] == "REJECT":
-        if should_close:
-            close_connection(conn)
-        return f"Error: Memory quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
-
-    content_hash = compute_content_hash(redacted_content)
-    quality_score = quality_res["quality_score"]
-    quality_status = quality_res["status"]
-    quality_flags_str = json.dumps(quality_res["quality_flags"])
-
-    # Stage 4: Stage A Exact Hash Collision Lookup
-    if not entity_id:
         try:
-            cursor = conn.execute(
-                """
-                SELECT id FROM entities
-                WHERE content_hash = ? AND (owner_id = ? OR scope = 'shared') AND status != 'archived'
-            """,
-                (content_hash, owner_id),
+            validate_memory_input(title, redacted_content, metadata)
+        except ValueError as e:
+            return str(e)
+
+        # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
+        from saltmdb.utils.nlp import auto_format_markdown
+
+        redacted_content = auto_format_markdown(redacted_content)
+
+        if not context_id and metadata and isinstance(metadata, dict):
+            context_id = metadata.get("project") or metadata.get("project_id")
+
+        # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
+        quality_res = evaluate_memory_quality(redacted_content, title)
+        if quality_res["status"] == "REJECT":
+            return f"Error: Memory quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
+
+        content_hash = compute_content_hash(redacted_content)
+        quality_score = quality_res["quality_score"]
+        quality_status = quality_res["status"]
+        quality_flags_str = json.dumps(quality_res["quality_flags"])
+
+        resolved_entity_id, hash_collision_error = _resolve_existing_entity_id(
+            conn, entity_id, title, owner_id, scope, content_hash
+        )
+        if hash_collision_error:
+            return hash_collision_error
+
+        proposed = {
+            "content": redacted_content,
+            "title": title,
+            "tags": tags,
+            "owner_id": owner_id,
+            "scope": scope,
+            "memory_type": memory_type,
+            "context_id": context_id,
+            "is_core": is_core,
+            "weight": weight,
+            "metadata": metadata,
+            "resolved_entity_id": resolved_entity_id,
+            "content_hash": content_hash,
+            "quality_score": quality_score,
+            "quality_status": quality_status,
+            "quality_flags_str": quality_flags_str,
+        }
+
+        # Deferred import: disposition_service imports relation_service, which imports this very
+        # module (memory_service) at ITS OWN top level -- a top-level import here would create a
+        # real init-time cycle. Matches this function's other deferred imports below.
+        from saltmdb.domain.services import disposition_service
+
+        effective_db_path = db_path or get_db_path()
+
+        if review_token:
+            result = disposition_service.commit_disposed_write(
+                conn, proposed, review_token, dispositions or [], effective_db_path
             )
-            row = cursor.fetchone()
-            if row:
-                if should_close:
-                    close_connection(conn)
-                return f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}"
-        except Exception:
-            pass
-
-    if not entity_id:
-        try:
-            cursor = conn.execute(
-                """
-                SELECT id FROM entities
-                WHERE title = ? AND owner_id = ? AND scope = ? AND status != 'archived'
-            """,
-                (title, owner_id, scope),
-            )
-            row = cursor.fetchone()
-            if row:
-                entity_id = row[0]
-                logger.debug(
-                    "Deduplication: Matched existing memory '%s' (ID: %s). Routing to temporal upsert.",
-                    title,
-                    entity_id,
-                )
-        except Exception:
-            pass
-
-    matched_supersession_id = None
-    matched_supersession_title = None
-    matched_sim_score = 0.0
-    duplicate_warning_str = None
-
-    if not entity_id and not skip_duplicate_check:
-        try:
-            dup_check = check_duplicate_memories(
-                title=title,
-                content=redacted_content,
-                owner_id=owner_id,
-                tags=tags,
-                context_id=context_id,
-                db_connection=conn,
-            )
-            if dup_check.get("duplicate_found") and "error" not in dup_check:
-                top = dup_check["potential_duplicates"][0]
-                sim_score = top.get("similarity_score", 0.0)
-                matched_owner = top.get("owner_id")
-
-                # Check namespace isolation: candidate must be ownerless, owned by the caller,
-                # or itself scope='shared' (visible to any owner) - not a literal owner_id match on "shared".
-                matched_scope = top.get("scope")
-                if matched_owner is None or matched_owner == owner_id or matched_scope == "shared":
-                    if sim_score >= DEDUP_SUPERSESSION_THRESHOLD:
-                        matched_supersession_id = top["id"]
-                        matched_supersession_title = top["title"]
-                        matched_sim_score = sim_score
-                        logger.info(
-                            "Calibrated Cosine Supersession Candidate: New memory '%s' matches existing memory '%s' (ID: %s, Cosine Similarity: %.2f)",
-                            title,
-                            top["title"],
-                            top["id"],
-                            sim_score,
-                        )
-
-                    if sim_score >= DEDUP_DUPLICATE_THRESHOLD:
-                        duplicate_warning_str = f" [WARNING: Potential duplicate of existing memory '{top['title']}' (ID: {top['id']}, similarity {sim_score})]"
-        except Exception:
-            pass
-
-    if not entity_id:
-        entity_id = str(uuid.uuid4())
-
-    try:
-
-        def _write(c):  # noqa: C901, PLR0912
-            cursor = conn.execute(
-                "SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,)
-            )
-            existing = cursor.fetchone()
-            if existing:
-                created_at, owner, valid_from = existing
-                hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
-
-                conn.execute(
-                    """
-                     INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
-                     SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
-                     FROM entities WHERE id = ?
-                 """,
-                    (hist_id, valid_from if valid_from else created_at, now, entity_id),
-                )
-
-                conn.execute(
-                    """
-                     INSERT INTO entity_tags (entity_id, tag_id)
-                     SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
-                 """,
-                    (hist_id, entity_id),
-                )
-
-            if tags is not None:
-                conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
-
-            metadata_str = json.dumps(metadata) if metadata else None
-            if is_core is None:
-                is_core_val = None
+            if isinstance(result, dict):
+                return result  # REVIEW_STALE
+            if isinstance(result, str) and result.startswith("Error"):
+                return result
+            entity_id_out = result.split("ID: ")[-1].strip()
+            res_msg = result
+        else:
+            # Gated identically to the pre-Track-A dup-check: skipped whenever this call already
+            # resolves to an existing entity (explicit entity_id OR a same-title/owner/scope
+            # upsert match -- resolved_entity_id covers both) or the caller opted out, exactly
+            # matching store_memory's original `if not entity_id and not skip_duplicate_check`
+            # gate, which was itself checked AFTER entity_id could have been mutated by the
+            # same-title match.
+            if resolved_entity_id or skip_duplicate_check:
+                preflight = {"candidates": []}
             else:
-                is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
-
-            conn.execute(
-                """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
-                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
-                ON CONFLICT(id) DO UPDATE SET
-                    updated_at = excluded.updated_at,
-                    last_accessed_at = excluded.last_accessed_at,
-                    owner_id = COALESCE(excluded.owner_id, entities.owner_id),
-                    scope = excluded.scope,
-                    is_core = COALESCE(?, entities.is_core),
-                    weight = excluded.weight,
-                    status = entities.status,
-                    title = excluded.title,
-                    full_content = excluded.full_content,
-                    valid_from = excluded.valid_from,
-                    valid_to = CASE WHEN entities.status IN ('consolidated', 'archived')
-                                     THEN entities.valid_to ELSE NULL END,
-                    metadata = excluded.metadata,
-                    context_id = COALESCE(excluded.context_id, entities.context_id),
-                    content_hash = excluded.content_hash,
-                    quality_score = excluded.quality_score,
-                    quality_status = excluded.quality_status,
-                    quality_flags = excluded.quality_flags,
-                    memory_type = COALESCE(?, entities.memory_type)
-            """,
-                (
-                    entity_id,
-                    now,
-                    now,
-                    now,
-                    owner_id,
-                    scope,
-                    is_core_val,
-                    weight,
-                    json.dumps([]),
-                    title,
-                    redacted_content,
-                    now,
-                    metadata_str,
-                    context_id,
-                    content_hash,
-                    quality_score,
-                    quality_status,
-                    quality_flags_str,
-                    memory_type,
-                    is_core_val,
-                    memory_type,
-                ),
-            )
-
-            if tags is not None:
-                tag_lookup: dict[str, str] = {}  # norm -> resolved tag_id, cached per-call to avoid
-                # re-resolving the same tag string twice within one store_memory
-                for tag_name in tags:
-                    tag_name = tag_name.strip()
-                    if not tag_name:
-                        continue
-
-                    norm_input = tag_name.lower().lstrip("#")
-                    norm_input = re.sub(r"[-_\s]+", "", norm_input)
-
-                    # Use cached result if we already resolved an equivalent tag string
-                    tag_id: str | None
-                    if norm_input in tag_lookup:
-                        tag_id = tag_lookup[norm_input]
-                    else:
-                        tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_id)
-                        if tag_id:
-                            tag_lookup[norm_input] = tag_id
-
-                    if not tag_id:
-                        continue
-
-                    conn.execute(
-                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                        (entity_id, tag_id),
-                    )
-
-            # Stage 4.5: is_core -> #core tag sync. is_core is the single writable source of
-            # truth; #core is a derived label the server maintains so the two can never drift
-            # apart again. Runs on every write (even calls that touch neither is_core nor tags),
-            # which also self-heals any pre-existing drift the next time an entity is touched.
-            resolved_row = conn.execute(
-                "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
-            ).fetchone()
-            resolved_is_core = bool(resolved_row[0]) if resolved_row else False
-            core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=owner_id)
-            if core_tag_id:
-                if resolved_is_core:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                        (entity_id, core_tag_id),
-                    )
-                else:
-                    conn.execute(
-                        "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
-                        (entity_id, core_tag_id),
-                    )
-
-            # Stage 5: Supersession Candidate Event Logging (Replaces unconfirmed auto-linking & weight demotion)
-            if matched_supersession_id:
-                _handle_supersession_candidate(
-                    conn=conn,
-                    entity_id=entity_id,
-                    matched_supersession_id=matched_supersession_id,
-                    matched_supersession_title=matched_supersession_title,
-                    matched_sim_score=matched_sim_score,
-                    owner_id=owner_id,
-                    context_id=context_id,
-                    event_run_id=event_run_id,
+                preflight = disposition_service.evaluate_store_preflight(
+                    conn, proposed, effective_db_path
                 )
 
-            return existing
+            if preflight["candidates"]:
+                return disposition_service.build_review_required_response(proposed, preflight)
 
-        existing = write_transaction_retrying(conn, _write)
+            def _write(c):
+                return _store_raw_entity(c, proposed)
+
+            entity_id_out, was_existing = write_transaction_retrying(conn, _write)
+            res_msg = f"Knowledge stored successfully with ID: {entity_id_out}"
+            if not was_existing and tags:
+                res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
         trigger_librarian(db_path=db_path)
 
-        target_db = db_path or get_db_path()
-        if target_db:
+        if effective_db_path:
             from saltmdb.domain.services import embedding_service
 
             _embed_pool.submit(
-                embedding_service.embed_entity_async, entity_id, title, redacted_content, target_db
+                embedding_service.embed_entity_async,
+                entity_id_out,
+                title,
+                redacted_content,
+                effective_db_path,
             )
             # Part A1 (chunk-embedding freshness lifecycle): pass the just-committed content_hash
             # (same value computed above and written into entities.content_hash in the same
@@ -485,17 +469,12 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # untouched instead of being clobbered by a stale in-flight write.
             _embed_pool.submit(
                 embedding_service.write_entity_chunk_embeddings,
-                entity_id,
+                entity_id_out,
                 redacted_content,
-                target_db,
+                effective_db_path,
                 content_hash,
             )
 
-        res_msg = f"Knowledge stored successfully with ID: {entity_id}"
-        if duplicate_warning_str:
-            res_msg += duplicate_warning_str
-        if not existing and tags:
-            res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"
         return res_msg
     except Exception as e:
         logger.error("Error storing knowledge: %s", e)

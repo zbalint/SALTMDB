@@ -140,6 +140,48 @@ STOP_WORDS = {
 }
 
 
+# Track A store-time disposition rewrite (see scratch/plans/track_a_disposition_detailed.md §2.1).
+# Fixed, documented, deliberately simple/explainable lexicon of correction/update/replacement
+# markers -- a heuristic hint feeding evaluate_store_preflight's supersession-signal detection,
+# never a determination (the caller sees exactly which phrases matched, not an opaque score).
+# Word-boundary-anchored, case-insensitive; checked against the NEW content only, not the target's.
+_CORRECTION_LANGUAGE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bactually,",
+        r"\bcorrection:",
+        r"\bno longer\b",
+        r"\binstead of\b",
+        r"\bsupersedes\b",
+        r"\breplaces\b",
+        r"\bwas wrong\b",
+        r"\bturns out\b",
+        r"\bupdate:",
+        r"\bdeprecated\b",
+        r"\boutdated\b",
+        r"\bcontrary to\b",
+        r"\brevised:",
+    )
+]
+
+
+def detect_correction_language(text: str) -> list[str]:
+    """Returns the distinct correction/update/replacement marker phrases found in `text`.
+
+    Empty list means no signal. Deliberately a plain substring/regex lexicon over a statistical
+    classifier -- this feeds an advisory hint an agent must be able to sanity-check at a glance
+    (see evaluate_store_preflight's `suggested_label`/`heuristic_note` contract), not a black box.
+    """
+    if not text:
+        return []
+    matches = []
+    for pattern in _CORRECTION_LANGUAGE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            matches.append(m.group(0).rstrip(",:"))
+    return matches
+
+
 def stem(word: str) -> str:
     """Basic English suffix stemming for fuzzy matching."""
     w = word.lower()

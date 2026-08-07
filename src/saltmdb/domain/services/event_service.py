@@ -295,8 +295,17 @@ def dismiss_events(
     agent_id: str = "system",
     db_connection=None,
     db_path: str = None,
+    _in_transaction: bool = False,
 ) -> str:
-    """Dismisses review events to prevent them from remaining pending."""
+    """Dismisses review events to prevent them from remaining pending.
+
+    _in_transaction=True skips the internal write_transaction_retrying wrapper and runs the write
+    directly against the caller's already-open transaction -- same shape as log_event's own
+    _in_transaction branch. Used by db/schema.py's Track A migration sweep (see
+    scratch/plans/track_a_disposition_detailed.md §5), which calls this from inside init_db's own
+    write transaction, where a nested BEGIN would raise "cannot start a transaction within a
+    transaction".
+    """
     if isinstance(event_ids, str):
         event_ids = [event_ids]
 
@@ -375,7 +384,10 @@ def dismiss_events(
                     (dismissal_id, now, agent_id, "event_dismissed", content_json),
                 )
 
-        write_transaction_retrying(conn, _write)
+        if _in_transaction:
+            _write(conn)
+        else:
+            write_transaction_retrying(conn, _write)
         return "Events dismissed successfully"
     finally:
         if should_close:

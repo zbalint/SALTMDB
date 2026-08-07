@@ -115,11 +115,14 @@ def init_entity_chunk_vector_schema(conn: sqlite3.Connection) -> None:
     making this function safe to call standalone -- from a test, a future script, or any other
     caller that never went through init_vector_schema first.
 
-    Memory-core rework Phase 4: consolidate_vector_clusters and scout_consolidated_supersessions no
-    longer self-load the extension directly here -- both go through
+    Memory-core rework Phase 4: callers needing entity centroids go through
     cohesion_service.get_fresh_entity_centroids, which calls try_load_vector_extension internally
     and degrades to a per-entity fallback (on-demand embedding) rather than raising if the load
-    fails, instead of the old bespoke try/except that silently abandoned the whole pass.
+    fails, instead of a bespoke try/except that silently abandons the whole pass. This includes
+    Track A's disposition_service.py (store-time consolidated-node integrity check) and
+    relation_service.py's commit_consolidation, both callers of get_fresh_entity_centroids --
+    the retired consolidate_vector_clusters/scout_consolidated_supersessions (memory-core rework,
+    see scratch/plans/track_a_disposition_detailed.md) used to be two more such callers.
     """
     conn.enable_load_extension(True)
     import sqlite_vec

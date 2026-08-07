@@ -459,11 +459,16 @@ class TestOutcomeClassification(unittest.TestCase):
             bdt.classify_store_result("Knowledge stored successfully with ID: abc"),
             ("stored_clean", None),
         )
+        # Track A (memory-core rework): the old "[WARNING: Potential duplicate...]" string
+        # suffix / "stored_with_duplicate_warning" outcome no longer exists -- store_memory now
+        # returns a REVIEW_REQUIRED dict before persistence instead of a warned success string.
         self.assertEqual(
-            bdt.classify_store_result(
-                "Knowledge stored successfully with ID: abc [WARNING: Potential duplicate of x]"
-            )[0],
-            "stored_with_duplicate_warning",
+            bdt.classify_store_result({"status": "REVIEW_REQUIRED", "candidates": []})[0],
+            "review_required",
+        )
+        self.assertEqual(
+            bdt.classify_store_result({"status": "REVIEW_STALE", "stale_candidate_ids": []})[0],
+            "review_stale",
         )
         outcome, detail = bdt.classify_store_result(
             "Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: x"
@@ -565,137 +570,6 @@ class TestIngestedEntityShape(unittest.TestCase):
                 self.assertIsNone(metadata["hf_label"])
                 self.assertEqual(metadata["source_title"], "Test Article Title")
                 self.assertEqual(metadata["split_group_id"], "squad:Test Article Title")
-
-
-class TestRunScopedSupersessionAttribution(unittest.TestCase):
-    """Item 5: two separate event_run_ids against a fixture DB with a deliberately
-    near-duplicate pair -- per-run and cumulative counts both correct; a forced temporal-upsert
-    case proves the first run's already-logged event still reports under the first run's
-    run_id, surviving the upsert."""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.temp_dir, "test.db")
-        self.conn = init_db(self.db_path)
-
-    def tearDown(self):
-        self.conn.close()
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def _run_scoped_count(self, run_id):
-        return self.conn.execute(
-            "SELECT COUNT(*) FROM events e WHERE e.type = 'supersession_candidate' "
-            "AND json_extract(e.content, '$.run_id') = ?",
-            (run_id,),
-        ).fetchone()[0]
-
-    def _cumulative_count(self, owner_id):
-        return self.conn.execute(
-            """
-            SELECT COUNT(*) FROM events e
-            JOIN entities en ON json_extract(e.content, '$.new_entity_id') = en.id
-            WHERE e.type = 'supersession_candidate' AND en.owner_id = ?
-            """,
-            (owner_id,),
-        ).fetchone()[0]
-
-    def test_per_run_and_cumulative_counts(self):
-        memory_service.store_memory(
-            content="The nofile ulimit setting was configured to 1048576 in /etc/security/limits.conf on the primary application server.",
-            title="Ulimit Base Config Target",
-            owner_id="bench",
-            skip_duplicate_check=True,
-            db_connection=self.conn,
-            db_path=self.db_path,
-        )
-        r1 = memory_service.store_memory(
-            content="The nofile ulimit setting was set to 1048576 in /etc/security/limits.conf on the primary application server today.",
-            title="Ulimit Near-Duplicate Alpha",
-            owner_id="bench",
-            db_connection=self.conn,
-            db_path=self.db_path,
-            event_run_id="run-A",
-        )
-        r2 = memory_service.store_memory(
-            content="The nofile ulimit value was configured to 1048576 inside /etc/security/limits.conf on the primary application server recently.",
-            title="Ulimit Near-Duplicate Beta",
-            owner_id="bench",
-            db_connection=self.conn,
-            db_path=self.db_path,
-            event_run_id="run-B",
-        )
-        self.assertIn("[WARNING: Potential duplicate", r1)
-        self.assertIn("[WARNING: Potential duplicate", r2)
-
-        self.assertEqual(self._run_scoped_count("run-A"), 1)
-        self.assertEqual(self._run_scoped_count("run-B"), 1)
-        self.assertEqual(self._cumulative_count("bench"), 2)
-
-    def test_temporal_upsert_does_not_reattribute_earlier_run(self):
-        """Reproduces exactly the scenario Rev 3's rejected metadata.ingestion_run_id design
-        would have gotten wrong: entity A triggers a supersession_candidate (event's new_entity_id
-        = A) under run-1, then A ITSELF gets temporal-upserted (same title/owner/scope retry)
-        under run-2, which overwrites A's own metadata in place -- store_memory's exact-match path
-        resolves entity_id from the title match BEFORE the dedup/supersession check even runs, so
-        this second call logs no new event at all (see store_memory's `if not entity_id and not
-        skip_duplicate_check` gate). A join computed after the fact against A's CURRENT metadata
-        would see run-2 and misattribute the earlier event; reading the event's own immutable
-        payload (this codebase's actual design) must still say run-1.
-        """
-        memory_service.store_memory(
-            content="Kubernetes pod eviction policy triggers when memory pressure exceeds the configured node threshold for five consecutive minutes.",
-            title="Eviction Policy Target Entity",
-            owner_id="bench2",
-            skip_duplicate_check=True,
-            db_connection=self.conn,
-            db_path=self.db_path,
-        )
-        # A: near-duplicate of the target above, under a title of its own -- triggers a
-        # supersession_candidate (new_entity_id=A) logged with payload.run_id="run-1". Also
-        # carries metadata.ingestion_run_id="run-1", exactly like the script's real call shape.
-        first = memory_service.store_memory(
-            content="Kubernetes pod eviction triggers once memory pressure exceeds the node's configured threshold for five straight minutes.",
-            title="Eviction Policy Reoccurring Title",
-            owner_id="bench2",
-            metadata={"ingestion_run_id": "run-1"},
-            db_connection=self.conn,
-            db_path=self.db_path,
-            event_run_id="run-1",
-        )
-        self.assertIn("[WARNING: Potential duplicate", first)
-        entity_a_id = first.split("ID: ")[1].split(" ")[0].rstrip("]")
-        self.assertEqual(self._run_scoped_count("run-1"), 1)
-
-        # Re-store under the SAME title/owner/scope -- store_memory's exact-title-match path
-        # resolves entity_id to A BEFORE the dedup/supersession block, so this upsert logs no
-        # new event, but it DOES overwrite A's own metadata (ingestion_run_id -> run-2).
-        second = memory_service.store_memory(
-            content="An entirely unrelated note about quarterly budget review scheduling for the infrastructure team, with no relation to eviction policy.",
-            title="Eviction Policy Reoccurring Title",
-            owner_id="bench2",
-            metadata={"ingestion_run_id": "run-2"},
-            db_connection=self.conn,
-            db_path=self.db_path,
-            event_run_id="run-2",
-        )
-        self.assertNotIn("[WARNING: Potential duplicate", second)
-        second_entity_id = second.split("ID: ")[1].split(" ")[0].rstrip("]")
-        self.assertEqual(second_entity_id, entity_a_id, "title-match upsert must reuse A's id")
-
-        # Confirm the upsert actually happened -- A's metadata now reads run-2 (the flawed
-        # metadata-join design's failure mode set up).
-        stored_metadata = json.loads(
-            self.conn.execute(
-                "SELECT metadata FROM entities WHERE id = ?", (entity_a_id,)
-            ).fetchone()[0]
-        )
-        self.assertEqual(stored_metadata["ingestion_run_id"], "run-2")
-
-        # The actual, authoritative accounting path (event payload, immutable) must still
-        # attribute the original event to run-1 -- proving it survives the upsert.
-        self.assertEqual(self._run_scoped_count("run-1"), 1)
-        self.assertEqual(self._run_scoped_count("run-2"), 0)
-        self.assertEqual(self._cumulative_count("bench2"), 1)
 
 
 class TestCompletionBarrier(unittest.TestCase):

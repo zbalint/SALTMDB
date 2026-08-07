@@ -681,6 +681,8 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     owner_id: str = None,
     context_id: str = None,
     override_justification: str | None = None,
+    metadata: dict | None = None,
+    memory_type: str | None = None,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
@@ -702,6 +704,13 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     surface -- they exist only so bulk_commit_consolidation can hoist expensive centroid
     computation before its write transaction opens, while every item still routes through this
     same single code path.
+
+    `metadata`/`memory_type` (Track A, see scratch/plans/track_a_disposition_detailed.md): added
+    so disposition_service.py's consolidate-disposition path can carry a proposed write's
+    metadata/memory_type through into the consolidated entity instead of silently dropping them
+    (this function previously had no columns for either) -- both default None/unset, matching
+    every existing caller's behavior exactly (memory_type still resolves to 'fact' via the same
+    COALESCE the plain store path uses).
     """
     if not parent_ids or not isinstance(parent_ids, list):
         return "Error: parent_ids must be a non-empty list of UUID strings."
@@ -910,10 +919,11 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         f"Failed to record consolidation override audit event: {audit_result}"
                     )
 
+            metadata_str = json.dumps(metadata) if metadata else None
             conn.execute(
                 """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
             """,
                 (
                     consolidated_id,
@@ -933,6 +943,8 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     quality_score,
                     quality_status,
                     quality_flags_str,
+                    metadata_str,
+                    memory_type,
                 ),
             )
 

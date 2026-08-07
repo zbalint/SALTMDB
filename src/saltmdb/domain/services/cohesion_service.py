@@ -26,6 +26,25 @@ def _centroid(vectors: list) -> list[float]:
     return (mean_vec / mean_norm).tolist()
 
 
+def compute_adhoc_centroid(content: str) -> list[float] | None:
+    """Chunk-embeds and centroids a piece of content that has no entity id yet -- pure, no DB I/O.
+
+    Used by disposition_service.py's consolidated-node integrity check (Track A, see
+    scratch/plans/track_a_disposition_detailed.md §2.2): the incoming `store_memory` content needs
+    a centroid to compare against a candidate target's, before it has ever been persisted as an
+    entity (and, for a `"distinct"`-resolved candidate, may never be). Returns None if the content
+    has no embeddable chunks (mirrors get_fresh_entity_centroids' own "no embeddable content"
+    unresolved case).
+    """
+    from saltmdb.domain.services.embedding_service import compute_entity_chunk_embeddings
+
+    chunk_rows = compute_entity_chunk_embeddings("__adhoc__", content or "")
+    if not chunk_rows:
+        return None
+    vectors = [row["embedding"] for row in chunk_rows]
+    return _centroid(vectors)
+
+
 def get_fresh_entity_centroids(  # noqa: C901, PLR0912, PLR0915
     entity_ids: list[str],
     conn: sqlite3.Connection,
