@@ -208,3 +208,39 @@ RELATION_GATE_STRONG_PREDICATES = frozenset({"elaborates_on", "resolves", "super
 RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
     {frozenset({"supersedes", "elaborates_on"})}
 )
+
+# Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
+# new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
+# Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching
+# analyze_lineage/analyze_dependencies' own existing depth-cap precedent (relation_service.py).
+# Policy choice, not benchmarked -- a `supersedes` chain longer than 10 hops abstains (leaves the
+# candidate unsubstituted) rather than being treated as trustworthy.
+SUPERSESSION_CHAIN_MAX_DEPTH = 10
+
+# NOTE: accept_or_abstain's (memory_service.py) DIRECT semantic-only acceptance rule
+# (search_memory mode="strict") deliberately does NOT use a standalone
+# RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE-style raw-cosine-distance constant. An earlier version of
+# this gate had one (0.4086, calibrated the same worst-negative+margin way as every threshold
+# above, 0% false-accept/0% false-reject on a small 6-document control corpus) -- it was removed
+# after scripts/benchmarking/run_relevance_gate_holdout.py's holdout pass against the real
+# 21k-entity diverse test corpus (scratch/diverse_corpus_full.db) proved it doesn't generalize: an
+# unrelated/nonsense query's nearest entity-embedding neighbor routinely measured 0.22-0.34
+# distance at that scale, fully overlapping the small control corpus's positive-class range. A
+# fixed absolute distance floor gets less discriminating as the candidate pool grows, not more --
+# it is not fixable by re-tuning the number, the signal shape itself doesn't hold at scale. See
+# accept_or_abstain's own docstring for the full investigation (a rank/margin-based variant was
+# also tried and also failed for the same reason). The gate instead reuses the already-calibrated,
+# chunk-level RERANK_SAME_TOPIC_THRESHOLD below (via rerank_candidates_by_topic's semantic_verdict
+# == "SAME_SPECIFIC_TOPIC"), which the same holdout pass confirmed DOES separate the two classes at
+# real corpus scale, at the cost of a higher (accepted, not hidden) false-reject rate on weakly/
+# broadly-paraphrased semantic-only matches -- see run_relevance_gate_holdout.py's docstring and
+# output for the measurements.
+
+# Hard cap on mode="strict"'s pagination overfetch loop (memory_service.py:search_memory, Part
+# C2): resolution/dedup/the relevance gate can all shrink the raw FTS+semantic candidate_window
+# down to fewer than `limit` survivors, so strict mode retries with a doubled candidate_window
+# until either enough survivors are found or the underlying corpus is exhausted (both channels
+# returned fewer rows than requested). This is the absolute ceiling on that doubling, independent
+# of RERANK_CANDIDATE_POOL_SIZE (the *initial* widened window) -- policy safety valve against
+# pathological queries, not benchmarked.
+STRICT_OVERFETCH_CANDIDATE_CAP = 200

@@ -238,6 +238,17 @@ def store_memory(
     pipeline; they have no effect when semantic search is disabled (which now makes query-based
     search_memory calls return an error rather than falling back to FTS-only results -- see
     SALTMDB_ENABLE_SEMANTIC) or on empty-query filter/tag-only browsing.
+
+    mode (opt-in, default "broad" -- identical to this tool's pre-existing behavior): "strict"
+    resolves a matched-but-superseded candidate to its live, multi-hop `supersedes` successor and
+    requires every surviving candidate to independently clear a calibrated relevance-abstention
+    gate -- an empty list is then a normal, successful "nothing sufficiently relevant" result, not
+    an error. "history" leaves every candidate visible (like "broad") but tags a candidate that is
+    the target of a currently-valid `supersedes` edge with `"is_superseded": true`, without hiding
+    or reordering it. Neither "strict" nor "history" ever exposes archived material -- both still
+    require `status != 'archived'` like "broad" already does. Only affects the hybrid
+    query-keyword pipeline, same scope as `rerank_by_topic`/`prefer_durable_types`/
+    `demote_superseded` above.
     """
 )
 def search_memory(
@@ -255,6 +266,7 @@ def search_memory(
     rerank_by_topic: bool | None = None,
     prefer_durable_types: bool | None = None,
     demote_superseded: bool | None = None,
+    mode: Literal["strict", "broad", "history"] | None = None,
     **kwargs,
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
@@ -295,6 +307,10 @@ def search_memory(
     prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else False
     demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
     demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else False
+    # Same two-line shape again -- `mode` has a real, meaningful default ("broad") rather than
+    # bool-False, but the None-sentinel + kwarg-alias-fallback pattern is identical.
+    mode_ = _resolve(mode, kw, kwargs, "mode")
+    mode_ = mode_ if mode_ is not None else "broad"
 
     return memory_service.search_memory(
         owner_id=owner_id_,
@@ -308,6 +324,7 @@ def search_memory(
         memory_type_filter=memory_type_filter_,
         tag_operator=tag_operator,  # type: ignore[arg-type]  # Any from raw kwarg; any non-"AND" value falls back to OR at runtime, no crash risk
         cursor=cursor_,
+        mode=mode_,  # type: ignore[arg-type]  # validated/normalized inside memory_service.search_memory
         include_related=include_related_,
         rerank_by_topic=rerank_by_topic_,
         prefer_durable_types=prefer_durable_types_,

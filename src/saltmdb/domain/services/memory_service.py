@@ -17,6 +17,8 @@ from saltmdb.config import (
     SNIPPET_MATCH_START,
     SNIPPET_MATCH_END,
     SNIPPET_ELLIPSIS,
+    SUPERSESSION_CHAIN_MAX_DEPTH,
+    STRICT_OVERFETCH_CANDIDATE_CAP,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import (
@@ -793,6 +795,36 @@ def rerank_candidates_by_topic(
             close_connection(conn)
 
 
+def _score_topics_with_fallback(query_text: str, ids: list[str], db_path: str) -> dict[str, dict]:
+    """Shared by rerank_by_topic's full-pool Stage-2 rerank and mode="strict"'s on-demand,
+    FTS-less-candidates-only grounding lookup (Part B) -- factored out so both call sites use
+    exactly one code path for "score these ids via chunk-level topic_score, falling back to
+    entity-level cosine similarity (B4) for any id rerank_candidates_by_topic couldn't score (not
+    yet chunk-embedded)". No candidate in `ids` is ever dropped: a fallback-tier id gets a
+    BROADLY_RELATED_THEMES/DIFFERENT_TOPICS verdict from RERANK_BROAD_THEME_THRESHOLD instead of
+    the primary tier's SAME_SPECIFIC_TOPIC/BROADLY_RELATED_THEMES/DIFFERENT_TOPICS three-way split.
+    """
+    if not ids:
+        return {}
+    topic_scores = rerank_candidates_by_topic(query_text, ids, db_path)
+    missing_ids = [eid for eid in ids if eid not in topic_scores]
+    if missing_ids:
+        from saltmdb.config import RERANK_BROAD_THEME_THRESHOLD
+        from saltmdb.domain.services import embedding_service
+
+        fallback_vec = embedding_service.embed_text(query_text)
+        fallback = _batch_semantic_similarities(missing_ids, fallback_vec, db_path)
+        for eid in missing_ids:
+            fscore = fallback.get(eid, 0.0)
+            fverdict = (
+                "BROADLY_RELATED_THEMES"
+                if fscore >= RERANK_BROAD_THEME_THRESHOLD
+                else "DIFFERENT_TOPICS"
+            )
+            topic_scores[eid] = {"topic_score": fscore, "semantic_verdict": fverdict}
+    return topic_scores
+
+
 def reciprocal_rank_fusion(
     fts_results: list,
     semantic_results: list[tuple[str, float]],
@@ -852,6 +884,59 @@ def _apply_type_bias(ordered_ids: list, conn) -> list:
     ]
 
 
+def _compute_superseded_ids(ordered_ids: list, conn) -> set:
+    """Shared query: ids within ordered_ids that are the TARGET of a currently-valid outgoing
+    `supersedes` edge (`A supersedes B` -> B, the target, is the old/superseded one -- matches this
+    codebase's `consolidated_from` precedent of source=new/target=old). Factored out of
+    `_apply_supersession_demotion` so mode="history" (Part C) can reuse the exact same
+    single-hop "is this superseded right now" check to TAG candidates without demoting or hiding
+    them, instead of duplicating the SQL. No-op (empty set) on an empty pool.
+    """
+    if not ordered_ids:
+        return set()
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT target_id FROM relations
+        WHERE target_id IN ({placeholders}) AND predicate = 'supersedes'
+          AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
+        """,
+        ordered_ids,
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _compute_superseded_ids_bitemporal(ordered_ids: list, conn) -> set:
+    """mode="history"'s own single-hop "is this superseded right now" check (Part C) -- NOT the
+    same query as `_compute_superseded_ids` above (Codex review P1 finding, correctly caught): that
+    function only checks `valid_to`, a pre-existing precedent from `_apply_supersession_demotion`
+    which this plan explicitly leaves unchanged ("stays single-hop, sink-to-bottom, and unchanged"
+    -- see that function's own docstring). But `history` mode's own docs promise `is_superseded`
+    reflects a "currently-valid" edge in the same full bitemporal sense Part A's resolver uses, so
+    it needs the same four-column predicate (`valid_from`/`valid_to`/`valid_at`/`invalid_at`), not
+    demote_superseded's narrower single-column one -- reusing `_apply_supersession_demotion`'s
+    check here would silently tag an edge whose `valid_from` is still in the future, or whose
+    `invalid_at` has already passed, as "currently superseding" when it isn't. No-op on an empty
+    pool.
+    """
+    if not ordered_ids:
+        return set()
+    now = datetime.now(UTC).isoformat()
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT target_id FROM relations
+        WHERE target_id IN ({placeholders}) AND predicate = 'supersedes'
+          AND (valid_from IS NULL OR datetime(valid_from) <= datetime(?))
+          AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))
+          AND (valid_at IS NULL OR datetime(valid_at) <= datetime(?))
+          AND (invalid_at IS NULL OR datetime(invalid_at) > datetime(?))
+        """,
+        ordered_ids + [now, now, now, now],
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
 def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     """Part 2 (SALTMDB memory 870a1d4e, demote_superseded): stable-partitions candidates that are
     the TARGET of a currently-valid outgoing `supersedes` edge to the back of ordered_ids,
@@ -862,22 +947,353 @@ def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     original wording, confirmed during implementation review). Uses this file's own existing
     "currently valid" literal idiom (see the related_map query above) rather than
     relation_service's separate point-in-time parameter style. No-op on an empty pool.
+
+    This is single-hop, sink-to-bottom, opt-in demotion -- structurally separate from the
+    multi-hop chain-resolution *substitution* `_resolve_supersession_chains` performs for
+    mode="strict" below (Part A of plans/scalable-strolling-stallman.md); this flag/function is
+    unchanged by that work.
     """
     if not ordered_ids:
         return []
-    placeholders = ",".join("?" for _ in ordered_ids)
-    rows = conn.execute(
-        f"""
-        SELECT DISTINCT target_id FROM relations
-        WHERE target_id IN ({placeholders}) AND predicate = 'supersedes'
-          AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))
-        """,
-        ordered_ids,
-    ).fetchall()
-    superseded_ids = {row[0] for row in rows}
+    superseded_ids = _compute_superseded_ids(ordered_ids, conn)
     return [eid for eid in ordered_ids if eid not in superseded_ids] + [
         eid for eid in ordered_ids if eid in superseded_ids
     ]
+
+
+def _resolve_supersession_chains(  # noqa: C901
+    conn,
+    candidate_ids: list[str],
+    where_clauses: list[str],
+    params: list,
+    max_depth: int = SUPERSESSION_CHAIN_MAX_DEPTH,
+) -> dict[str, str]:
+    """Part A (multi-hop supersession-chain resolution, plans/scalable-strolling-stallman.md, for
+    search_memory's mode="strict"): for each id in candidate_ids, walk the currently-valid
+    `supersedes` chain forward (`A supersedes B` => A is the newer/authoritative node, B is the old
+    one being replaced) to its live, fully-revalidated terminal head, and return
+    {candidate_id: resolved_head_id} for candidates that successfully resolved to a DIFFERENT id.
+    A candidate absent from the returned dict either has no live supersessor at all (nothing to
+    substitute) or hit an abstain condition below -- both mean "use the original id, unsubstituted"
+    to the caller, by design: a depth-capped or cycle-cut path is not safely treated as a terminal
+    head, so it must never be silently substituted.
+
+    Batched over the whole candidate pool in a single recursive-CTE round trip (same
+    IN (...)-batched idiom as `_apply_type_bias`/`_compute_superseded_ids` above -- not a
+    per-candidate loop), bounded to edges actually reachable from this pool within max_depth+1
+    hops. The CTE enumerates every reachable (root, hop) edge -- it deliberately does NOT attempt
+    to prune at a fork mid-recursion (a SQLite recursive CTE can't safely express "greedily keep
+    only the tie-break winner, discard the rest" without a fragile correlated-subquery rewrite);
+    instead all candidate edges are returned, and the correctness-critical tie-break/cycle/
+    depth-cap/liveness decisions are made by one deterministic Python walk per candidate below,
+    over the small in-memory edge set the query returns. This keeps the "one DB round trip,
+    batched over the whole pool" property the plan calls for while keeping the actual fork/abstain
+    logic auditable and unit-testable in plain Python instead of opaque SQL.
+
+    The SQL recursion bound is `depth <= max_depth` alone -- NOT a path-based cycle guard like
+    analyze_lineage/analyze_dependencies' own `NOT LIKE '%'||id||'%'` precedent (a real bug caught
+    during test-writing: a path-based SQL guard silently DROPS the row that would reveal a cycle,
+    which then looks indistinguishable from "genuinely terminal" to the code below it -- an actual
+    two-node A<->B cycle was mis-resolved to a live successor instead of abstaining, before this
+    was caught). The depth cap alone still guarantees SQL termination even on a real cycle
+    (bounded, repeated re-visits up to max_depth+1 rows), and cycle detection is instead done
+    exactly once, correctly, in the Python walk's own `visited` set below -- one source of truth
+    for "is this a cycle," not two that could disagree.
+
+    Design decisions pinned down explicitly (per the plan's own callout not to leave these
+    implicit):
+    - "Currently valid" for the `supersedes` EDGE is evaluated across all four bitemporal columns
+      (valid_from/valid_to/valid_at/invalid_at) at one captured `now` for the whole call -- not a
+      partial check like analyze_lineage's existing CTE (relation_service.py), which omits
+      valid_at.
+    - "Live" for a traversed NODE means `entities.status != 'archived'` only -- entities.valid_from/
+      valid_to are NOT independently re-checked, because in this codebase they only ever move in
+      lockstep with status (store_memory's temporal-upsert and archive_memory both only ever set
+      valid_to alongside status='archived'; a live entity's own valid_to is always NULL), so a
+      separate check would be redundant, not additive. This matches search_memory's own existing
+      liveness precedent (`e.status != 'archived'` in its where_clauses).
+    - Tie-break at a fork (two-plus currently-valid edges targeting the same node -- the relations
+      table's partial unique index only guarantees uniqueness per (source, target) pair, not per
+      target) is the successor's updated_at, then created_at, then id, all descending -- applied
+      greedily at EVERY hop of the walk, not just the final target, so a fork mid-chain resolves
+      the same deterministic way as a fork at the seed.
+    - Cycle, depth-cap breach (a chain that needs more than max_depth hops to terminate), or an
+      inaccessible/archived intermediate node anywhere in the chain: abstain on that candidate
+      entirely (see module docstring above for what "abstain" means to the caller).
+    - The resolved head is re-checked against the ORIGINAL query's own where_clauses/params
+      (owner_id/scope, context_id, is_core, memory_type_filter, tags_filter) before being
+      returned -- analyze_lineage/analyze_dependencies are unfiltered admin tools, search_memory is
+      not, and a resolved head is not necessarily visible to this particular caller.
+    """
+    if not candidate_ids:
+        return {}
+
+    now = datetime.now(UTC).isoformat()
+    validity_sql = (
+        "(r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?)) AND "
+        "(r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?)) AND "
+        "(r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?)) AND "
+        "(r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))"
+    )
+    placeholders = ",".join("?" for _ in candidate_ids)
+    query = f"""
+        WITH RECURSIVE chain(root_id, current_id, next_id, depth) AS (
+            SELECT r.target_id, r.target_id, r.source_id, 1
+            FROM relations r
+            WHERE r.target_id IN ({placeholders}) AND r.predicate = 'supersedes'
+              AND {validity_sql}
+
+            UNION ALL
+
+            SELECT c.root_id, c.next_id, r.source_id, c.depth + 1
+            FROM relations r
+            JOIN chain c ON r.target_id = c.next_id
+            WHERE r.predicate = 'supersedes' AND c.depth <= ?
+              AND {validity_sql}
+        )
+        SELECT DISTINCT root_id, current_id, next_id FROM chain
+    """
+    exec_params = list(candidate_ids) + [now, now, now, now, max_depth, now, now, now, now]
+    edge_rows = conn.execute(query, exec_params).fetchall()
+    if not edge_rows:
+        return {}
+
+    adjacency: dict[str, set] = {}
+    touched_ids: set = set(candidate_ids)
+    roots_with_edges: set = set()
+    for root_id, current_id, next_id in edge_rows:
+        adjacency.setdefault(current_id, set()).add(next_id)
+        touched_ids.add(current_id)
+        touched_ids.add(next_id)
+        roots_with_edges.add(root_id)
+
+    entity_placeholders = ",".join("?" for _ in touched_ids)
+    entity_rows = conn.execute(
+        f"SELECT id, status, updated_at, created_at FROM entities WHERE id IN ({entity_placeholders})",
+        list(touched_ids),
+    ).fetchall()
+    entity_info = {
+        row[0]: {"status": row[1], "updated_at": row[2], "created_at": row[3]}
+        for row in entity_rows
+    }
+
+    def _tie_break(next_ids: set) -> str:
+        def key(nid: str):
+            info = entity_info.get(nid, {})
+            return (info.get("updated_at") or "", info.get("created_at") or "", nid)
+
+        return max(next_ids, key=key)
+
+    _ABSTAIN = object()
+
+    def _walk(root_id: str):
+        node = root_id
+        visited = {root_id}
+        depth = 0
+        while True:
+            next_ids = adjacency.get(node)
+            if not next_ids:
+                break  # terminal: node has no further live supersessor
+            if depth + 1 > max_depth:
+                return _ABSTAIN  # chain continues beyond the allowed cap
+            chosen = _tie_break(next_ids)
+            info = entity_info.get(chosen)
+            if not info or info["status"] == "archived":
+                return _ABSTAIN  # inaccessible/archived intermediate (or terminal) node
+            if chosen in visited:
+                return _ABSTAIN  # cycle
+            visited.add(chosen)
+            node = chosen
+            depth += 1
+        return node if node != root_id else None
+
+    resolved: dict[str, str] = {}
+    for root_id in roots_with_edges:
+        outcome = _walk(root_id)
+        if outcome is not None and outcome is not _ABSTAIN:
+            resolved[root_id] = outcome
+
+    if not resolved:
+        return {}
+
+    # Filter-reapplication: the resolved head must independently satisfy the ORIGINAL query's own
+    # where_clauses/params -- a resolved head is not necessarily visible to this particular caller
+    # (owner/scope/context/is_core/memory_type/tags filters all still apply).
+    heads = set(resolved.values())
+    head_placeholders = ",".join("?" for _ in heads)
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    passing_rows = conn.execute(
+        f"SELECT e.id FROM entities e WHERE e.id IN ({head_placeholders}) AND {where_sql}",
+        list(heads) + list(params),
+    ).fetchall()
+    passing_heads = {row[0] for row in passing_rows}
+
+    return {cid: head for cid, head in resolved.items() if head in passing_heads}
+
+
+def _substitute_resolved_heads(
+    rrf_score_map: dict[str, float], resolved_map: dict[str, str]
+) -> dict[str, float]:
+    """Part A dedup-merge rule: substitutes every candidate in rrf_score_map that appears in
+    resolved_map (from `_resolve_supersession_chains`) with its resolved head, merging colliding
+    heads to the MAX score (never sum) -- avoids RRF-score inflation when multiple, otherwise
+    unrelated pool entries collapse onto the same live head. Returns a new dict re-sorted by score
+    descending (merging can change relative order versus the input). No-op (returns a re-sorted
+    copy) when resolved_map is empty.
+    """
+    substituted: dict[str, float] = {}
+    for cid, score in rrf_score_map.items():
+        head = resolved_map.get(cid, cid)
+        if head in substituted:
+            substituted[head] = max(substituted[head], score)
+        else:
+            substituted[head] = score
+    return dict(sorted(substituted.items(), key=lambda kv: -kv[1]))
+
+
+def _build_candidate_evidence(
+    pool_ids: list[str],
+    rrf_score_map: dict[str, float],
+    fts_rows: list,
+    semantic_rows: list[tuple[str, float]],
+    topic_scores_map: dict[str, dict],
+    resolved_from: dict[str, list[str]],
+    predecessor_grounded_map: dict[str, bool] | None = None,
+) -> dict[str, dict]:
+    """Part B: builds a per-candidate evidence record for every id in pool_ids, consumed by
+    `accept_or_abstain` below. Two distinct evidence classes are tracked (Codex correction to the
+    first plan draft, which conflated them):
+
+    - DIRECT: the candidate itself appeared in the FTS and/or semantic retrieval pool -- it has
+      its own native rank/score/lexical-match signal (`in_fts`/`in_semantic`/`fts_rank`/
+      `semantic_distance`/etc below).
+    - INDIRECT: the candidate is a resolved supersession head (present in `resolved_from`) that
+      was NOT itself in the original, pre-resolution retrieval pool. It has no native FTS/semantic
+      rank of its own -- copying the superseded predecessor's evidence onto it would be unsound
+      (the predecessor matched the query; the successor's own relation to the query is
+      unverified). This function deliberately leaves an indirect candidate's own direct-evidence
+      fields as their natural empty/None/False values; `predecessor_grounded_map` (built by the
+      caller from the PRE-resolution pool's own evidence, see search_memory) is threaded through
+      instead, so `accept_or_abstain` can require the predecessor's own match to have been strong,
+      per the plan's explicit "requiring the predecessor's match to have been strong" option.
+      A resolved head CAN also independently appear directly in the pool -- both classes can
+      coexist; `provenance` is "direct" whenever there's any native signal at all, "indirect" only
+      when there is none.
+
+    `topic_score`/`semantic_verdict` stay optional (None when absent) -- populated only when
+    rerank_by_topic actually ran for this call (cost note, Part B): this function must never force
+    that expensive Stage-2 pass as a side effect of being called.
+    """
+    fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
+    fts_bm25 = {row[0]: row[5] for row in fts_rows}
+    semantic_rank = {eid: i for i, (eid, _dist) in enumerate(semantic_rows)}
+    semantic_distance = {eid: dist for eid, dist in semantic_rows}
+    predecessor_grounded_map = predecessor_grounded_map or {}
+
+    evidence: dict[str, dict] = {}
+    for eid in pool_ids:
+        in_fts = eid in fts_rank
+        in_semantic = eid in semantic_rank
+        has_direct_signal = in_fts or in_semantic
+        is_resolved_head = eid in resolved_from
+        provenance = "direct" if has_direct_signal or not is_resolved_head else "indirect"
+        topic = topic_scores_map.get(eid)
+        evidence[eid] = {
+            "entity_id": eid,
+            "provenance": provenance,
+            "rrf_score": rrf_score_map.get(eid),
+            "in_fts": in_fts,
+            "fts_rank": fts_rank.get(eid),
+            "fts_bm25": fts_bm25.get(eid),
+            "in_semantic": in_semantic,
+            "semantic_rank": semantic_rank.get(eid),
+            "semantic_distance": semantic_distance.get(eid),
+            "dual_channel": in_fts and in_semantic,
+            "topic_score": topic["topic_score"] if topic else None,
+            "semantic_verdict": topic["semantic_verdict"] if topic else None,
+            "is_resolved_head": is_resolved_head,
+            "predecessor_grounded": predecessor_grounded_map.get(eid, False),
+        }
+    return evidence
+
+
+def accept_or_abstain(evidence: dict, policy: dict | None = None) -> tuple[bool, str]:  # noqa: PLR0911
+    """Part B: pure function deciding whether ONE candidate's evidence record clears the
+    relevance-abstention gate. Called per-candidate (not just against top-1) by search_memory's
+    mode="strict" path; an empty resulting pool after filtering every candidate is the `[]` case
+    (SALTMDB memory `c27792a1`). `policy` is accepted for future extension/testability but unused
+    today -- this function consumes only the precomputed categorical `semantic_verdict` already
+    attached to `evidence` (see `_build_candidate_evidence`); it reads no config.py threshold of
+    its own (unlike `_rrf_gap_confident`'s own direct RERANK_GAP_SKIP_RATIO import) -- the
+    SAME_SPECIFIC_TOPIC/BROADLY_RELATED_THEMES/DIFFERENT_TOPICS classification and its underlying
+    RERANK_SAME_TOPIC_THRESHOLD/RERANK_BROAD_THEME_THRESHOLD live in rerank_candidates_by_topic.
+
+    Acceptance requires a positive grounding signal -- a real, non-phantom match this codebase can
+    already produce:
+
+    - DIRECT, dual-channel (in_fts AND in_semantic): always accepted -- the strongest, already-
+      established signal shape (`_rrf_gap_confident`'s own precondition for even considering a
+      confident top-1).
+    - DIRECT, FTS-only (in_fts, not in_semantic): accepted -- an `entities_fts MATCH` is a genuine
+      term match, not a nearest-neighbor phantom, and its correctness doesn't degrade as the
+      corpus grows.
+    - DIRECT, semantic-only (in_semantic, not in_fts): accepted ONLY if `semantic_verdict` is
+      exactly "SAME_SPECIFIC_TOPIC" (reusing RERANK_SAME_TOPIC_THRESHOLD as-is, not a new
+      constant -- see the "why not a raw distance cutoff" note below). "BROADLY_RELATED_THEMES"
+      or no topic_score at all is NOT sufficient on its own.
+    - INDIRECT (resolved supersession head absent from the original pool): has no native signal of
+      its own to trust. Accepted only if `predecessor_grounded` is True -- the original,
+      pre-resolution candidate that resolved to this head independently cleared the DUAL_CHANNEL
+      or FTS_MATCH rule above (NOT the semantic-only rule; see search_memory's predecessor-
+      evidence construction, which never computes topic grounding for the pre-resolution pool).
+      This is deliberately the ONLY condition (an earlier version of this function also required
+      the head's own semantic_verdict not be "DIFFERENT_TOPICS" -- reverted: the on-demand
+      topic-grounding lookup that powers the DIRECT semantic-only rule above assigns EVERY
+      FTS-less candidate some verdict, including a default "DIFFERENT_TOPICS" for a resolved head
+      with no embedding data at all to score -- indistinguishable in the data from "genuinely
+      off-topic," so it was vetoing legitimately-grounded resolved heads that simply had no
+      chunk/entity embedding yet. Plan section B explicitly frames "predecessor was strong" as a
+      sufficient condition on its own, not one that must also be combined with the head's own
+      weak/absent signal).
+    - No evidence at all (neither direct nor a grounded indirect path): abstain.
+
+    Why not a raw semantic_distance cutoff (what an earlier version of this function did): empirically
+    disproven during implementation verification. Measured live against the 21k-entity diverse
+    test corpus (scratch/diverse_corpus_full.db), a genuinely unrelated/nonsense query's nearest
+    entity-embedding neighbor routinely lands at cosine distance 0.22-0.34 -- fully overlapping the
+    0.2152-0.3677 range measured for HAND-VERIFIED GENUINE semantic paraphrase matches in a small
+    control corpus. A single whole-document embedding vector's absolute distance to an unrelated
+    query shrinks as the candidate pool grows (more documents means a better chance some unrelated
+    one is coincidentally "close"), so a fixed distance floor that looks well-calibrated on a small
+    corpus silently stops discriminating at real scale -- it is not a fixable-by-retuning problem,
+    it is the wrong signal shape. A rank/margin-based check over the same raw vectors was tried
+    next and also failed: genuine and nonsense queries showed statistically indistinguishable
+    rank-1-vs-rank-2 distance gaps against the full corpus (both types of query land in a densely
+    clustered neighborhood of similar-distance candidates). Chunk-level topic_score
+    (rerank_candidates_by_topic) was tried third and is what this function actually uses --
+    but even that alone is NOT precise enough to cleanly separate the two classes at the
+    "BROADLY_RELATED_THEMES" tier (both genuine and nonsense queries commonly land there); only
+    the stricter, already-calibrated "SAME_SPECIFIC_TOPIC" tier reliably excludes the nonsense
+    class in live testing, at the accepted cost of also abstaining on some genuine but only
+    loosely/broadly-paraphrased semantic-only matches -- matching this codebase's explicit,
+    stated risk asymmetry (0% false-accept is the hard target; a nonzero false-reject rate on
+    weak, uncorroborated matches is accepted, not hidden) and directly implementing design memory
+    `b9b75764`'s "treat weak vector-only proximity as insufficient."
+    """
+    if evidence.get("provenance") == "indirect":
+        if not evidence.get("predecessor_grounded"):
+            return False, "indirect_ungrounded_predecessor"
+        return True, "indirect_grounded_predecessor"
+
+    if evidence.get("dual_channel"):
+        return True, "dual_channel"
+    if evidence.get("in_fts"):
+        return True, "fts_match"
+    if evidence.get("in_semantic"):
+        if evidence.get("semantic_verdict") == "SAME_SPECIFIC_TOPIC":
+            return True, "semantic_only_same_specific_topic"
+        return False, "semantic_only_insufficient_topic_grounding"
+    return False, "no_evidence"
 
 
 def search_memory(  # noqa: C901, PLR0912, PLR0915
@@ -896,10 +1312,39 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     rerank_by_topic: bool = False,
     prefer_durable_types: bool = False,
     demote_superseded: bool = False,
+    mode: Literal["strict", "broad", "history"] = "broad",
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
-    """Performs full-text keyword search and filtering in long-term memory."""
+    """Performs full-text keyword search and filtering in long-term memory.
+
+    mode (opt-in, default "broad" -- today's exact pre-existing behavior, unchanged): Part C of
+    plans/scalable-strolling-stallman.md (SALTMDB memory `9c199005`).
+    - "broad": no chain resolution, no relevance gate, no `is_superseded` tagging. Identical to
+      this function's behavior before mode existed.
+    - "strict": matched-but-superseded candidates are resolved and SUBSTITUTED with their live,
+      multi-hop-revalidated `supersedes` successor (Part A); every surviving candidate must then
+      independently clear a calibrated relevance-abstention gate (Part B) or is dropped. An empty
+      result (`[]`) is a normal, successful outcome for a query with no sufficiently-grounded
+      match -- not an error. Widens the candidate pool the same way rerank_by_topic/
+      prefer_durable_types/demote_superseded already do, and retries with a larger pool (up to
+      STRICT_OVERFETCH_CANDIDATE_CAP) when resolution/dedup/the gate shrink the post-policy pool
+      below what `offset`+`limit` needs (Part C2 -- pagination continuity across a rejection,
+      substitution, or many-to-one dedup collapse).
+    - "history": no resolution, no gate -- every live candidate the hybrid pipeline would
+      otherwise return stays visible exactly as in "broad", except a candidate that is the target
+      of a currently-valid `supersedes` edge is additionally tagged `"is_superseded": true` in its
+      result item. Does NOT relax entity-status visibility: every mode still starts from
+      `e.status != 'archived'`; "history" only stops live-but-superseded memories from being
+      silently hidden, it never exposes archived material.
+    `mode` only applies to the query-keyword-based hybrid pipeline -- it has no effect on
+    `explain_mode` (which returns before retrieval) or on empty-query filter/tag-only browsing
+    (there is no retrieval evidence to gate or chain to resolve there).
+    """
+    if mode not in ("strict", "broad", "history"):
+        logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
+        mode = "broad"
+
     should_close = False
     conn = db_connection
     if not conn:
@@ -1007,6 +1452,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         if explain_mode:
             if rerank_by_topic:
                 logger.debug("rerank_by_topic ignored: explain_mode takes precedence.")
+            if mode != "broad":
+                logger.debug("mode=%r ignored: explain_mode takes precedence.", mode)
             terms = sanitized_query.split() if sanitized_query else []
             searched_terms = {}
             for t in terms:
@@ -1040,6 +1487,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         # item assembly loop attaches topic_score/semantic_verdict only for ids present here, so
         # an empty map here is exactly what keeps unreranked results free of those keys.
         topic_scores_map: dict[str, dict] = {}
+        # Populated only under mode="history" -- ids in the final pool that are the target of a
+        # currently-valid `supersedes` edge, tagged (not hidden/reordered) in the result item.
+        superseded_ids: set = set()
         if sanitized_query:
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
             from saltmdb.config import is_semantic_search_enabled
@@ -1047,143 +1497,252 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if is_semantic_search_enabled():
                 if not db_path:
                     db_path = get_db_path()
-                if rerank_by_topic or prefer_durable_types or demote_superseded:
-                    # Widen the pool for rerank_by_topic AND Part 2's two opt-in ranking flags --
-                    # otherwise there's nothing meaningful to reorder within (a plain search's
-                    # pool is just offset+limit, often smaller than what's worth considering).
-                    from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
 
-                    candidate_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
-                else:
-                    candidate_window = offset + limit
-                fts_future = _search_pool.submit(
-                    _run_fts_search,
-                    conn,
-                    sanitized_query,
-                    where_clauses,
-                    params,
-                    candidate_window,
-                    0,
-                )
-                # semantic_search gets db_path so it opens its OWN connection
-                # — never share a connection across threads with sqlite_vec loaded
-                semantic_future = _search_pool.submit(
-                    semantic_search,
-                    query_keywords,
-                    where_clauses,
-                    params,
-                    candidate_window,
-                    db_path,
-                    0,
-                )
-                fts_rows = fts_future.result()
-                # semantic_future.result() re-raises any exception semantic_search() raised in the
-                # worker thread (post-Codex-review P0 fix) -- a real embedding/vector failure must
-                # propagate out to this function's own top-level except-Exception handler and come
-                # back as an error item, never get silently RRF-merged as if it were a genuinely
-                # empty (but successful) semantic result.
-                semantic_rows = semantic_future.result()
-
-                rrf_score_map = reciprocal_rank_fusion(fts_rows, semantic_rows, candidate_window)
-                fts_ids = {r[0] for r in fts_rows}
-                semantic_ids = {eid for eid, _ in semantic_rows}
-
-                if rrf_score_map:
-                    # Part 1 gap gate (SALTMDB memory 870a1d4e): skip Stage 2 entirely when
-                    # hybrid search already has a decisive, dual-channel-corroborated winner --
-                    # trust it instead of letting rerank second-guess it with noisier signal. Falls
-                    # through to the plain RRF-order `else` branch below exactly like every other
-                    # existing "rerank_by_topic requested but gated off" path (explain_mode,
-                    # semantic-disabled, empty query -- see the topic_scores_map comment above).
-                    gap_confident = rerank_by_topic and _rrf_gap_confident(
-                        rrf_score_map, fts_ids, semantic_ids
+                def _compute_pool(candidate_window: int) -> dict:  # noqa: C901, PLR0912
+                    """One full FTS+semantic+RRF-fuse+[resolve+substitute]+[rerank]+[gate]+
+                    [ranking-flags] pass at a given candidate_window size (Part C pipeline
+                    ordering: RRF fusion -> gap-gate check off the ORIGINAL un-substituted sets ->
+                    chain-resolution/substitution (mode="strict") -> [rerank_by_topic, if
+                    requested and not gap-confident] -> accept_or_abstain filter over the full
+                    widened pool (mode="strict"), before offset/limit slicing -> mark superseded
+                    (mode="history") -> prefer_durable_types -> demote_superseded). Returns the
+                    final ordered candidate id list (not yet offset/limit-sliced) plus enough
+                    metadata for the mode="strict" overfetch retry loop below (Part C2) to decide
+                    whether widening further could help, and for row assembly afterward.
+                    """
+                    fts_rows_ = _run_fts_search(
+                        conn, sanitized_query, where_clauses, params, candidate_window, 0
                     )
-                    if gap_confident:
-                        logger.debug(
-                            "rerank_by_topic skipped: RRF top1/top2 gap already decisive "
-                            "(dual-channel top1, ratio >= RERANK_GAP_SKIP_RATIO)."
-                        )
-                    if rerank_by_topic and not gap_confident:
-                        # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks the
-                        # whole candidate_window, then offset/limit slices the RERANKED order.
-                        pool_ids = list(rrf_score_map.keys())
-                        topic_scores = rerank_candidates_by_topic(query_keywords, pool_ids, db_path)
-                        # Fallback tier (B4) for ids rerank_candidates_by_topic couldn't score
-                        # (not yet chunk-embedded) -- reuses entity-level entity_embeddings via
-                        # _batch_semantic_similarities so no candidate is ever dropped from the
-                        # pool, it just sinks to the bottom of the reranked order instead.
-                        missing_ids = [eid for eid in pool_ids if eid not in topic_scores]
-                        if missing_ids:
-                            from saltmdb.config import RERANK_BROAD_THEME_THRESHOLD
-                            from saltmdb.domain.services import embedding_service
+                    semantic_rows_ = semantic_search(
+                        query_keywords, where_clauses, params, candidate_window, db_path, 0
+                    )
 
-                            fallback_vec = embedding_service.embed_text(query_keywords)
-                            fallback = _batch_semantic_similarities(
-                                missing_ids, fallback_vec, db_path
-                            )
-                            for eid in missing_ids:
-                                fscore = fallback.get(eid, 0.0)
-                                fverdict = (
-                                    "BROADLY_RELATED_THEMES"
-                                    if fscore >= RERANK_BROAD_THEME_THRESHOLD
-                                    else "DIFFERENT_TOPICS"
-                                )
-                                topic_scores[eid] = {
-                                    "topic_score": fscore,
-                                    "semantic_verdict": fverdict,
-                                }
-                        topic_scores_map = topic_scores
-                        # Full-override semantics (per spec): reranked order is sorted purely by
-                        # topic_score, replacing RRF order for Stage 2 -- not a blend.
-                        ranked_pool = sorted(
-                            pool_ids, key=lambda eid: -topic_scores[eid]["topic_score"]
+                    rrf_map = reciprocal_rank_fusion(fts_rows_, semantic_rows_, candidate_window)
+                    fts_ids_ = {r[0] for r in fts_rows_}
+                    semantic_ids_ = {eid for eid, _ in semantic_rows_}
+
+                    resolved_from_: dict[str, list[str]] = {}
+                    predecessor_grounded_map: dict[str, bool] = {}
+                    if rrf_map and mode == "strict":
+                        # Part A: resolve off the ORIGINAL, un-substituted pool -- gap-gate below
+                        # also reads fts_ids_/semantic_ids_ pre-substitution, same invariant.
+                        pre_pool_ids = list(rrf_map.keys())
+                        resolved_map = _resolve_supersession_chains(
+                            conn, pre_pool_ids, where_clauses, params
                         )
+                        if resolved_map:
+                            pre_evidence = _build_candidate_evidence(
+                                pre_pool_ids, rrf_map, fts_rows_, semantic_rows_, {}, {}
+                            )
+                            for cid, head in resolved_map.items():
+                                resolved_from_.setdefault(head, []).append(cid)
+                            for head, preds in resolved_from_.items():
+                                predecessor_grounded_map[head] = any(
+                                    accept_or_abstain(pre_evidence[p])[0]
+                                    for p in preds
+                                    if p in pre_evidence
+                                )
+                            rrf_map = _substitute_resolved_heads(rrf_map, resolved_map)
+
+                    topic_scores_map_: dict[str, dict] = {}
+                    if rrf_map:
+                        # Part 1 gap gate (SALTMDB memory 870a1d4e): skip Stage 2 entirely when
+                        # hybrid search already has a decisive, dual-channel-corroborated winner.
+                        # Deliberately checked against the pre-substitution fts_ids_/semantic_ids_
+                        # sets (a resolved head's own channel membership is a separate, Part B
+                        # evidence question, not this gate's).
+                        gap_confident = rerank_by_topic and _rrf_gap_confident(
+                            rrf_map, fts_ids_, semantic_ids_
+                        )
+                        if gap_confident:
+                            logger.debug(
+                                "rerank_by_topic skipped: RRF top1/top2 gap already decisive "
+                                "(dual-channel top1, ratio >= RERANK_GAP_SKIP_RATIO)."
+                            )
+                        if rerank_by_topic and not gap_confident:
+                            # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks
+                            # the whole candidate_window, then offset/limit slices the reranked
+                            # order.
+                            pool_ids = list(rrf_map.keys())
+                            topic_scores_map_ = _score_topics_with_fallback(
+                                query_keywords, pool_ids, db_path
+                            )
+                            # Full-override semantics (per spec): reranked order is sorted purely
+                            # by topic_score, replacing RRF order for Stage 2 -- not a blend.
+                            ranked_pool_ = sorted(
+                                pool_ids, key=lambda eid: -topic_scores_map_[eid]["topic_score"]
+                            )
+                        else:
+                            ranked_pool_ = list(rrf_map.keys())
+                            if mode == "strict":
+                                # accept_or_abstain's DIRECT semantic-only rule (Part B) needs a
+                                # calibrated topic_verdict, not a raw distance (see its own
+                                # docstring for why a distance/margin cutoff was tried and
+                                # empirically rejected) -- compute it on demand, WITHOUT
+                                # reordering the pool (full-pool reordering is rerank_by_topic's
+                                # own separate opt-in, untouched here), and only for candidates
+                                # that actually need it: those lacking FTS support at all
+                                # (fts_ids_). Dual-channel/FTS-matched candidates already have a
+                                # sufficient DIRECT signal and skip this lookup entirely, keeping
+                                # the added cost bounded.
+                                ungrounded_ids = [
+                                    eid for eid in ranked_pool_ if eid not in fts_ids_
+                                ]
+                                topic_scores_map_ = _score_topics_with_fallback(
+                                    query_keywords, ungrounded_ids, db_path
+                                )
+
+                        superseded_ids_: set = set()
+                        if mode == "strict":
+                            evidence_map = _build_candidate_evidence(
+                                ranked_pool_,
+                                rrf_map,
+                                fts_rows_,
+                                semantic_rows_,
+                                topic_scores_map_,
+                                resolved_from_,
+                                predecessor_grounded_map,
+                            )
+                            accepted_pool = []
+                            for eid in ranked_pool_:
+                                ok, reason = accept_or_abstain(evidence_map[eid])
+                                logger.debug(
+                                    "search_memory strict gate: %s -> accept=%s (%s)",
+                                    eid,
+                                    ok,
+                                    reason,
+                                )
+                                if ok:
+                                    accepted_pool.append(eid)
+                            ranked_pool_ = accepted_pool
+                        elif mode == "history":
+                            superseded_ids_ = _compute_superseded_ids_bitemporal(ranked_pool_, conn)
+
                         # Part 2 (SALTMDB memory 870a1d4e): type bias first, then supersession
                         # demotion -- ensures an explicitly-superseded item always sinks below a
-                        # merely-event-typed one, not the reverse. Applied to the FULL reranked
-                        # pool, before the offset/limit slice, same as rerank_by_topic's own
-                        # override above.
+                        # merely-event-typed one, not the reverse. Applied to the FULL pool,
+                        # before the offset/limit slice.
                         if prefer_durable_types:
-                            ranked_pool = _apply_type_bias(ranked_pool, conn)
+                            ranked_pool_ = _apply_type_bias(ranked_pool_, conn)
                         if demote_superseded:
-                            ranked_pool = _apply_supersession_demotion(ranked_pool, conn)
-                        merged_ids = ranked_pool[offset : offset + limit]
+                            ranked_pool_ = _apply_supersession_demotion(ranked_pool_, conn)
                     else:
-                        pool_order = list(rrf_score_map.keys())
-                        if prefer_durable_types:
-                            pool_order = _apply_type_bias(pool_order, conn)
-                        if demote_superseded:
-                            pool_order = _apply_supersession_demotion(pool_order, conn)
-                        merged_ids = pool_order[offset : offset + limit]
-                    if merged_ids:
-                        placeholders = ",".join("?" for _ in merged_ids)
-                        id_order = {eid: i for i, eid in enumerate(merged_ids)}
-                        fetch_sql = f"""
-                            SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                                   0.0 as rank_score,
-                                   e.created_at, e.updated_at, e.owner_id, e.scope,
-                                   e.metadata, e.context_id, e.memory_type, 0 as rel_count,
-                                   NULL as fts_snippet
-                            FROM entities e
-                            WHERE e.id IN ({placeholders})
-                        """
-                        fetched = conn.execute(fetch_sql, merged_ids).fetchall()
-                        sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
-                        # Rows that matched via FTS5 already carry a real query-centered excerpt in
-                        # fts_rows (computed in the same query as bm25()); rows that only surfaced via
-                        # semantic_search() never went through entities_fts MATCH at all, so they keep
-                        # fts_snippet = None here and fall back to the heuristic extractor below.
-                        fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
-                        rows = []
-                        for r in sorted_fetched:
-                            r_list = list(r)
-                            r_list[5] = rrf_score_map.get(r[0], 0.0)
-                            r_list[-1] = fts_snippet_map.get(r[0])
-                            rows.append(r_list)
-                    else:
-                        rows = []
+                        ranked_pool_ = []
+                        superseded_ids_ = set()
+
+                    # Both raw channels returned fewer rows than requested -> the underlying
+                    # corpus is exhausted for this query at this window size; growing
+                    # candidate_window further cannot reveal more candidates (Part C2).
+                    exhausted_ = (
+                        len(fts_rows_) < candidate_window and len(semantic_rows_) < candidate_window
+                    )
+                    return {
+                        "ordered_ids": ranked_pool_,
+                        "fts_rows": fts_rows_,
+                        "topic_scores_map": topic_scores_map_,
+                        "superseded_ids": superseded_ids_,
+                        "exhausted": exhausted_,
+                        # Post-substitution RRF fusion scores (Part A dedup-merge already applied
+                        # by _substitute_resolved_heads when mode="strict") -- used for the result
+                        # item's own "score" field below, same as before this refactor: the
+                        # assembled item's score is always the RRF fusion score, even when
+                        # rerank_by_topic's topic_score reordered `ordered_ids` (topic_score is
+                        # attached separately, it never replaces this field).
+                        "rrf_score_map": rrf_map,
+                    }
+
+                if rerank_by_topic or prefer_durable_types or demote_superseded or mode == "strict":
+                    # Widen the pool for rerank_by_topic, Part 2's two opt-in ranking flags, AND
+                    # mode="strict" (Part B pool-widening requirement) -- otherwise there's
+                    # nothing meaningful to reorder/resolve/gate within (a plain search's pool is
+                    # just offset+limit, often smaller than what's worth considering).
+                    from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
+
+                    base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
                 else:
-                    rows = fts_rows[offset : offset + limit]
+                    base_window = offset + limit
+
+                if mode == "strict":
+                    # Part C2 pagination redesign: resolution/dedup/the relevance gate can all
+                    # shrink the raw candidate_window's survivor count below offset+limit even
+                    # after the widening above. Re-run the WHOLE pass (from scratch, same
+                    # candidate_window semantics as every other mode -- see _run_fts_search's own
+                    # LIMIT candidate_window OFFSET 0, then this function's own final
+                    # `[offset:offset+limit]` Python slice below) with a doubled window until
+                    # enough survivors exist, the underlying corpus is exhausted, or the cap is
+                    # hit. Because every pass recomputes the full pool deterministically from
+                    # scratch (not an incremental DB offset), a later cursor call with a larger
+                    # `offset` reproduces a stable superset of this same computation -- cursor
+                    # continuity across a rejection/substitution/dedup collapse holds as long as
+                    # the underlying corpus doesn't change between calls, exactly like this
+                    # function's pre-existing offset:N cursor already assumed for every other mode.
+                    # No early "no-progress" stop here (Codex review P1 finding, correctly
+                    # rejected during re-review): an earlier version broke out after a single
+                    # doubling found zero additional accepted survivors, on the theory that a
+                    # genuinely relevant query should keep surfacing more matches as the window
+                    # grows. That's false in general -- real accepted candidates can legitimately
+                    # sit beyond the NEXT window too (e.g. ranks 41-80 when the window just grew
+                    # from 20 to 40), so that guard could return a prematurely short/empty page for
+                    # a genuinely satisfiable query. The plan's own spec is exactly "grow until
+                    # enough survivors, exhaustion, or cap" -- STRICT_OVERFETCH_CANDIDATE_CAP is
+                    # already the sole, deliberate safety valve on how far this is allowed to
+                    # search (see its own config.py docstring); a nonsense query scanning further
+                    # toward that cap in search of a real match is the accepted, documented
+                    # trade-off (see accept_or_abstain's docstring and
+                    # run_relevance_gate_holdout.py's held-out cases), not a bug to work around
+                    # with a second, undocumented early-exit heuristic.
+                    # Clamp the STARTING window to the cap too (Codex review round-2 P2 finding):
+                    # base_window is max(offset+limit, RERANK_CANDIDATE_POOL_SIZE), which can
+                    # itself already exceed STRICT_OVERFETCH_CANDIDATE_CAP for a large `limit` or a
+                    # deep `offset` cursor -- the loop's own `window < CAP` condition only guards
+                    # the DOUBLING step, not this initial value, so without this clamp the very
+                    # first _compute_pool() call could silently run past the "absolute cap" the
+                    # config/docs promise.
+                    window = min(base_window, STRICT_OVERFETCH_CANDIDATE_CAP)
+                    pool_result = _compute_pool(window)
+                    while (
+                        len(pool_result["ordered_ids"]) < offset + limit
+                        and not pool_result["exhausted"]
+                        and window < STRICT_OVERFETCH_CANDIDATE_CAP
+                    ):
+                        window = min(window * 2, STRICT_OVERFETCH_CANDIDATE_CAP)
+                        pool_result = _compute_pool(window)
+                else:
+                    pool_result = _compute_pool(base_window)
+
+                fts_rows = pool_result["fts_rows"]
+                topic_scores_map = pool_result["topic_scores_map"]
+                superseded_ids = pool_result["superseded_ids"]
+                rrf_score_map = pool_result["rrf_score_map"]
+                merged_ids = pool_result["ordered_ids"][offset : offset + limit]
+
+                if merged_ids:
+                    placeholders = ",".join("?" for _ in merged_ids)
+                    id_order = {eid: i for i, eid in enumerate(merged_ids)}
+                    fetch_sql = f"""
+                        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                               0.0 as rank_score,
+                               e.created_at, e.updated_at, e.owner_id, e.scope,
+                               e.metadata, e.context_id, e.memory_type, 0 as rel_count,
+                               NULL as fts_snippet
+                        FROM entities e
+                        WHERE e.id IN ({placeholders})
+                    """
+                    fetched = conn.execute(fetch_sql, merged_ids).fetchall()
+                    sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+                    # Rows that matched via FTS5 already carry a real query-centered excerpt in
+                    # fts_rows (computed in the same query as bm25()); rows that only surfaced via
+                    # semantic_search() never went through entities_fts MATCH at all, so they keep
+                    # fts_snippet = None here and fall back to the heuristic extractor below.
+                    fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
+                    rows = []
+                    for r in sorted_fetched:
+                        r_list = list(r)
+                        r_list[5] = rrf_score_map.get(r[0], 0.0)
+                        r_list[-1] = fts_snippet_map.get(r[0])
+                        rows.append(r_list)
+                else:
+                    rows = []
             else:
                 # Part 0 (SALTMDB memory 870a1d4e follow-on): FTS-only query retrieval is
                 # retired, not silently substituted -- search_memory is a hybrid FTS+dense-vector
@@ -1283,6 +1842,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if rerank_by_topic and eid in topic_scores_map:
                 item["topic_score"] = round(topic_scores_map[eid]["topic_score"], 6)
                 item["semantic_verdict"] = topic_scores_map[eid]["semantic_verdict"]
+            if mode == "history" and eid in superseded_ids:
+                item["is_superseded"] = True
 
             results.append(item)
 

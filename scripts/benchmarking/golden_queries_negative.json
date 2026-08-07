@@ -1,0 +1,87 @@
+{
+    "_meta": {
+        "description": "Holdout query set for search_memory's mode=\"strict\" relevance-abstention gate (memory_service.accept_or_abstain / _resolve_supersession_chains -- see plans/scalable-strolling-stallman.md Part D and SALTMDB memory `9c199005`/`c27792a1`/`b9b75764`). Companion to golden_queries.json (which is a positive-only, top-1/top-k ranking-quality set) -- this file exercises mode=\"strict\"-specific behavior: abstention on no-evidence queries, acceptance on genuinely grounded ones, and supersession-chain substitution.",
+        "corpus": "scripts/benchmarking/build_diverse_test_db.py's output (scratch/diverse_corpus_full.db, ~21.7k entities, 76 real `supersedes` edges) -- deliberately NOT the live personal corpus (per the standing SALTMDB_DB_PATH dev rule): run every case here against a throwaway COPY of that file, never the file itself and never the live default DB.",
+        "provenance": "Every case was run live against scratch/diverse_corpus_full.db during Part A-D implementation/verification (2026-08) and the expected_outcome below reflects the actual measured result at that time, not a guess. See run_relevance_gate_holdout.py in this directory for the runner that reproduces these checks.",
+        "known_gaps_codex_review": "Codex's implementation review (post-Part-E) correctly flagged that this file has no case for the semantic_paraphrase_positive category described below, and none for a broad-theme near-miss, a tied-candidate fork, or a stale-successor re-check. These were deliberately NOT added here after investigation: at this corpus's real ~21.7k-entity, heavily-multilingual scale, genuine hand-built paraphrase queries with disjoint vocabulary from a target entity were empirically found to usually land at BROADLY_RELATED_THEMES (0.63-0.74), not the stricter SAME_SPECIFIC_TOPIC bar the gate requires -- the one query found during investigation that DID clear SAME_SPECIFIC_TOPIC also turned out to share enough vocabulary with its target to independently pass via the FTS-only rule anyway, so it would not have exercised the semantic-only tier specifically. Mining a real, reliable, non-flaky case of this exact shape out of noisy real corpus data is impractical with the time available; the shape is instead covered precisely and deterministically by tests/test_relevance_gate.py's engineered-fixture unit tests (test_strict_mode_keeps_semantic_only_candidate_with_same_specific_topic, test_semantic_only_broadly_related_rejected) and tests/test_supersession_resolution.py's fork/tie-break tests (test_genuine_mid_chain_fork_tie_break, test_fork_tie_break_falls_back_to_created_at_then_id) -- see run_relevance_gate_holdout.py's own module docstring for the same reasoning.",
+        "case_meanings": {
+            "nonsense_abstain": "A query with no real relation to anything in the corpus. Expected outcome: mode=\"strict\" returns []. NOTE (documented, not hidden -- matches this codebase's stated risk-asymmetry convention): at this corpus's real ~21.7k-entity scale, a small residual false-accept rate remains for nonsense queries that happen to land within the calibrated SAME_SPECIFIC_TOPIC chunk-topic tier of some unrelated document purely by chance (measured ~2/7 to ~3/7 on the specific gibberish strings below during verification) -- see accept_or_abstain's own docstring for the full investigation of why a raw-distance/margin cutoff was tried first and rejected, and why this residual rate is the accepted trade-off rather than a bug. `held_out: true` cases are exactly the ones known to sometimes flip; they still count as a real check (report the actual outcome), just don't re-tune any threshold to force them to always abstain.",
+            "fts_exact_positive": "A query built from exact, distinctive terms known to appear verbatim in a specific entity's title/content -- expected to be accepted via the FTS-only or dual-channel DIRECT rule (a real term match, not dependent on the semantic-only tier at all).",
+            "semantic_paraphrase_positive": "A query that paraphrases a real entity with deliberately low vocabulary overlap. Expected to be accepted ONLY if it independently clears the SAME_SPECIFIC_TOPIC chunk-topic tier -- a weaker/broader paraphrase legitimately abstaining here is NOT a failure, it is the accepted false-reject cost of this gate's design (see accept_or_abstain's docstring). No case of this category exists in this file yet -- see known_gaps_codex_review above for why, and where the shape IS covered instead.",
+            "supersession_substitution": "A query that lexically/semantically matches an OLD entity that is the target of a real, currently-valid `supersedes` edge in this corpus. Expected outcome: mode=\"strict\" substitutes to the NEW (source) entity and does NOT return the old target id at all."
+        }
+    },
+    "cases": [
+        {
+            "id": "nonsense-pure-gibberish-1",
+            "query": "zzyzxqwkmpfjb1234nonexistentgarbledtoken",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "held_out": false
+        },
+        {
+            "id": "nonsense-pure-gibberish-2",
+            "query": "xkcdplaceholdernonsensequery77123",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "held_out": false
+        },
+        {
+            "id": "nonsense-pure-gibberish-3",
+            "query": "flerbnicate wobjuggle snorftastic",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "held_out": false
+        },
+        {
+            "id": "nonsense-sluszkulcs-anchor",
+            "query": "sluszkulcs",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "note": "The original SALTMDB memory `c27792a1` regression anchor query.",
+            "held_out": false
+        },
+        {
+            "id": "nonsense-keyboard-mash",
+            "query": "asdkfjqpwoeiruzxcvbnmqwerty999",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "note": "Known residual false-accept during verification (returned Arabic Wikipedia entries via the SAME_SPECIFIC_TOPIC tier) -- see case_meanings.nonsense_abstain above. Held out because it is known to sometimes flip; report the real outcome, do not re-tune to force it.",
+            "held_out": true
+        },
+        {
+            "id": "nonsense-partial-real-words",
+            "query": "purple elephant algorithm quantum banana",
+            "category": "nonsense_abstain",
+            "expected_outcome": "empty",
+            "note": "Contains genuine topical English words (\"algorithm\", \"quantum\") embedded in nonsense -- a real topical partial match to this corpus's actual quantum-computing entries is arguably defensible, not a pure gate failure. Held out for the same reason as nonsense-keyboard-mash.",
+            "held_out": true
+        },
+        {
+            "id": "fts-exact-title-mandatory",
+            "query": "title parameter optional store_memory MCP tool",
+            "category": "fts_exact_positive",
+            "expected_outcome": "non_empty",
+            "expected_top_title_contains": "Mandatory title in store_memory",
+            "held_out": false
+        },
+        {
+            "id": "fts-exact-title-max-length",
+            "query": "TITLE_MAX_LENGTH 120 character limit bump",
+            "category": "fts_exact_positive",
+            "expected_outcome": "non_empty",
+            "expected_top_title_contains": "TITLE_MAX_LENGTH=120",
+            "held_out": false
+        },
+        {
+            "id": "supersession-title-optional-to-mandatory",
+            "query": "title parameter optional store_memory MCP tool",
+            "category": "supersession_substitution",
+            "expected_outcome": "non_empty",
+            "expected_resolved_id": "70b93386-4e27-491e-a4f9-34739c65ee4c",
+            "expected_absent_id": "c1dc375b-c90f-4ba9-bb7c-66f87029fe02",
+            "note": "c1dc375b (old: 'Decision: Keep title parameter optional in store_memory MCP tool') is the target of a real, currently-valid `supersedes` edge from 70b93386 (new: mandatory-title decision) in the diverse corpus. mode=\"broad\" returns c1dc375b; mode=\"strict\" must substitute it away entirely and return only 70b93386.",
+            "held_out": false
+        }
+    ]
+}
