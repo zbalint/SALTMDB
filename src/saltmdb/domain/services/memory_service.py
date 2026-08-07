@@ -906,6 +906,34 @@ def _compute_superseded_ids(ordered_ids: list, conn) -> set:
     return {row[0] for row in rows}
 
 
+def _compute_bitemporal_target_ids(ordered_ids: list, conn, predicate: str, now: str) -> set:
+    """Shared core: ids within ordered_ids that are the TARGET of a currently-valid outgoing
+    `predicate` edge, "currently valid" meaning the full four-column bitemporal predicate
+    (`valid_from`/`valid_to`/`valid_at`/`invalid_at`) holds at the single caller-supplied `now`
+    instant -- not each column checked against its own independently-sampled clock read. Callers
+    that need internal consistency across multiple predicate checks (e.g.
+    `_apply_strict_ranking_defaults` checking both `supersedes` and `corrects`) MUST capture `now`
+    once and pass the same value into every call, or a candidate could be classified differently by
+    two checks that should agree (SALTMDB roadmap ba2cf66f P1#6 plan, Codex round-1 finding). No-op
+    (empty set) on an empty pool.
+    """
+    if not ordered_ids:
+        return set()
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT target_id FROM relations
+        WHERE target_id IN ({placeholders}) AND predicate = ?
+          AND (valid_from IS NULL OR datetime(valid_from) <= datetime(?))
+          AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))
+          AND (valid_at IS NULL OR datetime(valid_at) <= datetime(?))
+          AND (invalid_at IS NULL OR datetime(invalid_at) > datetime(?))
+        """,
+        ordered_ids + [predicate, now, now, now, now],
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
 def _compute_superseded_ids_bitemporal(ordered_ids: list, conn) -> set:
     """mode="history"'s own single-hop "is this superseded right now" check (Part C) -- NOT the
     same query as `_compute_superseded_ids` above (Codex review P1 finding, correctly caught): that
@@ -918,23 +946,15 @@ def _compute_superseded_ids_bitemporal(ordered_ids: list, conn) -> set:
     check here would silently tag an edge whose `valid_from` is still in the future, or whose
     `invalid_at` has already passed, as "currently superseding" when it isn't. No-op on an empty
     pool.
+
+    Thin wrapper over `_compute_bitemporal_target_ids` (SALTMDB roadmap ba2cf66f P1#6 plan) --
+    own `now` sample per call, matching this function's pre-existing single-call-site behavior
+    under mode="history" (which never needs cross-predicate consistency, unlike
+    `_apply_strict_ranking_defaults` below).
     """
-    if not ordered_ids:
-        return set()
-    now = datetime.now(UTC).isoformat()
-    placeholders = ",".join("?" for _ in ordered_ids)
-    rows = conn.execute(
-        f"""
-        SELECT DISTINCT target_id FROM relations
-        WHERE target_id IN ({placeholders}) AND predicate = 'supersedes'
-          AND (valid_from IS NULL OR datetime(valid_from) <= datetime(?))
-          AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))
-          AND (valid_at IS NULL OR datetime(valid_at) <= datetime(?))
-          AND (invalid_at IS NULL OR datetime(invalid_at) > datetime(?))
-        """,
-        ordered_ids + [now, now, now, now],
-    ).fetchall()
-    return {row[0] for row in rows}
+    return _compute_bitemporal_target_ids(
+        ordered_ids, conn, "supersedes", datetime.now(UTC).isoformat()
+    )
 
 
 def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
@@ -958,6 +978,47 @@ def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     superseded_ids = _compute_superseded_ids(ordered_ids, conn)
     return [eid for eid in ordered_ids if eid not in superseded_ids] + [
         eid for eid in ordered_ids if eid in superseded_ids
+    ]
+
+
+def _apply_strict_ranking_defaults(ordered_ids: list, conn) -> list:
+    """mode="strict"-only forced ranking defaults (SALTMDB roadmap ba2cf66f P1#6, design 1fddc04a):
+    durable-type preference + a residual-supersession/correction safety-net demotion, applied
+    unconditionally regardless of the caller's own prefer_durable_types/demote_superseded flags
+    (which keep their existing, independent, opt-in meaning for broad/history -- untouched by this
+    function). Order matches _apply_type_bias-then-demotion's existing precedent (Part 2, SALTMDB
+    memory 870a1d4e): type bias first, so an explicitly stale/wrong item always sinks below a
+    merely-event-typed one, not the reverse.
+
+    Covers two cases `demote_superseded`/`_resolve_supersession_chains` don't, by design:
+    - A candidate Part A's chain resolver abstained on (cycle, depth-cap breach, or archived
+      intermediate node) stays in the pool under its original id, still bitemporally superseded --
+      substitution deliberately declined to touch it, so without this safety net it would rank as
+      if authoritative.
+    - A candidate that is the target of a currently-valid `corrects` edge -- a predicate Part A's
+      resolver has no concept of (it only walks `supersedes` chains), and `demote_superseded`
+      (kept intentionally unchanged) never checked either.
+
+    One `now` captured here and passed into both bitemporal lookups so a validity-boundary-
+    straddling edge can't be classified differently by the two predicate checks (Codex plan-review
+    round-1 finding, `plans/amber-sifting-falcon.md`). Demoted ids are unioned (not two sequential
+    partitions) so an id caught by both checks sinks once, not double-processed -- both signal "this
+    specific memory is known wrong/outdated," treated as one demotion tier. Demotion changes
+    position only, never presence -- a demoted candidate already independently cleared
+    accept_or_abstain's gate on its own evidence merits before this function ever sees it. No-op on
+    an empty pool.
+    """
+    if not ordered_ids:
+        return []
+    ordered_ids = _apply_type_bias(ordered_ids, conn)
+    now = datetime.now(UTC).isoformat()
+    demoted = _compute_bitemporal_target_ids(
+        ordered_ids, conn, "supersedes", now
+    ) | _compute_bitemporal_target_ids(ordered_ids, conn, "corrects", now)
+    if not demoted:
+        return ordered_ids
+    return [eid for eid in ordered_ids if eid not in demoted] + [
+        eid for eid in ordered_ids if eid in demoted
     ]
 
 
@@ -1330,7 +1391,13 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
       prefer_durable_types/demote_superseded already do, and retries with a larger pool (up to
       STRICT_OVERFETCH_CANDIDATE_CAP) when resolution/dedup/the gate shrink the post-policy pool
       below what `offset`+`limit` needs (Part C2 -- pagination continuity across a rejection,
-      substitution, or many-to-one dedup collapse).
+      substitution, or many-to-one dedup collapse). Additionally, unconditionally and regardless
+      of the `prefer_durable_types`/`demote_superseded` flags above: durable-type preference is
+      always applied, and a surviving candidate is demoted (never excluded -- it already cleared
+      the gate on its own evidence) if it's still the target of a currently-valid `supersedes`
+      edge Part A's resolver couldn't cleanly resolve (cycle/depth-cap/archived-intermediate
+      abstain) or of a currently-valid `corrects` edge (roadmap `ba2cf66f` P1#6, design
+      `1fddc04a`; `_apply_strict_ranking_defaults`).
     - "history": no resolution, no gate -- every live candidate the hybrid pipeline would
       otherwise return stays visible exactly as in "broad", except a candidate that is the target
       of a currently-valid `supersedes` edge is additionally tagged `"is_superseded": true` in its
@@ -1498,7 +1565,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 if not db_path:
                     db_path = get_db_path()
 
-                def _compute_pool(candidate_window: int) -> dict:  # noqa: C901, PLR0912
+                def _compute_pool(candidate_window: int) -> dict:  # noqa: C901, PLR0912, PLR0915
                     """One full FTS+semantic+RRF-fuse+[resolve+substitute]+[rerank]+[gate]+
                     [ranking-flags] pass at a given candidate_window size (Part C pipeline
                     ordering: RRF fusion -> gap-gate check off the ORIGINAL un-substituted sets ->
@@ -1626,6 +1693,16 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             ranked_pool_ = _apply_type_bias(ranked_pool_, conn)
                         if demote_superseded:
                             ranked_pool_ = _apply_supersession_demotion(ranked_pool_, conn)
+                        # Roadmap ba2cf66f P1#6 / design 1fddc04a: durable-type preference and a
+                        # supersession/correction safety-net demotion are forced, unconditional
+                        # defaults under mode="strict", independent of the two opt-in flags above
+                        # (which keep their existing, narrower, mode-agnostic meaning and may have
+                        # already run a second time here -- harmless, a stable partition on the
+                        # same criterion applied twice is a no-op the second time). broad/history
+                        # are completely unreached by this branch -- their pre-existing behavior is
+                        # byte-identical, unaffected by this addition.
+                        if mode == "strict":
+                            ranked_pool_ = _apply_strict_ranking_defaults(ranked_pool_, conn)
                     else:
                         ranked_pool_ = []
                         superseded_ids_ = set()

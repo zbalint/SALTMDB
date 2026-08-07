@@ -243,12 +243,15 @@ def store_memory(
     resolves a matched-but-superseded candidate to its live, multi-hop `supersedes` successor and
     requires every surviving candidate to independently clear a calibrated relevance-abstention
     gate -- an empty list is then a normal, successful "nothing sufficiently relevant" result, not
-    an error. "history" leaves every candidate visible (like "broad") but tags a candidate that is
-    the target of a currently-valid `supersedes` edge with `"is_superseded": true`, without hiding
-    or reordering it. Neither "strict" nor "history" ever exposes archived material -- both still
-    require `status != 'archived'` like "broad" already does. Only affects the hybrid
-    query-keyword pipeline, same scope as `rerank_by_topic`/`prefer_durable_types`/
-    `demote_superseded` above.
+    an error. "strict" also always applies durable-type preference and demotes (never excludes) a
+    surviving candidate that's still the target of a currently-valid `supersedes` edge the
+    resolver couldn't cleanly resolve, or of a currently-valid `corrects` edge -- unconditionally,
+    regardless of `prefer_durable_types`/`demote_superseded` above. "history" leaves every
+    candidate visible (like "broad") but tags a candidate that is the target of a currently-valid
+    `supersedes` edge with `"is_superseded": true`, without hiding or reordering it. Neither
+    "strict" nor "history" ever exposes archived material -- both still require
+    `status != 'archived'` like "broad" already does. Only affects the hybrid query-keyword
+    pipeline, same scope as `rerank_by_topic`/`prefer_durable_types`/`demote_superseded` above.
     """
 )
 def search_memory(
