@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import os
 import shutil
+from unittest.mock import patch
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
 
@@ -41,6 +42,67 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res3 = tools.search_memory(keywords="authentication OAuth2", owner_id="agent1")
         self.assertTrue(len(res3) > 0)
         self.assertGreater(res3[0]["score"], 0.0)
+
+    def test_search_memory_use_cross_encoder_alias_resolution(self):
+        """Roadmap ba2cf66f P1#7: use_cross_encoder (and its 'cross_encoder' alias) must reach
+        memory_service.search_memory through the tools.py wrapper's alias-resolution layer, same
+        style as test_search_memory_alias_resolution above."""
+        orig_reranker_env = os.environ.get("SALTMDB_RERANKER_MODEL")
+        os.environ["SALTMDB_RERANKER_MODEL"] = "Xenova/ms-marco-MiniLM-L-6-v2"
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("SALTMDB_RERANKER_MODEL", None)
+                if orig_reranker_env is None
+                else os.environ.__setitem__("SALTMDB_RERANKER_MODEL", orig_reranker_env)
+            )
+        )
+        res_a = tools.store_memory(
+            content="content for a_entity",
+            title="a_entity",
+            owner_id="ce_owner",
+            skip_duplicate_check=True,
+        )
+        entity_a = res_a.split("ID: ")[1].strip()
+        res_b = tools.store_memory(
+            content="content for b_entity",
+            title="b_entity",
+            owner_id="ce_owner",
+            skip_duplicate_check=True,
+        )
+        entity_b = res_b.split("ID: ")[1].strip()
+
+        def _fts_row(eid):
+            return (eid, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
+
+        # entity_a matched by FTS only, entity_b matched by semantic only -> RRF tie (ratio 1.0,
+        # NOT gap-confident) -- exact fixture shape as test_topic_rerank.py's own "ambiguous"
+        # gap-gate case, so this test actually reaches the cross-encoder stage rather than being
+        # silently gated off before it (a dual-channel top1 anywhere skips Stage 2 entirely).
+        fts_rows = [_fts_row(entity_a)]
+        semantic_rows = [(entity_b, 0.1)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.reranker_service.score_pairs",
+                return_value=[-1.0, 9.0],
+            ),
+        ):
+            res_kw = tools.search_memory(
+                query_keywords="cross encoder alias test", use_cross_encoder=True
+            )
+            res_alias = tools.search_memory(
+                query_keywords="cross encoder alias test", cross_encoder=True
+            )
+
+        for res in (res_kw, res_alias):
+            self.assertEqual([r["id"] for r in res], [entity_b, entity_a])
+            by_id = {r["id"]: r for r in res}
+            self.assertEqual(by_id[entity_b]["cross_encoder_score"], 9.0)
 
     def test_search_memory_fetch_full(self):
         res = tools.store_memory(

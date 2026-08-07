@@ -239,6 +239,18 @@ def store_memory(
     search_memory calls return an error rather than falling back to FTS-only results -- see
     SALTMDB_ENABLE_SEMANTIC) or on empty-query filter/tag-only browsing.
 
+    use_cross_encoder (opt-in, default False; experimental, requires SALTMDB_RERANKER_MODEL to be
+    set to a supported model name server-side -- a no-op with no error otherwise): an independent
+    Stage-2 reordering alternative to `rerank_by_topic`, not a dependency of it -- either flag
+    alone widens the candidate pool and shares the same decisive-hybrid-winner confidence gate.
+    Scores the widened pool with a local ONNX cross-encoder (no PyTorch runtime) and fully
+    reorders by score, adding a `cross_encoder_score` field to each result item. If both
+    `rerank_by_topic` and `use_cross_encoder` are requested and neither is gated off,
+    cross-encoder's ordering wins (it runs second, as the more precise stage) -- `topic_score`
+    stays attached to the item regardless. Any failure (disabled, unsupported model, runner error)
+    falls back deterministically to whatever ordering would exist without it -- never an error,
+    never a widened result count.
+
     mode (opt-in, default "broad" -- identical to this tool's pre-existing behavior): "strict"
     resolves a matched-but-superseded candidate to its live, multi-hop `supersedes` successor and
     requires every surviving candidate to independently clear a calibrated relevance-abstention
@@ -269,6 +281,7 @@ def search_memory(
     rerank_by_topic: bool | None = None,
     prefer_durable_types: bool | None = None,
     demote_superseded: bool | None = None,
+    use_cross_encoder: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
     **kwargs,
 ) -> list | dict | str:
@@ -310,6 +323,11 @@ def search_memory(
     prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else False
     demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
     demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else False
+    # Same two-line shape again, for the same reason.
+    use_cross_encoder_ = _resolve(
+        use_cross_encoder, kw, kwargs, "use_cross_encoder", "cross_encoder"
+    )
+    use_cross_encoder_ = use_cross_encoder_ if use_cross_encoder_ is not None else False
     # Same two-line shape again -- `mode` has a real, meaningful default ("broad") rather than
     # bool-False, but the None-sentinel + kwarg-alias-fallback pattern is identical.
     mode_ = _resolve(mode, kw, kwargs, "mode")
@@ -332,6 +350,7 @@ def search_memory(
         rerank_by_topic=rerank_by_topic_,
         prefer_durable_types=prefer_durable_types_,
         demote_superseded=demote_superseded_,
+        use_cross_encoder=use_cross_encoder_,
     )
 
 

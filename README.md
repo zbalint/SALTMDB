@@ -74,6 +74,7 @@ SALTMDB runs FTS5/BM25 keyword search and dense vector semantic search **in para
 * Relation count is factored into FTS5 ranking as a small boost: `ORDER BY (bm25 * weight + rel_count * 0.1) ASC`.
 * Enabled by default; set `SALTMDB_ENABLE_SEMANTIC=false` to explicitly disable vector search. **Note**: `search_memory` no longer has an FTS-only fallback for query-based calls -- with semantic search disabled, a call that passes `query_keywords` returns `[{"error": "..."}]` instead of degraded FTS-only results. Filter/tag-only browsing (no `query_keywords`) is unaffected.
 * Duplicate checks (`check_duplicate_memories`) use batched precomputed vector lookups (`_batch_semantic_similarities`) to avoid re-embedding each candidate, with FTS5 pre-filtering to cap candidates at ~30 before the similarity pass.
+* Optional Stage-2 ONNX cross-encoder reranking (`search_memory`'s `use_cross_encoder`, experimental, opt-in): set `SALTMDB_RERANKER_MODEL` to a supported model name to enable. Independent of `rerank_by_topic` -- either flag alone widens the candidate pool and shares the same decisive-hybrid-winner gap-gate; if both are requested and neither is gated off, cross-encoder's reorder wins. No PyTorch runtime (uses `fastembed`'s existing ONNX `TextCrossEncoder` API). See the environment variable table below for supported model names. `Xenova/ms-marco-MiniLM-L-6-v2` (~88MB, pre-bundled under `src/saltmdb/models/`, same offline-first convention as the bi-encoder below) is the benchmark-recommended choice — it matched or beat every larger candidate tested (`BAAI/bge-reranker-base`, `jinaai/jina-reranker-v2-base-multilingual`, both 1GB+) on holdout top-1 accuracy at a fraction of the latency/footprint.
 
 > [!NOTE]
 > **Calibration caveat.** SALTMDB's constants fall into two different categories that must not be conflated:
@@ -187,6 +188,7 @@ $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 | :--- | :--- | :--- |
 | `SALTMDB_DB_PATH` | `~/.saltmdb/saltmdb.db` | Path to the SQLite database file. |
 | `SALTMDB_ENABLE_SEMANTIC` | `true` | Set to `false`/`0`/`off`/`no` to disable vector search. Query-based `search_memory` calls then return an error instead of an FTS-only fallback -- see the Search Architecture section above. |
+| `SALTMDB_RERANKER_MODEL` | _(unset)_ | Experimental, opt-in: set to an ONNX cross-encoder model name (`Xenova/ms-marco-MiniLM-L-6-v2`, `Xenova/ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`, `jinaai/jina-reranker-v1-tiny-en`, `jinaai/jina-reranker-v1-turbo-en`, or `jinaai/jina-reranker-v2-base-multilingual`) to enable `search_memory`'s `use_cross_encoder` Stage-2 reranking flag. Unset (default) or an unsupported name leaves `use_cross_encoder` a no-op. No PyTorch runtime -- uses `fastembed`'s existing ONNX Runtime backend, the same one already used for the bi-encoder. |
 | `SALTMDB_VIEWER_PORT` | `8080` | Port for the database dashboard viewer. |
 | `SALTMDB_VIEWER_HOST` | `127.0.0.1` | Bind host for the viewer (loopback-only by default). |
 | `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable auto-start of the viewer on MCP server startup. |

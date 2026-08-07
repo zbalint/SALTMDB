@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-__version__ = "0.1.0-alpha.68"
+__version__ = "0.1.0-alpha.69"
 
 # Path to the root of the repository (3 levels up from src/saltmdb/config.py)
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -244,3 +244,43 @@ SUPERSESSION_CHAIN_MAX_DEPTH = 10
 # of RERANK_CANDIDATE_POOL_SIZE (the *initial* widened window) -- policy safety valve against
 # pathological queries, not benchmarked.
 STRICT_OVERFETCH_CANDIDATE_CAP = 200
+
+# Cross-encoder reranking (search_memory's use_cross_encoder, see
+# src/saltmdb/domain/services/reranker_service.py). Roadmap ba2cf66f P1#7 / design memos
+# 1fddc04a/8115fa4a: benchmark an optional ONNX-only Stage-2 pairwise reranker, no PyTorch, no new
+# dependency (fastembed is already pinned and already wraps ONNX Runtime for the bi-encoder).
+
+
+def get_reranker_model_name() -> str | None:
+    """SALTMDB_RERANKER_MODEL env var, stripped. Unset/empty -> None (disabled, the default).
+
+    Feature-flag polarity is the OPPOSITE of is_semantic_search_enabled()'s default-true/opt-out
+    shape: this is an experimental, benchmark-gated, default-OFF/opt-in feature ("add no default
+    dependency" unless a model shows a material holdout gain -- see design memo 1fddc04a).
+    """
+    val = os.environ.get("SALTMDB_RERANKER_MODEL", "").strip()
+    return val or None
+
+
+# fastembed 0.8.0's TextCrossEncoder built-in registry as verified live during item-7 planning
+# (SALTMDB event `345bdd37`) -- does NOT include BAAI/bge-reranker-large (design memos
+# 1fddc04a/8115fa4a assumed it existed; verified absent from fastembed.rerank.cross_encoder
+# .TextCrossEncoder.list_supported_models()). BAAI/bge-reranker-base substitutes as the
+# BGE-family candidate instead (Codex-approved substitution, item-7 plan round 1).
+CROSS_ENCODER_SUPPORTED_MODELS = frozenset(
+    {
+        "Xenova/ms-marco-MiniLM-L-6-v2",
+        "Xenova/ms-marco-MiniLM-L-12-v2",
+        "BAAI/bge-reranker-base",
+        "jinaai/jina-reranker-v1-tiny-en",
+        "jinaai/jina-reranker-v1-turbo-en",
+        "jinaai/jina-reranker-v2-base-multilingual",
+    }
+)
+CROSS_ENCODER_MAX_CANDIDATES = 10  # <= RERANK_CANDIDATE_POOL_SIZE (20); cross-encoder cost is one
+# forward pass per candidate, materially more expensive per-item than the bi-encoder's single
+# batched call
+CROSS_ENCODER_MAX_CHARS = 800  # per-candidate truncation cap before scoring; tune from benchmark
+# latency data if warranted, not a pre-committed final value
+CROSS_ENCODER_MAX_QUERY_CHARS = 300  # query is concatenated into EVERY pair scored -- capped
+# independently of candidate length (Codex plan-review round-1 finding)

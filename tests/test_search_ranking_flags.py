@@ -235,5 +235,251 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
         )
 
 
+class TestUseCrossEncoderSeam(unittest.TestCase):
+    """Controlled-seam tests for roadmap ba2cf66f P1#7's use_cross_encoder flag -- same style as
+    TestPart2SearchMemorySeam above. reranker_service.score_pairs is mocked throughout (a fake
+    runner, per the design memo's own explicit test list) -- no real model load."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        self._orig_env = os.environ.get("SALTMDB_RERANKER_MODEL")
+        os.environ["SALTMDB_RERANKER_MODEL"] = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        if self._orig_env is None:
+            os.environ.pop("SALTMDB_RERANKER_MODEL", None)
+        else:
+            os.environ["SALTMDB_RERANKER_MODEL"] = self._orig_env
+
+    def _insert_entity(self, entity_id: str, memory_type: str = "fact") -> None:
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash, memory_type)"
+            " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
+            " ?, ?, ?, ?)",
+            (entity_id, entity_id, f"content for {entity_id}", entity_id, memory_type),
+        )
+        self.conn.commit()
+
+    def _fts_row(self, entity_id: str) -> tuple:
+        return (entity_id, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
+
+    def test_default_false_leaves_ordering_unchanged_even_with_model_configured(self):
+        # SALTMDB_RERANKER_MODEL is set in setUp -- proves the FLAG, not just env-var presence,
+        # gates the behavior.
+        self._insert_entity("a_entity")
+        self._insert_entity("b_entity")
+        fts_rows = [self._fts_row("a_entity"), self._fts_row("b_entity")]
+        semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
+        ):
+            results = search_memory(
+                query_keywords="cross encoder default seam", db_path=self.db_path
+            )
+
+        self.assertEqual([r["id"] for r in results], ["a_entity", "b_entity"])
+        mock_score.assert_not_called()
+        self.assertNotIn("cross_encoder_score", results[0])
+
+    def test_true_reorders_by_score(self):
+        self._insert_entity("a_entity")
+        self._insert_entity("b_entity")
+        fts_rows = [self._fts_row("a_entity"), self._fts_row("b_entity")]
+        semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            # a_entity naturally ranks first via RRF; scores reverse that.
+            patch(
+                "saltmdb.domain.services.reranker_service.score_pairs",
+                return_value=[-5.0, 5.0],
+            ),
+        ):
+            results = search_memory(
+                query_keywords="cross encoder reorder seam",
+                use_cross_encoder=True,
+                db_path=self.db_path,
+            )
+
+        self.assertEqual([r["id"] for r in results], ["b_entity", "a_entity"])
+
+    def test_pool_capped_to_max_candidates_before_scoring_with_unscored_tail_preserved(self):
+        """Roadmap ba2cf66f P1#7 / Codex full-diff review finding: the pool must be sliced to
+        CROSS_ENCODER_MAX_CANDIDATES BEFORE the batch entity fetch/score_pairs call, not after --
+        confirmed here by asserting score_pairs is called with exactly CROSS_ENCODER_MAX_CANDIDATES
+        texts even though the pool has more candidates than that, AND that the untouched overflow
+        (beyond the cap) stays appended at the tail in its original RRF relative order."""
+        from saltmdb.config import CROSS_ENCODER_MAX_CANDIDATES
+
+        num_entities = CROSS_ENCODER_MAX_CANDIDATES + 2
+        entity_ids = [f"e{i}" for i in range(num_entities)]
+        for eid in entity_ids:
+            self._insert_entity(eid)
+        # Both channels agree on e0..e_{N-1} order -> RRF preserves it exactly.
+        fts_rows = [self._fts_row(eid) for eid in entity_ids]
+        semantic_rows = [(eid, 0.1 * i) for i, eid in enumerate(entity_ids)]
+
+        # Ascending scores for the scored prefix -> highest score (== last score, N-1) sorts first.
+        scores = list(range(CROSS_ENCODER_MAX_CANDIDATES))
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.reranker_service.score_pairs",
+                return_value=scores,
+            ) as mock_score,
+        ):
+            results = search_memory(
+                query_keywords="cross encoder cap seam",
+                use_cross_encoder=True,
+                limit=num_entities,
+                db_path=self.db_path,
+            )
+
+        _called_query, called_texts = mock_score.call_args[0]
+        self.assertEqual(len(called_texts), CROSS_ENCODER_MAX_CANDIDATES)
+
+        scored_prefix_reordered = list(reversed(entity_ids[:CROSS_ENCODER_MAX_CANDIDATES]))
+        unscored_tail = entity_ids[CROSS_ENCODER_MAX_CANDIDATES:]
+        self.assertEqual([r["id"] for r in results], scored_prefix_reordered + unscored_tail)
+
+    def test_none_scores_fall_back_to_prior_order_deterministically(self):
+        # Simulates disabled/unsupported-model/runner-failure -- score_pairs returning None must
+        # leave ranked_pool_ exactly as it was, no exception, no widened result count.
+        self._insert_entity("a_entity")
+        self._insert_entity("b_entity")
+        fts_rows = [self._fts_row("a_entity"), self._fts_row("b_entity")]
+        semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.reranker_service.score_pairs",
+                return_value=None,
+            ),
+        ):
+            results = search_memory(
+                query_keywords="cross encoder fallback seam",
+                use_cross_encoder=True,
+                db_path=self.db_path,
+            )
+
+        self.assertEqual([r["id"] for r in results], ["a_entity", "b_entity"])
+        self.assertEqual(len(results), 2)
+        self.assertNotIn("cross_encoder_score", results[0])
+
+    def test_gap_confident_skips_cross_encoder_entirely(self):
+        # Dual-channel, decisive-margin top1 -- exact fixture shape as
+        # TestRrfGapGateSearchMemorySeam.test_decisive_dual_channel_winner_skips_rerank in
+        # test_topic_rerank.py: winner_entity is the ONLY fts_rows entry (rank 0, its only
+        # channel-of-record) and also rank 0 in semantic_rows -> RRF ratio ~2.03 vs loser_entity's
+        # single (semantic-only, rank 1) appearance. Both Stage-2 mechanisms share this gate.
+        self._insert_entity("winner_entity")
+        self._insert_entity("loser_entity")
+        fts_rows = [self._fts_row("winner_entity")]
+        semantic_rows = [("winner_entity", 0.1), ("loser_entity", 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
+        ):
+            results = search_memory(
+                query_keywords="gap confident cross encoder seam",
+                use_cross_encoder=True,
+                db_path=self.db_path,
+            )
+
+        self.assertEqual([r["id"] for r in results], ["winner_entity", "loser_entity"])
+        mock_score.assert_not_called()
+
+    def test_both_flags_cross_encoder_takes_final_ordering_precedence(self):
+        self._insert_entity("event_entity", "event")
+        self._insert_entity("decision_entity", "decision")
+        fts_rows = [self._fts_row("event_entity"), self._fts_row("decision_entity")]
+        semantic_rows = [("event_entity", 0.1), ("decision_entity", 0.5)]
+
+        with (
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            # topic rerank would put decision_entity first via a low RERANK_SAME_TOPIC_THRESHOLD
+            # comparison -- irrelevant here since it's not mocked to reorder; what matters is
+            # cross-encoder's own explicit reorder wins as the FINAL order regardless.
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={
+                    "event_entity": {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
+                    "decision_entity": {
+                        "topic_score": 0.1,
+                        "semantic_verdict": "DIFFERENT_TOPICS",
+                    },
+                },
+            ),
+            patch(
+                "saltmdb.domain.services.reranker_service.score_pairs",
+                return_value=[-5.0, 5.0],  # reverses topic rerank's own order
+            ),
+        ):
+            results = search_memory(
+                query_keywords="both flags cross encoder precedence seam",
+                rerank_by_topic=True,
+                use_cross_encoder=True,
+                db_path=self.db_path,
+            )
+
+        # topic rerank alone would rank event_entity first (higher topic_score); cross-encoder
+        # runs second and its reorder wins.
+        self.assertEqual([r["id"] for r in results], ["decision_entity", "event_entity"])
+        by_id = {r["id"]: r for r in results}
+        # topic_score stays attached alongside cross_encoder_score -- cross-encoder never erases it.
+        self.assertIn("topic_score", by_id["event_entity"])
+        self.assertIn("cross_encoder_score", by_id["event_entity"])
+
+    def test_explain_mode_never_calls_score_pairs(self):
+        with patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score:
+            search_memory(
+                query_keywords="explain mode seam",
+                use_cross_encoder=True,
+                explain_mode=True,
+                db_path=self.db_path,
+            )
+        mock_score.assert_not_called()
+
+    def test_empty_query_never_calls_score_pairs(self):
+        with patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score:
+            search_memory(query_keywords="", use_cross_encoder=True, db_path=self.db_path)
+        mock_score.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

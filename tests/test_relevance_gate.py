@@ -193,6 +193,34 @@ class TestBuildCandidateEvidence(unittest.TestCase):
         )
         self.assertTrue(ev["head"]["predecessor_grounded"])
 
+    def test_cross_encoder_score_absent_by_default(self):
+        """Roadmap ba2cf66f P1#7: cross_encoder_score defaults to None when the map param isn't
+        passed at all -- proves the new optional field can't silently affect any existing caller
+        that doesn't know about it."""
+        rrf_map = {"a": 0.5}
+        ev = _build_candidate_evidence(["a"], rrf_map, [], [], {}, {})
+        self.assertIsNone(ev["a"]["cross_encoder_score"])
+
+    def test_cross_encoder_score_populated_when_provided(self):
+        rrf_map = {"a": 0.5, "b": 0.4}
+        ce_map = {"a": 7.5}
+        ev = _build_candidate_evidence(["a", "b"], rrf_map, [], [], {}, {}, None, ce_map)
+        self.assertEqual(ev["a"]["cross_encoder_score"], 7.5)
+        # "b" wasn't scored (e.g. beyond CROSS_ENCODER_MAX_CANDIDATES) -- None, not 0.0 or KeyError.
+        self.assertIsNone(ev["b"]["cross_encoder_score"])
+
+    def test_accept_or_abstain_ignores_cross_encoder_score(self):
+        """Roadmap ba2cf66f P1#7 scope decision: cross_encoder_score is inert evidence this
+        release -- a candidate with NO fts/semantic signal at all must still abstain regardless of
+        how confident a cross-encoder score looks, since accept_or_abstain doesn't read the field
+        yet (deferred to a future, separately-calibrated gate rule)."""
+        rrf_map = {"a": 0.5}
+        ce_map = {"a": 99.0}  # a wildly "confident"-looking score
+        ev = _build_candidate_evidence(["a"], rrf_map, [], [], {}, {}, None, ce_map)
+        ok, reason = accept_or_abstain(ev["a"])
+        self.assertFalse(ok)
+        self.assertEqual(reason, "no_evidence")
+
 
 class TestSearchMemoryModeStrictSeam(unittest.TestCase):
     """Controlled-seam integration tests -- patches _run_fts_search/semantic_search so the pool
