@@ -68,7 +68,7 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
         ]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -135,7 +135,7 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
         semantic_rows = [("old_a", 0.05), ("old_b", 0.06), ("standalone", 0.07)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -200,7 +200,7 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
             }
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=[]),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 side_effect=_semantic_search,
@@ -242,7 +242,7 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
             return []
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=[]),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 side_effect=_semantic_search,

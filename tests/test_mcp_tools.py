@@ -88,7 +88,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_b, 0.1)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -146,7 +146,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_event, 0.1), (entity_decision, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -246,7 +246,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_superseded, 0.1), (entity_current, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,

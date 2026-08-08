@@ -17,6 +17,7 @@ from unittest.mock import patch
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import (
     _build_candidate_evidence,
+    _run_fts_search,
     accept_or_abstain,
     search_memory,
 )
@@ -29,7 +30,8 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": True,
-            "in_fts": True,
+            "in_fts_and": True,
+            "in_fts_or_only": False,
             "in_semantic": True,
         }
         ok, reason = accept_or_abstain(evidence)
@@ -40,7 +42,8 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": False,
-            "in_fts": True,
+            "in_fts_and": True,
+            "in_fts_or_only": False,
             "in_semantic": False,
         }
         ok, reason = accept_or_abstain(evidence)
@@ -51,7 +54,8 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": False,
-            "in_fts": False,
+            "in_fts_and": False,
+            "in_fts_or_only": False,
             "in_semantic": True,
             "semantic_verdict": "SAME_SPECIFIC_TOPIC",
         }
@@ -65,7 +69,8 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": False,
-            "in_fts": False,
+            "in_fts_and": False,
+            "in_fts_or_only": False,
             "in_semantic": True,
             "semantic_verdict": "BROADLY_RELATED_THEMES",
         }
@@ -79,7 +84,8 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": False,
-            "in_fts": False,
+            "in_fts_and": False,
+            "in_fts_or_only": False,
             "in_semantic": True,
             "semantic_verdict": None,
         }
@@ -90,12 +96,79 @@ class TestAcceptOrAbstain(unittest.TestCase):
         evidence = {
             "provenance": "direct",
             "dual_channel": False,
-            "in_fts": False,
+            "in_fts_and": False,
+            "in_fts_or_only": False,
             "in_semantic": False,
         }
         ok, reason = accept_or_abstain(evidence)
         self.assertFalse(ok)
         self.assertEqual(reason, "no_evidence")
+
+    # -- H1 fix: FTS OR-fallback-only matches (memory `ed7cc8d5`) --
+
+    def test_fts_or_fallback_only_without_topic_grounding_rejected(self):
+        """An OR-fallback-only match (present only because the AND-joined query found nothing and
+        _run_fts_search silently retried with OR) with no semantic_verdict at all must be rejected
+        -- it is an incidental single-term hit, not a corroborated match."""
+        evidence = {
+            "provenance": "direct",
+            "dual_channel": False,
+            "in_fts_and": False,
+            "in_fts_or_only": True,
+            "in_semantic": False,
+            "semantic_verdict": None,
+        }
+        ok, reason = accept_or_abstain(evidence)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "fts_or_fallback_insufficient_topic_grounding")
+
+    def test_fts_or_fallback_only_broadly_related_rejected(self):
+        evidence = {
+            "provenance": "direct",
+            "dual_channel": False,
+            "in_fts_and": False,
+            "in_fts_or_only": True,
+            "in_semantic": False,
+            "semantic_verdict": "BROADLY_RELATED_THEMES",
+        }
+        ok, reason = accept_or_abstain(evidence)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "fts_or_fallback_insufficient_topic_grounding")
+
+    def test_fts_or_fallback_only_same_specific_topic_accepted(self):
+        evidence = {
+            "provenance": "direct",
+            "dual_channel": False,
+            "in_fts_and": False,
+            "in_fts_or_only": True,
+            "in_semantic": False,
+            "semantic_verdict": "SAME_SPECIFIC_TOPIC",
+        }
+        ok, reason = accept_or_abstain(evidence)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "fts_or_fallback_same_specific_topic")
+
+    def test_fts_or_fallback_plus_semantic_does_not_bypass_via_dual_channel(self):
+        """The exact bypass H1's fix closes: an OR-fallback-only match that ALSO happens to land
+        in the semantic pool must NOT take the dual_channel shortcut (dual_channel is correctly
+        False here since it's keyed on in_fts_and, not the broader in_fts) -- it must go through
+        the same SAME_SPECIFIC_TOPIC check as an OR-fallback-only match with no semantic hit."""
+        base_evidence = {
+            "provenance": "direct",
+            "dual_channel": False,
+            "in_fts_and": False,
+            "in_fts_or_only": True,
+            "in_semantic": True,
+        }
+        rejected = {**base_evidence, "semantic_verdict": "BROADLY_RELATED_THEMES"}
+        ok, reason = accept_or_abstain(rejected)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "fts_or_fallback_insufficient_topic_grounding")
+
+        accepted = {**base_evidence, "semantic_verdict": "SAME_SPECIFIC_TOPIC"}
+        ok, reason = accept_or_abstain(accepted)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "fts_or_fallback_same_specific_topic")
 
     # -- indirect (resolved supersession head) provenance --
 
@@ -221,6 +294,158 @@ class TestBuildCandidateEvidence(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "no_evidence")
 
+    # -- H1 fix: used_or_fallback threading (memory `ed7cc8d5`) --
+
+    def test_used_or_fallback_false_marks_in_fts_and(self):
+        """Default (used_or_fallback=False, the existing behavior every non-migrated caller still
+        gets): a row present in fts_rows is a genuine AND match."""
+        fts_rows = [self._fts_row("a")]
+        rrf_map = {"a": 0.5}
+        ev = _build_candidate_evidence(["a"], rrf_map, fts_rows, [], {}, {})
+        self.assertTrue(ev["a"]["in_fts"])
+        self.assertTrue(ev["a"]["in_fts_and"])
+        self.assertFalse(ev["a"]["in_fts_or_only"])
+
+    def test_used_or_fallback_true_marks_in_fts_or_only(self):
+        """used_or_fallback=True: every row in fts_rows came from the OR-joined retry, not a
+        genuine AND match -- in_fts stays True (broad/history-mode recall unaffected), but
+        in_fts_and is False and in_fts_or_only is True."""
+        fts_rows = [self._fts_row("a")]
+        rrf_map = {"a": 0.5}
+        ev = _build_candidate_evidence(
+            ["a"], rrf_map, fts_rows, [], {}, {}, used_or_fallback=True
+        )
+        self.assertTrue(ev["a"]["in_fts"])
+        self.assertFalse(ev["a"]["in_fts_and"])
+        self.assertTrue(ev["a"]["in_fts_or_only"])
+
+    def test_dual_channel_false_when_or_fallback_even_with_semantic_hit(self):
+        """The exact bypass H1 closed: a candidate present via both the OR-fallback FTS branch
+        and the semantic pool must NOT be marked dual_channel -- dual_channel requires a genuine
+        AND match, not just any FTS presence."""
+        fts_rows = [self._fts_row("a")]
+        semantic_rows = [("a", 0.1)]
+        rrf_map = {"a": 0.5}
+        ev = _build_candidate_evidence(
+            ["a"], rrf_map, fts_rows, semantic_rows, {}, {}, used_or_fallback=True
+        )
+        self.assertTrue(ev["a"]["in_semantic"])
+        self.assertTrue(ev["a"]["in_fts_or_only"])
+        self.assertFalse(ev["a"]["dual_channel"])
+
+
+class TestRunFtsSearchFallbackFlag(unittest.TestCase):
+    """Direct unit tests on `_run_fts_search` itself (H1 fix, memory `ed7cc8d5`) -- exercises the
+    real AND->OR fallback branch against a real FTS5 index, not just through a patched gate test
+    (round-1 finding: testing only the gate risks missing a bug in the branch-detection itself)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _insert_entity(self, entity_id: str, content: str) -> None:
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash, memory_type)"
+            " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
+            " ?, ?, ?, 'fact')",
+            (entity_id, entity_id, content, entity_id),
+        )
+        self.conn.commit()
+
+    def test_and_match_found_no_fallback(self):
+        self._insert_entity("both", "alpha beta together")
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "alpha beta",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+        )
+        self.assertEqual({r[0] for r in rows}, {"both"})
+        self.assertFalse(used_or_fallback)
+
+    def test_and_finds_nothing_or_fallback_fires(self):
+        """No single entity has both terms -- the AND branch finds nothing, the OR retry finds
+        both single-term matches, used_or_fallback must be True."""
+        self._insert_entity("has_alpha", "alpha only text")
+        self._insert_entity("has_beta", "beta only text")
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "alpha beta",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+        )
+        self.assertEqual({r[0] for r in rows}, {"has_alpha", "has_beta"})
+        self.assertTrue(used_or_fallback)
+
+    def test_and_and_or_both_find_nothing_used_or_fallback_false(self):
+        """Codex review finding: used_or_fallback must be True only when the OR retry actually
+        PRODUCED rows, not merely because the OR branch was attempted -- a query with no matching
+        entity at all (neither AND nor OR finds anything) must report ([], False), matching this
+        function's own docstring contract ("the OR-joined retry is what produced rows")."""
+        self._insert_entity("unrelated", "completely different content, no overlap at all")
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "zzznomatch yyynomatch",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+        )
+        self.assertEqual(rows, [])
+        self.assertFalse(used_or_fallback)
+
+    def test_single_term_no_fallback_even_when_zero_rows(self):
+        """A single-term query that matches nothing must NOT attempt a fallback (len(terms) > 1
+        is required) -- used_or_fallback stays False, not just "unknown"."""
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "nonexistentterm",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+        )
+        self.assertEqual(rows, [])
+        self.assertFalse(used_or_fallback)
+
+    def test_empty_query_returns_empty_tuple_not_bare_list(self):
+        """The early-return empty-terms path must honor return_fallback_flag too: ([], False),
+        never a bare []."""
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+        )
+        self.assertEqual(rows, [])
+        self.assertFalse(used_or_fallback)
+
+    def test_return_fallback_flag_default_false_keeps_plain_list(self):
+        """Backward compatibility: callers that don't pass return_fallback_flag (the two
+        benchmark scripts that call _run_fts_search directly) must keep getting a plain list."""
+        self._insert_entity("both", "alpha beta together")
+        rows = _run_fts_search(self.conn, "alpha beta", ["e.status != 'archived'"], [], 10, 0)
+        self.assertIsInstance(rows, list)
+        self.assertEqual({r[0] for r in rows}, {"both"})
+
 
 class TestSearchMemoryModeStrictSeam(unittest.TestCase):
     """Controlled-seam integration tests -- patches _run_fts_search/semantic_search so the pool
@@ -257,7 +482,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         fts_rows = [self._fts_row("a")]
         semantic_rows = [("b", 0.1)]
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -277,7 +502,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("fts_hit", 0.05), ("semantic_only_no_grounding", 0.3)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -310,7 +535,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("fts_hit", 0.05), ("semantic_only_grounded", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -337,7 +562,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("semantic_only_no_grounding", 0.3)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=[]),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -369,7 +594,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("older", 0.1), ("newer", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -401,13 +626,271 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         self._insert_entity("a")
         fts_rows = [self._fts_row("a")]
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch("saltmdb.domain.services.memory_service.semantic_search", return_value=[]),
         ):
             results = search_memory(
                 query_keywords="q", db_path=self.db_path, include_related=False, mode="bogus"
             )
         self.assertEqual([r["id"] for r in results], ["a"])
+
+    # -- H1 fix: strict-mode gate on FTS OR-fallback matches (memory `ed7cc8d5`) --
+
+    def test_strict_mode_rejects_or_fallback_only_without_topic_grounding(self):
+        """An OR-fallback-only candidate (used_or_fallback=True from _run_fts_search) with no
+        SAME_SPECIFIC_TOPIC verdict must be dropped under mode="strict" -- this is the exact
+        false-accept mechanism H1 fixes (SALTMDB memory `6ee96334`)."""
+        self._insert_entity("or_fallback_only")
+        fts_rows = [self._fts_row("or_fallback_only")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                return_value={},
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                return_value={},
+            ),
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual(strict_results, [])
+
+    def test_strict_mode_accepts_or_fallback_only_with_same_specific_topic(self):
+        self._insert_entity("or_fallback_grounded")
+        fts_rows = [self._fts_row("or_fallback_grounded")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={
+                    "or_fallback_grounded": {
+                        "topic_score": 0.9,
+                        "semantic_verdict": "SAME_SPECIFIC_TOPIC",
+                    }
+                },
+            ),
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual({r["id"] for r in strict_results}, {"or_fallback_grounded"})
+
+    def test_strict_mode_or_fallback_plus_semantic_does_not_bypass_dual_channel(self):
+        """The exact bypass H1's fix closes, exercised through the full pipeline: an OR-fallback
+        match that ALSO appears in the semantic pool must NOT take the dual_channel shortcut --
+        it must still be held to the SAME_SPECIFIC_TOPIC bar."""
+        self._insert_entity("or_fallback_plus_semantic")
+        fts_rows = [self._fts_row("or_fallback_plus_semantic")]
+        semantic_rows = [("or_fallback_plus_semantic", 0.2)]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=semantic_rows,
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={
+                    "or_fallback_plus_semantic": {
+                        "topic_score": 0.4,
+                        "semantic_verdict": "BROADLY_RELATED_THEMES",
+                    }
+                },
+            ),
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual(
+            strict_results,
+            [],
+            "an OR-fallback + semantic candidate without SAME_SPECIFIC_TOPIC must still be "
+            "rejected, not accepted via the dual_channel shortcut",
+        )
+
+    def test_broad_mode_unaffected_by_or_fallback(self):
+        """Explicit scope boundary: only mode="strict"'s gate changes behavior. broad mode keeps
+        an OR-fallback match exactly as before, no gating."""
+        self._insert_entity("or_fallback_only")
+        fts_rows = [self._fts_row("or_fallback_only")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+        ):
+            results = search_memory(query_keywords="q", db_path=self.db_path, include_related=False)
+        self.assertEqual({r["id"] for r in results}, {"or_fallback_only"})
+
+    def test_history_mode_unaffected_by_or_fallback(self):
+        """Same scope boundary as broad mode: history mode's supersession tagging is unaffected
+        by whether the FTS match came via AND or the OR-fallback."""
+        self._insert_entity("or_fallback_only")
+        fts_rows = [self._fts_row("or_fallback_only")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+        ):
+            results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="history"
+            )
+        self.assertEqual({r["id"] for r in results}, {"or_fallback_only"})
+
+    def test_strict_mode_predecessor_or_fallback_only_grounded_is_accepted(self):
+        """Round-2-corrected predecessor path: a predecessor whose own evidence is OR-fallback-only
+        must get an on-demand topic-verdict lookup BEFORE predecessor_grounded_map is built (not
+        an empty topic map that silently always rejects it) -- SAME_SPECIFIC_TOPIC case accepts
+        the resolved head via indirect_grounded_predecessor."""
+        self._insert_entity("predecessor")
+        self._insert_entity("head")
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, valid_to)"
+            " VALUES (?, 'head', 'predecessor', 'supersedes', NULL)",
+            (str(uuid.uuid4()),),
+        )
+        self.conn.commit()
+        fts_rows = [self._fts_row("predecessor")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={
+                    "predecessor": {
+                        "topic_score": 0.9,
+                        "semantic_verdict": "SAME_SPECIFIC_TOPIC",
+                    }
+                },
+            ),
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual({r["id"] for r in strict_results}, {"head"})
+
+    def test_strict_mode_predecessor_or_fallback_only_ungrounded_is_rejected(self):
+        """Same setup as above, but the on-demand topic-verdict lookup returns a verdict below the
+        SAME_SPECIFIC_TOPIC bar -- the resolved head must be dropped, not silently substituted in
+        unconditionally."""
+        self._insert_entity("predecessor")
+        self._insert_entity("head")
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, valid_to)"
+            " VALUES (?, 'head', 'predecessor', 'supersedes', NULL)",
+            (str(uuid.uuid4()),),
+        )
+        self.conn.commit()
+        fts_rows = [self._fts_row("predecessor")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, True),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={
+                    "predecessor": {
+                        "topic_score": 0.3,
+                        "semantic_verdict": "BROADLY_RELATED_THEMES",
+                    }
+                },
+            ),
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual(strict_results, [])
+
+    def test_strict_mode_predecessor_true_and_match_skips_pre_pool_on_demand_scoring(self):
+        """Cost-bounding property: a predecessor that is a genuine AND match (used_or_fallback
+        False) must NOT trigger the PRE-POOL on-demand topic-scoring call at all -- it already has
+        a sufficient DIRECT signal via the existing dual_channel/fts_match rule, so
+        predecessor_grounded_map is resolved without ever topic-scoring "predecessor". The main
+        pool's own separate ungrounded-id scoring for the substituted "head" (which has no native
+        FTS/semantic signal of its own) is unrelated and still legitimately fires -- this test only
+        asserts "predecessor" itself is never passed to _score_topics_with_fallback."""
+        self._insert_entity("predecessor")
+        self._insert_entity("head")
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, valid_to)"
+            " VALUES (?, 'head', 'predecessor', 'supersedes', NULL)",
+            (str(uuid.uuid4()),),
+        )
+        self.conn.commit()
+        fts_rows = [self._fts_row("predecessor")]
+
+        with (
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.semantic_search",
+                return_value=[],
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                return_value={},
+            ) as mock_score_topics,
+        ):
+            strict_results = search_memory(
+                query_keywords="q", db_path=self.db_path, include_related=False, mode="strict"
+            )
+        self.assertEqual({r["id"] for r in strict_results}, {"head"})
+        for call in mock_score_topics.call_args_list:
+            ids_arg = call.args[1] if len(call.args) > 1 else call.kwargs.get("ids")
+            self.assertNotIn(
+                "predecessor",
+                ids_arg,
+                "true-AND pre-pool predecessor must skip the on-demand topic-scoring call",
+            )
 
 
 if __name__ == "__main__":

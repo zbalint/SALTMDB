@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
 _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-search")
 
+
 TITLE_MIN_LENGTH = 5
 TITLE_MAX_LENGTH = 120
 
@@ -529,13 +530,29 @@ STOP_WORDS = {
 
 
 def _run_fts_search(
-    conn, sanitized_query: str, where_clauses: list, params: list, limit: int, offset: int
-) -> list:
+    conn,
+    sanitized_query: str,
+    where_clauses: list,
+    params: list,
+    limit: int,
+    offset: int,
+    *,
+    return_fallback_flag: bool = False,
+) -> list | tuple[list, bool]:
     """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list.
 
     Each row's last column, fts_snippet, is a query-centered excerpt of full_content
     (FTS5 snippet(), column index 2) -- populated because this row genuinely matched via
     FTS5 MATCH in this query, distinct from rows that only surface via semantic_search().
+
+    `return_fallback_flag` (opt-in, default False for backward compatibility with the two
+    benchmark scripts that call this function directly): when True, returns
+    `(rows, used_or_fallback)` instead of a bare row list, where `used_or_fallback` is True iff
+    the AND-joined MATCH found nothing and the OR-joined retry is what actually produced `rows`.
+    This is a single pool-level bool, not a per-row property -- the OR-fallback is an
+    all-or-nothing property of how the query as a whole was executed. Every return path
+    (including the early-return empty-terms case) honors the flag: `([], False)`, never a bare
+    `[]`, when `return_fallback_flag=True`.
     """
     raw_terms = sanitized_query.split()
     terms = [t for t in raw_terms if t.lower() not in STOP_WORDS]
@@ -543,7 +560,7 @@ def _run_fts_search(
         terms = raw_terms
 
     if not terms:
-        return []
+        return ([], False) if return_fallback_flag else []
 
     fts_query_str = " ".join(f'"{t}"*' for t in terms)
     where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
@@ -571,11 +588,18 @@ def _run_fts_search(
     """
     exec_params = [fts_query_str] + params + [limit, offset]
     rows = conn.execute(sql, exec_params).fetchall()
+    used_or_fallback = False
     if not rows and len(terms) > 1:
         fts_fallback_query = " OR ".join(f'"{t}"*' for t in terms)
         exec_params_fb = [fts_fallback_query] + params + [limit, offset]
         rows = conn.execute(sql, exec_params_fb).fetchall()
-    return rows
+        # True iff the OR retry actually produced rows (Codex review finding) -- not merely
+        # "the OR branch ran." An AND-empty query whose OR retry ALSO finds nothing leaves
+        # `rows` empty either way, but the flag's own contract ("the OR-joined retry is what
+        # produced rows", see this function's docstring) should reflect reality precisely, not
+        # just "the fallback was attempted."
+        used_or_fallback = bool(rows)
+    return (rows, used_or_fallback) if return_fallback_flag else rows
 
 
 def semantic_search(
@@ -1200,26 +1224,41 @@ def _build_candidate_evidence(
     resolved_from: dict[str, list[str]],
     predecessor_grounded_map: dict[str, bool] | None = None,
     cross_encoder_scores_map: dict[str, float] | None = None,
+    *,
+    used_or_fallback: bool = False,
 ) -> dict[str, dict]:
     """Part B: builds a per-candidate evidence record for every id in pool_ids, consumed by
-    `accept_or_abstain` below. Two distinct evidence classes are tracked (Codex correction to the
-    first plan draft, which conflated them):
+    `accept_or_abstain` below. Two independent evidence axes are tracked:
 
-    - DIRECT: the candidate itself appeared in the FTS and/or semantic retrieval pool -- it has
-      its own native rank/score/lexical-match signal (`in_fts`/`in_semantic`/`fts_rank`/
-      `semantic_distance`/etc below).
-    - INDIRECT: the candidate is a resolved supersession head (present in `resolved_from`) that
-      was NOT itself in the original, pre-resolution retrieval pool. It has no native FTS/semantic
-      rank of its own -- copying the superseded predecessor's evidence onto it would be unsound
-      (the predecessor matched the query; the successor's own relation to the query is
-      unverified). This function deliberately leaves an indirect candidate's own direct-evidence
-      fields as their natural empty/None/False values; `predecessor_grounded_map` (built by the
-      caller from the PRE-resolution pool's own evidence, see search_memory) is threaded through
-      instead, so `accept_or_abstain` can require the predecessor's own match to have been strong,
-      per the plan's explicit "requiring the predecessor's match to have been strong" option.
-      A resolved head CAN also independently appear directly in the pool -- both classes can
-      coexist; `provenance` is "direct" whenever there's any native signal at all, "indirect" only
-      when there is none.
+    - DIRECT vs INDIRECT provenance (Codex correction to the first plan draft, which conflated
+      them):
+      - DIRECT: the candidate itself appeared in the FTS and/or semantic retrieval pool -- it has
+        its own native rank/score/lexical-match signal (`in_fts`/`in_semantic`/`fts_rank`/
+        `semantic_distance`/etc below).
+      - INDIRECT: the candidate is a resolved supersession head (present in `resolved_from`) that
+        was NOT itself in the original, pre-resolution retrieval pool. It has no native FTS/semantic
+        rank of its own -- copying the superseded predecessor's evidence onto it would be unsound
+        (the predecessor matched the query; the successor's own relation to the query is
+        unverified). This function deliberately leaves an indirect candidate's own direct-evidence
+        fields as their natural empty/None/False values; `predecessor_grounded_map` (built by the
+        caller from the PRE-resolution pool's own evidence, see search_memory) is threaded through
+        instead, so `accept_or_abstain` can require the predecessor's own match to have been strong,
+        per the plan's explicit "requiring the predecessor's match to have been strong" option.
+        A resolved head CAN also independently appear directly in the pool -- both classes can
+        coexist; `provenance` is "direct" whenever there's any native signal at all, "indirect" only
+        when there is none.
+    - AND-match vs OR-fallback-only, for DIRECT FTS matches (H1 fix): `used_or_fallback` is the
+      single pool-level bool `_run_fts_search` returns when `return_fallback_flag=True` -- True iff
+      the AND-joined MATCH found nothing and the OR-joined retry is what produced `fts_rows`. When
+      True, every id in `fts_rows` is an OR-fallback-only match (`in_fts_or_only`); when False,
+      every id in `fts_rows` is a genuine AND match (`in_fts_and`) -- this is a property of how the
+      whole query was executed, not a per-row distinction. `in_fts` stays `in_fts_and or
+      in_fts_or_only` for any caller that doesn't care about the split (broad/history mode ranking
+      keeps using it for recall, unchanged). `dual_channel` is keyed specifically on `in_fts_and`
+      (NOT the broader `in_fts`) -- an OR-fallback-only candidate that also happens to land in the
+      semantic pool must still go through `accept_or_abstain`'s `in_fts_or_only` topic-grounding
+      check, not bypass it via the dual-channel shortcut (this was a real bypass caught during
+      review; do not "simplify" `dual_channel` back to `in_fts and in_semantic`).
 
     `topic_score`/`semantic_verdict` stay optional (None when absent) -- populated only when
     rerank_by_topic actually ran for this call (cost note, Part B): this function must never force
@@ -1239,6 +1278,8 @@ def _build_candidate_evidence(
     evidence: dict[str, dict] = {}
     for eid in pool_ids:
         in_fts = eid in fts_rank
+        in_fts_and = in_fts and not used_or_fallback
+        in_fts_or_only = in_fts and used_or_fallback
         in_semantic = eid in semantic_rank
         has_direct_signal = in_fts or in_semantic
         is_resolved_head = eid in resolved_from
@@ -1249,12 +1290,14 @@ def _build_candidate_evidence(
             "provenance": provenance,
             "rrf_score": rrf_score_map.get(eid),
             "in_fts": in_fts,
+            "in_fts_and": in_fts_and,
+            "in_fts_or_only": in_fts_or_only,
             "fts_rank": fts_rank.get(eid),
             "fts_bm25": fts_bm25.get(eid),
             "in_semantic": in_semantic,
             "semantic_rank": semantic_rank.get(eid),
             "semantic_distance": semantic_distance.get(eid),
-            "dual_channel": in_fts and in_semantic,
+            "dual_channel": in_fts_and and in_semantic,
             "topic_score": topic["topic_score"] if topic else None,
             "semantic_verdict": topic["semantic_verdict"] if topic else None,
             "is_resolved_head": is_resolved_head,
@@ -1278,22 +1321,36 @@ def accept_or_abstain(evidence: dict, policy: dict | None = None) -> tuple[bool,
     Acceptance requires a positive grounding signal -- a real, non-phantom match this codebase can
     already produce:
 
-    - DIRECT, dual-channel (in_fts AND in_semantic): always accepted -- the strongest, already-
+    - DIRECT, dual-channel (in_fts_and AND in_semantic): always accepted -- the strongest, already-
       established signal shape (`_rrf_gap_confident`'s own precondition for even considering a
-      confident top-1).
-    - DIRECT, FTS-only (in_fts, not in_semantic): accepted -- an `entities_fts MATCH` is a genuine
-      term match, not a nearest-neighbor phantom, and its correctness doesn't degrade as the
-      corpus grows.
-    - DIRECT, semantic-only (in_semantic, not in_fts): accepted ONLY if `semantic_verdict` is
-      exactly "SAME_SPECIFIC_TOPIC" (reusing RERANK_SAME_TOPIC_THRESHOLD as-is, not a new
-      constant -- see the "why not a raw distance cutoff" note below). "BROADLY_RELATED_THEMES"
-      or no topic_score at all is NOT sufficient on its own.
+      confident top-1). Deliberately keyed on `in_fts_and`, not the broader `in_fts` -- an
+      OR-fallback-only match that also happens to land in the semantic pool must NOT take this
+      shortcut; it goes through the `in_fts_or_only` rule below instead (H1 fix; this is the exact
+      bypass an earlier revision of this gate had).
+    - DIRECT, true FTS AND-match (in_fts_and, not in_semantic): accepted -- a genuine AND-joined
+      `entities_fts MATCH` is a real term match, not a nearest-neighbor phantom, and its
+      correctness doesn't degrade as the corpus grows.
+    - DIRECT, FTS OR-fallback-only (in_fts_or_only -- present only because the AND-joined query
+      found nothing and `_run_fts_search` silently retried with an OR-joined query), REGARDLESS of
+      whether it also happens to be `in_semantic`: accepted ONLY if `semantic_verdict` is exactly
+      "SAME_SPECIFIC_TOPIC", the same bar as the semantic-only rule below. An OR-fallback match is
+      an incidental single-term hit, not a corroborated match on its own -- unconditionally
+      accepting it (as an earlier revision of this gate did, via the old broad `in_fts` check) is
+      exactly the false-accept mechanism SALTMDB memory `6ee96334` traced 10/10 replayed
+      negative-control queries to.
+    - DIRECT, semantic-only (in_semantic, neither in_fts_and nor in_fts_or_only): accepted ONLY if
+      `semantic_verdict` is exactly "SAME_SPECIFIC_TOPIC" (reusing RERANK_SAME_TOPIC_THRESHOLD
+      as-is, not a new constant -- see the "why not a raw distance cutoff" note below).
+      "BROADLY_RELATED_THEMES" or no topic_score at all is NOT sufficient on its own.
     - INDIRECT (resolved supersession head absent from the original pool): has no native signal of
       its own to trust. Accepted only if `predecessor_grounded` is True -- the original,
-      pre-resolution candidate that resolved to this head independently cleared the DUAL_CHANNEL
-      or FTS_MATCH rule above (NOT the semantic-only rule; see search_memory's predecessor-
-      evidence construction, which never computes topic grounding for the pre-resolution pool).
-      This is deliberately the ONLY condition (an earlier version of this function also required
+      pre-resolution candidate that resolved to this head independently cleared the DUAL_CHANNEL,
+      true-AND FTS_MATCH, or (since the H1 fix) the OR-fallback-plus-SAME_SPECIFIC_TOPIC rule above
+      (NOT the semantic-only rule; see search_memory's predecessor-evidence construction). An
+      OR-fallback-only predecessor's `predecessor_grounded` value can therefore itself depend on an
+      on-demand topic-verdict lookup performed over the pre-resolution pool before this map is
+      built -- not only on `dual_channel`/`in_fts_and` signals, as an earlier revision of this
+      docstring implied. This is deliberately the ONLY condition (an earlier version of this function also required
       the head's own semantic_verdict not be "DIFFERENT_TOPICS" -- reverted: the on-demand
       topic-grounding lookup that powers the DIRECT semantic-only rule above assigns EVERY
       FTS-less candidate some verdict, including a default "DIFFERENT_TOPICS" for a resolved head
@@ -1334,8 +1391,12 @@ def accept_or_abstain(evidence: dict, policy: dict | None = None) -> tuple[bool,
 
     if evidence.get("dual_channel"):
         return True, "dual_channel"
-    if evidence.get("in_fts"):
+    if evidence.get("in_fts_and"):
         return True, "fts_match"
+    if evidence.get("in_fts_or_only"):
+        if evidence.get("semantic_verdict") == "SAME_SPECIFIC_TOPIC":
+            return True, "fts_or_fallback_same_specific_topic"
+        return False, "fts_or_fallback_insufficient_topic_grounding"
     if evidence.get("in_semantic"):
         if evidence.get("semantic_verdict") == "SAME_SPECIFIC_TOPIC":
             return True, "semantic_only_same_specific_topic"
@@ -1597,8 +1658,14 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     metadata for the mode="strict" overfetch retry loop below (Part C2) to decide
                     whether widening further could help, and for row assembly afterward.
                     """
-                    fts_rows_ = _run_fts_search(
-                        conn, sanitized_query, where_clauses, params, candidate_window, 0
+                    fts_rows_, used_or_fallback_ = _run_fts_search(
+                        conn,
+                        sanitized_query,
+                        where_clauses,
+                        params,
+                        candidate_window,
+                        0,
+                        return_fallback_flag=True,
                     )
                     semantic_rows_ = semantic_search(
                         query_keywords, where_clauses, params, candidate_window, db_path, 0
@@ -1606,6 +1673,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
 
                     rrf_map = reciprocal_rank_fusion(fts_rows_, semantic_rows_, candidate_window)
                     fts_ids_ = {r[0] for r in fts_rows_}
+                    # True-AND-only id set (H1 fix): empty whenever used_or_fallback_ is True,
+                    # since every row in fts_rows_ then came from the OR-joined retry, not a
+                    # genuine AND match -- see _run_fts_search's own docstring for why this is a
+                    # single pool-level bool, not a per-row property.
+                    fts_and_ids_ = fts_ids_ if not used_or_fallback_ else set()
                     semantic_ids_ = {eid for eid, _ in semantic_rows_}
 
                     resolved_from_: dict[str, list[str]] = {}
@@ -1618,8 +1690,32 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             conn, pre_pool_ids, where_clauses, params
                         )
                         if resolved_map:
+                            # H1 predecessor-grounding fix: on-demand topic-score exactly the
+                            # OR-fallback-only subset of pre_pool_ids (true-AND pre-pool candidates
+                            # already have a sufficient DIRECT signal and skip this lookup) BEFORE
+                            # building pre_evidence -- otherwise an OR-fallback-only predecessor can
+                            # never get a semantic_verdict at all, silently always failing the
+                            # in_fts_or_only rule below regardless of its real topic relevance.
+                            pre_or_fallback_only_ids = (
+                                [eid for eid in pre_pool_ids if eid in fts_ids_]
+                                if used_or_fallback_
+                                else []
+                            )
+                            pre_topic_scores_map = (
+                                _score_topics_with_fallback(
+                                    query_keywords, pre_or_fallback_only_ids, db_path
+                                )
+                                if pre_or_fallback_only_ids
+                                else {}
+                            )
                             pre_evidence = _build_candidate_evidence(
-                                pre_pool_ids, rrf_map, fts_rows_, semantic_rows_, {}, {}
+                                pre_pool_ids,
+                                rrf_map,
+                                fts_rows_,
+                                semantic_rows_,
+                                pre_topic_scores_map,
+                                {},
+                                used_or_fallback=used_or_fallback_,
                             )
                             for cid, head in resolved_map.items():
                                 resolved_from_.setdefault(head, []).append(cid)
@@ -1673,12 +1769,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 # empirically rejected) -- compute it on demand, WITHOUT
                                 # reordering the pool (full-pool reordering is rerank_by_topic's
                                 # own separate opt-in, untouched here), and only for candidates
-                                # that actually need it: those lacking FTS support at all
-                                # (fts_ids_). Dual-channel/FTS-matched candidates already have a
-                                # sufficient DIRECT signal and skip this lookup entirely, keeping
-                                # the added cost bounded.
+                                # that actually need it: those lacking a genuine FTS AND-match
+                                # (fts_and_ids_, NOT the broader fts_ids_ -- H1 fix). An
+                                # OR-fallback-only candidate IS included here and DOES get a
+                                # semantic_verdict computed, so accept_or_abstain's in_fts_or_only
+                                # rule can actually be satisfied; only true-AND/dual-channel
+                                # candidates already have a sufficient DIRECT signal and skip this
+                                # lookup, keeping the added cost bounded.
                                 ungrounded_ids = [
-                                    eid for eid in ranked_pool_ if eid not in fts_ids_
+                                    eid for eid in ranked_pool_ if eid not in fts_and_ids_
                                 ]
                                 topic_scores_map_ = _score_topics_with_fallback(
                                     query_keywords, ungrounded_ids, db_path
@@ -1750,6 +1849,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 resolved_from_,
                                 predecessor_grounded_map,
                                 cross_encoder_scores_map_,
+                                used_or_fallback=used_or_fallback_,
                             )
                             accepted_pool = []
                             for eid in ranked_pool_:

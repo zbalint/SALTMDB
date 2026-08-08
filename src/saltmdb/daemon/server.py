@@ -21,6 +21,7 @@ from typing import Any
 from saltmdb import config
 from saltmdb.daemon import discovery, platform_paths, protocol
 from saltmdb.daemon.dispatch import DISPATCH_TABLE
+from saltmdb.daemon.embed_stall_monitor import EmbedStallMonitor
 from saltmdb.db.schema import init_db
 
 logger = logging.getLogger(__name__)
@@ -499,12 +500,21 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     def _request_shutdown(*_args) -> None:
         shutdown_requested.set()
 
+    # Construct before the watcher thread starts: the watcher closes over this object to stop it
+    # during shutdown, so it must be bound even if a signal lands immediately at startup.
+    stall_monitor = EmbedStallMonitor(db_path)
+
     def _shutdown_watcher() -> None:
         shutdown_requested.wait()
-        _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key)
+        _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor)
 
     watcher_thread = threading.Thread(target=_shutdown_watcher, daemon=True)
     watcher_thread.start()
+
+    # H6: periodic stale-pending visibility. Deliberately no monitor-owned termination path: the
+    # existing grace shutdown already handles a genuinely idle daemon, while terminating a daemon
+    # with a live session needs an explicit future lifecycle policy.
+    stall_monitor.start()
 
     state.set_shutdown_callback(_request_shutdown)
     state.start_initial_grace_period()
@@ -529,12 +539,16 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     watcher_thread.join()
 
 
-def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key) -> None:
+def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor=None) -> None:
     """Ordered shutdown -- latency/resource hygiene, NOT a data-safety mechanism (see
     scratch/plans/track_b_daemon_detailed.md §6's reframing: SQLite's own WAL+busy_timeout+retry
     concurrency machinery, already relied on throughout this codebase, is what actually makes
     brief overlap between an outgoing daemon and its successor safe)."""
     state.begin_draining()
+
+    if stall_monitor is not None:
+        stall_monitor.stop()  # daemon=True thread, dies with the process regardless -- stopped
+        # here purely to avoid a stray check firing mid-drain, not for correctness.
 
     service_server.shutdown()  # stops serve_forever's accept loop
     service_server.server_close()  # round-5 fix: shutdown() alone does not release the port

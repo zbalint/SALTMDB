@@ -462,7 +462,7 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
         semantic_rows = [(entity_a, 0.1), (entity_b, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -491,7 +491,7 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
         semantic_rows = [(entity_b, 0.1)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=fts_rows),
+            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,

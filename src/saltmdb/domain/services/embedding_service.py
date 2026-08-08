@@ -168,7 +168,11 @@ def embed_entity_async(entity_id: str, title: str, full_content: str, db_path: s
 
 
 def backfill_pending_embeddings(db_path: str = None) -> int:
-    """Scans for active entities where embedding_status = 'pending' or NULL and queues embedding generation."""
+    """Scans for active entities where embedding_status = 'pending' or NULL and queues embedding
+    generation. Fired from the daemon startup sweep and separately from a viewer/routes.py
+    maintenance endpoint -- NOT from the manual --backfill-chunk-embeddings CLI flag /
+    run_backfill_chunk_embeddings_now RPC, which only invokes backfill_chunk_embeddings (the
+    chunk-level sweep) instead."""
     from saltmdb.config import get_db_path
     from saltmdb.db.connection import get_connection
     from saltmdb.domain.services.memory_service import _embed_pool
@@ -320,12 +324,15 @@ def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
     (fire-and-forget, same pool as the entity-level embed). This function is a separate,
     synchronous repair pass over that -- invoked explicitly on demand (e.g. via
     `python -m saltmdb --backfill-chunk-embeddings`) and unconditionally at normal server startup
-    (see __main__.py, right after backfill_pending_embeddings()) -- catching anything an async
-    job never completed or completed incorrectly: never-chunked entities, a failed/interrupted
-    job, Foundation-era rows that predate this column, or (defense-in-depth) any stale write that
-    somehow slipped past the hot-path guard. Runs synchronously in-process (not via
-    memory_service._embed_pool), per user decision -- self-contained and easy to reason about for
-    a startup sweep, at the cost of blocking startup for its duration.
+    (see `daemon/server.py`'s startup sweep, right after backfill_pending_embeddings() -- corrected
+    from a stale `__main__.py` reference; `__main__.py` only forwards manual
+    `--backfill-chunk-embeddings` CLI invocations to the running daemon over RPC, it is not itself
+    the startup call site) -- catching anything an async job never completed or completed
+    incorrectly: never-chunked entities, a failed/interrupted job, Foundation-era rows that predate
+    this column, or (defense-in-depth) any stale write that somehow slipped past the hot-path
+    guard. Runs synchronously in-process (not via memory_service._embed_pool), per user decision --
+    self-contained and easy to reason about for a startup sweep, at the cost of blocking startup
+    for its duration.
 
     Captures each candidate's content_hash at selection time and passes it through to
     write_entity_chunk_embeddings as expected_content_hash, so the staleness guard there has
@@ -341,8 +348,39 @@ def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
     write. A skipped entity picks up a real content_hash (and becomes eligible again) on its next
     store_memory write, or the next init_db() run.
 
-    Returns the count of entities actually written (excludes any skipped by the staleness guard
-    or by a still-missing content_hash).
+    Per-row isolation (H2 fix, memory `ed7cc8d5`): each row's write_entity_chunk_embeddings call is
+    wrapped in its own `except Exception` (not `BaseException`) -- a mid-loop exception no longer
+    silently aborts every entity after the one that raised. Safe by construction: this function's
+    own selection connection is already closed before the loop starts, and each
+    write_entity_chunk_embeddings call opens its own connection and uses one retried atomic
+    transaction, so a per-row failure cannot leave that entity's chunk rows partially written. The
+    OUTER try/except at this function's own call site (daemon startup sweep) is unchanged and still
+    protects against selection-query/extension-load failures, which per-row isolation inside this
+    loop cannot address.
+
+    Structured six-bucket count logging, always emitted at the end of the sweep (not gated on
+    nonzero): `selected` (total rows returned by the selection query, the denominator) and five
+    mutually-exclusive per-row outcomes that sum to it -- `written`, `skipped_missing_hash`
+    (existing NULL-content_hash branch), `skipped_empty_or_unchunkable` (new precheck below, since
+    write_entity_chunk_embeddings() returning 0 is otherwise ambiguous between this and a stale-
+    guard skip), `skipped_stale_guard` (a real-content row whose write call returned 0 after the
+    empty-content precheck already ruled that out), and `failed` (from the per-row isolation
+    above). `selected != written` is NOT inherently anomalous -- stale-guard and missing-hash skips
+    are deliberate, expected behavior. A per-row `INFO`-level log line (the daemon's actual default
+    level; `DEBUG` would be silently invisible in the deployed configuration this is meant to help
+    diagnose) fires at the start of each row's processing, so a hang's last-logged entity id
+    identifies where the sweep stopped even though a hang -- as opposed to a raised exception, which
+    per-row isolation above already handles -- still prevents this function from ever reaching its
+    own final aggregate log line.
+
+    Root cause of any *historical* chunk-embedding escape (why an earlier unconditional sweep found
+    and should have fixed a given entity but apparently didn't) stays formally UNRESOLVED by this
+    fix -- it makes the failure mode visible and non-silent going forward, it does not retroactively
+    explain what happened before.
+
+    Returns the count of entities actually written (`written` bucket -- excludes entities skipped
+    by the staleness guard, a missing content_hash, empty/unchunkable content, or a per-row write
+    failure).
     """
     import sqlite_vec
     from saltmdb.config import get_db_path
@@ -386,8 +424,20 @@ def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
     finally:
         conn.close()
 
+    selected = len(rows)
     written = 0
-    for eid, content, content_hash in rows:
+    skipped_missing_hash = 0
+    skipped_empty_or_unchunkable = 0
+    skipped_stale_guard = 0
+    failed = 0
+
+    for i, (eid, content, content_hash) in enumerate(rows, start=1):
+        # Visibility (H2 fix): logged at the start of every row's processing, at INFO (the
+        # daemon's actual default level) -- so a hang's last-logged entity id identifies where
+        # the sweep stopped, even though a hang itself (as opposed to a raised exception, isolated
+        # below) still prevents this function from ever reaching its final aggregate log line.
+        logger.info("Backfilling chunk embeddings for entity %s (%d/%d)", eid, i, selected)
+
         if not content_hash:
             # See docstring: forwarding this as expected_content_hash=None would silently
             # disable the staleness guard for this entity (Codex re-review finding, Foundation
@@ -397,10 +447,45 @@ def backfill_chunk_embeddings(db_path: str = None, limit: int = None) -> int:
                 "(run init_db() to migrate legacy rows)",
                 eid,
             )
+            skipped_missing_hash += 1
             continue
-        count = write_entity_chunk_embeddings(
-            eid, content, db_path, expected_content_hash=content_hash
-        )
+
+        if not content or not content.strip():
+            # Precheck (H2 fix): write_entity_chunk_embeddings() returns bare 0 for BOTH this case
+            # and a stale-guard skip -- disambiguate here, before calling it, rather than changing
+            # that function's own return contract (which has another caller, store_memory's
+            # fire-and-forget path, this fix deliberately doesn't need to touch).
+            skipped_empty_or_unchunkable += 1
+            continue
+
+        try:
+            count = write_entity_chunk_embeddings(
+                eid, content, db_path, expected_content_hash=content_hash
+            )
+        except Exception:
+            # Per-row isolation (H2 fix): logger.exception (not plain .error) captures the
+            # traceback; continuing to the next row is what actually closes the sweep-escape gap
+            # -- one bad row no longer silently aborts everything after it.
+            logger.exception("Chunk-embedding backfill failed for entity %s", eid)
+            failed += 1
+            continue
+
         if count > 0:
             written += 1
+        else:
+            # The empty-content precheck above already ruled out that explanation for a 0 return
+            # here -- the remaining explanation is write_entity_chunk_embeddings' own stale-write
+            # guard (the entity was edited/archived since this sweep read its content_hash).
+            skipped_stale_guard += 1
+
+    logger.info(
+        "backfill_chunk_embeddings complete: selected=%d written=%d skipped_missing_hash=%d "
+        "skipped_empty_or_unchunkable=%d skipped_stale_guard=%d failed=%d",
+        selected,
+        written,
+        skipped_missing_hash,
+        skipped_empty_or_unchunkable,
+        skipped_stale_guard,
+        failed,
+    )
     return written

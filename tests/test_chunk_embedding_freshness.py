@@ -3,10 +3,13 @@ import tempfile
 import os
 import re
 import time
+import uuid
+from unittest import mock
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory, archive_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
+from saltmdb.domain.services import embedding_service as embedding_service_module
 from saltmdb.domain.services.embedding_service import (
     write_entity_chunk_embeddings,
     backfill_chunk_embeddings,
@@ -328,6 +331,151 @@ class TestChunkEmbeddingFreshness(unittest.TestCase):
         entity_hash = self._content_hash(entity_id)
         for row in repaired_rows:
             self.assertEqual(row[3], entity_hash)
+
+    # -- H2 fix: per-row isolation + structured counts (memory `ed7cc8d5`) ----
+
+    def _force_never_chunked(self, *entity_ids: str) -> None:
+        """Deletes an entity's existing chunk rows so backfill_chunk_embeddings' selection query
+        (NOT EXISTS branch) picks it back up, simulating a never-successfully-chunked entity
+        without waiting on a real staleness window."""
+        placeholders = ",".join("?" for _ in entity_ids)
+        self.conn.execute(
+            f"DELETE FROM entity_chunk_embeddings WHERE entity_id IN ({placeholders})",
+            entity_ids,
+        )
+        self.conn.commit()
+
+    def test_backfill_isolates_per_row_failure_and_logs_exception(self):
+        """A raising write for one entity must not abort the whole sweep -- entities before and
+        after it in the selection order still get written, and the exception is logged via
+        logger.exception (not swallowed, not just logger.error) with the specific entity id."""
+        ids = []
+        for label in ("one", "two", "three"):
+            eid = self._store(
+                f"Backfill Isolation {label}", f"Content for backfill isolation entity {label}."
+            )
+            self._poll_for_rows(eid)
+            ids.append(eid)
+        self._force_never_chunked(*ids)
+
+        real_write = embedding_service_module.write_entity_chunk_embeddings
+        failing_id = ids[1]
+
+        def _flaky_write(entity_id, content, db_path, expected_content_hash=None):
+            if entity_id == failing_id:
+                raise RuntimeError("simulated write failure")
+            return real_write(entity_id, content, db_path, expected_content_hash=expected_content_hash)
+
+        with self.assertLogs("saltmdb.domain.services.embedding_service", level="ERROR") as cm:
+            with mock.patch.object(
+                embedding_service_module, "write_entity_chunk_embeddings", side_effect=_flaky_write
+            ):
+                written = backfill_chunk_embeddings(self.db_path)
+
+        self.assertEqual(written, 2, "the two non-raising entities must still be written")
+        self.assertTrue(
+            any(failing_id in line for line in cm.output),
+            "the failing entity's id must appear in an ERROR-level (logger.exception) log record",
+        )
+        self.assertTrue(self._chunk_rows(ids[0]), "entity before the failure must still be written")
+        self.assertTrue(self._chunk_rows(ids[2]), "entity after the failure must still be written")
+        self.assertFalse(self._chunk_rows(failing_id), "the failing entity must not have chunk rows")
+
+    def test_backfill_structured_count_buckets(self):
+        """One entity with empty/whitespace content, one with a missing content_hash, one whose
+        write is made to simulate a stale-guard skip, one that writes successfully, and one that
+        raises -- assert all six counts land the expected row in the expected bucket, not just
+        that the aggregate log line exists."""
+        ok_id = self._store("Backfill Count OK", "Real content for the successful-write bucket.")
+        self._poll_for_rows(ok_id)
+        fail_id = self._store("Backfill Count Fail", "Content that will raise during backfill.")
+        self._poll_for_rows(fail_id)
+        self._force_never_chunked(ok_id, fail_id)
+
+        empty_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash, memory_type)"
+            " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
+            " 'Empty Content Entity', '   ', 'somehash', 'fact')",
+            (empty_id,),
+        )
+        missing_hash_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash, memory_type)"
+            " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
+            " 'Missing Hash Entity', 'some real content here', NULL, 'fact')",
+            (missing_hash_id,),
+        )
+        stale_guard_id = str(uuid.uuid4())
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash, memory_type)"
+            " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
+            " 'Stale Guard Entity', 'some real content here too', 'realhash', 'fact')",
+            (stale_guard_id,),
+        )
+        self.conn.commit()
+
+        real_write = embedding_service_module.write_entity_chunk_embeddings
+
+        def _flaky_write(entity_id, content, db_path, expected_content_hash=None):
+            if entity_id == fail_id:
+                raise RuntimeError("simulated write failure")
+            if entity_id == stale_guard_id:
+                # Simulate write_entity_chunk_embeddings' own stale-write guard skip (a 0 return)
+                # without needing to actually race the guard itself -- that mechanism is already
+                # covered by test_reverse_completion_race_stale_write_does_not_clobber_newer_commit.
+                return 0
+            return real_write(entity_id, content, db_path, expected_content_hash=expected_content_hash)
+
+        with self.assertLogs("saltmdb.domain.services.embedding_service", level="INFO") as cm:
+            with mock.patch.object(
+                embedding_service_module, "write_entity_chunk_embeddings", side_effect=_flaky_write
+            ):
+                written = backfill_chunk_embeddings(self.db_path)
+
+        self.assertEqual(written, 1, "only ok_id should count toward the written bucket")
+        summary_lines = [line for line in cm.output if "backfill_chunk_embeddings complete" in line]
+        self.assertEqual(len(summary_lines), 1, "exactly one aggregate summary line must be logged")
+        summary = summary_lines[0]
+        self.assertIn("selected=5", summary)
+        self.assertIn("written=1", summary)
+        self.assertIn("skipped_missing_hash=1", summary)
+        self.assertIn("skipped_empty_or_unchunkable=1", summary)
+        self.assertIn("skipped_stale_guard=1", summary)
+        self.assertIn("failed=1", summary)
+
+    def test_backfill_per_row_start_log_precedes_write_call(self):
+        """The per-row start-of-attempt log line must be emitted BEFORE the write call executes,
+        proven via a controllable fake that checks the log already recorded this entity's id at
+        the moment it's invoked -- not a real indefinite hang (same caution H6's own test guidance
+        uses: a controllable fake, not real blocking, in a unit test)."""
+        eid = self._store("Backfill Start Log", "Content for the start-of-attempt visibility test.")
+        self._poll_for_rows(eid)
+        self._force_never_chunked(eid)
+
+        real_write = embedding_service_module.write_entity_chunk_embeddings
+        observed = {}
+
+        def _observing_write(entity_id, content, db_path, expected_content_hash=None):
+            observed["logged_before_write"] = any(entity_id in line for line in cm.output)
+            return real_write(entity_id, content, db_path, expected_content_hash=expected_content_hash)
+
+        with self.assertLogs("saltmdb.domain.services.embedding_service", level="INFO") as cm:
+            with mock.patch.object(
+                embedding_service_module, "write_entity_chunk_embeddings", side_effect=_observing_write
+            ):
+                backfill_chunk_embeddings(self.db_path)
+
+        self.assertTrue(
+            observed.get("logged_before_write"),
+            "the per-row start-of-attempt log line must precede the write call, not follow it",
+        )
 
 
 if __name__ == "__main__":

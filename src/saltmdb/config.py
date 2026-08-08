@@ -301,3 +301,11 @@ DAEMON_RESPAWN_RETRY_INTERVAL = 8
 # Daemon grace-period shutdown timer once the last session disconnects -- matches the pre-Track-B
 # viewer liveness watchdog's existing grace_period default exactly, no user-visible behavior change.
 DAEMON_SHUTDOWN_GRACE_PERIOD_S = 30
+
+# _embed_pool stall visibility (daemon/embed_stall_monitor.py) -- H6 fix. The monitor reports
+# stale pending embeddings periodically; it deliberately does not terminate a daemon with a live
+# client session. Once a daemon is truly idle, the existing 30-second grace shutdown already
+# exits it and a later client respawns a fresh pool. Recovering a stall while a session remains
+# connected needs an explicit lifecycle-policy change and is intentionally separate work.
+EMBED_STALL_CHECK_INTERVAL_S = 300
+EMBED_STALL_PENDING_AGE_THRESHOLD_S = 300
