@@ -1361,10 +1361,21 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     demote_superseded: bool = True,
     use_cross_encoder: bool = False,
     mode: Literal["strict", "broad", "history"] = "broad",
+    disable_semantic: bool = False,
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
+
+    disable_semantic (default False; Track B, scratch/plans/track_b_daemon_detailed.md §14): a
+    per-call override forcing the FTS-only path for this one request, regardless of the
+    SALTMDB_ENABLE_SEMANTIC env var -- added because a persistent daemon reads its environment
+    once at its own startup and holds it fixed, so a caller-side env mutation (as
+    `cmd_bootstrap_digest`'s `--no-semantic` flag used to do) has no effect on an already-running
+    daemon. Evaluated fresh on every call, never a global/env mutation, since the daemon is
+    multi-threaded and a shared mutable flag would race concurrent calls. Governs only this
+    function's own semantic-search gate below -- `check_duplicate_memories`'s separate
+    `is_semantic_search_enabled()` call site is unrelated and unaffected.
 
     use_cross_encoder (opt-in, default False; roadmap `ba2cf66f` P1#7, design `1fddc04a`/
     `8115fa4a`): an independent Stage-2 reordering alternative to `rerank_by_topic`, NOT a
@@ -1570,7 +1581,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
             from saltmdb.config import is_semantic_search_enabled
 
-            if is_semantic_search_enabled():
+            if is_semantic_search_enabled() and not disable_semantic:
                 if not db_path:
                     db_path = get_db_path()
 

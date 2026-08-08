@@ -1,11 +1,6 @@
 import os
-from pathlib import Path
 
 __version__ = "0.1.0-alpha.70"
-
-# Path to the root of the repository (3 levels up from src/saltmdb/config.py)
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-VIEWER_SHIM_PATH = str(_PACKAGE_ROOT / "saltmdb_viewer.py")
 
 
 def get_db_path() -> str:
@@ -262,3 +257,47 @@ CROSS_ENCODER_MAX_CHARS = 800  # per-candidate truncation cap before scoring; tu
 # latency data if warranted, not a pre-committed final value
 CROSS_ENCODER_MAX_QUERY_CHARS = 300  # query is concatenated into EVERY pair scored -- capped
 # independently of candidate length (Codex plan-review round-1 finding)
+
+# Track B backend daemon (see scratch/plans/track_b_daemon_detailed.md §2-§6, 5 rounds of Codex
+# plan review). The daemon is the sole process that opens SQLite; per-agent stdio MCP processes
+# become thin frontend adapters talking to it over local TCP RPC.
+
+# Election-port / probe-port pairing: one fixed slot per canonical DB path derives BOTH ports as a
+# single (2i, 2i+1) pair, so a genuine election-port collision between two DB paths always also
+# collides on the probe port (collision-preservation by construction, round-4 fix after round-3's
+# independently-hashed derivation broke this). Range chosen inside the IANA dynamic/private port
+# range (49152-65535); 8000 pairs is enormous overkill for the realistic number of DBs one user
+# runs, kept far below the range ceiling.
+DAEMON_PORT_PAIR_BASE = 49500
+DAEMON_PORT_PAIR_COUNT = 8000  # ports 49500-65499 (8000 pairs * 2)
+
+# RPC wire protocol (daemon/protocol.py): length-prefixed JSON framing.
+DAEMON_RPC_MAX_MESSAGE_BYTES = 33_554_432  # 32 MiB
+DAEMON_RPC_CONNECT_TIMEOUT_S = 2.0
+DAEMON_RPC_CALL_TIMEOUT_S = 60.0  # generous for a cold embedding-model load or a large search
+
+# Probe-port identify responder (daemon/server.py): ordinary hygiene bounds, not safety-critical
+# (the probe port is not the ownership-arbitration mechanism -- that's the election guard alone).
+DAEMON_IDENTIFY_MAX_CONCURRENT = 8
+DAEMON_IDENTIFY_READ_TIMEOUT_S = 1.0
+
+# Bounded, best-effort latency/resource-hygiene drain during daemon shutdown (NOT a data-safety
+# mechanism -- SQLite's own WAL+busy_timeout+write_transaction_retrying machinery, already relied
+# on throughout this codebase including today's actual multi-process architecture, is what makes
+# brief overlap between an outgoing daemon and its successor safe). Currently informational only;
+# no code path blocks on this value as of the round-5 shutdown-sequence design (immediate
+# cancel_futures + prompt listener close), kept as a named constant in case a future bounded-wait
+# step is added.
+DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S = 5.0
+
+# ensure_daemon_running()'s discovery-retry loop (daemon/client.py).
+DAEMON_DISCOVERY_RETRY_ATTEMPTS = 40  # 40 * 0.25s = 10s bounded window
+DAEMON_DISCOVERY_RETRY_DELAY_S = 0.25
+# Periodic re-spawn interval within that same loop (in attempts, not seconds) -- closes a
+# drain-retry livelock where a single speculative spawn could lose the race against a still-
+# shutting-down prior owner with nothing left retrying (Codex round-2 finding).
+DAEMON_RESPAWN_RETRY_INTERVAL = 8
+
+# Daemon grace-period shutdown timer once the last session disconnects -- matches the pre-Track-B
+# viewer liveness watchdog's existing grace_period default exactly, no user-visible behavior change.
+DAEMON_SHUTDOWN_GRACE_PERIOD_S = 30

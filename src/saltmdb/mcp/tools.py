@@ -1,13 +1,12 @@
 from typing import Literal
 import json
 from saltmdb.mcp.server import mcp
-from saltmdb.domain.services import (
-    event_service,
-    memory_service,
-    relation_service,
-    ephemeral_service,
-    librarian_service,
-)
+from saltmdb.daemon import client as daemon_client
+from saltmdb.daemon import protocol
+# ephemeral_service is the sole domain.services import remaining in this module (see
+# ephemeral_memory below): EPHEMERAL_CONN never touches the persistent DB, so ephemeral_memory
+# never goes over RPC and stays adapter-local, exactly as before Track B.
+from saltmdb.domain.services import ephemeral_service
 
 
 def _normalize_list_or_str(val) -> list:
@@ -50,6 +49,80 @@ def _resolve(explicit, kw: dict, raw_kwargs: dict, *aliases: str):
     return None
 
 
+class DirectDispatchBackend:
+    """Calls daemon/dispatch.py in-process, no network. Two legitimate callers, not test-only
+    scaffolding duplicated for two purposes: (a) explicitly injected by tests
+    (tests/test_mcp_tools.py, tests/test_tag_merge_tool.py setUp/tearDown) since those exercise
+    this module's argument-normalization layer against a temp DB with no daemon involved; (b) the
+    daemon's own RPC handler (daemon/server.py), which IS a DirectDispatchBackend instance
+    receiving already-normalized kwargs over the wire."""
+
+    def call(self, tool_name: str, kwargs: dict):
+        from saltmdb.daemon import dispatch
+
+        return dispatch.DISPATCH_TABLE[tool_name](**kwargs)
+
+
+class RpcBackend:
+    """The only backend used in real production adapter runtime -- configured exactly once, by
+    __main__.py's default branch, synchronously, BEFORE mcp.run() is called (not inside
+    server_lifespan, which owns only the SessionConnection). Classifies mid-call RPC failures per
+    protocol.WRITE_TOOLS/READ_TOOLS (§12): a write tool never silently retries, a read tool does."""
+
+    def call(self, tool_name: str, kwargs: dict):
+        from saltmdb.config import get_db_path
+
+        db_path = get_db_path()
+        try:
+            return daemon_client.call(db_path, tool_name, kwargs)
+        except daemon_client.DaemonRpcError as e:
+            if e.code == "MID_CALL_FAILURE":
+                if tool_name in protocol.READ_TOOLS:
+                    return daemon_client.call(db_path, tool_name, kwargs)
+                if tool_name in protocol.WRITE_TOOLS:
+                    return {
+                        "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
+                        "tool": tool_name,
+                        "advice": (
+                            "The daemon connection was lost while this write was in flight. "
+                            "Whether it committed is unknown from here -- SQLite's own transaction "
+                            "durability means it either fully committed or fully rolled back, "
+                            "never partially, but that answer didn't make it back over this "
+                            "connection. Re-verify before retrying, to avoid creating a duplicate."
+                        ),
+                    }
+            raise
+
+
+_backend = None  # unconfigured by default -- calling a tool with no backend set raises clearly
+
+
+def _backend_or_raise():
+    if _backend is None:
+        raise RuntimeError(
+            "No backend configured -- tools.py must not be called without either "
+            "configure_backend() (production, __main__.py) or an explicit test-injected "
+            "DirectDispatchBackend (tests)."
+        )
+    return _backend
+
+
+def configure_backend(backend) -> None:
+    """Production entrypoint: called once by __main__.py, before mcp.run(). Never reset for the
+    remaining life of the process -- there is exactly one backend for an adapter process's entire
+    run, by construction, so there is nothing to restore."""
+    global _backend
+    _backend = backend
+
+
+def _set_backend_for_test(backend):
+    """Test-only: returns the previous value so a test's tearDown can restore it. Never called by
+    production code -- production uses configure_backend(), which never needs a restore path."""
+    global _backend
+    prev, _backend = _backend, backend
+    return prev
+
+
 @mcp.tool()
 def log_event(
     agent_id: str = None,
@@ -68,13 +141,16 @@ def log_event(
     error_code_ = _resolve(error_code, kw, kwargs, "error_code")
     session_id_ = _resolve(session_id, kw, kwargs, "session_id")
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project")
-    return event_service.log_event(
-        agent_id=agent_id_,
-        type=type_,
-        content=content_,
-        error_code=error_code_,
-        session_id=session_id_,
-        context_id=context_id_,
+    return _backend_or_raise().call(
+        "log_event",
+        {
+            "agent_id": agent_id_,
+            "type": type_,
+            "content": content_,
+            "error_code": error_code_,
+            "session_id": session_id_,
+            "context_id": context_id_,
+        },
     )
 
 
@@ -90,7 +166,7 @@ def get_canonical_tags(query: str = None, domain: str = None, limit: int = None,
     )
     limit_ = _resolve(limit, kw, kwargs, "limit")
     limit_ = limit_ if limit_ is not None else 50
-    return memory_service.get_canonical_tags(domain=query_, limit=limit_)
+    return _backend_or_raise().call("get_canonical_tags", {"domain": query_, "limit": limit_})
 
 
 @mcp.tool()
@@ -103,7 +179,7 @@ def get_canonical_predicates(query: str = None, limit: int = None, **kwargs) -> 
     query_ = _resolve(query, kw, kwargs, "query", "predicate_filter", "substring")
     limit_ = _resolve(limit, kw, kwargs, "limit")
     limit_ = limit_ if limit_ is not None else 50
-    return relation_service.get_canonical_predicates(query=query_, limit=limit_)
+    return _backend_or_raise().call("get_canonical_predicates", {"query": query_, "limit": limit_})
 
 
 @mcp.tool()
@@ -119,7 +195,9 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
         else _resolve(None, kw, kwargs, "tags_to_merge", "merge_tags", "aliases")
     )
     tags_to_merge_ = _normalize_list_or_str(raw_merge)
-    return librarian_service.merge_tags(keep_tag=keep_tag_, tags_to_merge=tags_to_merge_)
+    return _backend_or_raise().call(
+        "merge_tags", {"keep_tag": keep_tag_, "tags_to_merge": tags_to_merge_}
+    )
 
 
 @mcp.tool(
@@ -184,10 +262,7 @@ def store_memory(
 
     memory_type_ = _resolve(memory_type, kw, kwargs, "memory_type", "type", "kind")
 
-    if check_duplicates_only or kw.get("check_duplicates_only"):
-        return memory_service.check_duplicate_memories(
-            title=title_, content=content_, owner_id=owner_id_, tags=tags_, context_id=context_id_
-        )
+    check_duplicates_only_ = check_duplicates_only or kw.get("check_duplicates_only") or False
 
     entity_id = _resolve(None, kw, kwargs, "entity_id", "id")
     weight = _resolve(None, kw, kwargs, "weight") or 1
@@ -200,25 +275,29 @@ def store_memory(
     review_token_ = _resolve(review_token, kw, kwargs, "review_token")
     dispositions_ = _resolve(dispositions, kw, kwargs, "dispositions")
 
-    return memory_service.store_memory(
-        content=content_,
-        tags=tags_,
-        owner_id=owner_id_,
-        scope=scope_,  # type: ignore[arg-type]  # _resolve() returns Any; runtime-validated below the FastMCP boundary
-        weight=weight,
-        is_core=is_core_,
-        memory_type=memory_type_,
-        title=title_,
-        entity_id=entity_id,
-        relevance=relevance,
-        impact=impact,
-        novelty=novelty,
-        actionability=actionability,
-        metadata=metadata,
-        skip_duplicate_check=skip_duplicate_check,
-        context_id=context_id_,
-        review_token=review_token_,
-        dispositions=dispositions_,
+    return _backend_or_raise().call(
+        "store_memory",
+        {
+            "content": content_,
+            "tags": tags_,
+            "owner_id": owner_id_,
+            "scope": scope_,
+            "weight": weight,
+            "is_core": is_core_,
+            "memory_type": memory_type_,
+            "title": title_,
+            "entity_id": entity_id,
+            "relevance": relevance,
+            "impact": impact,
+            "novelty": novelty,
+            "actionability": actionability,
+            "metadata": metadata,
+            "skip_duplicate_check": skip_duplicate_check,
+            "context_id": context_id_,
+            "review_token": review_token_,
+            "dispositions": dispositions_,
+            "check_duplicates_only": check_duplicates_only_,
+        },
     )
 
 
@@ -261,6 +340,11 @@ def store_memory(
     pipeline; they have no effect when semantic search is disabled (which now makes query-based
     search_memory calls return an error rather than falling back to FTS-only results -- see
     SALTMDB_ENABLE_SEMANTIC) or on empty-query filter/tag-only browsing.
+
+    disable_semantic (opt-in, default False): forces the FTS-only path for this one call,
+    regardless of the server's SALTMDB_ENABLE_SEMANTIC setting -- a per-call override, not a
+    server-wide toggle (Track B: a persistent daemon reads its environment once at its own
+    startup, so a caller-side env mutation has no effect on an already-running daemon).
 
     use_cross_encoder (opt-in, default False; experimental, requires SALTMDB_RERANKER_MODEL to be
     set to a supported model name server-side -- a no-op with no error otherwise): an independent
@@ -314,13 +398,12 @@ def search_memory(
     demote_superseded: bool | None = None,
     use_cross_encoder: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
+    disable_semantic: bool | None = None,
     **kwargs,
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
     entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "id")
-    if entity_id_ or fetch_full or kw.get("fetch_full"):
-        if entity_id_:
-            return memory_service.fetch_memory_chunk(entity_id=entity_id_)
+    fetch_full_ = fetch_full or kw.get("fetch_full") or False
 
     query_keywords_ = _resolve(
         query_keywords, kw, kwargs, "query_keywords", "query", "q", "keywords"
@@ -340,51 +423,47 @@ def search_memory(
     cursor_ = _resolve(cursor, kw, kwargs, "cursor")
     include_related_ = _resolve(include_related, kw, kwargs, "include_related")
     include_related_ = include_related_ if include_related_ is not None else True
-    # Mirrors include_related_'s exact two-line shape above, not explain_mode's single-line
-    # `or False` shape (~line 245 in this same function): a `bool = False` declared-parameter
-    # default is never None, so _resolve's alias fallback (which only triggers on a None
-    # sentinel) would never see the "rerank" kwarg alias if that pattern were copied here.
     rerank_by_topic_ = _resolve(rerank_by_topic, kw, kwargs, "rerank_by_topic", "rerank")
     rerank_by_topic_ = rerank_by_topic_ if rerank_by_topic_ is not None else False
-    # Same two-line shape as rerank_by_topic_ above, for the same reason (a plain `bool`
-    # declared-parameter default is never None, regardless of which literal it is, so _resolve's
-    # kwarg-alias fallback needs a None sentinel first). This fallback resolves to True, not
-    # False -- matching memory_service.search_memory's own signature default, which flipped
-    # (roadmap ba2cf66f, benchmark 1d886a43); the raw parameters here stay `bool | None = None`.
     prefer_durable_types_ = _resolve(
         prefer_durable_types, kw, kwargs, "prefer_durable_types", "prefer_durable"
     )
     prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else True
     demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
     demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else True
-    # Same two-line shape again, for the same reason.
     use_cross_encoder_ = _resolve(
         use_cross_encoder, kw, kwargs, "use_cross_encoder", "cross_encoder"
     )
     use_cross_encoder_ = use_cross_encoder_ if use_cross_encoder_ is not None else False
-    # Same two-line shape again -- `mode` has a real, meaningful default ("broad") rather than
-    # bool-False, but the None-sentinel + kwarg-alias-fallback pattern is identical.
     mode_ = _resolve(mode, kw, kwargs, "mode")
     mode_ = mode_ if mode_ is not None else "broad"
+    disable_semantic_ = _resolve(disable_semantic, kw, kwargs, "disable_semantic", "no_semantic")
+    disable_semantic_ = disable_semantic_ if disable_semantic_ is not None else False
 
-    return memory_service.search_memory(
-        owner_id=owner_id_,
-        query_keywords=query_keywords_,
-        tags_filter=tags_filter_,
-        metadata_filter=metadata_filter_,
-        explain_mode=explain_mode,
-        limit=limit_,
-        context_id=context_id_,
-        is_core=is_core_,
-        memory_type_filter=memory_type_filter_,
-        tag_operator=tag_operator,  # type: ignore[arg-type]  # Any from raw kwarg; any non-"AND" value falls back to OR at runtime, no crash risk
-        cursor=cursor_,
-        mode=mode_,  # type: ignore[arg-type]  # validated/normalized inside memory_service.search_memory
-        include_related=include_related_,
-        rerank_by_topic=rerank_by_topic_,
-        prefer_durable_types=prefer_durable_types_,
-        demote_superseded=demote_superseded_,
-        use_cross_encoder=use_cross_encoder_,
+    return _backend_or_raise().call(
+        "search_memory",
+        {
+            "entity_id": entity_id_,
+            "fetch_full": fetch_full_,
+            "owner_id": owner_id_,
+            "query_keywords": query_keywords_,
+            "tags_filter": tags_filter_,
+            "metadata_filter": metadata_filter_,
+            "explain_mode": explain_mode,
+            "limit": limit_,
+            "context_id": context_id_,
+            "is_core": is_core_,
+            "memory_type_filter": memory_type_filter_,
+            "tag_operator": tag_operator,
+            "cursor": cursor_,
+            "mode": mode_,
+            "include_related": include_related_,
+            "rerank_by_topic": rerank_by_topic_,
+            "prefer_durable_types": prefer_durable_types_,
+            "demote_superseded": demote_superseded_,
+            "use_cross_encoder": use_cross_encoder_,
+            "disable_semantic": disable_semantic_,
+        },
     )
 
 
@@ -398,6 +477,12 @@ def ephemeral_memory(
     key_ = _resolve(key, kw, kwargs, "key")
     value_ = _resolve(value, kw, kwargs, "value")
 
+    # Deliberately NOT routed through _backend_or_raise() -- EPHEMERAL_CONN is a separate
+    # in-memory-only sqlite3 connection that never touches the persistent DB, so this tool was
+    # never in scope for the DB-access-boundary invariant to begin with. Routing it through the
+    # daemon would silently turn per-agent-process-isolated volatile secrets into a cross-agent-
+    # shared store (Codex Track-B plan-review round-2 finding) -- calling ephemeral_service
+    # directly, in-process, exactly as before Track B, preserves today's isolation exactly.
     if action_ == "store" or value_ is not None:
         return ephemeral_service.store_ephemeral_memory(key=key_, value=value_)
     return ephemeral_service.get_ephemeral_memory(key=key_)
@@ -416,11 +501,20 @@ def archive_memory(
     target = _normalize_list_or_str(raw_target)
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
 
+    # The bulk/single/none decision depends on the ORIGINAL request shape (did the caller pass a
+    # list, even a 1-item one?) -- pre-normalization information that daemon/dispatch.py can't
+    # reconstruct from the already-normalized `target` list alone, so the mode is resolved here
+    # and sent as an explicit tag (self-caught during implementation, see dispatch.py's matching
+    # comment).
     if len(target) > 1 or (isinstance(raw_target, list) and len(target) > 0):
-        return memory_service.bulk_archive_memory(archive_requests=target)
+        return _backend_or_raise().call(
+            "archive_memory", {"mode": "bulk", "archive_requests": target}
+        )
     elif len(target) == 1:
-        return memory_service.archive_memory(entity_id=target[0], owner_id=owner_id_)
-    return memory_service.archive_memory(entity_id=None, owner_id=owner_id_)
+        return _backend_or_raise().call(
+            "archive_memory", {"mode": "single", "entity_id": target[0], "owner_id": owner_id_}
+        )
+    return _backend_or_raise().call("archive_memory", {"mode": "none", "owner_id": owner_id_})
 
 
 @mcp.tool()
@@ -447,34 +541,33 @@ def manage_relation(
     """
     kw = _unwrap_kwargs(kwargs)
     relations_ = _resolve(relations, kw, kwargs, "relations")
-    if relations_:
-        if isinstance(relations_, str):
-            relations_ = _normalize_list_or_str(relations_)
-        return relation_service.bulk_store_relations(relations=relations_)
+    if relations_ and isinstance(relations_, str):
+        relations_ = _normalize_list_or_str(relations_)
 
     source_id_ = _resolve(source_id, kw, kwargs, "source_id", "source")
     target_id_ = _resolve(target_id, kw, kwargs, "target_id", "target")
     predicate_ = _resolve(predicate, kw, kwargs, "predicate", "relation")
     invalidate_ = _resolve(invalidate, kw, kwargs, "invalidate") or False
-
-    if invalidate_:
-        invalid_at_ = _resolve(None, kw, kwargs, "invalid_at")
-        return relation_service.invalidate_relation(
-            source_id=source_id_, target_id=target_id_, predicate=predicate_, invalid_at=invalid_at_
-        )
-
+    invalid_at_ = _resolve(None, kw, kwargs, "invalid_at")
     valid_at_ = _resolve(None, kw, kwargs, "valid_at")
     override_justification_ = _resolve(
         override_justification, kw, kwargs, "override_justification", "override_reason"
     )
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
-    return relation_service.store_relation(
-        source_id=source_id_,
-        target_id=target_id_,
-        predicate=predicate_,
-        valid_at=valid_at_,
-        override_justification=override_justification_,
-        owner_id=owner_id_,
+
+    return _backend_or_raise().call(
+        "manage_relation",
+        {
+            "relations": relations_,
+            "source_id": source_id_,
+            "target_id": target_id_,
+            "predicate": predicate_,
+            "invalidate": invalidate_,
+            "invalid_at": invalid_at_,
+            "valid_at": valid_at_,
+            "override_justification": override_justification_,
+            "owner_id": owner_id_,
+        },
     )
 
 
@@ -501,10 +594,8 @@ def commit_consolidation(
     """
     kw = _unwrap_kwargs(kwargs)
     consolidations_ = _resolve(consolidations, kw, kwargs, "consolidations")
-    if consolidations_:
-        if isinstance(consolidations_, str):
-            consolidations_ = _normalize_list_or_str(consolidations_)
-        return relation_service.bulk_commit_consolidation(consolidations=consolidations_)
+    if consolidations_ and isinstance(consolidations_, str):
+        consolidations_ = _normalize_list_or_str(consolidations_)
 
     raw_parents = _resolve(parent_ids, kw, kwargs, "parent_ids")
     parent_ids_ = _normalize_list_or_str(raw_parents)
@@ -521,17 +612,21 @@ def commit_consolidation(
         override_justification, kw, kwargs, "override_justification", "override_reason"
     )
 
-    return relation_service.commit_consolidation(
-        parent_ids=parent_ids_,
-        title=title_,
-        content=content_,
-        is_core=is_core_,
-        tags=tags_,
-        scope=scope,  # type: ignore[arg-type]  # Any from raw kwarg; not runtime-validated against the Literal, stored as-is
-        weight=weight,
-        owner_id=owner_id_,
-        context_id=context_id_,
-        override_justification=override_justification_,
+    return _backend_or_raise().call(
+        "commit_consolidation",
+        {
+            "consolidations": consolidations_,
+            "parent_ids": parent_ids_,
+            "title": title_,
+            "content": content_,
+            "is_core": is_core_,
+            "tags": tags_,
+            "scope": scope,
+            "weight": weight,
+            "owner_id": owner_id_,
+            "context_id": context_id_,
+            "override_justification": override_justification_,
+        },
     )
 
 
@@ -555,16 +650,18 @@ def inspect_graph(
     mode_ = _resolve(mode, kw, kwargs, "mode") or "dependencies"
     owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
     point_in_time_ = _resolve(point_in_time, kw, kwargs, "point_in_time", "as_of", "at")
+    max_depth_ = _resolve(max_depth, kw, kwargs, "max_depth")
 
-    if mode_ == "lineage":
-        return relation_service.analyze_lineage(entity_id=entity_id_, point_in_time=point_in_time_)
-    elif mode_ == "orphans":
-        return memory_service.detect_orphaned_memories(owner_id=owner_id_)
-    else:
-        max_depth_ = _resolve(max_depth, kw, kwargs, "max_depth") or 5
-        return relation_service.analyze_dependencies(
-            root_entity_id=entity_id_, max_depth=max_depth_, point_in_time=point_in_time_
-        )
+    return _backend_or_raise().call(
+        "inspect_graph",
+        {
+            "entity_id": entity_id_,
+            "mode": mode_,
+            "owner_id": owner_id_,
+            "point_in_time": point_in_time_,
+            "max_depth": max_depth_,
+        },
+    )
 
 
 @mcp.tool()
@@ -585,26 +682,24 @@ def get_events(
     limit_ = _resolve(limit, kw, kwargs, "limit") or 20
     offset_ = _resolve(offset, kw, kwargs, "offset") or 0
     session_id_ = _resolve(session_id, kw, kwargs, "session_id")
+    agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent")
+    type_filter_ = _resolve(type_filter, kw, kwargs, "type_filter", "type")
+    status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
 
-    if session_id_ or mode_ == "session":
-        return event_service.get_session_summary(session_id=session_id_)
-    elif mode_ == "memories":
-        owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
-        status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
-        return memory_service.scan_memories(
-            owner_id=owner_id_, status_filter=status_filter_, limit=limit_, offset=offset_
-        )
-    else:
-        agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent")
-        type_filter_ = _resolve(type_filter, kw, kwargs, "type_filter", "type")
-        status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter")
-        return event_service.get_recent_events(
-            agent_id=agent_id_,
-            type_filter=type_filter_,
-            limit=limit_,
-            offset=offset_,
-            status_filter=status_filter_,
-        )
+    return _backend_or_raise().call(
+        "get_events",
+        {
+            "mode": mode_,
+            "limit": limit_,
+            "offset": offset_,
+            "session_id": session_id_,
+            "agent_id": agent_id_,
+            "type_filter": type_filter_,
+            "status_filter": status_filter_,
+            "owner_id": owner_id_,
+        },
+    )
 
 
 @mcp.tool()
@@ -621,4 +716,6 @@ def dismiss_event(
     agent_id_ = _resolve(agent_id, kw, kwargs, "agent_id", "agent", "owner_id", "owner") or "system"
     if not event_ids_:
         raise ValueError("Missing 'event_id' parameter.")
-    return event_service.dismiss_events(event_ids_, reason_, agent_id_)
+    return _backend_or_raise().call(
+        "dismiss_event", {"event_ids": event_ids_, "reason": reason_, "agent_id": agent_id_}
+    )

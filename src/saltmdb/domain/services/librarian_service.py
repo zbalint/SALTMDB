@@ -1,7 +1,5 @@
-import sys
 import os
 import sqlite3
-import subprocess
 import logging
 from typing import Any
 from datetime import datetime, UTC
@@ -25,7 +23,7 @@ _librarian_trigger_pool = ThreadPoolExecutor(
 
 
 def trigger_librarian(db_path: str = None):
-    """Fire-and-forget: schedules the cooldown check + subprocess spawn on a background
+    """Fire-and-forget: schedules the cooldown check + maintenance pass on a background
     thread so this never blocks or adds write-lock contention to the caller's request."""
     if (
         os.environ.get("SALTMDB_DISABLE_LIBRARIAN")
@@ -34,28 +32,49 @@ def trigger_librarian(db_path: str = None):
     ):
         return
     db_path = db_path or get_db_path()
-    _librarian_trigger_pool.submit(_trigger_librarian_impl, db_path)
+    _librarian_trigger_pool.submit(_run_maintenance_pass_impl, db_path, False)
 
 
-def _trigger_librarian_impl(db_path: str) -> None:
-    """Checks the raw-entity threshold and cooldown, then spawns the librarian subprocess.
+def run_librarian_now(db_path: str = None, force: bool = True) -> str:
+    """Daemon-owned entry point for the manual "run_librarian_now" RPC (Track B, see
+    scratch/plans/track_b_daemon_detailed.md §11) and the redesigned `--librarian` CLI. Submits to
+    the SAME single-worker _librarian_trigger_pool the automatic trigger above uses, and BLOCKS on
+    the result -- this is what makes the automatic and manual paths mutually exclusive without any
+    separate lock (Codex Track-B plan-review round-1 finding: a request handler invoking manual
+    maintenance must never run concurrently with a queued/active automatic pass). `force=True`
+    (the default here, matching a human's explicit request) bypasses the cooldown throttle but
+    still serializes through the pool.
+    """
+    db_path = db_path or get_db_path()
+    future = _librarian_trigger_pool.submit(_run_maintenance_pass_impl, db_path, force)
+    return future.result()
 
-    Runs on the background trigger thread (see trigger_librarian). The cooldown claim is a
-    single atomic UPDATE on last_run_at guarded by its own WHERE clause, so concurrent
-    callers racing here still collapse to exactly one winner -- unlike the previous
-    acquire_librarian_lock() + immediate release_librarian_lock() dance, which spent two
-    separate BEGIN IMMEDIATE write transactions just to perform this same throttle check.
-    locked_at/locked_by_pid are intentionally left untouched here: that field is the
-    subprocess's own real leader-election mutex (see db/locks.py, __main__.py), not this
-    parent-side throttle.
+
+def _run_maintenance_pass_impl(db_path: str, force: bool) -> str:
+    """The actual maintenance-pass body, run on the single-worker trigger-pool thread. Replaces
+    the old subprocess-spawn tail (Track B: Librarian becomes an in-daemon integration instead of
+    `python -m saltmdb --librarian`) -- everything above this line in the old
+    `_trigger_librarian_impl` (the raw-count check, the cooldown-claim UPDATE) is preserved
+    unchanged when force=False; force=True (manual invocation) skips straight to the pass itself.
+
+    The cooldown claim is a single atomic UPDATE on last_run_at guarded by its own WHERE clause,
+    so concurrent automatic callers racing here still collapse to exactly one winner -- unlike the
+    old acquire_librarian_lock()/release_librarian_lock() dance, which spent two separate BEGIN
+    IMMEDIATE write transactions just to perform this same throttle check (that leader-election
+    lock, db/locks.py, is removed entirely under Track B -- exactly one daemon process, ever, runs
+    this function, so there is nothing left to elect a leader among).
     """
     try:
         conn = get_connection(db_path)
-        try:
+    except Exception as e:
+        logger.debug("Could not open connection for librarian maintenance pass: %s", e)
+        return f"Skipped: could not open database connection ({e})."
+    try:
+        if not force:
             cursor = conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'raw'")
             raw_count = cursor.fetchone()[0]
             if raw_count < 2:
-                return
+                return "Skipped: raw-entity threshold not met."
 
             def _claim_cooldown(c):
                 now = datetime.now(UTC).isoformat()
@@ -71,40 +90,22 @@ def _trigger_librarian_impl(db_path: str) -> None:
                 return cur.rowcount == 1
 
             if not write_transaction_retrying(conn, _claim_cooldown):
-                return
+                return "Skipped: cooldown not elapsed."
+
+        try:
+            merge_tags_heuristics(conn)
         finally:
-            close_connection(conn)
+            # Runs unconditionally (even if merge_tags_heuristics raised) as long as we have a
+            # live connection -- checkpoint/optimize maintenance shouldn't be skipped just
+            # because tag-merging failed (matches __main__.py's old --librarian finally-block
+            # framing, preserved here since that CLI entrypoint no longer runs this directly).
+            _run_librarian_maintenance(conn)
+        return "Librarian maintenance pass complete."
     except Exception as e:
-        logger.debug("Cooldown/lock check exception in trigger_librarian: %s", e)
-        return
-
-    try:
-        creationflags = 0
-        if sys.platform == "win32":
-            creationflags = 0x08000000  # CREATE_NO_WINDOW
-
-        # Redirect stdout/stderr to librarian.log (same directory as the DB) instead of DEVNULL
-        # so Librarian subprocess output/errors are actually visible for debugging, matching the
-        # viewer.log redirection precedent in saltmdb/viewer/server.py. Uses the already-resolved
-        # local `db_path` (set above via `db_path = db_path or get_db_path()`), NOT a fresh
-        # get_db_path() call -- calling get_db_path() again here would silently ignore a caller-
-        # supplied non-default db_path and always point at the default ~/.saltmdb directory
-        # regardless of which database this invocation is actually operating on.
-        log_path = os.path.join(os.path.dirname(db_path), "librarian.log")
-        if os.path.exists(log_path) and os.path.getsize(log_path) > 5 * 1024 * 1024:
-            try:
-                os.replace(log_path, f"{log_path}.1")
-            except OSError:
-                pass
-        with open(log_path, "a", encoding="utf-8") as log_f:
-            subprocess.Popen(
-                [sys.executable, "-m", "saltmdb", "--librarian"],
-                stdout=log_f,
-                stderr=log_f,
-                creationflags=creationflags,
-            )
-    except Exception as e:
-        logger.warning("Failed to spawn librarian subprocess: %s", e)
+        logger.warning("Librarian maintenance pass failed: %s", e)
+        return f"Failed: {e}"
+    finally:
+        close_connection(conn)
 
 
 def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):

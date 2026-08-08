@@ -13,8 +13,10 @@ class TestTagMergeTool(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]

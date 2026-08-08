@@ -13,8 +13,14 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
+        # Track B (scratch/plans/track_b_daemon_detailed.md §8): tools.py's tool functions call
+        # through a backend indirection now; inject the in-process DirectDispatchBackend so these
+        # tests keep exercising tools.py's argument-normalization layer against this temp DB with
+        # no daemon involved, exactly as before.
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -178,11 +184,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         only a mock that inspects the actual forwarded kwarg can prove the WRAPPER's fallback
         itself is True, not just that the end-to-end result happens to look reordered (Codex
         diff-review finding)."""
-        with patch.object(tools.memory_service, "search_memory", return_value=[]) as mock_search:
+        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
             tools.search_memory(query_keywords="pdt wrapper mock test", owner_id="pdt_owner")
         self.assertTrue(mock_search.call_args.kwargs["prefer_durable_types"])
 
-        with patch.object(tools.memory_service, "search_memory", return_value=[]) as mock_search:
+        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
             tools.search_memory(
                 query_keywords="pdt wrapper mock test",
                 owner_id="pdt_owner",
@@ -195,11 +201,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         test_search_memory_prefer_durable_types_wrapper_forwards_true_when_omitted above, for
         demote_superseded -- demote_superseded has no kwarg alias to also cover (unlike
         prefer_durable_types/prefer_durable), so this is the whole wrapper-layer proof needed."""
-        with patch.object(tools.memory_service, "search_memory", return_value=[]) as mock_search:
+        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
             tools.search_memory(query_keywords="ds wrapper mock test", owner_id="ds_owner")
         self.assertTrue(mock_search.call_args.kwargs["demote_superseded"])
 
-        with patch.object(tools.memory_service, "search_memory", return_value=[]) as mock_search:
+        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
             tools.search_memory(
                 query_keywords="ds wrapper mock test",
                 owner_id="ds_owner",

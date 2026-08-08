@@ -28,47 +28,108 @@ def _summarize_event(ev):
         return (ev.get("content") or "")[:120]
 
 
+def _search_memory_defaults(**overrides) -> dict:
+    """Full kwargs shape daemon/dispatch.py's search_memory expects -- mirrors mcp/tools.py's
+    search_memory defaulting exactly, since this CLI calls the daemon directly (Track B, §14)
+    rather than through tools.py's own normalization layer."""
+    base = {
+        "entity_id": None,
+        "fetch_full": False,
+        "owner_id": None,
+        "query_keywords": None,
+        "tags_filter": None,
+        "metadata_filter": None,
+        "explain_mode": False,
+        "limit": 5,
+        "context_id": None,
+        "is_core": None,
+        "memory_type_filter": None,
+        "tag_operator": "AND",
+        "cursor": None,
+        "mode": "broad",
+        "include_related": True,
+        "rerank_by_topic": False,
+        "prefer_durable_types": True,
+        "demote_superseded": True,
+        "use_cross_encoder": False,
+        "disable_semantic": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def _get_events_defaults(**overrides) -> dict:
+    """Mirrors mcp/tools.py's get_events defaulting exactly, same rationale as above."""
+    base = {
+        "mode": "events",
+        "limit": 20,
+        "offset": 0,
+        "session_id": None,
+        "agent_id": None,
+        "type_filter": None,
+        "status_filter": None,
+        "owner_id": None,
+    }
+    base.update(overrides)
+    return base
+
+
 def cmd_bootstrap_digest(args):
     from saltmdb.config import get_db_path
+    from saltmdb.daemon import client as daemon_client
 
     db_path = args.db_path or get_db_path()
     if not os.path.exists(db_path):
         return 0  # nothing to report yet, not an error
 
-    from saltmdb.db.connection import get_connection, close_connection
-    from saltmdb.domain.services.memory_service import search_memory
-    from saltmdb.domain.services.event_service import get_recent_events
-
-    if args.no_semantic:
-        os.environ["SALTMDB_ENABLE_SEMANTIC"] = "false"
-
-    conn = get_connection(db_path)
+    # Track B (scratch/plans/track_b_daemon_detailed.md §14): calls through daemon/client.py the
+    # same way mcp/tools.py does -- not a new code path. This is a frequently-invoked, latency-
+    # sensitive hook script; it benefits from the daemon's already-warm embedding model instead of
+    # paying a cold Python-process-plus-model-load cost on every invocation.
     try:
-        core = search_memory(
-            is_core=True, limit=args.core_limit, include_related=False, db_connection=conn
+        core = daemon_client.call(
+            db_path,
+            "search_memory",
+            _search_memory_defaults(
+                is_core=True,
+                limit=args.core_limit,
+                include_related=False,
+                disable_semantic=args.no_semantic,
+            ),
         )
+        if not isinstance(core, list):
+            core = []
     except Exception:
         core = []
+
     keywords = args.project_keywords or os.path.basename(os.getcwd().rstrip("\\/"))
     project: Any = []
     if keywords:
         try:
-            project = search_memory(
-                query_keywords=keywords,
-                limit=args.project_limit,
-                include_related=False,
-                db_connection=conn,
+            project = daemon_client.call(
+                db_path,
+                "search_memory",
+                _search_memory_defaults(
+                    query_keywords=keywords,
+                    limit=args.project_limit,
+                    include_related=False,
+                    disable_semantic=args.no_semantic,
+                ),
             )
+            if not isinstance(project, list):
+                project = []
         except Exception:
             project = []
+
     try:
-        events = get_recent_events(
-            type_filter="consolidation_request", limit=args.events_limit, db_connection=conn
+        events = daemon_client.call(
+            db_path,
+            "get_events",
+            _get_events_defaults(type_filter="consolidation_request", limit=args.events_limit),
         )
         pending = [e for e in events if isinstance(e, dict) and e.get("status") == "pending"]
     except Exception:
         pending = []
-    close_connection(conn)
 
     print(_fmt_digest(core, project, pending, keywords))
     return 0
