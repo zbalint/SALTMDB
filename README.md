@@ -12,39 +12,45 @@
 
 SALTMDB is built using standard Python libraries and SQLite, prioritizing concurrency safety, security, and low memory overhead.
 
+> [!NOTE]
+> **Memory-core rework, Track B.** As of `v0.1.0-alpha.72`, SALTMDB no longer lets each agent's MCP process open SQLite directly. A single backend daemon (`src/saltmdb/daemon/`) is now the sole process that ever opens the DB; every agent process is a thin RPC adapter. See "Single-Owner Backend Daemon" below the feature list for the full design.
+
 ```mermaid
 graph TD
     subgraph Active Agents
         A[Antigravity CLI]
-        B[Copilot / Claude Code]
+        B[Copilot / Claude Code / Codex]
     end
 
-    subgraph MCP Server Layer
-        A -->|Stdio / MCP| Server[saltmdb.mcp.server]
-        B -->|Stdio / MCP| Server
-        Server -->|BEGIN IMMEDIATE / WAL / write_transaction_retrying| MainDB[(sqlite3: saltmdb.db)]
-        Server -->|check_same_thread=False| EphemDB[(sqlite3: :memory:)]
+    subgraph "Per-Agent Thin Adapter (one stdio MCP process per agent)"
+        A -->|Stdio / MCP| AdA[saltmdb.mcp.server]
+        B -->|Stdio / MCP| AdB[saltmdb.mcp.server]
+        AdA -->|check_same_thread=False, local-only| EphA[(sqlite3: :memory:, per-process)]
+        AdB -->|check_same_thread=False, local-only| EphB[(sqlite3: :memory:, per-process)]
     end
 
-    subgraph Background Threads
-        Server -->|_embed_pool: ThreadPoolExecutor x2| EmbedWorker[embedding_service.embed_entity_async]
-        EmbedWorker -->|fastembed ONNX + sqlite_vec| VecDB[(entity_embeddings vec0)]
-        Server -->|_librarian_trigger_pool x1 fire-and-forget| TriggerCheck[cooldown check / subprocess spawn]
-        TriggerCheck -->|Atomic last_run_at UPDATE| Lock[_system_locks]
-        TriggerCheck -->|python -m saltmdb --librarian| Lib[Librarian gc subprocess]
-        Lib -->|acquire_librarian_lock| Lock
-        Lib -->|merge_tags_heuristics| MainDB
-        Lib -->|WAL checkpoint + PRAGMA optimize| MainDB
+    subgraph "Single-Owner Backend Daemon (one daemon process per DB path)"
+        AdA -->|ensure_daemon_running: spawn-or-connect,<br/>length-prefixed JSON RPC over loopback TCP| Daemon[daemon.server]
+        AdB -->|same RPC protocol| Daemon
+        Daemon -->|BEGIN IMMEDIATE / WAL / write_transaction_retrying| MainDB[(sqlite3: saltmdb.db)]
+        Daemon -->|_embed_pool: ThreadPoolExecutor x2| EmbedWorker[embedding_service.embed_entity_async]
+        EmbedWorker -->|fastembed ONNX + sqlite_vec| VecDB[(entity_embeddings /<br/>entity_chunk_embeddings vec0)]
+        Daemon -->|_librarian_trigger_pool x1, in-process, no subprocess| Lib[librarian_service maintenance pass]
+        Lib -->|atomic cooldown UPDATE on _system_locks,<br/>no cross-process leader-election lock| MainDB
+        Daemon -->|in-daemon thread, gated by viewer_port state| Viewer[viewer.routes HTTP server]
+        Viewer --> MainDB
+        Daemon -->|30s grace timer after last session disconnects| Shutdown[auto-shutdown]
     end
 ```
 
-- **Mechanical Text Quality Gate & Store-Time Disposition:** Sub-millisecond multi-stage pre-embedding quality evaluation — idempotent auto-formatting (`auto_format_markdown`), prose extraction (`extract_prose_content`), Shannon character entropy ($H(X) \in [2.5, 5.3]$), Word 3-gram and 5-gram sequence repetition, Type-Token Ratio ($\ge 0.35$), Coleman-Liau readability bounds ($CLI \in [2.0, 26.0]$), and MSDI structural density scoring — followed by Stage A SHA-256 exact hash collision lookup before ONNX embedding generation. A synchronous preflight then runs on every `store_memory` call: a strict multi-signal bar ($\ge 0.75$ cosine plus correction-language/type/scope compatibility signals — weak thematic similarity alone never flags) surfaces one or more candidates as an advisory-only `REVIEW_REQUIRED` response instead of persisting; the calling agent resolves each candidate (distinct / supersede / consolidate / elaborate) and resubmits with a `review_token`, committed atomically. No async queue, no auto-linking, no auto weight demotion.
+- **Mechanical Text Quality Gate & Store-Time Disposition:** Sub-millisecond multi-stage pre-embedding quality evaluation — idempotent auto-formatting (`auto_format_markdown`), prose extraction (`extract_prose_content`), Shannon character entropy ($H(X) \in [2.5, 5.3]$), Word 3-gram and 5-gram sequence repetition, Type-Token Ratio ($\ge 0.35$), Coleman-Liau readability bounds ($CLI \in [2.0, 26.0]$), and MSDI structural density scoring — followed by Stage A SHA-256 exact hash collision lookup before ONNX embedding generation. A synchronous preflight then runs on every brand-new `store_memory` write (skipped when the call already resolves to an existing entity, or `skip_duplicate_check=True`): a candidate at $\ge 0.75$ cosine similarity with compatible `memory_type`/`scope` is actually flagged only if it *also* shows correction language, crosses the stricter $\ge 0.85$ duplicate band, or is a stale consolidated node — weak thematic similarity alone never flags. A flag surfaces the candidate(s) as an advisory-only `REVIEW_REQUIRED` response instead of persisting; the calling agent resolves each candidate (`distinct` always available, plus `elaborate`/`supersede` against a core target or `consolidate`/`supersede` against a non-core one) and resubmits with a `review_token`, committed atomically. No async queue, no auto-linking, no auto weight demotion.
 - **Hybrid Search (FTS5 + Vector RRF):** Parallel FTS5/BM25 keyword search and `BAAI/bge-small-en-v1.5` dense vector search (via `fastembed` + `onnxruntime`) combined via Reciprocal Rank Fusion. Enabled by default; each search type runs on a dedicated thread pool. FTS5 uses a Porter tokenizer with title-biased BM25 weights (10:1 title-to-content, 5:1 alias-to-content). Semantic search uses a dedicated per-request connection to avoid cross-thread sqlite_vec conflicts.
 - **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write. Custom patterns can be added via `.saltmdb_redact` in the working directory (one regex per line).
 - **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution, canonical redirects, and three seeded top-level tags (`episodic`, `semantic`, `procedural`).
 - **SCD Type 2 Temporal History:** Every upsert preserves the prior version as an archived snapshot (`<entity_id>_h_<8-char-suffix>`) for full audit lineage.
 - **Lossless Consolidation:** Soft-archives source memories, auto-creates `consolidated_from` graph edges — never hard-deletes.
 - **Bi-Temporal Relations:** Relation edges carry both a system/transaction-time axis (`valid_from`/`valid_to`, set by consolidation) and an independent event/world-time axis (`valid_at`/`invalid_at`, settable directly by agents via `manage_relation(invalidate=True)`).
+- **Single-Owner Backend Daemon (memory-core rework, Track B):** Exactly one background daemon process (`src/saltmdb/daemon/`) opens SQLite for a given DB path; every MCP client and most CLI entrypoints connect as a thin RPC adapter over loopback TCP (length-prefixed JSON framing), auto-spawning the daemon on first connect (`saltmdb-viewer` is the one exception — a read-only status client that never spawns, see "Running the Database Dashboard Viewer" below). Ownership is arbitrated by a bind-only guard socket on a per-DB-path election port — never a stale-lock file a crashed process could leave behind. The Librarian and web viewer both moved in-process into the daemon as part of this change, eliminating the old cross-process leader-election lock entirely. See "Single-Owner Backend Daemon & Librarian Throttling" under Core Features for the full design.
 
 ### 1. Database Schema
 The SQLite database operates in **Write-Ahead Logging (WAL)** mode (`PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`). All writes use explicit `BEGIN IMMEDIATE` transactions with exponential backoff retry (up to 4 total attempts). It includes the following tables:
@@ -57,7 +63,7 @@ The SQLite database operates in **Write-Ahead Logging (WAL)** mode (`PRAGMA jour
 * **`predicates`**: A canonical-predicate lookup table (mirrors `tags`' alias-resolution shape). Seeded with: `resolves`, `depends_on`, `references`, `elaborates_on`, `consolidated_from`, `supersedes`, `relates_to`, `similar_to`. `relates_to` and `references` are pre-aliased onto `elaborates_on`. Write-time predicate canonicalization via `resolve_or_create_predicate()` normalizes all submitted predicates before storage and notes any alias substitution in the result string.
 * **`entities_fts`**: A virtual table using **SQLite FTS5** (Porter tokenizer) indexing `title`, `full_content`, and `search_aliases` (from `metadata.search_aliases`). Kept in sync with entities via four triggers (`insert_entity_fts`, `update_entity_fts`, `update_entity_fts_unarchived`, `archive_memory_fts`, `delete_entity_fts`).
 * **`entity_embeddings`**: A `sqlite-vec` `vec0` virtual table storing 384-dimensional ONNX float32 embeddings (`embedding FLOAT[384]`). Loaded via `sqlite_vec.load(conn)` on a per-connection basis; the extension is pre-imported *before* any `BEGIN IMMEDIATE` transaction opens to prevent stalled cold-import from holding the write lock.
-* **`_system_locks`**: A system table facilitating leader election mutex locks for concurrent Librarian processes. Columns: `task_name`, `locked_at`, `locked_by_pid`, `last_run_at`. Lock expiry: 10 minutes (stale safety net). Trigger cooldown: 5 minutes between subprocess spawns.
+* **`_system_locks`**: A system table backing the Librarian's cooldown throttle inside the single backend daemon (Track B retired its former cross-process leader-election use — see "Single-Owner Backend Daemon & Librarian Throttling" above). Columns: `task_name`, `locked_at`, `locked_by_pid`, `last_run_at`. Trigger cooldown: 5 minutes between in-daemon maintenance passes, claimed via a single atomic `UPDATE`. `locked_at`/`locked_by_pid` are retained columns from the pre-Track-B leader-election shape but are no longer written to.
 * **`_viewer_sessions`**: Tracks active web viewer sessions by `port` + `session_pid` for reference-counted lifecycle management.
 
 ---
@@ -101,10 +107,11 @@ Before any database writes occur, the text is evaluated by a regex-based scrubbi
 ### 5. Ephemeral State Layer
 For temporary data (like short-lived session tokens, OTPs, or process variables), the server maintains an isolated `:memory:` SQLite database (a module-level singleton on `connection.py`). These variables are never written to disk and disappear completely when the server stops.
 
-### 6. Atomic Leader Election Mutex
-To prevent multiple parent processes from launching redundant garbage collection tasks simultaneously, the server uses an **Atomic SQLite lock** in the `_system_locks` table.
-* The lock uses a **10-minute expiry safety net**. If a terminal session crashes mid-run, the lock automatically expires, preventing permanent deadlocks.
-* Trigger cooldown: the cooldown check runs on a single-worker `_librarian_trigger_pool` background thread (fire-and-forget), claiming the `last_run_at` timestamp atomically via a single `UPDATE ... WHERE last_run_at IS NULL OR last_run_at < now - 300s`. This prevents both redundant spawns and the old two-transaction lock-check pattern from adding contention to the hot path.
+### 6. Single-Owner Backend Daemon & Librarian Throttling
+Exactly one daemon process (`src/saltmdb/daemon/server.py`) ever opens SQLite for a given DB path. Ownership is arbitrated by a **bind-only guard socket** on a per-DB-path "election port" (derived deterministically from the resolved DB path into the `49500`–`65499` range) — the daemon binds it and holds it for its entire lifetime, never `accept()`-ing a connection; a losing contender's own bind attempt fails almost instantly and it exits cleanly without ever touching the DB. This replaces a lock *row* (which a crashed process could leave stale) with a lock the OS itself releases the instant the holding process dies. A paired "probe port" (`election_port + 1`) answers lightweight identify requests so a client can tell "daemon still starting up" apart from "a stale/foreign process holds this port," without needing to open the DB to find out.
+* Every MCP client and most CLI entrypoints (`python -m saltmdb`, `--librarian`, `--backfill-chunk-embeddings`) are thin RPC adapters: `ensure_daemon_running()` connects to an already-running daemon or spawns one (detached subprocess, `CREATE_NO_WINDOW` on Windows / `start_new_session=True` on Unix, stdout/stderr redirected to `daemon.log`) and retries discovery for a bounded window. `saltmdb-viewer` is the one exception — a read-only `viewer_status` RPC client that requires an already-running daemon and never spawns one itself; run any of the other entrypoints first if you get a "no daemon running" message.
+* The daemon starts a 30-second grace-period shutdown timer (`DAEMON_SHUTDOWN_GRACE_PERIOD_S`) both at its own startup and every time its session count returns to zero, so a daemon spawned only to service a one-shot RPC (no client ever opens a session) still shuts itself down on the same timer, not just after a connected session disconnects. An in-flight RPC (a librarian pass, a chunk-embedding backfill) is tracked separately and blocks the timer from firing mid-call. `saltmdb-daemon --foreground` (explicit manual launch) disables this timer entirely and runs until `SIGINT`/`SIGTERM`.
+* **Librarian throttling**, now that only one process ever runs the maintenance pass: the old cross-process leader-election lock (`acquire_librarian_lock`/`release_librarian_lock`, two separate `BEGIN IMMEDIATE` transactions against `_system_locks`) is retired outright — there is nothing left to elect a leader among. The cooldown check collapses to a single atomic `UPDATE _system_locks SET last_run_at = ? WHERE last_run_at IS NULL OR last_run_at < now - 300s` on the daemon's single-worker `_librarian_trigger_pool` thread, and a manual pass (`--librarian`, or the `run_librarian_now` RPC) shares that same pool so the automatic and manual paths can never run concurrently.
 
 ### 7. Automated Session Lifecycle Hooks
 SALTMDB integrates with native lifecycle hooks across major AI agent frameworks (**Claude Code**, **Google Antigravity CLI**, and **GitHub Copilot CLI**):
@@ -118,20 +125,18 @@ SALTMDB integrates with native lifecycle hooks across major AI agent frameworks 
 
 ## 🧹 The Librarian Process (Garbage Collection)
 
-Whenever the database is modified, the server schedules a fire-and-forget cooldown check on a background thread pool (`_librarian_trigger_pool`, 1 worker). If at least 2 raw entities exist and 5 minutes have elapsed since the last librarian spawn, a detached background subprocess is launched:
+> [!NOTE]
+> **Memory-core rework, Track B.** The Librarian is no longer its own detached subprocess (`python -m saltmdb --librarian` spawned per triggering client process). It now runs **in-process inside the single backend daemon**, on the daemon's existing single-worker `_librarian_trigger_pool` — see "Single-Owner Backend Daemon & Librarian Throttling" above. The description below reflects the current in-daemon behavior; the subprocess-spawn description this section used to carry is gone along with the subprocess itself.
 
-```
-python -m saltmdb --librarian
-```
+Whenever the database is modified, the daemon schedules a fire-and-forget cooldown check on its single-worker `_librarian_trigger_pool` background thread. If at least 2 raw entities exist and 5 minutes have elapsed since the last pass, the maintenance pass runs directly on that thread — no subprocess spawn, no separate process to detach or redirect. A manual pass (`python -m saltmdb --librarian`, now an RPC-forwarding client, or the daemon's own `run_librarian_now` RPC) submits to the *same* pool and blocks on the result, which is what makes the automatic and manual paths mutually exclusive without any separate lock.
 
-* **Windows Detachment:** Spawns with `0x08000000` (`CREATE_NO_WINDOW`) to prevent distracting terminal window popups.
-* **Unix Detachment:** Does not pass `start_new_session=True`; the subprocess's stdout/stderr are redirected to an append-mode `librarian.log` file in the same directory as `saltmdb.db` (rotated at 5 MB → `.1` backup). This allows debugging Librarian output while keeping it off the MCP stdio channel.
+A spawned background daemon's output goes to its own `daemon.log` (same directory as `saltmdb.db`) rather than a dedicated `librarian.log` — there's no longer a separate subprocess whose output needs its own redirection. (A daemon launched explicitly in the foreground, `saltmdb-daemon --foreground`, logs to the terminal as normal instead.)
 
-Once the background Librarian acquires the atomic lock, it runs:
+Once the Librarian's cooldown-claim UPDATE wins (see above), it runs:
 
 1. **Tag Merging (`merge_tags_heuristics`):** Merges case-insensitive, punctuation-stripped tag aliases (e.g. `#Auth-Error` and `#auth_error` normalize to `autherror`) into a canonical tag to prevent folksonomy fragmentation. Arbitrary SQL row order determines the canonical winner.
 
-**Maintenance pass (`_run_librarian_maintenance`):** Runs unconditionally after the tag-merging pass (even on partial failure), while the leader lock is still held: `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA optimize=0x10002`.
+**Maintenance pass (`_run_librarian_maintenance`):** Runs unconditionally after the tag-merging pass (even on partial failure), on the same trigger-pool thread: `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA optimize=0x10002`.
 
 > [!NOTE]
 > **Retired (memory-core rework, Track A).** The Librarian used to run two additional async passes here — vector topic clustering (`consolidate_vector_clusters`) and consolidated-supersession scouting (`scout_consolidated_supersessions`) — each logging a reviewable `consolidation_request`/`supersession_candidate` event for a human/agent to resolve later. Both were deleted outright, no replacement queue. Store-time disposition (see the Quality Gate section above) folds the duplicate/supersession/stale-consolidated-node evidence-gathering those passes did into a **synchronous** `store_memory` preflight instead — evaluated inline on the write that's actually relevant, not from a periodic scan of the whole DB. See `scratch/plans/track_a_disposition_detailed.md` for the full design and rationale.
@@ -182,11 +187,11 @@ $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 | `SALTMDB_DB_PATH` | `~/.saltmdb/saltmdb.db` | Path to the SQLite database file. |
 | `SALTMDB_ENABLE_SEMANTIC` | `true` | Set to `false`/`0`/`off`/`no` to disable vector search. Query-based `search_memory` calls then return an error instead of an FTS-only fallback -- see the Search Architecture section above. |
 | `SALTMDB_RERANKER_MODEL` | _(unset)_ | Experimental, opt-in: set to an ONNX cross-encoder model name (`Xenova/ms-marco-MiniLM-L-6-v2`, `Xenova/ms-marco-MiniLM-L-12-v2`, `BAAI/bge-reranker-base`, `jinaai/jina-reranker-v1-tiny-en`, `jinaai/jina-reranker-v1-turbo-en`, or `jinaai/jina-reranker-v2-base-multilingual`) to enable `search_memory`'s `use_cross_encoder` Stage-2 reranking flag. Unset (default) or an unsupported name leaves `use_cross_encoder` a no-op. No PyTorch runtime -- uses `fastembed`'s existing ONNX Runtime backend, the same one already used for the bi-encoder. |
-| `SALTMDB_VIEWER_PORT` | `8080` | Port for the database dashboard viewer. |
-| `SALTMDB_VIEWER_HOST` | `127.0.0.1` | Bind host for the viewer (loopback-only by default). |
-| `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable auto-start of the viewer on MCP server startup. |
-| `SALTMDB_DISABLE_LIBRARIAN` | _(unset)_ | Set to any value to suppress all Librarian subprocess spawns. |
-| `SALTMDB_TEST_MODE` | _(unset)_ | Set to any value in test environments to suppress Librarian spawns. |
+| `SALTMDB_VIEWER_PORT` | `8080` | Port for the database dashboard viewer, read when the backend daemon starts its in-process viewer thread. |
+| `SALTMDB_VIEWER_HOST` | `127.0.0.1` | **Currently not consumed** — the daemon binds the viewer directly to `127.0.0.1` regardless of this variable (a known gap from the Track B rework, not yet wired through). |
+| `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable the backend daemon's in-process viewer thread. |
+| `SALTMDB_DISABLE_LIBRARIAN` | _(unset)_ | Set to any value to suppress all Librarian maintenance-pass triggers (runs in-daemon as of Track B; no longer a separate subprocess). |
+| `SALTMDB_TEST_MODE` | _(unset)_ | Set to any value in test environments to suppress Librarian maintenance-pass triggers. |
 
 ### 3. Registering with MCP Clients
 MCP clients do not inherit your shell's PATH — always use the **full path** to your Python executable. Find it first:
@@ -211,15 +216,15 @@ Then add to your MCP client configuration file:
 See [INSTALL.md](INSTALL.md) for platform-specific examples and troubleshooting.
 
 ### 4. Database Dashboard Viewer
-SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**:
-1. Run the viewer:
+SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**. As of the Track B backend-daemon rework, it runs as an in-process thread inside the single backend daemon and comes up automatically as soon as any MCP client causes the daemon to spawn (gated by `SALTMDB_VIEWER_ENABLED`, default on) — there's nothing to separately launch:
+1. Check status (requires a daemon already running for the resolved DB path — it does **not** spawn one, and takes no `--port` or other flags):
    ```bash
    python -m saltmdb.viewer.server
    # or if installed via pip install -e .:
    saltmdb-viewer
    ```
-   Override the default port with `--port <PORT>` or the `SALTMDB_VIEWER_PORT` environment variable.
-2. Open your web browser and navigate to:
+   The daemon reads `SALTMDB_VIEWER_PORT` (default `8080`) when it starts the viewer thread, not per `saltmdb-viewer` invocation.
+2. Once a daemon is running with the viewer enabled, open your web browser and navigate to:
    [http://localhost:8080](http://localhost:8080)
 
 ### 5. Running Unit Tests
