@@ -294,24 +294,16 @@ class TestCloseConnection(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_pragma_optimize_is_executed(self):
+    def test_close_is_pure(self):
         conn = init_db(self.db_path)
         executed = []
         conn.set_trace_callback(lambda stmt: executed.append(stmt))
         close_connection(conn)
-        self.assertTrue(
-            any("PRAGMA optimize" in stmt for stmt in executed),
-            f"PRAGMA optimize was not executed during close_connection; saw: {executed}",
-        )
+        self.assertFalse(executed, f"close_connection unexpectedly ran SQL: {executed}")
 
-    def test_logs_at_debug_level(self):
+    def test_close_does_not_log_maintenance(self):
         conn = init_db(self.db_path)
-        with self.assertLogs("saltmdb.db.connection", level="DEBUG") as ctx:
-            close_connection(conn)
-        self.assertTrue(
-            any("WAL checkpoint" in msg for msg in ctx.output),
-            f"expected a WAL-checkpoint debug log line; saw: {ctx.output}",
-        )
+        close_connection(conn)
 
     def test_never_raises_even_if_pragma_fails(self):
         conn = init_db(self.db_path)

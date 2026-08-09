@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 _librarian_trigger_pool = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="saltmdb-librarian-trigger"
 )
-
-
-def trigger_librarian(db_path: str = None):
+def trigger_librarian(db_path: str = None, *, coordinator=None):
     """Fire-and-forget: schedules the cooldown check + maintenance pass on a background
     thread so this never blocks or adds write-lock contention to the caller's request."""
     if (
@@ -32,10 +30,13 @@ def trigger_librarian(db_path: str = None):
     ):
         return
     db_path = db_path or get_db_path()
-    _librarian_trigger_pool.submit(_run_maintenance_pass_impl, db_path, False)
+    if coordinator is not None:
+        _librarian_trigger_pool.submit(run_librarian_now, db_path, False, coordinator)
+    else:
+        _librarian_trigger_pool.submit(_run_maintenance_pass_impl, db_path, False)
 
 
-def run_librarian_now(db_path: str = None, force: bool = True) -> str:
+def run_librarian_now(db_path: str = None, force: bool = True, coordinator=None) -> str:
     """Daemon-owned entry point for the manual "run_librarian_now" RPC (Track B, see
     scratch/plans/track_b_daemon_detailed.md §11) and the redesigned `--librarian` CLI. Submits to
     the SAME single-worker _librarian_trigger_pool the automatic trigger above uses, and BLOCKS on
@@ -46,8 +47,31 @@ def run_librarian_now(db_path: str = None, force: bool = True) -> str:
     still serializes through the pool.
     """
     db_path = db_path or get_db_path()
+    if coordinator is not None:
+        result = coordinator.submit(
+            "librarian_mutations", lambda conn: _run_maintenance_pass_on_connection(conn, force), priority="background"
+        )
+        coordinator.submit_maintenance("librarian_checkpoint_optimize", _run_librarian_maintenance)
+        return result
     future = _librarian_trigger_pool.submit(_run_maintenance_pass_impl, db_path, force)
     return future.result()
+
+
+def _run_maintenance_pass_on_connection(conn, force: bool) -> str:
+    if not force:
+        raw_count = conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'raw'").fetchone()[0]
+        if raw_count < 2:
+            return "Skipped: raw-entity threshold not met."
+        now = datetime.now(UTC).isoformat()
+        cur = conn.execute(
+            f"UPDATE _system_locks SET last_run_at=? WHERE task_name='librarian_consolidation' "
+            f"AND (last_run_at IS NULL OR datetime(last_run_at) < datetime('now', '-{LIBRARIAN_TRIGGER_COOLDOWN_S} seconds'))",
+            (now,),
+        )
+        if cur.rowcount != 1:
+            return "Skipped: cooldown not elapsed."
+    merge_tags_heuristics(conn)
+    return "Librarian maintenance pass complete."
 
 
 def _run_maintenance_pass_impl(db_path: str, force: bool) -> str:

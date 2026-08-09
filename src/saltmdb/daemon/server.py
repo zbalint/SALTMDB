@@ -21,7 +21,8 @@ from typing import Any
 
 from saltmdb import config
 from saltmdb.daemon import discovery, platform_paths, protocol
-from saltmdb.daemon.dispatch import DISPATCH_TABLE
+from saltmdb.daemon.dispatch import DISPATCH_TABLE, dispatch_tool
+from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
 from saltmdb.daemon.embed_stall_monitor import EmbedStallMonitor
 from saltmdb.db.schema import init_db
 
@@ -50,6 +51,8 @@ class _DaemonState:
         self._shutdown_timer: threading.Timer | None = None
         self._shutdown_callback = None
         self._started_at = time.monotonic()
+        self.coordinator: DbWriteCoordinator | None = None
+        self.embedding_scheduler = None
 
     def viewer_snapshot(self) -> dict[str, Any]:
         """Return the daemon-owned fields safe to expose to the local Viewer."""
@@ -60,6 +63,7 @@ class _DaemonState:
                 "viewer": {"enabled": self.viewer_port is not None, "port": self.viewer_port},
                 "active_hello_sessions": len(self._sessions),
                 "inflight_rpc_dispatches": self._inflight,
+                "db_writer": self.coordinator.telemetry() if self.coordinator else None,
             }
 
     def set_shutdown_callback(self, callback) -> None:
@@ -191,20 +195,37 @@ class _DaemonState:
                     return protocol.build_error_response(
                         request_id, protocol.UNKNOWN_TOOL, f"unknown tool: {tool}"
                     )
-                result = DISPATCH_TABLE[tool](**(params.get("kwargs") or {}))
+                if self.coordinator is None:
+                    return protocol.build_error_response(request_id, protocol.INTERNAL_ERROR, "database writer unavailable")
+                result = dispatch_tool(tool, params.get("kwargs") or {}, self.coordinator)
                 return protocol.build_ok_response(request_id, result)
             elif method == "run_librarian_now":
                 from saltmdb.domain.services import librarian_service
 
+                if self.coordinator is None:
+                    raise RuntimeError("database writer unavailable")
                 result = librarian_service.run_librarian_now(
-                    db_path=self.db_path, force=params.get("force", True)
+                    db_path=self.db_path, force=params.get("force", True), coordinator=self.coordinator
                 )
                 return protocol.build_ok_response(request_id, result)
             elif method == "run_backfill_chunk_embeddings_now":
-                from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
+                from saltmdb.domain.services.embedding_service import reconcile_embedding_jobs
 
-                count = backfill_chunk_embeddings(db_path=self.db_path)
-                return protocol.build_ok_response(request_id, f"{count} entities backfilled.")
+                if self.coordinator is None:
+                    raise RuntimeError("database writer unavailable")
+                after_id = None
+                total = 0
+                while True:
+                    ids = self.coordinator.submit(
+                        "run_backfill_chunk_embeddings_now",
+                        lambda conn, cursor=after_id: reconcile_embedding_jobs(conn, limit=100, after_id=cursor),
+                        priority="background",
+                    )
+                    if not ids:
+                        break
+                    total += len(ids)
+                    after_id = ids[-1]
+                return protocol.build_ok_response(request_id, f"{total} entities queued for durable embedding.")
             else:
                 return protocol.build_error_response(
                     request_id, protocol.UNKNOWN_METHOD, f"unknown method: {method}"
@@ -422,27 +443,40 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     probe_thread = threading.Thread(target=_probe_accept_loop, args=(probe_sock, state), daemon=True)
     probe_thread.start()
 
-    # Step 4: init_db + the same unconditional startup-backfill sweeps the old adapter path ran
-    # on every process start -- now exactly once per daemon lifetime.
+    # Step 4: the bootstrap connection is the only writer before the coordinator.
     conn = init_db(db_path)
     conn.close()
     try:
-        from saltmdb.domain.services.embedding_service import (
-            backfill_chunk_embeddings,
-            backfill_pending_embeddings,
-        )
+        from saltmdb.domain.services.embedding_service import EmbedJobScheduler, reconcile_embedding_jobs
 
-        count = backfill_pending_embeddings(db_path=db_path)
-        if count > 0:
-            logger.info("Queued %d pending entity embeddings for background generation.", count)
+        state.coordinator = DbWriteCoordinator(db_path)
+        state.coordinator.start()
+        from saltmdb.db.connection import enable_daemon_connection_boundary
+        enable_daemon_connection_boundary()
+        # One deliberate, conservative recovery generation for every active
+        # legacy row.  Each page is a bounded background transaction.
+        after_id = None
+        reconciled = 0
+        while True:
+            page = state.coordinator.submit(
+                "reconcile_embedding_jobs",
+                lambda c, cursor=after_id: reconcile_embedding_jobs(c, limit=100, after_id=cursor),
+                priority="background",
+            )
+            if not page:
+                break
+            reconciled += len(page)
+            after_id = page[-1]
+        logger.info("Reconciled durable embedding jobs for %d active entities.", reconciled)
+        state.embedding_scheduler = EmbedJobScheduler(state.coordinator)
+        state.embedding_scheduler.start()
     except Exception as e:
-        logger.warning("Startup embedding backfill check failed: %s", e)
-    try:
-        chunk_count = backfill_chunk_embeddings(db_path=db_path)
-        if chunk_count > 0:
-            logger.info("Chunk-embedding startup sweep repaired/backfilled %d entities.", chunk_count)
-    except Exception as e:
-        logger.warning("Startup chunk-embedding backfill sweep failed: %s", e)
+        logger.exception("Startup durable embedding recovery failed: %s", e)
+        if state.coordinator:
+            state.coordinator.shutdown(timeout=config.DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S)
+        probe_sock.close()
+        guard.close()
+        sys.exit(1)
 
     # Step 5: service-port TCP listener, OS-assigned port.
     service_server = _ThreadingRpcServer(("127.0.0.1", 0), _RpcRequestHandler)
@@ -472,6 +506,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         except OSError as e:
             logger.error("Viewer bind failed on port %d: %s", viewer_port, e)
             service_server.server_close()
+            if state.embedding_scheduler is not None:
+                state.embedding_scheduler.stop()
+            if state.coordinator is not None:
+                state.coordinator.shutdown(timeout=config.DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S)
             probe_sock.close()
             guard.close()
             sys.exit(1)
@@ -562,6 +600,11 @@ def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, k
     brief overlap between an outgoing daemon and its successor safe)."""
     state.begin_draining()
 
+    if state.embedding_scheduler is not None:
+        state.embedding_scheduler.stop()
+    if state.coordinator is not None:
+        state.coordinator.begin_draining()
+
     if stall_monitor is not None:
         stall_monitor.stop()  # daemon=True thread, dies with the process regardless -- stopped
         # here purely to avoid a stray check firing mid-drain, not for correctness.
@@ -584,6 +627,12 @@ def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, k
             pool.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
             logger.debug("Executor pool shutdown failed (non-fatal): %s", e)
+
+    if state.coordinator is not None:
+        # An active foreground transaction is allowed to finish.  Queued
+        # foreground work was resolved during begin_draining; durable
+        # background jobs remain in SQLite for restart recovery.
+        state.coordinator.shutdown()
 
     discovery.remove(key)
 

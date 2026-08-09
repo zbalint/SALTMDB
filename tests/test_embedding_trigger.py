@@ -1,7 +1,6 @@
 import unittest
 import tempfile
 import os
-import time
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory
 
@@ -20,7 +19,7 @@ class TestEmbeddingTrigger(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_store_memory_triggers_embedding_generation(self):
+    def test_store_memory_creates_durable_embedding_jobs(self):
         res = store_memory(
             title="Async Embedding Test Memory",
             content="Content for testing async background embedding generation worker pool",
@@ -30,18 +29,10 @@ class TestEmbeddingTrigger(unittest.TestCase):
         )
         entity_id = res.split("ID: ")[1]
 
-        # Wait up to 5 seconds for background embedding thread pool execution
-        ready = False
-        for _ in range(50):
-            row = self.conn.execute(
-                "SELECT embedding_status FROM entities WHERE id = ?", (entity_id,)
-            ).fetchone()
-            if row and row[0] == "ready":
-                ready = True
-                break
-            time.sleep(0.1)
-
-        self.assertTrue(ready, "Embedding status did not transition to 'ready'")
+        states = self.conn.execute(
+            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind", (entity_id,)
+        ).fetchall()
+        self.assertEqual(states, [("chunk", "queued"), ("entity", "queued")])
 
 
 if __name__ == "__main__":

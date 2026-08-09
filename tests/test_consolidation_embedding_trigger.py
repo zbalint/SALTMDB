@@ -1,7 +1,6 @@
 import unittest
 import tempfile
 import os
-import time
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
@@ -21,7 +20,7 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
             except Exception:
                 pass
 
-    def test_commit_consolidation_triggers_embedding_generation(self):
+    def test_commit_consolidation_creates_durable_embedding_jobs(self):
         res1 = store_memory(
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation embedding",
@@ -53,20 +52,10 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         self.assertIn("Successfully committed", c_res)
         consolidated_id = c_res.split("ID: ")[-1].strip()
 
-        # Wait up to 5 seconds for background embedding thread pool execution
-        ready = False
-        for _ in range(50):
-            row = self.conn.execute(
-                "SELECT embedding_status FROM entities WHERE id = ?", (consolidated_id,)
-            ).fetchone()
-            if row and row[0] == "ready":
-                ready = True
-                break
-            time.sleep(0.1)
-
-        self.assertTrue(
-            ready, "Consolidated entity's embedding status did not transition to 'ready'"
-        )
+        states = self.conn.execute(
+            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind", (consolidated_id,)
+        ).fetchall()
+        self.assertEqual(states, [("chunk", "queued"), ("entity", "queued")])
 
 
 if __name__ == "__main__":

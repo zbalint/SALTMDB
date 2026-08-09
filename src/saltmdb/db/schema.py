@@ -23,6 +23,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
     if not db_path:
         db_path = get_db_path()
 
+    # Bootstrap is the sole pre-coordinator writer.
     conn = get_connection(db_path)
 
     # Force sqlite_vec (and its numpy dependency, a large native extension) to finish
@@ -168,6 +169,32 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             )
         except sqlite3.OperationalError:
             pass
+
+        # Durable embedding work.  Jobs deliberately have no FK: old releases
+        # may retain historical entities, and job diagnostics must remain
+        # inspectable even after an administrative cleanup.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS embedding_jobs (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL,
+            job_kind TEXT NOT NULL CHECK(job_kind IN ('entity', 'chunk')),
+            source_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN
+                ('queued', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at DATETIME,
+            lease_expires_at DATETIME,
+            last_error TEXT,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            completed_at DATETIME,
+            UNIQUE(entity_id, job_kind, source_hash)
+        );
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embedding_jobs_due "
+            "ON embedding_jobs(state, next_attempt_at, lease_expires_at)"
+        )
 
         # 3. Tags Table (Folksonomy with support for canonical aliases)
         conn.execute("""

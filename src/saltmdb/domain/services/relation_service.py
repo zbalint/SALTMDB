@@ -760,6 +760,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     f"<{next(iter(unresolved.values()))}>",
                 ),
             )
+
         else:
             min_sim, offending_pair = min_pairwise_cohesion(centroids)
 
@@ -948,6 +949,16 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 ),
             )
 
+            # The new consolidated entity and all archived parents transition
+            # with their durable embedding work in this one transaction.
+            from saltmdb.domain.services.embedding_service import (
+                cancel_embedding_jobs_for_entity,
+                enqueue_embedding_jobs_for_entity,
+            )
+            enqueue_embedding_jobs_for_entity(
+                conn, consolidated_id, clean_title, redacted_content, content_hash
+            )
+
             if tags:
                 for tag_name in tags:
                     tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_val)
@@ -975,6 +986,8 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             """,
                 [now, now] + resolved_parents,
             )
+            for parent_id in resolved_parents:
+                cancel_embedding_jobs_for_entity(conn, parent_id)
 
             parent_set = set(resolved_parents)
             active_touching_rows = conn.execute(
@@ -1032,32 +1045,6 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 _do_commit()
 
             write_transaction_retrying(conn, _write)
-
-        try:
-            target_db = conn.execute("PRAGMA database_list").fetchone()[2]
-        except Exception:
-            target_db = db_path or get_db_path()
-        if target_db:
-            from saltmdb.domain.services import embedding_service
-            from saltmdb.domain.services.memory_service import _embed_pool
-
-            _embed_pool.submit(
-                embedding_service.embed_entity_async,
-                consolidated_id,
-                clean_title,
-                redacted_content,
-                target_db,
-            )
-            # Part A2 (chunk-embedding freshness lifecycle): analogous chunk-write trigger for
-            # the newly consolidated entity, passing the real content_hash computed/committed
-            # above (~line 578/644), not None -- same out-of-order-race fix as store_memory's A1.
-            _embed_pool.submit(
-                embedding_service.write_entity_chunk_embeddings,
-                consolidated_id,
-                redacted_content,
-                target_db,
-                content_hash,
-            )
 
         return f"Successfully committed consolidated memory with ID: {consolidated_id}"
     except Exception as e:

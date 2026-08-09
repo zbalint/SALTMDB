@@ -2,7 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, UTC
 from saltmdb.config import get_db_path
-from saltmdb.db.connection import get_connection, close_connection
+from saltmdb.db.connection import open_read_connection, close_connection
 
 
 def create_snapshot(db_path: str = None) -> str:
@@ -15,7 +15,7 @@ def create_snapshot(db_path: str = None) -> str:
     backup_filename = f"saltmdb_snapshot_{timestamp}.db"
     backup_path = os.path.join(backup_dir, backup_filename)
 
-    src_conn = get_connection(db_path)
+    src_conn = open_read_connection(db_path)
     dest_conn = None
     try:
         dest_conn = sqlite3.connect(backup_path)

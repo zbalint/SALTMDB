@@ -52,6 +52,7 @@ def _dispatch_store_memory(**kw):
         context_id=kw.get("context_id"),
         review_token=kw.get("review_token"),
         dispositions=kw.get("dispositions"),
+        coordinator=kw.get("coordinator"),
     )
 
 
@@ -191,3 +192,28 @@ DISPATCH_TABLE = {
     "inspect_graph": _dispatch_inspect_graph,
     "get_events": _dispatch_get_events,
 }
+
+# Tool calls that can mutate persistent state.  The daemon server calls these
+# through ``dispatch_tool`` so even legacy service implementations execute on
+# the coordinator-owned SQLite connection.
+MUTATING_TOOLS = frozenset(
+    {"log_event", "merge_tags", "dismiss_event", "store_memory", "archive_memory", "manage_relation", "commit_consolidation"}
+)
+
+
+def dispatch_tool(tool: str, kwargs: dict, coordinator):
+    """Invoke one normalized tool with the daemon's single-writer boundary."""
+    fn = DISPATCH_TABLE[tool]
+    if tool in MUTATING_TOOLS:
+        if tool in {"store_memory", "log_event"}:
+            kwargs = {**kwargs, "coordinator": coordinator}
+        return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
+    if tool == "search_memory" and kwargs.get("entity_id"):
+        content = memory_service.fetch_memory_chunk(entity_id=kwargs["entity_id"], touch=False)
+        coordinator.submit(
+            "touch_memory_access",
+            lambda conn: memory_service.touch_memory_access(kwargs["entity_id"], conn),
+            priority="foreground",
+        )
+        return content
+    return fn(**kwargs)

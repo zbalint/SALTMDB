@@ -3,6 +3,8 @@ import random
 import sqlite3
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
+from pathlib import Path
 
 from saltmdb.config import (
     RETRY_BASE_DELAY_S,
@@ -11,6 +13,32 @@ from saltmdb.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Set only by DbWriteCoordinator's writer thread.  It is deliberately a
+# ContextVar rather than a process global so request/model threads can never
+# accidentally borrow the SQLite object.
+_coordinator_connection: ContextVar[sqlite3.Connection | None] = ContextVar(
+    "saltmdb_coordinator_connection", default=None
+)
+_daemon_boundary_enabled = False
+
+
+def enable_daemon_connection_boundary() -> None:
+    """After bootstrap, non-writer daemon threads may open read-only DB handles only."""
+    global _daemon_boundary_enabled
+    _daemon_boundary_enabled = True
+
+
+def is_coordinator_connection(conn: sqlite3.Connection) -> bool:
+    return conn is _coordinator_connection.get()
+
+
+def _enter_coordinator_connection(conn: sqlite3.Connection):
+    return _coordinator_connection.set(conn)
+
+
+def _leave_coordinator_connection(token) -> None:
+    _coordinator_connection.reset(token)
 
 # Module-level ephemeral in-memory connection (singleton)
 EPHEMERAL_CONN = sqlite3.connect(":memory:", check_same_thread=False, timeout=10.0)
@@ -31,9 +59,24 @@ def init_ephemeral_db():
 init_ephemeral_db()
 
 
-def get_connection(db_path: str) -> sqlite3.Connection:
-    """Create a new per-request connection configured with optimized PRAGMAs."""
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20.0, isolation_level=None)
+def open_read_connection(db_path: str) -> sqlite3.Connection:
+    """Open a read-only SQLite connection.
+
+    Daemon request handlers must use this for normal reads.  ``query_only`` is
+    intentionally set in addition to URI ``mode=ro``: the former makes an
+    accidental write fail loudly even if a caller later attaches another DB.
+    """
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=5.0)
+    conn.execute("PRAGMA query_only=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+
+def open_writer_connection(db_path: str) -> sqlite3.Connection:
+    """Open a writer connection for schema bootstrap or DbWriteCoordinator only."""
+    conn = sqlite3.connect(db_path, timeout=20.0, isolation_level=None)
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
@@ -43,6 +86,29 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON;")
     # Explicit default (1000 pages / ~4MB); do not lower until WAL-page-count logging
     # (see close_connection) shows growth is actually a problem
+    conn.execute("PRAGMA wal_autocheckpoint=1000;")
+    return conn
+
+
+# Compatibility name retained for direct-mode tests and legacy callers.  New
+# daemon code must use ``open_read_connection`` or DbWriteCoordinator instead.
+def get_connection(db_path: str) -> sqlite3.Connection:
+    active = _coordinator_connection.get()
+    if active is not None:
+        return active
+    if _daemon_boundary_enabled:
+        return open_read_connection(db_path)
+    # Legacy direct-mode compatibility only.  The daemon never calls this
+    # outside coordinator scope; its historical cross-thread setting remains
+    # for unit tests and standalone migration helpers.
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20.0, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA cache_size=-8000;")
+    conn.execute("PRAGMA mmap_size=67108864;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA wal_autocheckpoint=1000;")
     return conn
 
@@ -92,6 +158,12 @@ def write_transaction_retrying(conn: sqlite3.Connection, fn):
     Returns:
         The return value of fn(c).
     """
+    # Service helpers retain their historical transaction wrapper.  When a
+    # daemon dispatch already owns the outer coordinator transaction, nesting
+    # must reuse it rather than issuing a second BEGIN IMMEDIATE.
+    if conn is _coordinator_connection.get():
+        return fn(conn)
+
     attempt = 0
     while True:
         try:
@@ -130,20 +202,14 @@ def _log_wal_checkpoint_state(conn: sqlite3.Connection) -> None:
 
 
 def close_connection(conn: sqlite3.Connection) -> None:
-    """Close a connection, running best-effort cleanup PRAGMAs first.
+    """Close a connection without hidden maintenance writes.
 
-    Never raises -- this is meant to be safe to call from cleanup/finally
-    paths (including while another exception is already being handled),
-    where raising here would mask the original error.
+    Checkpointing and optimisation are explicit coordinator jobs; doing either
+    while closing an otherwise read-only connection violates the daemon's
+    single-writer boundary.
     """
-    try:
-        conn.execute("PRAGMA optimize;")
-    except Exception as e:
-        logger.debug("PRAGMA optimize failed during close_connection: %s", e)
-    try:
-        _log_wal_checkpoint_state(conn)
-    except Exception as e:
-        logger.debug("WAL checkpoint state logging failed during close_connection: %s", e)
+    if conn is _coordinator_connection.get():
+        return
     conn.close()
 
 

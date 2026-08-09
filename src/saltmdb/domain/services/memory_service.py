@@ -20,7 +20,7 @@ from saltmdb.config import (
     SUPERSESSION_CHAIN_MAX_DEPTH,
     STRICT_OVERFETCH_CANDIDATE_CAP,
 )
-from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+from saltmdb.db.connection import get_connection, is_coordinator_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import (
     resolve_entity_id,
     extract_title_and_snippet,
@@ -264,6 +264,13 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
                 (entity_id, core_tag_id),
             )
 
+    # This is intentionally part of the same transaction as the entity
+    # version/tag update: a committed active source always has durable work,
+    # even if the daemon dies before the scheduler can dispatch inference.
+    from saltmdb.domain.services.embedding_service import enqueue_embedding_jobs_for_entity
+
+    enqueue_embedding_jobs_for_entity(conn, entity_id, title, redacted_content, content_hash)
+
     return entity_id, bool(existing)
 
 
@@ -286,6 +293,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     context_id: str = None,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
     *,
     review_token: str | None = None,
     dispositions: list | None = None,
@@ -447,34 +455,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
-        trigger_librarian(db_path=db_path)
-
-        if effective_db_path:
-            from saltmdb.domain.services import embedding_service
-
-            _embed_pool.submit(
-                embedding_service.embed_entity_async,
-                entity_id_out,
-                title,
-                redacted_content,
-                effective_db_path,
-            )
-            # Part A1 (chunk-embedding freshness lifecycle): pass the just-committed content_hash
-            # (same value computed above and written into entities.content_hash in the same
-            # transaction that wrote redacted_content), not None. This is the actual fix for the
-            # out-of-order race two _embed_pool jobs for the same entity_id can hit: if this job's
-            # worker happens to run *after* a subsequent edit to the same entity_id has already
-            # committed a different content_hash, the guard inside write_entity_chunk_embeddings
-            # re-reads entities.content_hash fresh inside its own transaction, sees it no longer
-            # matches this job's content_hash, and no-ops -- existing, newer rows are left
-            # untouched instead of being clobbered by a stale in-flight write.
-            _embed_pool.submit(
-                embedding_service.write_entity_chunk_embeddings,
-                entity_id_out,
-                redacted_content,
-                effective_db_path,
-                content_hash,
-            )
+        trigger_librarian(db_path=db_path, coordinator=coordinator)
 
         return res_msg
     except Exception as e:
@@ -2133,7 +2114,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             close_connection(conn)
 
 
-def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str = None) -> str:
+def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True) -> str:
     """Returns full markdown text of a memory."""
     if not entity_id:
         return "Error: entity_id is mandatory."
@@ -2158,11 +2139,11 @@ def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str =
         )
         row = cursor.fetchone()
         if row:
-            now = datetime.now(UTC).isoformat()
-            conn.execute(
-                "UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id)
-            )
-            conn.commit()
+            if touch:
+                now = datetime.now(UTC).isoformat()
+                conn.execute("UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id))
+                if not is_coordinator_connection(conn):
+                    conn.commit()
             return row[2]
         return f"Memory not found for ID: {resolved_id}"
     except Exception as e:
@@ -2171,6 +2152,16 @@ def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str =
     finally:
         if should_close:
             close_connection(conn)
+
+
+def touch_memory_access(entity_id: str, db_connection) -> None:
+    """Writer-side half of a fetch access-time touch."""
+    resolved_id = resolve_entity_id(db_connection, entity_id)
+    if resolved_id:
+        db_connection.execute(
+            "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+            (datetime.now(UTC).isoformat(), resolved_id),
+        )
 
 
 def archive_memory(  # noqa: PLR0911
@@ -2232,6 +2223,8 @@ def archive_memory(  # noqa: PLR0911
             """,
                 (now, resolved_id, resolved_id),
             )
+            from saltmdb.domain.services.embedding_service import cancel_embedding_jobs_for_entity
+            cancel_embedding_jobs_for_entity(conn, resolved_id)
 
         if _in_transaction:
             _do_archive()

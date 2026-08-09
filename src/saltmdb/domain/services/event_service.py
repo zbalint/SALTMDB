@@ -18,6 +18,7 @@ def log_event(
     context_id: str = None,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
     _in_transaction: bool = False,
 ) -> str:
     """Appends an event to the append-only events ledger.
@@ -74,7 +75,7 @@ def log_event(
         if not _in_transaction:
             from saltmdb.domain.services.librarian_service import trigger_librarian
 
-            trigger_librarian(db_path=db_path)
+            trigger_librarian(db_path=db_path, coordinator=coordinator)
         return f"Event logged successfully with ID: {event_id}"
     except Exception as e:
         logger.error("Error logging event: %s", e)
