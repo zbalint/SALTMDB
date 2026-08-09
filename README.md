@@ -216,7 +216,7 @@ Then add to your MCP client configuration file:
 See [INSTALL.md](INSTALL.md) for platform-specific examples and troubleshooting.
 
 ### 4. Database Dashboard Viewer
-SALTMDB includes a sleek, zero-dependency dark-mode dashboard to inspect events, memories, tags, system locks, **Lineage Explorer (tree & graph)**, and **interactive SVG Force-Directed Relations Topology**. As of the Track B backend-daemon rework, it runs as an in-process thread inside the single backend daemon and comes up automatically as soon as any MCP client causes the daemon to spawn (gated by `SALTMDB_VIEWER_ENABLED`, default on) — there's nothing to separately launch:
+SALTMDB includes a zero-build, local-only knowledge-operations Viewer for Overview, Memory Explorer, Activity, local relationship exploration, Quality, Operations, Tags, and diagnostics. It safely renders agent-authored Markdown with pinned local assets and exposes read-only browser APIs only. The legacy System Locks page is retired: Librarian cooldown state is not a cross-process lock. As of the Track B backend-daemon rework, the Viewer runs as an in-process daemon thread and comes up automatically as soon as any MCP client causes the daemon to spawn (gated by `SALTMDB_VIEWER_ENABLED`, default on) — there's nothing to separately launch:
 1. Check status (requires a daemon already running for the resolved DB path — it does **not** spawn one, and takes no `--port` or other flags):
    ```bash
    python -m saltmdb.viewer.server

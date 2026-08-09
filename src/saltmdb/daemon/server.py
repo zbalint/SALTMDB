@@ -16,6 +16,7 @@ import socket
 import socketserver
 import sys
 import threading
+import time
 from typing import Any
 
 from saltmdb import config
@@ -48,6 +49,18 @@ class _DaemonState:
         self._draining = False
         self._shutdown_timer: threading.Timer | None = None
         self._shutdown_callback = None
+        self._started_at = time.monotonic()
+
+    def viewer_snapshot(self) -> dict[str, Any]:
+        """Return the daemon-owned fields safe to expose to the local Viewer."""
+        with self._lock:
+            return {
+                "ready": self.service_port is not None and not self._draining,
+                "uptime_s": round(time.monotonic() - self._started_at, 3),
+                "viewer": {"enabled": self.viewer_port is not None, "port": self.viewer_port},
+                "active_hello_sessions": len(self._sessions),
+                "inflight_rpc_dispatches": self._inflight,
+            }
 
     def set_shutdown_callback(self, callback) -> None:
         self._shutdown_callback = callback
@@ -446,6 +459,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     if config.is_viewer_enabled():
         from saltmdb.viewer.routes import SALTMDBHandler
         from saltmdb.viewer.server import SALTMDBTCPServer
+        from saltmdb.viewer.context import ViewerReadGateway
 
         viewer_port = config.get_viewer_port()
         # Round-4 fix: explicit, since the daemon constructs this directly and bypasses
@@ -453,6 +467,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         SALTMDBTCPServer.allow_reuse_address = True
         try:
             viewer_httpd = SALTMDBTCPServer(("127.0.0.1", viewer_port), SALTMDBHandler)
+            viewer_httpd.daemon_state = state
+            viewer_httpd.viewer_gateway = ViewerReadGateway(db_path, state)
         except OSError as e:
             logger.error("Viewer bind failed on port %d: %s", viewer_port, e)
             service_server.server_close()
