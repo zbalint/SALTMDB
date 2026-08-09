@@ -104,7 +104,9 @@ class TestViewerReworkContracts(unittest.TestCase):
     def test_neighborhood_validates_time_and_reports_real_truncation(self):
         self._insert_entity("root")
         self._insert_entity("child")
+        self._insert_entity("second-child")
         self._insert_relation("root", "child")
+        self._insert_relation("root", "second-child")
         self.conn.commit()
         handler = self._handler()
         invalid = self._capture(handler)
@@ -112,11 +114,16 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertEqual(invalid["status"], 400)
 
         exact = self._capture(handler)
-        handler.get_relations_neighborhood({"entity_id": ["root"], "max_nodes": ["2"]})
+        handler.get_relations_neighborhood({"entity_id": ["root"], "max_edges": ["1"]})
         self.assertEqual(exact["status"], 200)
-        self.assertEqual(exact["data"]["total_matching_edges"], 1)
-        self.assertEqual(exact["data"]["omitted_edge_count"], 0)
-        self.assertFalse(exact["data"]["truncated"])
+        edge = exact["data"]["edges"][0]
+        self.assertEqual(edge["source"], "root")
+        self.assertIn(edge["target"], {"child", "second-child"})
+        self.assertEqual(edge["predicate"], "related_to")
+        self.assertEqual(exact["data"]["returned_edges"], 1)
+        self.assertEqual(exact["data"]["total_matching_edges"], 2)
+        self.assertEqual(exact["data"]["omitted_edge_count"], 1)
+        self.assertTrue(exact["data"]["truncated"])
 
     def test_quality_and_operations_contracts(self):
         store_memory(
@@ -150,6 +157,8 @@ class TestViewerReworkContracts(unittest.TestCase):
                 ("raw-fact", now, now, now, "Raw fact", "raw fact content", "raw", "fact"),
                 ("consolidated-decision", now, now, now, "Consolidated decision", "decision content", "consolidated", "decision"),
                 ("archived-fact", now, now, now, "Archived fact", "archived content", "archived", "fact"),
+                ("raw-fact-two", now, now, now, "Raw fact two", "raw fact content", "raw", "fact"),
+                ("raw-fact-three", now, now, now, "Raw fact three", "raw fact content", "raw", "fact"),
             ],
         )
         self.conn.commit()
@@ -162,7 +171,16 @@ class TestViewerReworkContracts(unittest.TestCase):
         handler.get_entities({"memory_type": ["decision"]})
         self.assertEqual([item["id"] for item in decision["data"]["entities"]], ["consolidated-decision"])
 
-    def test_frontend_restores_lifecycle_controls_and_structured_views(self):
+        paged = self._capture(handler)
+        handler.get_entities({"status": ["raw"], "memory_type": ["fact"], "page": ["2"], "limit": ["2"]})
+        self.assertEqual(paged["data"]["page"], 2)
+        self.assertEqual(paged["data"]["total_count"], 3)
+        self.assertEqual(paged["data"]["total_pages"], 2)
+        self.assertEqual(len(paged["data"]["entities"]), 1)
+        self.assertEqual(paged["data"]["entities"][0]["status"], "raw")
+        self.assertEqual(paged["data"]["entities"][0]["memory_type"], "fact")
+
+    def test_frontend_remediation_contracts(self):
         root = Path(__file__).resolve().parents[1]
         script = (root / "src/saltmdb/viewer/static/viewer.js").read_text(encoding="utf-8")
         stylesheet = (root / "src/saltmdb/viewer/static/viewer.css").read_text(encoding="utf-8")
@@ -172,7 +190,36 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("All types", script)
         self.assertIn("Page ${data.page} of ${data.total_pages", script)
         self.assertIn("renderGraph", script)
+        self.assertIn("normalizeGraph", script)
+        self.assertIn("edge.source", script)
+        self.assertIn("edge.target", script)
+        self.assertNotIn("source_id", script)
+        self.assertNotIn("target_id", script)
+        self.assertIn("malformed relations could not be rendered", script)
+        self.assertIn("No active relations for this memory", script)
+        self.assertIn("Showing ${data.returned_edges} of ${data.total_matching_edges} relations; ${data.omitted_edge_count} omitted by limit.", script)
+        self.assertIn("source?.title || edge.source", script)
+        self.assertIn("button('Apply filters', 'primary', undefined, 'submit')", script)
+        self.assertIn("button('Explore graph', 'primary', undefined, 'submit')", script)
+        self.assertIn("type = 'button'", script)
+        self.assertIn("focusRelationshipInput", script)
+        self.assertIn("modalInvoker", script)
+        self.assertIn("aria-busy", script)
         self.assertIn("Copy ID", script)
+        self.assertIn("memoryCell", script)
         self.assertIn("metadata-panel", script)
         self.assertNotIn("New data may be available", script)
-        self.assertIn(".status-raw", stylesheet)
+        self.assertIn("--lifecycle-raw", stylesheet)
+        self.assertIn("--lifecycle-consolidated", stylesheet)
+        self.assertIn("--lifecycle-archived", stylesheet)
+        self.assertIn("--state-ready", stylesheet)
+        self.assertIn("--state-pending", stylesheet)
+        self.assertIn("--state-failed", stylesheet)
+        self.assertIn("--state-warning", stylesheet)
+        self.assertIn("['Pending', embeddingData.pending, 'pending']", script)
+        self.assertIn("['Failed', embeddingData.failed, 'failed']", script)
+        self.assertIn(".metric-card.pending { border-top-color: var(--state-pending); }", stylesheet)
+        self.assertIn(".metric-card.failed { border-top-color: var(--state-failed); }", stylesheet)
+        self.assertIn(".row-button { display: block; width: 100%", stylesheet)
+        self.assertIn("text-align: left", stylesheet)
+        self.assertIn(".predicate-pill", stylesheet)
