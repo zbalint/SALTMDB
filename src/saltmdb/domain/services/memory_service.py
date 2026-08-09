@@ -639,15 +639,21 @@ def semantic_search(
 
         query_vector = embedding_service.embed_text(query)
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        # vec0's `MATCH ... AND k = N` is its KNN execution path.  Calling
+        # vec_distance_cosine() in ORDER BY forces a full scan of every embedding and made
+        # realistic frozen-corpus evaluation (and normal search at scale) effectively hang.
+        # Request enough neighbours to retain the existing pagination contract, then apply the
+        # ordinary SQL limit/offset below.
+        knn_k = limit + offset
         sql = f"""
-            SELECT e.id, vec_distance_cosine(ee.embedding, ?) as distance
+            SELECT e.id, ee.distance as distance
             FROM entity_embeddings ee
             JOIN entities e ON ee.entity_id = e.id
-            WHERE e.embedding_status = 'ready' AND {where_sql}
-            ORDER BY distance ASC
+            WHERE ee.embedding MATCH ? AND k = ?
+              AND e.embedding_status = 'ready' AND {where_sql}
             LIMIT ? OFFSET ?
         """
-        exec_params = [sqlite_vec.serialize_float32(query_vector)] + params + [limit, offset]
+        exec_params = [sqlite_vec.serialize_float32(query_vector), knn_k] + params + [limit, offset]
         rows = conn.execute(sql, exec_params).fetchall()
         return [(row[0], row[1]) for row in rows]
     finally:
