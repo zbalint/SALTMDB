@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from saltmdb.daemon.server import _DaemonState
@@ -139,3 +140,39 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertEqual(operations["status"], 200)
         self.assertEqual(operations["data"]["api_version"], 1)
         self.assertIn("active_hello_sessions", operations["data"]["daemon"])
+
+    def test_explorer_filters_status_and_memory_type(self):
+        now = datetime.now(UTC).isoformat()
+        self.conn.executemany(
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title,
+               full_content, status, memory_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                ("raw-fact", now, now, now, "Raw fact", "raw fact content", "raw", "fact"),
+                ("consolidated-decision", now, now, now, "Consolidated decision", "decision content", "consolidated", "decision"),
+                ("archived-fact", now, now, now, "Archived fact", "archived content", "archived", "fact"),
+            ],
+        )
+        self.conn.commit()
+        handler = self._handler()
+        archived = self._capture(handler)
+        handler.get_entities({"status": ["archived"]})
+        self.assertEqual([item["id"] for item in archived["data"]["entities"]], ["archived-fact"])
+
+        decision = self._capture(handler)
+        handler.get_entities({"memory_type": ["decision"]})
+        self.assertEqual([item["id"] for item in decision["data"]["entities"]], ["consolidated-decision"])
+
+    def test_frontend_restores_lifecycle_controls_and_structured_views(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "src/saltmdb/viewer/static/viewer.js").read_text(encoding="utf-8")
+        stylesheet = (root / "src/saltmdb/viewer/static/viewer.css").read_text(encoding="utf-8")
+        shell = get_frontend_html()
+        self.assertIn('id="connection-indicator"', shell)
+        self.assertIn("All statuses", script)
+        self.assertIn("All types", script)
+        self.assertIn("Page ${data.page} of ${data.total_pages", script)
+        self.assertIn("renderGraph", script)
+        self.assertIn("Copy ID", script)
+        self.assertIn("metadata-panel", script)
+        self.assertNotIn("New data may be available", script)
+        self.assertIn(".status-raw", stylesheet)

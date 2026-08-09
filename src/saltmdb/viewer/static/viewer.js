@@ -1,24 +1,302 @@
 (() => {
   'use strict';
-  const state = { view: 'overview', renderController: null, detailController: null, poller: null };
-  const view = document.querySelector('#view'); const title = document.querySelector('#view-title');
-  const status = document.querySelector('#live-status'); const notice = document.querySelector('#notice');
-  const dialog = document.querySelector('#memory-detail'); const detail = document.querySelector('#detail-content');
-  const names = { overview:'Overview', explorer:'Memory Explorer', activity:'Activity', relationships:'Relationships', quality:'Quality', operations:'Operations', tags:'Tags', diagnostics:'Diagnostics' };
-  const api = async (path, controller = state.renderController) => { const response = await fetch(path, { signal: controller?.signal }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`); return data; };
-  const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; };
+
+  const state = {
+    view: 'overview', renderController: null, detailController: null, poller: null,
+    explorerPreset: {}, explorerPage: 1, relationRoot: '',
+  };
+  const view = document.querySelector('#view');
+  const title = document.querySelector('#view-title');
+  const status = document.querySelector('#live-status');
+  const notice = document.querySelector('#notice');
+  const indicator = document.querySelector('#connection-indicator');
+  const dialog = document.querySelector('#memory-detail');
+  const detail = document.querySelector('#detail-content');
+  const names = {
+    overview: 'Overview', explorer: 'Memory Explorer', activity: 'Activity',
+    relationships: 'Relationships', quality: 'Quality & Lifecycle', operations: 'Operations',
+    tags: 'Tags & Taxonomy', diagnostics: 'Diagnostics',
+  };
+
+  const node = (tag, text, className) => {
+    const element = document.createElement(tag);
+    if (text !== undefined) element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  };
+  const svgNode = (tag, attributes = {}) => {
+    const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+    return element;
+  };
   const setNotice = (text) => { notice.hidden = !text; notice.textContent = text || ''; };
-  const error = (err) => { view.replaceChildren(node('p', err.message || String(err), 'error')); status.textContent = 'Unavailable'; };
-  const metric = (label, value) => { const box = node('article', undefined, 'card'); box.append(node('p', label, 'muted'), node('strong', String(value ?? '—'), 'metric')); return box; };
-  const renderTable = (columns, rows) => { const wrap = node('div', undefined, 'table-wrap'); const table = node('table'); const head = node('thead'); const tr = node('tr'); columns.forEach(c => tr.append(node('th', c))); head.append(tr); const body = node('tbody'); rows.forEach(row => body.append(row)); table.append(head, body); wrap.append(table); return wrap; };
-  const openDetail = async (id) => { try { state.detailController?.abort(); state.detailController = new AbortController(); const data = await api(`/api/entities/${encodeURIComponent(id)}`, state.detailController); detail.replaceChildren(); detail.append(node('p', data.id, 'muted')); const actions = node('p'); const copy = node('button', 'Copy Markdown'); copy.onclick = () => navigator.clipboard?.writeText(data.full_content || ''); actions.append(copy); detail.append(actions); const markdown = node('div', undefined, 'markdown'); const raw = window.marked?.parse(data.full_content || '') || ''; markdown.innerHTML = window.DOMPurify.sanitize(raw, { USE_PROFILES: { html: true }, FORBID_TAGS: ['style', 'svg', 'math'], FORBID_ATTR: ['style'] }); detail.append(markdown); detail.append(node('h3', 'Evidence')); detail.append(node('pre', JSON.stringify({ owner:data.owner_id, status:data.status, memory_type:data.memory_type, quality:data.quality_status, tags:data.tags, valid_from:data.valid_from, valid_to:data.valid_to }, null, 2))); dialog.showModal(); } catch (err) { if (err.name !== 'AbortError') setNotice(err.message); } };
-  const overview = async () => { const data = await api('/api/stats'); const grid = node('div', undefined, 'grid'); [['Active memories',data.active_entities],['Events',data.total_events],['Relations',data.total_relations],['Tags',data.total_tags],['Pending embeddings',data.embeddings_pending]].forEach(x => grid.append(metric(x[0], x[1]))); view.replaceChildren(grid); };
-  const explorer = async () => { const form = node('form', undefined, 'toolbar'); const q = document.createElement('input'); q.placeholder='Search title or content'; const prefix = document.createElement('input'); prefix.placeholder='ID prefix'; const tag = document.createElement('input'); tag.placeholder='Tag'; const submit = node('button','Search'); form.append(q,prefix,tag,submit); const result = node('div'); const list = async params => { const data = await api(`/api/entities?${params}`); const rows = data.entities.map(e => { const tr=node('tr'); const cell=node('td'); const button=node('button',e.title,'row-button'); button.onclick=()=>openDetail(e.id); cell.append(button); tr.append(cell,node('td',e.memory_type),node('td',e.status),node('td',(e.tags||[]).join(', '))); return tr; }); result.replaceChildren(renderTable(['Title','Type','Status','Tags'],rows)); }; form.onsubmit = async event => { event.preventDefault(); const params = new URLSearchParams(); if(q.value)params.set('q',q.value); if(prefix.value)params.set('id_prefix',prefix.value); if(tag.value)params.set('tag',tag.value); await list(params); }; view.replaceChildren(form,result); await list(new URLSearchParams()); };
-  const activity = async () => { const data = await api('/api/events?limit=20'); const rows=data.events.map(e=>{const tr=node('tr'); tr.append(node('td',e.timestamp),node('td',e.type),node('td',e.agent_id),node('td',e.content)); return tr;}); view.replaceChildren(renderTable(['Time','Type','Agent','Event'],rows)); };
-  const relationships = async () => { const form=node('form','toolbar'); const input=document.createElement('input'); input.placeholder='Exact memory ID'; const result=node('div'); form.append(input,node('button','Explore')); form.onsubmit=async e=>{e.preventDefault(); const data=await api(`/api/relations/neighborhood?entity_id=${encodeURIComponent(input.value)}`); result.replaceChildren(node('p',`${data.nodes.length} nodes · ${data.returned_edges} edges${data.truncated?' (truncated)':''}`),renderTable(['Relation','Source','Target'],data.edges.map(x=>{const tr=node('tr');tr.append(node('td',x.predicate),node('td',x.source_title),node('td',x.target_title));return tr;})));}; view.replaceChildren(form,result); };
-  const operations = async () => { const data=await api('/api/operations'); const grid=node('div',undefined,'grid'); [['Daemon ready',data.daemon.ready],['Hello sessions',data.daemon.active_hello_sessions],['In-flight RPCs',data.daemon.inflight_rpc_dispatches],['DB bytes',data.database.files.db_bytes]].forEach(x=>grid.append(metric(x[0],x[1]))); view.replaceChildren(grid); };
-  const simple = async (path, heading) => { const data=await api(path); view.replaceChildren(node('h3',heading),node('pre',JSON.stringify(data,null,2))); };
-  const render = async () => { state.renderController?.abort(); state.renderController = new AbortController(); title.textContent=names[state.view]; document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('is-active',b.dataset.view===state.view)); try { status.textContent='Refreshing'; const loader={overview,explorer,activity,relationships,operations}[state.view] || (()=>simple(state.view==='tags'?'/api/tags':state.view==='quality'?'/api/quality':'/api/scatterplot',names[state.view])); await loader(); status.textContent='Updated just now'; } catch(err) { if(err.name!=='AbortError') error(err); } };
-  const schedule=()=>{clearInterval(state.poller);state.poller=setInterval(()=>{if(!document.hidden && ['overview','activity','operations'].includes(state.view))render();else if(!document.hidden)setNotice('New data may be available — refresh to update this investigation.');},10000);};
-  document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>{state.view=button.dataset.view; setNotice(''); render();})); document.querySelector('#refresh').addEventListener('click',render); document.querySelector('#close-detail').addEventListener('click',()=>dialog.close()); document.addEventListener('visibilitychange',()=>{if(!document.hidden && ['overview','activity','operations'].includes(state.view))render();else if(!document.hidden)setNotice('New data may be available — refresh to update this investigation.');}); window.addEventListener('beforeunload',()=>{clearInterval(state.poller);state.renderController?.abort();state.detailController?.abort();}); render(); schedule();
+  const connection = (kind, text) => {
+    indicator.className = `connection-indicator is-${kind}`;
+    indicator.lastElementChild.textContent = text;
+  };
+  const api = async (path, controller = state.renderController) => {
+    try {
+      const response = await fetch(path, { signal: controller?.signal });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      connection('online', 'Viewer connected');
+      return data;
+    } catch (err) {
+      if (err.name !== 'AbortError') connection('offline', 'Viewer unavailable');
+      throw err;
+    }
+  };
+  const showError = (err) => {
+    view.replaceChildren(node('p', err.message || String(err), 'error'));
+    status.textContent = 'Unavailable';
+  };
+  const button = (label, className, handler) => {
+    const element = node('button', label, className);
+    element.type = 'button';
+    if (handler) element.addEventListener('click', handler);
+    return element;
+  };
+  const copyText = async (value, label = 'Text') => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(value);
+      setNotice(`${label} copied to clipboard.`);
+    } catch (_) { setNotice(`Could not copy ${label.toLowerCase()}.`); }
+  };
+  const select = (label, options, value = '') => {
+    const wrap = node('label', undefined, 'field');
+    wrap.append(node('span', label, 'field-label'));
+    const element = document.createElement('select');
+    options.forEach(([optionValue, optionLabel]) => {
+      const option = node('option', optionLabel); option.value = optionValue;
+      option.selected = optionValue === value; element.append(option);
+    });
+    wrap.append(element);
+    return { wrap, element };
+  };
+  const statusBadge = (value) => node('span', value || 'unknown', `status-pill status-${value || 'unknown'}`);
+  const tagList = (tags) => {
+    const wrap = node('span', undefined, 'tag-list');
+    (tags || []).forEach(tag => wrap.append(node('span', tag, 'tag')));
+    return wrap;
+  };
+  const metric = (label, value, tone = '') => {
+    const box = node('article', undefined, `card metric-card ${tone}`);
+    box.append(node('p', label, 'muted'), node('strong', String(value ?? '—'), 'metric'));
+    return box;
+  };
+  const section = (heading, description) => {
+    const header = node('div', undefined, 'section-heading');
+    header.append(node('h3', heading));
+    if (description) header.append(node('p', description, 'muted'));
+    return header;
+  };
+  const renderTable = (columns, rows, empty = 'Nothing to show yet.') => {
+    const wrap = node('div', undefined, 'table-wrap');
+    const table = node('table'); const head = node('thead'); const headRow = node('tr');
+    columns.forEach(column => headRow.append(node('th', column)));
+    head.append(headRow); const body = node('tbody');
+    if (rows.length) rows.forEach(row => body.append(row));
+    else { const row = node('tr'); const cell = node('td', empty, 'muted'); cell.colSpan = columns.length; row.append(cell); body.append(row); }
+    table.append(head, body); wrap.append(table); return wrap;
+  };
+  const titleButton = (entity) => button(entity.title || entity.id, 'row-button', () => openDetail(entity.id));
+
+  const openDetail = async (id) => {
+    try {
+      state.detailController?.abort(); state.detailController = new AbortController();
+      const data = await api(`/api/entities/${encodeURIComponent(id)}`, state.detailController);
+      detail.replaceChildren();
+      document.querySelector('#detail-title').textContent = data.title || 'Memory';
+      const identity = node('div', undefined, 'detail-identity');
+      identity.append(statusBadge(data.status), statusBadge(data.memory_type), node('code', data.id, 'memory-id'));
+      detail.append(identity);
+      const metadata = node('section', undefined, 'metadata-panel');
+      metadata.append(section('Metadata'));
+      const metadataGrid = node('dl', undefined, 'metadata-grid');
+      const metadataEntries = [
+        ['Lifecycle', data.status || '—'], ['Memory type', data.memory_type || 'fact'],
+        ['Embedding', data.embedding_status || 'pending'], ['Quality', data.quality_status || 'Not evaluated'],
+        ['Owner', data.owner_id || 'system'], ['Scope', data.scope || '—'], ['Weight', data.weight ?? '—'],
+        ['Core memory', data.is_core ? 'Yes (#core)' : 'No'], ['Created', data.created_at || '—'],
+        ['Updated', data.updated_at || '—'], ['Last accessed', data.last_accessed_at || '—'],
+        ['Context ID', data.context_id || data.project_id || '—'], ['Entity ID', data.id],
+      ];
+      metadataEntries.forEach(([label, value]) => { metadataGrid.append(node('dt', label), node('dd', value)); });
+      metadata.append(metadataGrid);
+      const topTags = node('div', undefined, 'metadata-tags'); topTags.append(node('strong', 'Tags'), tagList(data.tags)); metadata.append(topTags);
+      if (data.metadata && Object.keys(data.metadata).length) {
+        const custom = node('div', undefined, 'metadata-custom'); custom.append(node('strong', 'Custom metadata'));
+        const customFacts = node('dl', undefined, 'custom-facts');
+        Object.entries(data.metadata).forEach(([key, value]) => customFacts.append(node('dt', key), node('dd', typeof value === 'string' ? value : JSON.stringify(value))));
+        custom.append(customFacts); metadata.append(custom);
+      }
+      detail.append(metadata);
+      const actions = node('div', undefined, 'detail-actions');
+      const raw = node('pre', data.full_content || '', 'raw-markdown'); raw.hidden = true;
+      actions.append(button('Copy ID', '', () => copyText(data.id, 'Memory ID')));
+      actions.append(button('Copy Markdown', '', () => copyText(data.full_content || '', 'Markdown')));
+      actions.append(button('Show raw', '', () => { raw.hidden = !raw.hidden; raw.previousElementSibling.hidden = raw.hidden; }));
+      detail.append(actions);
+      const markdown = node('div', undefined, 'markdown');
+      const parsed = window.marked?.parse(data.full_content || '') || '';
+      markdown.innerHTML = window.DOMPurify.sanitize(parsed, {
+        USE_PROFILES: { html: true }, FORBID_TAGS: ['style', 'svg', 'math'], FORBID_ATTR: ['style'],
+      });
+      detail.append(markdown, raw);
+      const evidence = node('section', undefined, 'evidence'); evidence.append(section('Memory evidence'));
+      const facts = node('dl', undefined, 'facts');
+      const entries = [['Valid from', data.valid_from || '—'], ['Valid to', data.valid_to || 'Current']];
+      entries.forEach(([label, value]) => { facts.append(node('dt', label), node('dd', value)); });
+      evidence.append(facts);
+      const relationSummary = node('p', `${data.relations.outgoing_count} outgoing · ${data.relations.incoming_count} incoming relations`, 'muted');
+      evidence.append(relationSummary, button('Explore relationship graph', '', () => {
+        state.relationRoot = data.id; state.view = 'relationships'; dialog.close(); render();
+      }));
+      detail.append(evidence); dialog.showModal();
+    } catch (err) { if (err.name !== 'AbortError') setNotice(err.message); }
+  };
+
+  const overview = async () => {
+    const data = await api('/api/stats'); const fragment = document.createDocumentFragment();
+    const heading = section('Memory at a glance', 'A quick read of the current knowledge base.');
+    const grid = node('div', undefined, 'grid');
+    [['Active memories', data.active_entities, ''], ['Raw memories', data.raw_count, 'raw'], ['Consolidated', data.consolidated_count, 'consolidated'], ['Archived', data.archived_count, 'archived'], ['Pending embeddings', data.embeddings_pending, 'warning']]
+      .forEach(item => grid.append(metric(...item)));
+    fragment.append(heading, grid);
+    const lifecycle = node('div', undefined, 'card lifecycle-summary'); lifecycle.append(section('Lifecycle', 'Open a focused explorer view.'));
+    [['All memories', ''], ['Raw', 'raw'], ['Consolidated', 'consolidated'], ['Archived', 'archived']].forEach(([label, value]) => lifecycle.append(button(label, `filter-link ${value ? `status-${value}` : ''}`, () => {
+      state.explorerPreset = { status: value }; state.explorerPage = 1; state.view = 'explorer'; render();
+    })));
+    fragment.append(lifecycle); view.replaceChildren(fragment);
+  };
+
+  const explorer = async () => {
+    const form = node('form', undefined, 'toolbar explorer-toolbar');
+    const q = document.createElement('input'); q.placeholder = 'Search title or content'; q.value = state.explorerPreset.q || '';
+    const prefix = document.createElement('input'); prefix.placeholder = 'ID prefix'; prefix.value = state.explorerPreset.id_prefix || '';
+    const tag = document.createElement('input'); tag.placeholder = 'Tag'; tag.value = state.explorerPreset.tag || '';
+    const lifecycle = select('Lifecycle', [['', 'All statuses'], ['raw', 'Raw'], ['consolidated', 'Consolidated'], ['archived', 'Archived']], state.explorerPreset.status || '');
+    const type = select('Memory type', [['', 'All types'], ['decision', 'Decision'], ['fact', 'Fact'], ['procedure', 'Procedure'], ['preference', 'Preference'], ['event', 'Event']], state.explorerPreset.memory_type || '');
+    form.append(q, prefix, tag, lifecycle.wrap, type.wrap, button('Apply filters', 'primary'));
+    const result = node('div');
+    let currentParams = new URLSearchParams(state.explorerPreset);
+    const list = async (params, page = 1) => {
+      currentParams = new URLSearchParams(params); const requestParams = new URLSearchParams(params); requestParams.set('page', String(page)); requestParams.set('limit', '50');
+      const data = await api(`/api/entities?${requestParams}`); const rows = data.entities.map(entity => {
+        const row = node('tr'); const memory = node('td'); const idLine = node('div', undefined, 'id-prefix'); idLine.append(node('code', entity.id.slice(0, 12)), button('Copy ID', 'copy-id', () => copyText(entity.id, 'Memory ID'))); memory.append(titleButton(entity), idLine);
+        const lifecycleCell = node('td'); lifecycleCell.append(statusBadge(entity.status)); const typeCell = node('td'); typeCell.append(statusBadge(entity.memory_type));
+        const tags = node('td'); tags.append(tagList(entity.tags)); row.append(memory, typeCell, lifecycleCell, tags); return row;
+      });
+      const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Memory pages');
+      const previous = button('Previous', '', () => list(currentParams, page - 1)); previous.disabled = page <= 1;
+      const next = button('Next', '', () => list(currentParams, page + 1)); next.disabled = page >= data.total_pages;
+      pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} memories`, 'muted'), next);
+      result.replaceChildren(section(`${data.total_count} memories`, 'Filter by lifecycle, type, title, content, ID, or tag.'), renderTable(['Memory', 'Type', 'Lifecycle', 'Tags'], rows), pager);
+      state.explorerPage = page;
+    };
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); const params = new URLSearchParams();
+      [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['status', lifecycle.element.value], ['memory_type', type.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1; await list(params, 1);
+    });
+    view.replaceChildren(section('Explore memories', 'Search the durable knowledge graph without losing lifecycle context.'), form, result);
+    const initial = new URLSearchParams(state.explorerPreset); await list(initial, state.explorerPage);
+  };
+
+  const activity = async () => {
+    const data = await api('/api/events?limit=20'); const rows = data.events.map(event => {
+      const row = node('tr'); row.append(node('td', event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content)); return row;
+    }); view.replaceChildren(section('Recent activity', 'The latest durable operational events.'), renderTable(['Time', 'Type', 'Agent', 'Event'], rows));
+  };
+
+  const renderGraph = (data) => {
+    const canvas = node('div', undefined, 'graph-canvas'); const width = 760; const height = 420;
+    const svg = svgNode('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Relationship neighborhood graph' });
+    const nodes = data.nodes || []; const radiusX = 270; const radiusY = 145; const positions = new Map();
+    nodes.forEach((item, index) => {
+      const angle = (Math.PI * 2 * index / Math.max(nodes.length, 1)) - Math.PI / 2;
+      positions.set(item.id, { x: width / 2 + Math.cos(angle) * radiusX, y: height / 2 + Math.sin(angle) * radiusY });
+    });
+    const edgeLayer = svgNode('g', { class: 'graph-edges' });
+    (data.edges || []).forEach(edge => {
+      const source = positions.get(edge.source_id); const target = positions.get(edge.target_id); if (!source || !target) return;
+      edgeLayer.append(svgNode('line', { x1: source.x, y1: source.y, x2: target.x, y2: target.y }));
+      const label = svgNode('text', { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 - 6, class: 'graph-edge-label' }); label.textContent = edge.predicate; edgeLayer.append(label);
+    }); svg.append(edgeLayer);
+    const nodeLayer = svgNode('g', { class: 'graph-nodes' });
+    nodes.forEach(item => {
+      const position = positions.get(item.id); const group = svgNode('g', { class: `graph-node status-${item.status}`, tabindex: '0', role: 'button', 'aria-label': `Open ${item.title || item.id}` });
+      group.append(svgNode('circle', { cx: position.x, cy: position.y, r: 25 }));
+      const label = svgNode('text', { x: position.x, y: position.y + 44, 'text-anchor': 'middle' }); label.textContent = (item.title || item.id).slice(0, 25); group.append(label);
+      group.addEventListener('click', () => openDetail(item.id)); group.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDetail(item.id); } }); nodeLayer.append(group);
+    }); svg.append(nodeLayer); canvas.append(svg); return canvas;
+  };
+
+  const relationships = async () => {
+    const form = node('form', '','toolbar'); const input = document.createElement('input'); input.placeholder = 'Memory ID'; input.value = state.relationRoot;
+    form.append(input, button('Explore graph', 'primary')); const result = node('div');
+    const load = async root => {
+      if (!root) return; const data = await api(`/api/relations/neighborhood?entity_id=${encodeURIComponent(root)}`); state.relationRoot = root;
+      const rows = data.edges.map(edge => { const row = node('tr'); row.append(node('td', edge.predicate), node('td', edge.source_title), node('td', edge.target_title)); return row; });
+      result.replaceChildren(section(`${data.nodes.length} connected memories`, `${data.returned_edges} relations${data.truncated ? ` · ${data.omitted_edge_count} omitted by safety limit` : ''}. Select a node for its full evidence.`), renderGraph(data), renderTable(['Relation', 'Source', 'Target'], rows));
+    };
+    form.addEventListener('submit', async event => { event.preventDefault(); await load(input.value.trim()); });
+    view.replaceChildren(section('Relationship graph', 'A bounded visual neighborhood centered on one memory.'), form, result);
+    if (state.relationRoot) await load(state.relationRoot);
+  };
+
+  const quality = async () => {
+    const data = await api('/api/quality'); const fragment = document.createDocumentFragment();
+    const attention = node('div', undefined, 'grid'); attention.append(metric('Quality signals', data.items.length, 'warning'), metric('Orphaned raw memories', data.orphan_raw.length, 'raw'));
+    const qualityRows = data.items.map(item => { const row = node('tr'); const memory = node('td'); memory.append(titleButton(item)); const lifecycle = node('td'); lifecycle.append(statusBadge(item.status)); const embedding = node('td'); embedding.append(statusBadge(item.embedding_status || 'pending')); const flags = node('td'); flags.append(tagList(item.quality_flags)); row.append(memory, lifecycle, embedding, node('td', item.quality_status || 'Not evaluated'), flags); return row; });
+    const orphanRows = data.orphan_raw.map(item => { const row = node('tr'); const memory = node('td'); memory.append(titleButton(item)); row.append(memory, node('td', item.id.slice(0, 12), 'muted')); return row; });
+    fragment.append(section('Quality & lifecycle', 'Read-only signals to focus maintenance work.'), attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), section('Raw memories without relations'), renderTable(['Memory', 'ID'], orphanRows)); view.replaceChildren(fragment);
+  };
+
+  const operations = async () => {
+    const data = await api('/api/operations'); const grid = node('div', undefined, 'grid');
+    [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches], ['Database size', `${data.database.files.db_bytes} B`], ['Schema version', data.database.schema_version]].forEach(item => grid.append(metric(...item)));
+    view.replaceChildren(section('Operations', 'Point-in-time daemon and database health supplied by the daemon.'), grid);
+  };
+
+  const tags = async () => {
+    const data = await api('/api/tags'); const rows = data.tags.map(tag => { const row = node('tr'); const name = node('td'); name.append(button(tag.name, 'row-button', () => { state.explorerPreset = { tag: tag.name }; state.explorerPage = 1; state.view = 'explorer'; render(); })); row.append(name, node('td', String(tag.usage_count)), node('td', tag.canonical_id || 'Canonical')); return row; });
+    view.replaceChildren(section('Tags & taxonomy', 'Select a tag to inspect every matching memory.'), renderTable(['Tag', 'Memories', 'Canonical target'], rows));
+  };
+
+  const diagnostics = async () => {
+    const embeddingData = await api('/api/embeddings_stats'); const fragment = document.createDocumentFragment();
+    const grid = node('div', undefined, 'grid'); [['Ready', embeddingData.ready, 'ok'], ['Pending', embeddingData.pending, 'warning'], ['Failed', embeddingData.failed, 'warning'], ['Archived', embeddingData.archived, 'archived']].forEach(item => grid.append(metric(...item)));
+    fragment.append(section('Embedding diagnostics', 'A local projection for inspection; it is not a similarity decision.'), grid);
+    const projection = node('section', undefined, 'card'); projection.append(section('2D embedding projection', 'Calculates a bounded local projection of ready embeddings only when requested.'));
+    const projectionResult = node('div'); projection.append(button('Load projection', '', async () => {
+      const scatterData = await api('/api/scatterplot'); projectionResult.replaceChildren();
+      if (scatterData.error) projectionResult.append(node('p', scatterData.error, 'muted'));
+      else if (!scatterData.points?.length) projectionResult.append(node('p', 'No ready embeddings are available to project yet.', 'muted'));
+      else {
+        const plot = node('div', undefined, 'scatterplot'); const svg = svgNode('svg', { viewBox: '0 0 760 300', role: 'img', 'aria-label': 'Two dimensional embedding projection' }); const xs = scatterData.points.map(point => point.x); const ys = scatterData.points.map(point => point.y); const minX = Math.min(...xs); const minY = Math.min(...ys); const xSpan = Math.max(...xs) - minX || 1; const ySpan = Math.max(...ys) - minY || 1;
+        scatterData.points.forEach(point => { const circle = svgNode('circle', { cx: 30 + (point.x - minX) / xSpan * 700, cy: 270 - (point.y - minY) / ySpan * 240, r: 4, class: `scatter-point status-${point.status}`, tabindex: '0', role: 'button', 'aria-label': point.title }); circle.addEventListener('click', () => openDetail(point.id)); svg.append(circle); }); plot.append(svg); projectionResult.append(plot);
+      }
+    }), projectionResult); fragment.append(projection);
+    view.replaceChildren(fragment);
+  };
+
+  const loaders = { overview, explorer, activity, relationships, quality, operations, tags, diagnostics };
+  const render = async () => {
+    state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
+    document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('is-active', item.dataset.view === state.view));
+    try { status.textContent = 'Refreshing'; await loaders[state.view](); status.textContent = 'Updated just now'; } catch (err) { if (err.name !== 'AbortError') showError(err); }
+  };
+  const schedule = () => {
+    clearInterval(state.poller); state.poller = setInterval(() => {
+      if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render();
+    }, 10000);
+  };
+  document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
+  document.querySelector('#refresh').addEventListener('click', render);
+  document.querySelector('#close-detail').addEventListener('click', () => dialog.close());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
+  window.addEventListener('beforeunload', () => { clearInterval(state.poller); state.renderController?.abort(); state.detailController?.abort(); });
+  connection('checking', 'Checking connection…'); render(); schedule();
 })();
