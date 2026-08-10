@@ -147,7 +147,7 @@ def _check_consolidated_integrity(
     return sim < COHESION_MIN_PAIRWISE_THRESHOLD
 
 
-def evaluate_store_preflight(conn, proposed: dict, db_path: str) -> dict:
+def evaluate_store_preflight(conn, proposed: dict, db_path: str) -> dict:  # noqa: C901, PLR0912
     """Side-effect-free. Returns {"candidates": [...]} -- an empty list means clear to store
     immediately, no REVIEW_REQUIRED gate.
 
@@ -312,7 +312,7 @@ def build_review_required_response(proposed: dict, preflight: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def commit_disposed_write(  # noqa: C901, PLR0912, PLR0915
+def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
     conn, proposed: dict, review_token: str, dispositions: list, db_path: str
 ) -> dict | str:
     """Revalidates `review_token` against live DB state, then persists the write plus every
@@ -404,7 +404,7 @@ def commit_disposed_write(  # noqa: C901, PLR0912, PLR0915
 
     result_holder: dict = {}
 
-    def _write(c):  # noqa: C901
+    def _write(c):  # noqa: C901, PLR0912
         # Authoritative, in-transaction revalidation (Codex implementation-review finding #4):
         # re-checked fresh against `c`, inside BEGIN IMMEDIATE, not before it -- this is what
         # actually closes the TOCTOU window, not the early pass above. Also revalidates is_core

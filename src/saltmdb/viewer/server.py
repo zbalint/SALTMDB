@@ -1,7 +1,6 @@
 import sys
 import socketserver
 import logging
-from saltmdb.viewer.routes import SALTMDBHandler
 
 logger = logging.getLogger(__name__)
 

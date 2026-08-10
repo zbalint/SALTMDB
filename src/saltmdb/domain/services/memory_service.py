@@ -7,7 +7,6 @@ from typing import Any, Literal
 from saltmdb.config import (
     get_db_path,
     DEDUP_SUPERSESSION_THRESHOLD,
-    DEDUP_DUPLICATE_THRESHOLD,
     DEDUP_LEXICAL_THRESHOLD,
     BM25_TITLE_WEIGHT,
     BM25_CONTENT_WEIGHT,
@@ -105,7 +104,7 @@ def _resolve_existing_entity_id(
     return None, None
 
 
-def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
+def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR0912, PLR0915
     """Persists `proposed` as a plain raw entity (a temporal upsert if `resolved_entity_id` names
     an already-existing row, otherwise a fresh insert) -- the same insert/tag/`#core`-sync logic
     `store_memory` has always run, factored out so `disposition_service.commit_disposed_write`'s

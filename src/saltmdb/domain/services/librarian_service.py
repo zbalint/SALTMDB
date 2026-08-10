@@ -64,9 +64,9 @@ def _run_maintenance_pass_on_connection(conn, force: bool) -> str:
             return "Skipped: raw-entity threshold not met."
         now = datetime.now(UTC).isoformat()
         cur = conn.execute(
-            f"UPDATE _system_locks SET last_run_at=? WHERE task_name='librarian_consolidation' "
-            f"AND (last_run_at IS NULL OR datetime(last_run_at) < datetime('now', '-{LIBRARIAN_TRIGGER_COOLDOWN_S} seconds'))",
-            (now,),
+            "UPDATE _system_locks SET last_run_at=? WHERE task_name='librarian_consolidation' "
+            "AND (last_run_at IS NULL OR datetime(last_run_at) < datetime('now', printf('-%d seconds', ?)))",
+            (now, LIBRARIAN_TRIGGER_COOLDOWN_S),
         )
         if cur.rowcount != 1:
             return "Skipped: cooldown not elapsed."

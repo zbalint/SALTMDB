@@ -235,7 +235,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         db_path = os.environ.get("SALTMDB_DB_PATH") or get_db_path()
         return ViewerReadGateway(db_path).connect()
 
-    def get_scatterplot(self):
+    def get_scatterplot(self):  # noqa: C901
         def _checkpoint(msg):
             # A native-level crash (e.g. OpenBLAS DLL abort) kills the process
             # without raising a Python exception, so ordinary error logging
@@ -1052,8 +1052,8 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     is_core = False
 
             conn = self.get_db_connection()
-            where = ["(title LIKE ? OR full_content LIKE ?)", "status != 'archived'"]
-            params = [f"%{q}%", f"%{q}%"]
+            where: list[str] = ["(title LIKE ? OR full_content LIKE ?)", "status != 'archived'"]
+            params: list[Any] = [f"%{q}%", f"%{q}%"]
             if is_core is not None:
                 where.append("is_core = ?")
                 params.append(int(is_core))

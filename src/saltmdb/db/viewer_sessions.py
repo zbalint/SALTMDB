@@ -1,6 +1,5 @@
 import os
 import sys
-import subprocess
 import logging
 from datetime import datetime, UTC
 from saltmdb.db.connection import write_transaction_retrying
@@ -22,7 +21,7 @@ if sys.platform == "win32":
     kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid: int) -> bool:  # noqa: PLR0911
     """Checks whether a process with the given PID is currently alive on Linux or Windows."""
     if sys.platform == "win32":
         import ctypes

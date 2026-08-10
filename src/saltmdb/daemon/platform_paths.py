@@ -76,7 +76,7 @@ def _classify_windows_drive(resolved_path: str) -> Classification:
         return "unknown"
 
 
-def classify_db_path(resolved_db_path: str) -> Classification:
+def classify_db_path(resolved_db_path: str) -> Classification:  # noqa: PLR0911
     """resolved_db_path must already be fully resolved (symlinks followed) -- callers pass the
     output of discovery.resolve_canonical_db_path(), never a raw path."""
     if sys.platform == "win32":

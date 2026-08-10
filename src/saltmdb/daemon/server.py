@@ -17,7 +17,10 @@ import socketserver
 import sys
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from saltmdb.domain.services.embedding_service import EmbedJobScheduler
 
 from saltmdb import config
 from saltmdb.daemon import discovery, platform_paths, protocol
@@ -52,7 +55,7 @@ class _DaemonState:
         self._shutdown_callback = None
         self._started_at = time.monotonic()
         self.coordinator: DbWriteCoordinator | None = None
-        self.embedding_scheduler = None
+        self.embedding_scheduler: "EmbedJobScheduler | None" = None
 
     def viewer_snapshot(self) -> dict[str, Any]:
         """Return the daemon-owned fields safe to expose to the local Viewer."""
@@ -143,8 +146,8 @@ class _DaemonState:
             "service_port": self.service_port,
         }
 
-    def handle_request(self, request: dict[str, Any], session_id: int | None = None) -> dict[str, Any]:
-        request_id = request.get("id")
+    def handle_request(self, request: dict[str, Any], session_id: int | None = None) -> dict[str, Any]:  # noqa: PLR0911
+        request_id: str | None = request.get("id")
         if self._draining:
             return protocol.build_error_response(
                 request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
@@ -163,26 +166,8 @@ class _DaemonState:
             # reaching this check, since `or` short-circuits before isinstance() even runs.
             return protocol.build_error_response(request_id, protocol.MALFORMED_REQUEST, "params must be an object")
 
-        if method in ("hello", "goodbye", "ping"):
-            if method == "hello" and session_id is not None:
-                # Atomic with _grace_fire's own lock: closes the exact race where a hello is
-                # acknowledged "ok" to the caller in the gap before the session is actually
-                # registered, during which the grace timer could observe zero sessions and start
-                # draining a connection the caller just believes it successfully opened.
-                with self._lock:
-                    if self._draining:
-                        return protocol.build_error_response(
-                            request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
-                        )
-                    self._sessions.add(session_id)
-                    if self._shutdown_timer is not None:
-                        self._shutdown_timer.cancel()
-                        self._shutdown_timer = None
-            return protocol.build_ok_response(request_id, {"status": "ok"})
-        elif method == "viewer_status":
-            return protocol.build_ok_response(
-                request_id, {"enabled": self.viewer_port is not None, "port": self.viewer_port}
-            )
+        if method in ("hello", "goodbye", "ping", "viewer_status"):
+            return self._handle_session_method(method, request_id, session_id)
 
         if not self._acquire_inflight():
             return protocol.build_error_response(
@@ -190,42 +175,11 @@ class _DaemonState:
             )
         try:
             if method == "tool_call":
-                tool = params.get("tool")
-                if tool not in DISPATCH_TABLE:
-                    return protocol.build_error_response(
-                        request_id, protocol.UNKNOWN_TOOL, f"unknown tool: {tool}"
-                    )
-                if self.coordinator is None:
-                    return protocol.build_error_response(request_id, protocol.INTERNAL_ERROR, "database writer unavailable")
-                result = dispatch_tool(tool, params.get("kwargs") or {}, self.coordinator)
-                return protocol.build_ok_response(request_id, result)
+                return self._handle_tool_call(request_id, params)
             elif method == "run_librarian_now":
-                from saltmdb.domain.services import librarian_service
-
-                if self.coordinator is None:
-                    raise RuntimeError("database writer unavailable")
-                result = librarian_service.run_librarian_now(
-                    db_path=self.db_path, force=params.get("force", True), coordinator=self.coordinator
-                )
-                return protocol.build_ok_response(request_id, result)
+                return self._handle_run_librarian(request_id, params)
             elif method == "run_backfill_chunk_embeddings_now":
-                from saltmdb.domain.services.embedding_service import reconcile_embedding_jobs
-
-                if self.coordinator is None:
-                    raise RuntimeError("database writer unavailable")
-                after_id = None
-                total = 0
-                while True:
-                    ids = self.coordinator.submit(
-                        "run_backfill_chunk_embeddings_now",
-                        lambda conn, cursor=after_id: reconcile_embedding_jobs(conn, limit=100, after_id=cursor),
-                        priority="background",
-                    )
-                    if not ids:
-                        break
-                    total += len(ids)
-                    after_id = ids[-1]
-                return protocol.build_ok_response(request_id, f"{total} entities queued for durable embedding.")
+                return self._handle_run_backfill(request_id)
             else:
                 return protocol.build_error_response(
                     request_id, protocol.UNKNOWN_METHOD, f"unknown method: {method}"
@@ -235,6 +189,75 @@ class _DaemonState:
             return protocol.build_error_response(request_id, protocol.INTERNAL_ERROR, str(e))
         finally:
             self._release_inflight()
+
+    def _handle_session_method(
+        self, method: str, request_id: str | None, session_id: int | None
+    ) -> dict[str, Any]:
+        """Handle session-lifecycle (hello/goodbye/ping) and status methods.
+        These never acquire the inflight counter -- they are exempt from the shutdown gate."""
+        if method == "hello" and session_id is not None:
+            # Atomic with _grace_fire's own lock: closes the exact race where a hello is
+            # acknowledged "ok" to the caller in the gap before the session is actually
+            # registered, during which the grace timer could observe zero sessions and start
+            # draining a connection the caller just believes it successfully opened.
+            with self._lock:
+                if self._draining:
+                    return protocol.build_error_response(
+                        request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
+                    )
+                self._sessions.add(session_id)
+                if self._shutdown_timer is not None:
+                    self._shutdown_timer.cancel()
+                    self._shutdown_timer = None
+        if method == "viewer_status":
+            return protocol.build_ok_response(
+                request_id, {"enabled": self.viewer_port is not None, "port": self.viewer_port}
+            )
+        return protocol.build_ok_response(request_id, {"status": "ok"})
+
+    def _handle_tool_call(self, request_id: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch a tool_call RPC method."""
+        tool = params.get("tool")
+        if tool not in DISPATCH_TABLE:
+            return protocol.build_error_response(
+                request_id, protocol.UNKNOWN_TOOL, f"unknown tool: {tool}"
+            )
+        if self.coordinator is None:
+            return protocol.build_error_response(request_id, protocol.INTERNAL_ERROR, "database writer unavailable")
+        result = dispatch_tool(tool, params.get("kwargs") or {}, self.coordinator)
+        return protocol.build_ok_response(request_id, result)
+
+    def _handle_run_librarian(self, request_id: str | None, params: dict[str, Any]) -> dict[str, Any]:
+        """Run an on-demand librarian maintenance pass."""
+        from saltmdb.domain.services import librarian_service
+
+        if self.coordinator is None:
+            raise RuntimeError("database writer unavailable")
+        result = librarian_service.run_librarian_now(
+            db_path=self.db_path, force=params.get("force", True), coordinator=self.coordinator
+        )
+        return protocol.build_ok_response(request_id, result)
+
+    def _handle_run_backfill(self, request_id: str | None) -> dict[str, Any]:
+        """Trigger a full chunk-embedding backfill pass over all active entities."""
+        from saltmdb.domain.services.embedding_service import reconcile_embedding_jobs
+
+        if self.coordinator is None:
+            raise RuntimeError("database writer unavailable")
+        after_id: str | None = None
+        total = 0
+        while True:
+            # submit() with wait=True (default) always returns T directly, never Future[T].
+            ids: list[str] = self.coordinator.submit(  # type: ignore[assignment]
+                "run_backfill_chunk_embeddings_now",
+                lambda conn, cursor=after_id: reconcile_embedding_jobs(conn, limit=100, after_id=cursor),
+                priority="background",
+            )
+            if not ids:
+                break
+            total += len(ids)
+            after_id = ids[-1]
+        return protocol.build_ok_response(request_id, f"{total} entities queued for durable embedding.")
 
 
 class _ThreadingRpcServer(socketserver.ThreadingMixIn, socketserver.TCPServer):

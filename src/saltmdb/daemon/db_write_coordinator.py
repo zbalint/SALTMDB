@@ -165,6 +165,55 @@ class DbWriteCoordinator:
                 return self._background.get_nowait(), 0
         return None, foreground_run
 
+    def _load_vector_extension(self) -> None:
+        """Best-effort sqlite-vec extension load on the writer connection.
+        DBs without vector support still need a reliable scalar writer, so failures are swallowed."""
+        if sqlite_vec is None or self._conn is None:
+            return
+        try:
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
+        except Exception:
+            pass  # DBs without vector support still need a reliable scalar writer.
+
+    def _execute_job(self, job: "_Job") -> None:
+        """Run one job's fn inside a write transaction (or directly if it's a _Maintenance job),
+        then settle its Future. Called only from the writer thread."""
+        self._active_label = job.label
+        self._active_transaction = True
+        try:
+            if isinstance(job.fn, _Maintenance):
+                result = job.fn.fn(self._conn)  # type: ignore[arg-type]
+            else:
+                # Register the connection only *inside* the outer transaction callback.
+                # Nested legacy helpers then reuse it, while this top-level call still
+                # opens the required BEGIN IMMEDIATE transaction.
+                def _in_transaction(conn):
+                    token = _enter_coordinator_connection(conn)
+                    try:
+                        return job.fn(conn)
+                    finally:
+                        _leave_coordinator_connection(token)
+                result = write_transaction_retrying(self._conn, _in_transaction)  # type: ignore[arg-type]
+        except BaseException as exc:
+            with self._stats_lock:
+                self._failed += 1
+            # Future callbacks may submit more work.  Mark this job complete before invoking
+            # them so they enqueue normally, never as a bogus nested autocommit operation.
+            self._active_transaction = False
+            job.future.set_exception(exc)
+            if not isinstance(exc, Exception):
+                raise
+        else:
+            with self._stats_lock:
+                self._completed += 1
+            self._active_transaction = False
+            job.future.set_result(result)
+        finally:
+            self._active_transaction = False
+            self._active_label = None
+
     def _run(self) -> None:
         self._thread_id = threading.get_ident()
         try:
@@ -174,14 +223,7 @@ class DbWriteCoordinator:
             self._started = False
             return
         try:
-            try:
-                if sqlite_vec is not None:
-                    self._conn.enable_load_extension(True)
-                    sqlite_vec.load(self._conn)
-                    self._conn.enable_load_extension(False)
-            except Exception:
-                # DBs without vector support still need a reliable scalar writer.
-                pass
+            self._load_vector_extension()
             fg_run = 0
             while True:
                 if self._stopping:
@@ -198,41 +240,7 @@ class DbWriteCoordinator:
                     continue
                 if job.future.cancelled():
                     continue
-                self._active_label = job.label
-                self._active_transaction = True
-                try:
-                    if isinstance(job.fn, _Maintenance):
-                        result = job.fn.fn(self._conn)
-                    else:
-                        # Register the connection only *inside* the outer
-                        # transaction callback.  Nested legacy helpers then
-                        # reuse it, while this top-level call still opens the
-                        # required BEGIN IMMEDIATE transaction.
-                        def _in_transaction(conn):
-                            token = _enter_coordinator_connection(conn)
-                            try:
-                                return job.fn(conn)
-                            finally:
-                                _leave_coordinator_connection(token)
-                        result = write_transaction_retrying(self._conn, _in_transaction)
-                except BaseException as exc:
-                    with self._stats_lock:
-                        self._failed += 1
-                    # Future callbacks may submit more work.  Mark this job
-                    # complete before invoking them so they enqueue normally,
-                    # never as a bogus nested autocommit operation.
-                    self._active_transaction = False
-                    job.future.set_exception(exc)
-                    if not isinstance(exc, Exception):
-                        raise
-                else:
-                    with self._stats_lock:
-                        self._completed += 1
-                    self._active_transaction = False
-                    job.future.set_result(result)
-                finally:
-                    self._active_transaction = False
-                    self._active_label = None
+                self._execute_job(job)
         finally:
             self.begin_draining()
             if self._conn is not None:

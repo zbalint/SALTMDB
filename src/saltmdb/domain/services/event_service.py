@@ -290,7 +290,7 @@ def get_session_summary(session_id: str, db_connection=None, db_path: str = None
             close_connection(conn)
 
 
-def dismiss_events(
+def dismiss_events(  # noqa: C901
     event_ids: str | list[str],
     reason: str,
     agent_id: str = "system",
