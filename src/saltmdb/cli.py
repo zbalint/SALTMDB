@@ -1,35 +1,52 @@
 import argparse
-import json
+import concurrent.futures
 import os
 import sys
 from typing import Any
 
 
-def _fmt_digest(core, project, pending_events, project_keywords):
-    lines = ["## SALTMDB Session Digest"]
+def _fmt_memory(m: dict) -> str:
+    mid = m.get("id", "")
+    mtype = m.get("memory_type") or "fact"
+    is_core = str(bool(m.get("is_core", False))).lower()
+    # Escape double-quotes and strip newlines so the YAML single-line title value stays valid.
+    title = m.get("title", "").replace('"', '\\"').replace("\n", " ")
+    # Escape closing tag in content to prevent premature block termination.
+    content = (m.get("full_content") or m.get("snippet") or "").replace(
+        "</memory>", "&lt;/memory&gt;"
+    )
+    return "\n".join([
+        f'<memory id="{mid}" type="{mtype}" is_core="{is_core}">',
+        "---",
+        f'title: "{title}"',
+        f"type: {mtype}",
+        f"is_core: {is_core}",
+        "---",
+        "",
+        content,
+        "</memory>",
+    ])
+
+
+def _fmt_digest(core: list, project: list, project_keywords: str | None) -> str:
+    lines = ["<saltmdb-digest>"]
+
     if core and not (len(core) == 1 and "error" in core[0]):
-        lines.append("\n### Core Rules")
+        lines.append("\n<core-rules>")
         for m in core:
-            lines.append(f"\n#### {m.get('title', 'Rule')}")
-            lines.append(m.get("full_content") or m.get("snippet", ""))
+            lines.append("")
+            lines.append(_fmt_memory(m))
+        lines.append("\n</core-rules>")
+
     if project_keywords and project and not (len(project) == 1 and "error" in project[0]):
-        lines.append(f"\n### Project Context ({project_keywords})")
+        lines.append(f'\n<project-context keywords="{project_keywords}">')
         for m in project:
-            lines.append(f"\n#### {m.get('title', 'Context')}")
-            lines.append(m.get("full_content") or m.get("snippet", ""))
-    if pending_events:
-        lines.append(f"\n### Pending Consolidation Requests: {len(pending_events)}")
-        lines += [f"- {_summarize_event(e)}" for e in pending_events[:5]]
-    return "\n".join(lines) if len(lines) > 1 else ""
+            lines.append("")
+            lines.append(_fmt_memory(m))
+        lines.append("\n</project-context>")
 
-
-def _summarize_event(ev):
-    try:
-        data = json.loads(ev.get("content", "{}"))
-        n = len(data.get("entity_ids") or data.get("new_raw_entity_ids") or [])
-        return f"{data.get('target', 'unknown')} ({n} entries, agent={ev.get('agent_id')})"
-    except Exception:
-        return (ev.get("content") or "")[:120]
+    lines.append("\n</saltmdb-digest>")
+    return "\n".join(lines)
 
 
 def _search_memory_defaults(**overrides) -> dict:
@@ -60,25 +77,6 @@ def _search_memory_defaults(**overrides) -> dict:
     }
     base.update(overrides)
     return base
-
-
-def _get_events_defaults(**overrides) -> dict:
-    """Mirrors mcp/tools.py's get_events defaulting exactly, same rationale as above."""
-    base = {
-        "mode": "events",
-        "limit": 20,
-        "offset": 0,
-        "session_id": None,
-        "agent_id": None,
-        "type_filter": None,
-        "status_filter": None,
-        "owner_id": None,
-    }
-    base.update(overrides)
-    return base
-
-import concurrent.futures
-import sys
 
 
 def cmd_bootstrap_digest(args):
@@ -112,7 +110,7 @@ def cmd_bootstrap_digest(args):
 
     keywords = args.project_keywords or os.path.basename(os.getcwd().rstrip("\\/"))
     project: Any = []
-    if keywords:
+    if keywords and args.project_limit > 0:
         try:
             project = daemon_client.call(
                 db_path,
@@ -148,18 +146,7 @@ def cmd_bootstrap_digest(args):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             list(executor.map(_fetch_full, all_items))
 
-    try:
-        events = daemon_client.call(
-            db_path,
-            "get_events",
-            _get_events_defaults(type_filter="consolidation_request", limit=args.events_limit),
-        )
-        pending = [e for e in events if isinstance(e, dict) and e.get("status") == "pending"]
-    except Exception as e:
-        print(f"# Warning: Failed to fetch pending events: {e}", file=sys.stderr)
-        pending = []
-
-    print(_fmt_digest(core, project, pending, keywords))
+    print(_fmt_digest(core, project, keywords))
     return 0
 
 
@@ -171,8 +158,7 @@ def build_parser():
     d = sub.add_parser("bootstrap-digest", help="Print a compact plain-text session digest.")
     d.add_argument("--project-keywords", default=None)
     d.add_argument("--core-limit", type=int, default=20)
-    d.add_argument("--project-limit", type=int, default=5)
-    d.add_argument("--events-limit", type=int, default=20)
+    d.add_argument("--project-limit", type=int, default=0)
     d.add_argument("--no-semantic", action="store_true")
     d.set_defaults(func=cmd_bootstrap_digest)
 
