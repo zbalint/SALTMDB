@@ -269,14 +269,16 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
             ).fetchall()
             if rows:
                 return True
+            from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+            process_embedding_jobs_sync(self.conn)
             time.sleep(interval)
         return False
 
     def test_backward_compatible_when_flag_omitted(self):
-        self._store(
+        eid = self._store(
             "Rerank Backward Compat", "Some real content for the backward compatibility test."
         )
-        time.sleep(0.5)
+        self.assertTrue(self._poll_for_chunk_rows(eid))
 
         results = search_memory(query_keywords="backward compatibility test", db_path=self.db_path)
         self.assertTrue(len(results) > 0)
@@ -541,8 +543,9 @@ class TestRrfGapGateSmoke(unittest.TestCase):
 
     def test_gap_gate_does_not_crash_real_search(self):
         self._store("Gap Gate Smoke A", "Some real content for the gap gate smoke test.")
-        self._store("Gap Gate Smoke B", "Some other real content, a different topic entirely.")
-        time.sleep(0.5)
+        eid = self._store("Gap Gate Smoke B", "Some other real content, a different topic entirely.")
+        from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+        process_embedding_jobs_sync(self.conn)
 
         results = search_memory(
             query_keywords="gap gate smoke test", rerank_by_topic=True, db_path=self.db_path

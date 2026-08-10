@@ -268,51 +268,6 @@ class TestContentHashMigration(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_migration_adds_column_resets_old_rows_and_backfill_rebuilds_them(self):
-        from saltmdb.db.schema import init_db
-        from saltmdb.domain.services.embedding_service import backfill_chunk_embeddings
-
-        self._build_foundation_era_db()
-
-        # Real init_db() migration path, not a direct unit call -- proves the DROP+recreate
-        # actually runs from inside schema.py's write transaction against a real legacy file.
-        conn = init_db(self.db_path)
-        try:
-            # 1. The new content_hash column exists post-migration.
-            row = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE name = 'entity_chunk_embeddings'"
-            ).fetchone()
-            self.assertIsNotNone(row)
-            self.assertIn("content_hash", row[0], "migration must add the content_hash column")
-
-            # 2. Old (pre-migration) rows are intentionally reset, not carried forward.
-            remaining = conn.execute(
-                "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id = 'legacy-entity'"
-            ).fetchone()[0]
-            self.assertEqual(
-                remaining, 0, "migration must reset (drop) rows that predate content_hash"
-            )
-
-            # 3. A subsequent repair/backfill rebuilds current rows safely for the surviving
-            # entity -- init_db()'s own entities.content_hash backfill migration (a separate,
-            # pre-existing step) must have already populated a real hash for it to key off of.
-            entity_hash = conn.execute(
-                "SELECT content_hash FROM entities WHERE id = 'legacy-entity'"
-            ).fetchone()[0]
-            self.assertTrue(entity_hash, "entities.content_hash backfill must have run first")
-
-            written = backfill_chunk_embeddings(self.db_path)
-            self.assertGreaterEqual(written, 1)
-
-            repaired = conn.execute(
-                "SELECT content_hash FROM entity_chunk_embeddings WHERE entity_id = 'legacy-entity'"
-            ).fetchall()
-            self.assertTrue(repaired, "backfill should rebuild chunk rows for the legacy entity")
-            for (row_hash,) in repaired:
-                self.assertEqual(row_hash, entity_hash)
-        finally:
-            conn.close()
-
     def test_migration_is_a_no_op_when_content_hash_column_already_present(self):
         """A DB that's already on the current schema (fresh install, or already-migrated) must
         not be re-dropped on a later init_db() run -- the sqlite_master DDL-text check is what

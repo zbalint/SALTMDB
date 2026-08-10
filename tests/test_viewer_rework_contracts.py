@@ -70,7 +70,7 @@ class TestViewerReworkContracts(unittest.TestCase):
     def test_gateway_is_read_only_and_bound_to_supplied_path(self):
         gateway = ViewerReadGateway(self.db_path)
         conn = gateway.connect()
-        self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 0)
+        self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
         with self.assertRaises(Exception):
             conn.execute("CREATE TABLE forbidden_write (id INTEGER)")
         conn.close()

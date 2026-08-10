@@ -157,6 +157,8 @@ class TestE2ETopicRerank(unittest.TestCase):
             ).fetchall()
             if rows:
                 return True
+            from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+            process_embedding_jobs_sync(self.conn)
             time.sleep(interval)
         return False
 

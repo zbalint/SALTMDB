@@ -608,6 +608,8 @@ class TestCompletionBarrier(unittest.TestCase):
             ).fetchone()
             if row and row[0] == "ready" and chunk:
                 return True
+            from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+            process_embedding_jobs_sync(self.conn)
             time.sleep(interval)
         return False
 

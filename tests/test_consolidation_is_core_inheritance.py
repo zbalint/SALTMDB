@@ -25,7 +25,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         # background embedding jobs on the shared module-level thread pool -- those jobs
         # can still be draining when an unrelated later test mocks embed_text and counts
         # calls, causing order-dependent flakes elsewhere in the suite.
-        self._embed_patcher = patch("saltmdb.domain.services.embedding_service.embed_entity_async")
+        self._embed_patcher = patch("saltmdb.domain.services.embedding_service.enqueue_embedding_jobs_for_entity")
         self._embed_patcher.start()
         self.addCleanup(self._embed_patcher.stop)
 

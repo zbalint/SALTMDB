@@ -410,3 +410,23 @@ def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[d
 
 
 
+
+def process_embedding_jobs_sync(conn) -> None:
+    """Test utility to synchronously process all pending embedding jobs on the caller thread."""
+    from saltmdb.db.connection import write_transaction
+    while True:
+        with write_transaction(conn):
+            snapshot = _claim_embedding_job(conn)
+        if not snapshot:
+            break
+        try:
+            if snapshot["job_kind"] == "entity":
+                payload = embed_text(f"{snapshot['title']}\n\n{snapshot['content']}")
+            else:
+                payload = compute_entity_chunk_embeddings(snapshot["entity_id"], snapshot["content"])
+        except Exception as exc:
+            with write_transaction(conn):
+                _retry_embedding_job(conn, snapshot["id"], str(exc))
+            continue
+        with write_transaction(conn):
+            _persist_embedding_if_current(conn, snapshot, payload)
