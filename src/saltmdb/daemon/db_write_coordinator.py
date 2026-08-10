@@ -14,6 +14,11 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Callable, Generic, Literal, TypeVar
 
+try:
+    import sqlite_vec
+except ImportError:
+    sqlite_vec = None
+
 from saltmdb.db.connection import (
     _enter_coordinator_connection,
     _leave_coordinator_connection,
@@ -45,8 +50,8 @@ class DbWriteCoordinator:
         self.db_path = db_path
         self._foreground: queue.Queue[_Job] = queue.Queue()
         self._background: queue.Queue[_Job] = queue.Queue()
-        self._wakeup = threading.Condition()
         self._admission_lock = threading.Lock()
+        self._wakeup = threading.Condition(self._admission_lock)
         self._stopping = False
         self._started = False
         self._thread: threading.Thread | None = None
@@ -111,7 +116,8 @@ class DbWriteCoordinator:
         return future.result() if wait else future
 
     def telemetry(self) -> dict[str, object]:
-        queued = list(self._foreground.queue) + list(self._background.queue)
+        with self._admission_lock:
+            queued = list(self._foreground.queue) + list(self._background.queue)
         now = time.monotonic()
         with self._stats_lock:
             return {
@@ -126,6 +132,7 @@ class DbWriteCoordinator:
             }
 
     def begin_draining(self) -> None:
+        jobs_to_cancel = []
         with self._admission_lock:
             self._stopping = True
             # In-memory queue entries are not durable.  Their source work is
@@ -134,10 +141,11 @@ class DbWriteCoordinator:
             for lane in (self._foreground, self._background):
                 while True:
                     try:
-                        job = lane.get_nowait()
+                        jobs_to_cancel.append(lane.get_nowait())
                     except queue.Empty:
                         break
-                    job.future.set_exception(CoordinatorUsageError("DAEMON_SHUTTING_DOWN"))
+        for job in jobs_to_cancel:
+            job.future.set_exception(CoordinatorUsageError("DAEMON_SHUTTING_DOWN"))
         with self._wakeup:
             self._wakeup.notify_all()
 
@@ -159,13 +167,18 @@ class DbWriteCoordinator:
 
     def _run(self) -> None:
         self._thread_id = threading.get_ident()
-        self._conn = open_writer_connection(self.db_path)
+        try:
+            self._conn = open_writer_connection(self.db_path)
+        except Exception:
+            self.begin_draining()
+            self._started = False
+            return
         try:
             try:
-                import sqlite_vec
-                self._conn.enable_load_extension(True)
-                sqlite_vec.load(self._conn)
-                self._conn.enable_load_extension(False)
+                if sqlite_vec is not None:
+                    self._conn.enable_load_extension(True)
+                    sqlite_vec.load(self._conn)
+                    self._conn.enable_load_extension(False)
             except Exception:
                 # DBs without vector support still need a reliable scalar writer.
                 pass
@@ -180,7 +193,8 @@ class DbWriteCoordinator:
                     if self._stopping:
                         break
                     with self._wakeup:
-                        self._wakeup.wait(timeout=0.25)
+                        if self._foreground.empty() and self._background.empty() and not self._stopping:
+                            self._wakeup.wait()
                     continue
                 if job.future.cancelled():
                     continue
@@ -209,6 +223,8 @@ class DbWriteCoordinator:
                     # never as a bogus nested autocommit operation.
                     self._active_transaction = False
                     job.future.set_exception(exc)
+                    if not isinstance(exc, Exception):
+                        raise
                 else:
                     with self._stats_lock:
                         self._completed += 1
@@ -218,6 +234,7 @@ class DbWriteCoordinator:
                     self._active_transaction = False
                     self._active_label = None
         finally:
+            self.begin_draining()
             if self._conn is not None:
                 close_connection(self._conn)
             self._conn = None
