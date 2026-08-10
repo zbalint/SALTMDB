@@ -9,10 +9,14 @@ def _fmt_digest(core, project, pending_events, project_keywords):
     lines = ["## SALTMDB Session Digest"]
     if core and not (len(core) == 1 and "error" in core[0]):
         lines.append("\n### Core Rules")
-        lines += [f"- {m['title']}: {m['snippet']}" for m in core]
+        for m in core:
+            lines.append(f"\n#### {m.get('title', 'Rule')}")
+            lines.append(m.get("full_content") or m.get("snippet", ""))
     if project_keywords and project and not (len(project) == 1 and "error" in project[0]):
         lines.append(f"\n### Project Context ({project_keywords})")
-        lines += [f"- {m['title']}: {m['snippet']}" for m in project]
+        for m in project:
+            lines.append(f"\n#### {m.get('title', 'Context')}")
+            lines.append(m.get("full_content") or m.get("snippet", ""))
     if pending_events:
         lines.append(f"\n### Pending Consolidation Requests: {len(pending_events)}")
         lines += [f"- {_summarize_event(e)}" for e in pending_events[:5]]
@@ -73,6 +77,9 @@ def _get_events_defaults(**overrides) -> dict:
     base.update(overrides)
     return base
 
+import concurrent.futures
+import sys
+
 
 def cmd_bootstrap_digest(args):
     from saltmdb.config import get_db_path
@@ -99,7 +106,8 @@ def cmd_bootstrap_digest(args):
         )
         if not isinstance(core, list):
             core = []
-    except Exception:
+    except Exception as e:
+        print(f"# Warning: Failed to fetch core memory: {e}", file=sys.stderr)
         core = []
 
     keywords = args.project_keywords or os.path.basename(os.getcwd().rstrip("\\/"))
@@ -118,8 +126,27 @@ def cmd_bootstrap_digest(args):
             )
             if not isinstance(project, list):
                 project = []
-        except Exception:
+        except Exception as e:
+            print(f"# Warning: Failed to fetch project memory: {e}", file=sys.stderr)
             project = []
+
+    def _fetch_full(item):
+        if isinstance(item, dict) and "id" in item:
+            try:
+                full_text = daemon_client.call(
+                    db_path,
+                    "search_memory",
+                    _search_memory_defaults(entity_id=item["id"], fetch_full=True),
+                )
+                item["full_content"] = full_text if isinstance(full_text, str) else item.get("snippet", "")
+            except Exception as e:
+                print(f"# Warning: Failed to fetch full context for {item.get('id')}: {e}", file=sys.stderr)
+                item["full_content"] = item.get("snippet", "")
+
+    all_items = [i for i in (core + project) if isinstance(i, dict) and "id" in i]
+    if all_items:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            list(executor.map(_fetch_full, all_items))
 
     try:
         events = daemon_client.call(
@@ -128,7 +155,8 @@ def cmd_bootstrap_digest(args):
             _get_events_defaults(type_filter="consolidation_request", limit=args.events_limit),
         )
         pending = [e for e in events if isinstance(e, dict) and e.get("status") == "pending"]
-    except Exception:
+    except Exception as e:
+        print(f"# Warning: Failed to fetch pending events: {e}", file=sys.stderr)
         pending = []
 
     print(_fmt_digest(core, project, pending, keywords))
