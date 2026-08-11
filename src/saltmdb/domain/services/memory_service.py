@@ -11,7 +11,7 @@ from saltmdb.config import (
     BM25_TITLE_WEIGHT,
     BM25_CONTENT_WEIGHT,
     BM25_ALIAS_WEIGHT,
-    RELATION_COUNT_PENALTY,
+    RELATION_COUNT_BOOST,
     SNIPPET_MAX_TOKENS,
     SNIPPET_MATCH_START,
     SNIPPET_MATCH_END,
@@ -562,7 +562,7 @@ def _run_fts_search(
         FROM entities_fts fts
         JOIN entities e ON fts.id = e.id
         WHERE fts.entities_fts MATCH ?{where_sql}
-        ORDER BY (bm25(entities_fts, {bm25_weights}) * e.weight + (rel_count * {RELATION_COUNT_PENALTY})) ASC,
+        ORDER BY (bm25(entities_fts, {bm25_weights}) * e.weight - (rel_count * {RELATION_COUNT_BOOST})) ASC,
                  e.updated_at DESC
         LIMIT ? OFFSET ?
     """
