@@ -24,7 +24,11 @@ def main():
         try:
             result = daemon_client.call_method(db_path, "run_backfill_chunk_embeddings_now", {})
         except Exception as e:
-            print(f"Error: could not reach a SALTMDB daemon for {db_path}: {e}", file=sys.stderr, flush=True)
+            print(
+                f"Error: could not reach a SALTMDB daemon for {db_path}: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
             sys.exit(1)
         print(result, flush=True)
     elif "--librarian" in sys.argv:
@@ -35,7 +39,11 @@ def main():
         try:
             result = daemon_client.call_method(db_path, "run_librarian_now", {"force": True})
         except Exception as e:
-            print(f"Error: could not reach a SALTMDB daemon for {db_path}: {e}", file=sys.stderr, flush=True)
+            print(
+                f"Error: could not reach a SALTMDB daemon for {db_path}: {e}",
+                file=sys.stderr,
+                flush=True,
+            )
             sys.exit(1)
         print(result, flush=True)
     else:

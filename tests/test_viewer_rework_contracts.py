@@ -97,9 +97,9 @@ class TestViewerReworkContracts(unittest.TestCase):
 
     def test_shell_uses_local_sanitizer_assets_without_inline_handlers(self):
         shell = get_frontend_html()
-        self.assertIn('/static/vendor/dompurify-3.4.10.min.js', shell)
-        self.assertIn('/static/vendor/marked-18.0.7.umd.js', shell)
-        self.assertNotIn('onclick=', shell)
+        self.assertIn("/static/vendor/dompurify-3.4.10.min.js", shell)
+        self.assertIn("/static/vendor/marked-18.0.7.umd.js", shell)
+        self.assertNotIn("onclick=", shell)
 
     def test_neighborhood_validates_time_and_reports_real_truncation(self):
         self._insert_entity("root")
@@ -155,10 +155,37 @@ class TestViewerReworkContracts(unittest.TestCase):
                full_content, status, memory_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 ("raw-fact", now, now, now, "Raw fact", "raw fact content", "raw", "fact"),
-                ("consolidated-decision", now, now, now, "Consolidated decision", "decision content", "consolidated", "decision"),
-                ("archived-fact", now, now, now, "Archived fact", "archived content", "archived", "fact"),
+                (
+                    "consolidated-decision",
+                    now,
+                    now,
+                    now,
+                    "Consolidated decision",
+                    "decision content",
+                    "consolidated",
+                    "decision",
+                ),
+                (
+                    "archived-fact",
+                    now,
+                    now,
+                    now,
+                    "Archived fact",
+                    "archived content",
+                    "archived",
+                    "fact",
+                ),
                 ("raw-fact-two", now, now, now, "Raw fact two", "raw fact content", "raw", "fact"),
-                ("raw-fact-three", now, now, now, "Raw fact three", "raw fact content", "raw", "fact"),
+                (
+                    "raw-fact-three",
+                    now,
+                    now,
+                    now,
+                    "Raw fact three",
+                    "raw fact content",
+                    "raw",
+                    "fact",
+                ),
             ],
         )
         self.conn.commit()
@@ -169,10 +196,14 @@ class TestViewerReworkContracts(unittest.TestCase):
 
         decision = self._capture(handler)
         handler.get_entities({"memory_type": ["decision"]})
-        self.assertEqual([item["id"] for item in decision["data"]["entities"]], ["consolidated-decision"])
+        self.assertEqual(
+            [item["id"] for item in decision["data"]["entities"]], ["consolidated-decision"]
+        )
 
         paged = self._capture(handler)
-        handler.get_entities({"status": ["raw"], "memory_type": ["fact"], "page": ["2"], "limit": ["2"]})
+        handler.get_entities(
+            {"status": ["raw"], "memory_type": ["fact"], "page": ["2"], "limit": ["2"]}
+        )
         self.assertEqual(paged["data"]["page"], 2)
         self.assertEqual(paged["data"]["total_count"], 3)
         self.assertEqual(paged["data"]["total_pages"], 2)
@@ -197,7 +228,10 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertNotIn("target_id", script)
         self.assertIn("malformed relations could not be rendered", script)
         self.assertIn("No active relations for this memory", script)
-        self.assertIn("Showing ${data.returned_edges} of ${data.total_matching_edges} relations; ${data.omitted_edge_count} omitted by limit.", script)
+        self.assertIn(
+            "Showing ${data.returned_edges} of ${data.total_matching_edges} relations; ${data.omitted_edge_count} omitted by limit.",
+            script,
+        )
         self.assertIn("source?.title || edge.source", script)
         self.assertIn("button('Apply filters', 'primary', undefined, 'submit')", script)
         self.assertIn("button('Explore graph', 'primary', undefined, 'submit')", script)
@@ -218,7 +252,9 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("--state-warning", stylesheet)
         self.assertIn("['Pending', embeddingData.pending, 'pending']", script)
         self.assertIn("['Failed', embeddingData.failed, 'failed']", script)
-        self.assertIn(".metric-card.pending { border-top-color: var(--state-pending); }", stylesheet)
+        self.assertIn(
+            ".metric-card.pending { border-top-color: var(--state-pending); }", stylesheet
+        )
         self.assertIn(".metric-card.failed { border-top-color: var(--state-failed); }", stylesheet)
         self.assertIn(".row-button { display: block; width: 100%", stylesheet)
         self.assertIn("text-align: left", stylesheet)

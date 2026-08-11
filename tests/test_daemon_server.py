@@ -30,7 +30,9 @@ from saltmdb.daemon.server import _DaemonState
 
 class TestDaemonStateConcurrency(unittest.TestCase):
     def _state(self, foreground: bool = False) -> _DaemonState:
-        state = _DaemonState(db_path="/tmp/saltmdb_test_daemon_state.db", key="testkey", foreground=foreground)
+        state = _DaemonState(
+            db_path="/tmp/saltmdb_test_daemon_state.db", key="testkey", foreground=foreground
+        )
         state.auth_token = "tok"
         return state
 
@@ -140,7 +142,9 @@ class TestDaemonStateConcurrency(unittest.TestCase):
         self.assertEqual(resp["result"], {"enabled": True, "port": 8080})
 
     def test_viewer_status_reports_disabled_daemon_state(self):
-        resp = self._state().handle_request(protocol.build_request("viewer_status", {}, token="tok"))
+        resp = self._state().handle_request(
+            protocol.build_request("viewer_status", {}, token="tok")
+        )
         self.assertEqual(resp["result"], {"enabled": False, "port": None})
 
     def test_acquire_inflight_rejected_once_draining(self):
@@ -163,7 +167,9 @@ class TestDaemonStateRealConcurrency(unittest.TestCase):
     ITERATIONS = 200
 
     def _state(self) -> _DaemonState:
-        state = _DaemonState(db_path="/tmp/saltmdb_test_daemon_state.db", key="testkey", foreground=False)
+        state = _DaemonState(
+            db_path="/tmp/saltmdb_test_daemon_state.db", key="testkey", foreground=False
+        )
         state.auth_token = "tok"
         return state
 
@@ -284,9 +290,13 @@ class TestDaemonSignalShutdown(unittest.TestCase):
             while time.time() < deadline and not os.path.exists(discovery_file):
                 if proc.poll() is not None:
                     out = proc.stdout.read().decode("utf-8", errors="replace")
-                    self.fail(f"daemon exited early (code {proc.returncode}) before publishing discovery:\n{out}")
+                    self.fail(
+                        f"daemon exited early (code {proc.returncode}) before publishing discovery:\n{out}"
+                    )
                 time.sleep(0.1)
-            self.assertTrue(os.path.exists(discovery_file), "daemon never published its discovery file in time")
+            self.assertTrue(
+                os.path.exists(discovery_file), "daemon never published its discovery file in time"
+            )
 
             # The actual regression test: SIGTERM must not deadlock against serve_forever()'s own
             # thread (Codex round-1 claim #1, confirmed against socketserver.BaseServer.shutdown()'s
@@ -304,10 +314,14 @@ class TestDaemonSignalShutdown(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
-                self.fail("daemon did not exit within 15s of SIGTERM -- shutdown deadlock regression")
+                self.fail(
+                    "daemon did not exit within 15s of SIGTERM -- shutdown deadlock regression"
+                )
 
             self.assertEqual(exit_code, 0)
-            self.assertFalse(os.path.exists(discovery_file), "discovery file not removed on clean shutdown")
+            self.assertFalse(
+                os.path.exists(discovery_file), "discovery file not removed on clean shutdown"
+            )
         finally:
             if proc.poll() is None:
                 proc.kill()

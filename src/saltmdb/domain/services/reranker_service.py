@@ -171,6 +171,8 @@ def score_pairs(query: str, candidates: list[str]) -> list[float] | None:
     )
 
     model_name = get_reranker_model_name()
+    if model_name is None:
+        return None
     capped_query = (query or "")[:CROSS_ENCODER_MAX_QUERY_CHARS]
     capped = [c[:CROSS_ENCODER_MAX_CHARS] for c in candidates[:CROSS_ENCODER_MAX_CANDIDATES]]
     try:

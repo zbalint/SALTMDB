@@ -23,9 +23,11 @@ here would create a real init-time cycle (memory_service -> disposition_service 
 """
 
 import base64
+import binascii
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from saltmdb.config import (
     DEDUP_DUPLICATE_THRESHOLD,
@@ -48,6 +50,15 @@ from saltmdb.utils.nlp import detect_correction_language
 from saltmdb.utils.text import compute_content_hash
 
 logger = logging.getLogger(__name__)
+
+
+def _proposal_text(proposed: dict[str, Any]) -> tuple[str, str] | None:
+    title = proposed.get("title")
+    content = proposed.get("content")
+    if not isinstance(title, str) or not title or not isinstance(content, str) or not content:
+        return None
+    return title, content
+
 
 _CORE_SAFE_DISPOSITIONS = ["distinct", "supersede", "elaborate"]
 _NON_CORE_DISPOSITIONS = ["distinct", "supersede", "consolidate"]
@@ -115,7 +126,7 @@ def _decode_review_token(token: str) -> dict | None:
     try:
         raw = base64.urlsafe_b64decode(token.encode("ascii"))
         return json.loads(raw.decode("utf-8"))
-    except Exception:
+    except (binascii.Error, UnicodeError, json.JSONDecodeError, ValueError):
         return None
 
 
@@ -143,7 +154,9 @@ def _check_consolidated_integrity(
     if target_id not in centroids:
         return False  # target unresolved this pass (archived/no content) -- not this check's job
 
-    sim, _offending_pair = min_pairwise_cohesion({"__adhoc__": adhoc_vec, target_id: centroids[target_id]})
+    sim, _offending_pair = min_pairwise_cohesion(
+        {"__adhoc__": adhoc_vec, target_id: centroids[target_id]}
+    )
     return sim < COHESION_MIN_PAIRWISE_THRESHOLD
 
 
@@ -184,7 +197,9 @@ def evaluate_store_preflight(conn, proposed: dict, db_path: str) -> dict:  # noq
 
         proposed_type = proposed.get("memory_type")
         type_compatible = (
-            proposed_type is None or target_memory_type is None or proposed_type == target_memory_type
+            proposed_type is None
+            or target_memory_type is None
+            or proposed_type == target_memory_type
         )
         scope_compatible = proposed.get("scope") == target_scope
         if not (type_compatible and scope_compatible):
@@ -404,7 +419,7 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     result_holder: dict = {}
 
-    def _write(c):  # noqa: C901, PLR0912
+    def _write(c):  # noqa: C901, PLR0912, PLR0915 -- atomic disposition transaction intentionally keeps validation and writes together
         # Authoritative, in-transaction revalidation (Codex implementation-review finding #4):
         # re-checked fresh against `c`, inside BEGIN IMMEDIATE, not before it -- this is what
         # actually closes the TOCTOU window, not the early pass above. Also revalidates is_core
@@ -460,6 +475,10 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         was_existing = False
         if consolidate_targets:
+            proposal_text = _proposal_text(proposed)
+            if proposal_text is None:
+                return "Error: title and content are required for consolidation."
+            proposed_title, proposed_content = proposal_text
             if precomputed is not None:
                 centroids, unresolved, observed_state = precomputed
             else:
@@ -468,8 +487,8 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
             res = commit_consolidation(
                 parent_ids=consolidate_targets,
-                title=proposed.get("title"),
-                content=proposed.get("content"),
+                title=proposed_title,
+                content=proposed_content,
                 tags=proposed.get("tags"),
                 scope=proposed.get("scope") or "shared",
                 weight=proposed.get("weight") or 1,

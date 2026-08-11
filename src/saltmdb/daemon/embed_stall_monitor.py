@@ -40,7 +40,9 @@ class EmbedStallMonitor:
             try:
                 self._check_once()
             except Exception:
-                logger.exception("embed-stall-monitor: check failed (non-fatal, will retry next tick)")
+                logger.exception(
+                    "embed-stall-monitor: check failed (non-fatal, will retry next tick)"
+                )
 
     def _check_once(self) -> None:
         """Log one warning whenever an active entity has been pending past the configured age."""
@@ -82,12 +84,16 @@ class EmbedStallMonitor:
 
     def _query_job_health(self) -> tuple[int, int, int]:
         from saltmdb.db.connection import open_read_connection
+
         conn = open_read_connection(self._db_path)
         try:
-            return tuple(conn.execute(q).fetchone()[0] for q in (
-                "SELECT COUNT(*) FROM embedding_jobs WHERE state='retry_wait'",
-                "SELECT COUNT(*) FROM embedding_jobs WHERE state='running' AND datetime(lease_expires_at) < datetime('now')",
-                "SELECT COUNT(*) FROM embedding_jobs WHERE state='failed'",
-            ))
+            return tuple(
+                conn.execute(q).fetchone()[0]
+                for q in (
+                    "SELECT COUNT(*) FROM embedding_jobs WHERE state='retry_wait'",
+                    "SELECT COUNT(*) FROM embedding_jobs WHERE state='running' AND datetime(lease_expires_at) < datetime('now')",
+                    "SELECT COUNT(*) FROM embedding_jobs WHERE state='failed'",
+                )
+            )
         finally:
             conn.close()

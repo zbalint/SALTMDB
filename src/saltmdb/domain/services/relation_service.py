@@ -2,6 +2,7 @@ import uuid
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime, UTC
 from typing import Any, Literal
 from saltmdb.config import (
@@ -192,7 +193,8 @@ def store_relation(  # noqa: C901, PLR0915
             # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
             # (archived, no usable content) forces a gate failure requiring override -- same
             # convention as Phase 3/4's unresolved-centroid handling, not a silent pass.
-            sim, offending, unresolved = 1.0, None, {}
+            sim, offending = 1.0, None
+            unresolved: dict[str, str] = {}
             if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
                 centroids, unresolved, _observed_state = get_fresh_entity_centroids(
                     [resolved_source, resolved_target], conn, db_path or get_db_path()
@@ -743,15 +745,25 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # against. cohesion_gate_applicable also gates the TOCTOU revalidation in _do_commit below --
     # no cohesion decision means no observed_state snapshot to revalidate against.
     cohesion_gate_applicable = len(resolved_parents) >= 2
+    centroids: dict[str, list[float]]
+    unresolved: dict[str, str]
+    observed_state: dict[str, tuple[str, str]]
     if not cohesion_gate_applicable:
         centroids, unresolved, observed_state = {}, {}, {}
         min_sim, offending_pair = 1.0, None
     else:
-        centroids, unresolved, observed_state = (
-            (_precomputed_centroids, _precomputed_unresolved, _precomputed_observed_state)
-            if _precomputed_centroids is not None
-            else get_fresh_entity_centroids(resolved_parents, conn, db_path or get_db_path())
-        )
+        if (
+            _precomputed_centroids is not None
+            and _precomputed_unresolved is not None
+            and _precomputed_observed_state is not None
+        ):
+            centroids = _precomputed_centroids
+            unresolved = _precomputed_unresolved
+            observed_state = _precomputed_observed_state
+        else:
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                resolved_parents, conn, db_path or get_db_path()
+            )
         if unresolved:
             min_sim, offending_pair = (
                 0.0,
@@ -834,8 +846,10 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if should_close:
                 close_connection(conn)
             return f"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}"
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning(
+            "Consolidation exact-hash lookup unavailable; continuing with duplicate checks: %s", exc
+        )
 
     # Stage B Near-Duplicate Check (excluding resolved parent IDs)
     try:
@@ -853,8 +867,8 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 top["title"],
                 top["id"],
             )
-    except Exception:
-        pass
+    except (sqlite3.Error, ValueError) as exc:
+        logger.warning("Consolidation near-duplicate check unavailable; continuing: %s", exc)
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
@@ -955,6 +969,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 cancel_embedding_jobs_for_entity,
                 enqueue_embedding_jobs_for_entity,
             )
+
             enqueue_embedding_jobs_for_entity(
                 conn, consolidated_id, clean_title, redacted_content, content_hash
             )

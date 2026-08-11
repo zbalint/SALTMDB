@@ -19,13 +19,13 @@ repos:
       - id: gitleaks
 
   # bandit runs as a local hook (not the upstream mirror) so it shares this repo's exact
-  # dev environment/config and honors .bandit-baseline.json (pre-existing, reviewed findings —
-  # see CONTRIBUTING.md §6). uv sync --extra dev must have been run at least once.
+  # dev environment/config and reports every configured finding without a historical baseline.
+  # uv sync --extra dev must have been run at least once.
   - repo: local
     hooks:
       - id: bandit
-        name: bandit (security scan, baselined)
-        entry: uv run bandit -c pyproject.toml -r src -b .bandit-baseline.json -q
+        name: bandit (security scan)
+        entry: uv run bandit -c pyproject.toml -r src -q
         language: system
         pass_filenames: false
         files: ^src/.*\.py$

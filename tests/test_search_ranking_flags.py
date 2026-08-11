@@ -180,7 +180,10 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
         semantic_rows = [("event_entity", 0.1), ("decision_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -223,7 +226,10 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
         semantic_rows = [("superseded_entity", 0.1), ("current_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -301,7 +307,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -323,7 +332,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -362,7 +374,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         scores = list(range(CROSS_ENCODER_MAX_CANDIDATES))
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -395,7 +410,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -427,7 +445,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         semantic_rows = [("winner_entity", 0.1), ("loser_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -450,7 +471,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         semantic_rows = [("event_entity", 0.1), ("decision_entity", 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,

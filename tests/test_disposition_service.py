@@ -80,7 +80,9 @@ class TestPreflightSurfacing(DispositionServiceTestBase):
         self.assertIn(cand["suggested_label"], ("possible_duplicate", "possible_supersession"))
         self.assertIn("heuristic_note", cand)
         self.assertIn("not a determination", cand["heuristic_note"])
-        self.assertEqual(set(cand["available_dispositions"]), {"distinct", "supersede", "consolidate"})
+        self.assertEqual(
+            set(cand["available_dispositions"]), {"distinct", "supersede", "consolidate"}
+        )
 
     def test_correction_language_surfaces_possible_supersession(self):
         r1 = self._store(
@@ -98,7 +100,9 @@ class TestPreflightSurfacing(DispositionServiceTestBase):
         cand = r2["candidates"][0]
         self.assertEqual(cand["target_entity_id"], entity_id)
         self.assertEqual(cand["suggested_label"], "possible_supersession")
-        self.assertTrue(any("correction_language" in s for s in cand["evidence"]["matched_signals"]))
+        self.assertTrue(
+            any("correction_language" in s for s in cand["evidence"]["matched_signals"])
+        )
 
     def test_weak_similarity_alone_never_flags(self):
         self._store(
@@ -130,13 +134,15 @@ class TestPreflightSurfacing(DispositionServiceTestBase):
         cand = r2["candidates"][0]
         self.assertEqual(cand["target_entity_id"], entity_id)
         self.assertTrue(cand["target_is_core"])
-        self.assertEqual(set(cand["available_dispositions"]), {"distinct", "supersede", "elaborate"})
+        self.assertEqual(
+            set(cand["available_dispositions"]), {"distinct", "supersede", "elaborate"}
+        )
         self.assertNotIn("consolidate", cand["available_dispositions"])
 
 
 class TestCommitDispositions(DispositionServiceTestBase):
     def test_distinct_matches_unflagged_store_shape(self):
-        r1 = self._store(
+        self._store(
             "Distinct Base Fact",
             "The default HTTP timeout for the internal API gateway is 30 seconds.",
             skip_duplicate_check=True,
@@ -225,7 +231,9 @@ class TestCommitDispositions(DispositionServiceTestBase):
         core_status = self.conn.execute(
             "SELECT status FROM entities WHERE id = ?", (core_id,)
         ).fetchone()[0]
-        self.assertEqual(core_status, "raw", "elaborate must never archive/consolidate a core target")
+        self.assertEqual(
+            core_status, "raw", "elaborate must never archive/consolidate a core target"
+        )
 
     def test_consolidate_disposition_no_temp_raw_node_ever_created(self):
         r1 = self._store(
@@ -245,7 +253,9 @@ class TestCommitDispositions(DispositionServiceTestBase):
             review_token=r2["review_token"],
             dispositions=[self._resolve_one(r2, "consolidate")],
         )
-        self.assertTrue(r3.startswith("Successfully committed") or r3.startswith("Knowledge stored"))
+        self.assertTrue(
+            r3.startswith("Successfully committed") or r3.startswith("Knowledge stored")
+        )
         new_id = r3.split("ID: ")[1].strip()
 
         new_row = self.conn.execute(
@@ -266,7 +276,7 @@ class TestCommitDispositions(DispositionServiceTestBase):
         self.assertEqual(stray, 0)
 
     def test_missing_disposition_for_flagged_candidate_rejected(self):
-        r1 = self._store(
+        self._store(
             "Missing Disposition Base",
             "The deploy pipeline runs integration tests before every production release.",
             skip_duplicate_check=True,
@@ -287,7 +297,7 @@ class TestCommitDispositions(DispositionServiceTestBase):
     def test_core_restricted_disposition_rejected_even_if_client_forces_it(self):
         """Defense in depth: even if a caller sends 'consolidate' for a core-flagged candidate
         (ignoring the offered available_dispositions), the server rejects it independently."""
-        r1 = self._store(
+        self._store(
             "Core Invariant Two",
             "Every write transaction uses BEGIN IMMEDIATE to acquire the write lock up front.",
             is_core=True,
@@ -335,7 +345,7 @@ class TestReviewStale(DispositionServiceTestBase):
         self.assertEqual(res["status"], "REVIEW_STALE")
 
     def test_stale_on_content_mismatch_at_commit(self):
-        r1 = self._store(
+        self._store(
             "Fingerprint Base",
             "The scheduler retries a failed job up to 3 times before marking it dead.",
             skip_duplicate_check=True,
@@ -354,7 +364,7 @@ class TestReviewStale(DispositionServiceTestBase):
         self.assertEqual(res["status"], "REVIEW_STALE")
 
     def test_stale_on_expired_token(self):
-        r1 = self._store(
+        self._store(
             "Expiry Base",
             "The connection pool maximum size is set to 20 for the primary database.",
             skip_duplicate_check=True,
@@ -428,7 +438,9 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
         cand = res["candidates"][0]
         self.assertEqual(cand["target_entity_id"], consolidated_id)
         self.assertEqual(cand["suggested_label"], "possible_supersession")
-        self.assertTrue(any("correction_language" in s for s in cand["evidence"]["matched_signals"]))
+        self.assertTrue(
+            any("correction_language" in s for s in cand["evidence"]["matched_signals"])
+        )
 
     def test_multi_candidate_mixed_dispositions_one_atomic_commit(self):
         """Two independent flagged candidates in one preflight, resolved to different concrete
@@ -579,7 +591,7 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
         """Additional correctness fix: a 'consolidate' disposition must not silently drop the
         proposed write's metadata/memory_type (commit_consolidation previously had no columns
         for either)."""
-        r1 = self._store(
+        self._store(
             "Metadata Preservation Base",
             "The API gateway enforces a 30 second upstream timeout for all proxied requests.",
             memory_type="procedure",  # must match r2's memory_type for the type-compatibility gate
@@ -601,7 +613,9 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
             review_token=r2["review_token"],
             dispositions=[self._resolve_one(r2, "consolidate")],
         )
-        self.assertTrue(res.startswith("Successfully committed") or res.startswith("Knowledge stored"))
+        self.assertTrue(
+            res.startswith("Successfully committed") or res.startswith("Knowledge stored")
+        )
         new_id = res.split("ID: ")[1].strip()
 
         row = self.conn.execute(
@@ -619,7 +633,11 @@ class TestConsolidationParentCap(DispositionServiceTestBase):
         base = "Distinct fixture entity number"
         ids = []
         for i in range(MAX_CONSOLIDATION_REQUEST_SIZE + 1):
-            r = self._store(f"Cap Fixture {i}", f"{base} {i} with unique padding text to satisfy the quality gate.", skip_duplicate_check=True)
+            r = self._store(
+                f"Cap Fixture {i}",
+                f"{base} {i} with unique padding text to satisfy the quality gate.",
+                skip_duplicate_check=True,
+            )
             ids.append(r.split("ID: ")[1].strip())
 
         candidates = [
@@ -657,7 +675,9 @@ class TestConsolidationParentCap(DispositionServiceTestBase):
             "candidates": candidates,
         }
         token = disposition_service._encode_review_token(token_payload)
-        dispositions = [{"candidate_id": c["candidate_id"], "disposition": "consolidate"} for c in candidates]
+        dispositions = [
+            {"candidate_id": c["candidate_id"], "disposition": "consolidate"} for c in candidates
+        ]
 
         res = disposition_service.commit_disposed_write(
             self.conn, proposed, token, dispositions, self.db_path

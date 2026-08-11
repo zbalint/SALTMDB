@@ -168,7 +168,10 @@ class TestRunMatrixForQueries(unittest.TestCase):
         )
         self.assertNotIn(self.archived_id, result["pools"]["q2"])
         self.assertTrue(
-            any(e["query_id"] == "q2" and "not found/archived" in e["error"] for e in result["errors"])
+            any(
+                e["query_id"] == "q2" and "not found/archived" in e["error"]
+                for e in result["errors"]
+            )
         )
 
     def test_force_include_fetches_stub_when_entity_exists_but_unretrieved(self):
@@ -206,28 +209,63 @@ class TestRunMatrixForQueries(unittest.TestCase):
         self.assertEqual(result["pools"], {})
 
     def test_resume_does_not_repeat_completed_query(self):
-        config = next(c for c in eval_configs._build_evaluation_configs()
-                      if c["name"] == eval_configs.CURRENT_DEFAULT_CONFIG_NAME)
-        queries = [{"id": "q-resume", "query": "distributed cache invalidation", "source_entity_ids": [],
-                    "category": "exact_title"}]
+        config = next(
+            c
+            for c in eval_configs._build_evaluation_configs()
+            if c["name"] == eval_configs.CURRENT_DEFAULT_CONFIG_NAME
+        )
+        queries = [
+            {
+                "id": "q-resume",
+                "query": "distributed cache invalidation",
+                "source_entity_ids": [],
+                "category": "exact_title",
+            }
+        ]
         checkpoint = Path(self.temp_dir) / "checkpoint.json"
         meta = {"queries_fingerprint": "q", "configs_fingerprint": "c", "limit": 10}
-        first = rem.run_matrix_for_queries(self.conn, self.db_path, queries, [config], limit=10,
-                                           progress_every=0, checkpoint_path=checkpoint,
-                                           checkpoint_every=1, resume_meta=meta)
-        resumed = rem.run_matrix_for_queries(self.conn, self.db_path, queries, [config], limit=10,
-                                             progress_every=0, resume_result=first, resume_meta=meta)
+        first = rem.run_matrix_for_queries(
+            self.conn,
+            self.db_path,
+            queries,
+            [config],
+            limit=10,
+            progress_every=0,
+            checkpoint_path=checkpoint,
+            checkpoint_every=1,
+            resume_meta=meta,
+        )
+        resumed = rem.run_matrix_for_queries(
+            self.conn,
+            self.db_path,
+            queries,
+            [config],
+            limit=10,
+            progress_every=0,
+            resume_result=first,
+            resume_meta=meta,
+        )
         self.assertEqual(first["config_rankings"], resumed["config_rankings"])
         self.assertEqual(first["latencies_ms"], resumed["latencies_ms"])
 
     def test_resume_rejects_unknown_completed_query(self):
-        config = next(c for c in eval_configs._build_evaluation_configs()
-                      if c["name"] == eval_configs.CURRENT_DEFAULT_CONFIG_NAME)
+        config = next(
+            c
+            for c in eval_configs._build_evaluation_configs()
+            if c["name"] == eval_configs.CURRENT_DEFAULT_CONFIG_NAME
+        )
         with self.assertRaises(ValueError):
             rem.run_matrix_for_queries(
-                self.conn, self.db_path, [{"id": "q", "query": "cache", "source_entity_ids": [], "category": "exact_title"}],
-                [config], progress_every=0,
-                resume_result={"completed_query_ids": ["not-in-manifest"], "config_rankings": {}, "pools": {}},
+                self.conn,
+                self.db_path,
+                [{"id": "q", "query": "cache", "source_entity_ids": [], "category": "exact_title"}],
+                [config],
+                progress_every=0,
+                resume_result={
+                    "completed_query_ids": ["not-in-manifest"],
+                    "config_rankings": {},
+                    "pools": {},
+                },
             )
 
 

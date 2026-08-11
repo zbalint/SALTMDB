@@ -26,7 +26,9 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         # See test_consolidation_is_core_inheritance.py for why this is patched out:
         # avoids leaking real background embedding jobs into unrelated tests' mock counts.
-        self._embed_patcher = patch("saltmdb.domain.services.embedding_service.enqueue_embedding_jobs_for_entity")
+        self._embed_patcher = patch(
+            "saltmdb.domain.services.embedding_service.enqueue_embedding_jobs_for_entity"
+        )
         self._embed_patcher.start()
         self.addCleanup(self._embed_patcher.stop)
 

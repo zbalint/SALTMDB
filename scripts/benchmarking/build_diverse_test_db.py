@@ -297,7 +297,9 @@ def parse_frontmatter_file(path: Path, dataset: str, source_relpath: str) -> Par
 # --------------------------------------------------------------------------------------------
 
 
-def compute_split_group_id(dataset: str, source_title: str | None, original_document_id: str) -> str:
+def compute_split_group_id(
+    dataset: str, source_title: str | None, original_document_id: str
+) -> str:
     """f"{dataset}:{source_title}" when a title exists (squad + all six wikipedia_* sets --
     dataset-qualified so identical titles across languages/datasets never collide), else
     original_document_id (the five non-title datasets, inherently one-row-per-example). Any
@@ -365,12 +367,18 @@ def classify_store_result(result: str | dict) -> tuple[str, str | None]:
             return "review_stale", str(result)
         return "other_error", str(result)
     if result.startswith("Knowledge stored successfully"):
-        return "stored_clean", None
-    if "REJECT_EXACT_DUPLICATE" in result:
-        return "exact_duplicate_rejected", result
-    if "Memory quality check rejected" in result:
-        return "quality_rejected", result
-    return "other_error", result
+        outcome = "stored_clean"
+        detail = None
+    elif "REJECT_EXACT_DUPLICATE" in result:
+        outcome = "exact_duplicate_rejected"
+        detail = result
+    elif "Memory quality check rejected" in result:
+        outcome = "quality_rejected"
+        detail = result
+    else:
+        outcome = "other_error"
+        detail = result
+    return outcome, detail
 
 
 # --------------------------------------------------------------------------------------------
@@ -609,7 +617,9 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
         "attempted_this_invocation": total_attempted,
         "attempted_cumulative": len(state.records),
         "datasets": {
-            d: _finalize_dataset_stats(per_dataset_stats[d]) for d in datasets if d in per_dataset_stats
+            d: _finalize_dataset_stats(per_dataset_stats[d])
+            for d in datasets
+            if d in per_dataset_stats
         },
         "supersession_candidate_count_this_run": run_scoped_count,
         "supersession_candidate_count_cumulative": cumulative_count,
@@ -657,7 +667,9 @@ def main() -> int:
         choices=ALL_DATASETS,
         help="Datasets to ingest (default: all twelve).",
     )
-    parser.add_argument("--db-path", required=True, help="Destination DB path (never the live path).")
+    parser.add_argument(
+        "--db-path", required=True, help="Destination DB path (never the live path)."
+    )
     parser.add_argument("--seed", default="diverse-corpus-v1", help="Selection seed.")
     parser.add_argument(
         "--source-db-path", default=None, help="DB to copy from (default: live get_db_path())."
@@ -692,7 +704,11 @@ def main() -> int:
     else:
         n_per_dataset = int(args.n_per_dataset)
 
-    test_data_dir = Path(args.test_data_dir) if args.test_data_dir else Path(__file__).resolve().parents[2] / "test_data"
+    test_data_dir = (
+        Path(args.test_data_dir)
+        if args.test_data_dir
+        else Path(__file__).resolve().parents[2] / "test_data"
+    )
 
     if not args.resume:
         print(f"Preparing destination DB copy: {src} -> {dst}")
@@ -701,7 +717,9 @@ def main() -> int:
         print(f"Resuming against existing destination DB: {dst}")
 
     run_id = str(uuid.uuid4())
-    print(f"run_id={run_id}  seed={args.seed}  n_per_dataset={args.n_per_dataset}  datasets={args.datasets}")
+    print(
+        f"run_id={run_id}  seed={args.seed}  n_per_dataset={args.n_per_dataset}  datasets={args.datasets}"
+    )
 
     manifest = run_ingestion(
         dest_db_path=str(dst),

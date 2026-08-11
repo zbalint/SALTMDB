@@ -1,10 +1,16 @@
 """Contract tests for split isolation and the frozen-shortlist blind gate."""
+
 import importlib.util
 import unittest
 from pathlib import Path
 
 
-_PATH = Path(__file__).resolve().parents[1] / "scripts" / "benchmarking" / "analyze_evaluation_matrix.py"
+_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "benchmarking"
+    / "analyze_evaluation_matrix.py"
+)
 _SPEC = importlib.util.spec_from_file_location("analyze_evaluation_matrix", _PATH)
 am = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(am)
@@ -12,10 +18,19 @@ _SPEC.loader.exec_module(am)
 
 def _fixture(split="dev"):
     configs = [item["name"] for item in am._build_evaluation_configs()]
-    query = {"id": "q1", "query": "cache protocol", "split": split, "category": "exact_title",
-             "topic_family_id": "family:1", "source_entity_ids": ["c1"]}
-    matrix = {"errors": [], "config_rankings": {"q1": {name: ["c1"] for name in configs}},
-              "pools": {"q1": {"c1": {"title": "Cache", "snippet": "protocol"}}}}
+    query = {
+        "id": "q1",
+        "query": "cache protocol",
+        "split": split,
+        "category": "exact_title",
+        "topic_family_id": "family:1",
+        "source_entity_ids": ["c1"],
+    }
+    matrix = {
+        "errors": [],
+        "config_rankings": {"q1": {name: ["c1"] for name in configs}},
+        "pools": {"q1": {"c1": {"title": "Cache", "snippet": "protocol"}}},
+    }
     labels = [{"query_id": "q1", "candidate_id": "c1", "median_grade": 2, "final_grade": 2}]
     return [query], matrix, labels
 
@@ -44,11 +59,15 @@ class TestAnalyzeEvaluationMatrix(unittest.TestCase):
         queries, matrix, labels = _fixture("blind")
         analysis = am.analyze(queries, matrix, labels, n_resamples=10, split="blind")
         dev_queries, dev_matrix, dev_labels = _fixture("dev")
-        shortlist = am.freeze_dev_contenders(am.analyze(dev_queries, dev_matrix, dev_labels, n_resamples=10))
+        shortlist = am.freeze_dev_contenders(
+            am.analyze(dev_queries, dev_matrix, dev_labels, n_resamples=10)
+        )
         comparisons = am.paired_comparisons(analysis, shortlist["comparisons"], n_resamples=10)
         self.assertEqual(len(comparisons), 4)
-        self.assertEqual({(item["contender"], item["baseline"]) for item in comparisons},
-                         {tuple(pair) for pair in shortlist["comparisons"]})
+        self.assertEqual(
+            {(item["contender"], item["baseline"]) for item in comparisons},
+            {tuple(pair) for pair in shortlist["comparisons"]},
+        )
 
 
 if __name__ == "__main__":

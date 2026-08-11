@@ -14,6 +14,8 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Callable, Generic, Literal, TypeVar
 
+import logging
+
 try:
     import sqlite_vec
 except ImportError:
@@ -29,6 +31,7 @@ from saltmdb.db.connection import (
 
 T = TypeVar("T")
 Priority = Literal["foreground", "background"]
+logger = logging.getLogger(__name__)
 
 
 class CoordinatorUsageError(RuntimeError):
@@ -78,7 +81,12 @@ class DbWriteCoordinator:
         return threading.get_ident() == self._thread_id and self._active_transaction
 
     def submit(
-        self, label: str, fn: Callable[[sqlite3.Connection], T], *, priority: Priority = "foreground", wait: bool = True
+        self,
+        label: str,
+        fn: Callable[[sqlite3.Connection], T],
+        *,
+        priority: Priority = "foreground",
+        wait: bool = True,
     ) -> T | Future[T]:
         if self.in_transaction():
             if self._conn is None:
@@ -96,7 +104,9 @@ class DbWriteCoordinator:
             self._wakeup.notify()
         return future.result() if wait else future
 
-    def submit_maintenance(self, label: str, fn: Callable[[sqlite3.Connection], T], *, wait: bool = True) -> T | Future[T]:
+    def submit_maintenance(
+        self, label: str, fn: Callable[[sqlite3.Connection], T], *, wait: bool = True
+    ) -> T | Future[T]:
         """Serialize explicit maintenance which SQLite forbids in a transaction.
 
         ``wal_checkpoint`` is the important example.  It still runs on the
@@ -167,15 +177,29 @@ class DbWriteCoordinator:
 
     def _load_vector_extension(self) -> None:
         """Best-effort sqlite-vec extension load on the writer connection.
-        DBs without vector support still need a reliable scalar writer, so failures are swallowed."""
+        DBs without vector support still need a reliable scalar writer, so failures are logged and
+        swallowed. Extension loading is always disabled again after a successful enable, including
+        when the extension itself fails to load.
+        """
         if sqlite_vec is None or self._conn is None:
             return
+        extension_loading_enabled = False
         try:
             self._conn.enable_load_extension(True)
+            extension_loading_enabled = True
             sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
-        except Exception:
-            pass  # DBs without vector support still need a reliable scalar writer.
+        except (sqlite3.Error, OSError, RuntimeError) as exc:
+            logger.warning(
+                "sqlite_vec extension load unavailable; scalar writes remain enabled: %s", exc
+            )
+        finally:
+            if extension_loading_enabled:
+                try:
+                    self._conn.enable_load_extension(False)
+                except (sqlite3.Error, OSError, RuntimeError) as exc:
+                    logger.warning(
+                        "Could not disable sqlite extension loading after vector setup: %s", exc
+                    )
 
     def _execute_job(self, job: "_Job") -> None:
         """Run one job's fn inside a write transaction (or directly if it's a _Maintenance job),
@@ -195,6 +219,7 @@ class DbWriteCoordinator:
                         return job.fn(conn)
                     finally:
                         _leave_coordinator_connection(token)
+
                 result = write_transaction_retrying(self._conn, _in_transaction)  # type: ignore[arg-type]
         except BaseException as exc:
             with self._stats_lock:
@@ -235,7 +260,11 @@ class DbWriteCoordinator:
                     if self._stopping:
                         break
                     with self._wakeup:
-                        if self._foreground.empty() and self._background.empty() and not self._stopping:
+                        if (
+                            self._foreground.empty()
+                            and self._background.empty()
+                            and not self._stopping
+                        ):
                             self._wakeup.wait()
                     continue
                 if job.future.cancelled():

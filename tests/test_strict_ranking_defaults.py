@@ -253,7 +253,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         semantic_rows = [("wrong_fact", 0.1), ("event_entity", 0.2), ("corrector", 0.3)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -287,7 +290,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         semantic_rows = [("wrong", 0.1), ("right", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -341,7 +347,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         semantic_rows = [("wrong", 0.1), ("right", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -354,7 +363,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         self._insert_relation("right", "wrong", "corrects")
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -380,7 +392,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         semantic_rows = [("wrong", 0.1), ("right", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -411,7 +426,10 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         semantic_rows = [("a", 0.1), ("unrelated", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,

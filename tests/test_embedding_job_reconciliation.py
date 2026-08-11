@@ -25,6 +25,14 @@ class EmbeddingJobReconciliationTests(unittest.TestCase):
             conn.execute("UPDATE embedding_jobs SET state='succeeded'")
             conn.execute("UPDATE entities SET embedding_status='ready' WHERE id='e'")
             reconcile_embedding_jobs(conn)
-            self.assertEqual(conn.execute("SELECT embedding_status FROM entities WHERE id='e'").fetchone()[0], "ready")
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM embedding_jobs WHERE state='succeeded'").fetchone()[0], 2)
+            self.assertEqual(
+                conn.execute("SELECT embedding_status FROM entities WHERE id='e'").fetchone()[0],
+                "ready",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM embedding_jobs WHERE state='succeeded'"
+                ).fetchone()[0],
+                2,
+            )
             conn.close()

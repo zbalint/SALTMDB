@@ -3,6 +3,7 @@
 This module intentionally does not call an LLM.  It writes bounded request batches and accepts
 only text/language keyed by an already-local slot, so source IDs never come from external output.
 """
+
 import argparse
 import hashlib
 import json
@@ -11,26 +12,60 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from query_generation import (QueryRow, assign_families_to_split, classify_length_bucket,
-                              generate_gibberish_query, generate_partial_word_nonsense_query,
-                              perturb_typo)
+from query_generation import (
+    QueryRow,
+    classify_length_bucket,
+    generate_gibberish_query,
+    generate_partial_word_nonsense_query,
+    perturb_typo,
+)
 
 
-CANONICAL_SLOT_KEYS = frozenset({
-    "slot_id", "query_id", "instruction", "source_text", "target_language", "lang",
-    "category", "subtype", "source_entity_ids", "topic_family_id", "provenance",
-})
-QUERY_KEYS = frozenset({
-    "id", "query", "lang", "category", "subtype", "split", "source_entity_ids",
-    "topic_family_id", "length_bucket", "provenance",
-})
+CANONICAL_SLOT_KEYS = frozenset(
+    {
+        "slot_id",
+        "query_id",
+        "instruction",
+        "source_text",
+        "target_language",
+        "lang",
+        "category",
+        "subtype",
+        "source_entity_ids",
+        "topic_family_id",
+        "provenance",
+    }
+)
+QUERY_KEYS = frozenset(
+    {
+        "id",
+        "query",
+        "lang",
+        "category",
+        "subtype",
+        "split",
+        "source_entity_ids",
+        "topic_family_id",
+        "length_bucket",
+        "provenance",
+    }
+)
 NEGATIVE_CATEGORIES = (
-    "pure_gibberish", "partial_real_word_nonsense", "nl_off_topic", "false_premise",
-    "fictional_unanswerable", "vocabulary_overlap_mismatch",
+    "pure_gibberish",
+    "partial_real_word_nonsense",
+    "nl_off_topic",
+    "false_premise",
+    "fictional_unanswerable",
+    "vocabulary_overlap_mismatch",
 )
 POSITIVE_CATEGORIES = (
-    "exact_title", "paraphrase", "body_text", "short_natural_language",
-    "long_natural_language", "multilingual", "typo_partial",
+    "exact_title",
+    "paraphrase",
+    "body_text",
+    "short_natural_language",
+    "long_natural_language",
+    "multilingual",
+    "typo_partial",
 )
 
 
@@ -51,12 +86,22 @@ def validate_slots(slots: list[dict]) -> None:
     for slot in slots:
         if set(slot) not in (CANONICAL_SLOT_KEYS, CANONICAL_SLOT_KEYS | {"split"}):
             raise ValueError("slot does not have the canonical key set")
-        for key in ("slot_id", "query_id", "instruction", "target_language",
-                    "lang", "category", "subtype", "topic_family_id", "provenance"):
+        for key in (
+            "slot_id",
+            "query_id",
+            "instruction",
+            "target_language",
+            "lang",
+            "category",
+            "subtype",
+            "topic_family_id",
+            "provenance",
+        ):
             if not isinstance(slot[key], str) or not slot[key].strip():
                 raise ValueError(f"slot {key} must be a non-empty string")
-        if not isinstance(slot["source_text"], str) or (not slot["source_text"].strip()
-                                                         and slot["category"] not in NEGATIVE_CATEGORIES):
+        if not isinstance(slot["source_text"], str) or (
+            not slot["source_text"].strip() and slot["category"] not in NEGATIVE_CATEGORIES
+        ):
             raise ValueError("only negative slots may have empty source_text")
         if not isinstance(slot["source_entity_ids"], list) or not all(
             isinstance(value, str) and value for value in slot["source_entity_ids"]
@@ -70,8 +115,12 @@ def validate_slots(slots: list[dict]) -> None:
         seen_queries.add(slot["query_id"])
 
 
-def validate_queries(queries: list[dict], *, targets: dict[str, int] | None = None,
-                     required_categories: set[str] | None = None) -> None:
+def validate_queries(
+    queries: list[dict],
+    *,
+    targets: dict[str, int] | None = None,
+    required_categories: set[str] | None = None,
+) -> None:
     """Validate frozen manifests, including the split isolation rule.
 
     `targets`, when supplied, must be exact (the real experiment passes dev=400/blind=800).
@@ -102,7 +151,9 @@ def validate_queries(queries: list[dict], *, targets: dict[str, int] | None = No
         raise ValueError(f"required categories missing: {sorted(missing)}")
 
 
-def assign_slots(slots: list[dict], dev_target: int, blind_target: int, seed: int = 0) -> list[dict]:
+def assign_slots(
+    slots: list[dict], dev_target: int, blind_target: int, seed: int = 0
+) -> list[dict]:
     validate_slots(slots)
     families: dict[str, list[dict]] = {}
     for slot in slots:
@@ -113,13 +164,24 @@ def assign_slots(slots: list[dict], dev_target: int, blind_target: int, seed: in
     assigned: dict[str, str] = {}
     used = {"dev": 0, "blind": 0}
     for category in sorted({slot["category"] for slot in slots}):
-        candidates = [family for family, members in sorted(families.items())
-                      if any(member["category"] == category for member in members)]
+        candidates = [
+            family
+            for family, members in sorted(families.items())
+            if any(member["category"] == category for member in members)
+        ]
         for split, target in (("dev", dev_target), ("blind", blind_target)):
-            candidate = next((family for family in candidates if family not in assigned
-                              and used[split] + len(families[family]) <= target), None)
+            candidate = next(
+                (
+                    family
+                    for family in candidates
+                    if family not in assigned and used[split] + len(families[family]) <= target
+                ),
+                None,
+            )
             if candidate is None:
-                raise ValueError(f"cannot reserve category {category!r} for {split} without splitting a family")
+                raise ValueError(
+                    f"cannot reserve category {category!r} for {split} without splitting a family"
+                )
             assigned[candidate] = split
             used[split] += len(families[candidate])
     for family, members in sorted(families.items(), key=lambda item: (-len(item[1]), item[0])):
@@ -147,8 +209,11 @@ def build_batches(slots: list[dict], batch_size: int = 60) -> list[list[dict]]:
         raise ValueError("batch_size must be 1..60")
     validate_slots(slots)
     # Never disclose local source IDs or family/split bookkeeping to a generator.
-    safe = [{k: s[k] for k in ("slot_id", "instruction", "source_text", "target_language")} for s in slots]
-    return [safe[i:i + batch_size] for i in range(0, len(safe), batch_size)]
+    safe = [
+        {k: s[k] for k in ("slot_id", "instruction", "source_text", "target_language")}
+        for s in slots
+    ]
+    return [safe[i : i + batch_size] for i in range(0, len(safe), batch_size)]
 
 
 def materialize_queries(slots: list[dict], generated: list[dict]) -> list[dict]:
@@ -169,17 +234,33 @@ def materialize_queries(slots: list[dict], generated: list[dict]) -> list[dict]:
         if not text or text.casefold() in seen_text:
             raise ValueError("empty or duplicate generated query")
         seen_text.add(text.casefold())
-        queries.append(QueryRow(id=slot["query_id"], query=text, lang=item.get("lang", slot.get("lang", "und")),
-            category=slot["category"], subtype=slot["subtype"], split=slot["split"],
-            source_entity_ids=slot.get("source_entity_ids", []), topic_family_id=slot["topic_family_id"],
-            length_bucket=classify_length_bucket(text), provenance=item.get("provenance", slot["provenance"])).to_dict())
+        queries.append(
+            QueryRow(
+                id=slot["query_id"],
+                query=text,
+                lang=item.get("lang", slot.get("lang", "und")),
+                category=slot["category"],
+                subtype=slot["subtype"],
+                split=slot["split"],
+                source_entity_ids=slot.get("source_entity_ids", []),
+                topic_family_id=slot["topic_family_id"],
+                length_bucket=classify_length_bucket(text),
+                provenance=item.get("provenance", slot["provenance"]),
+            ).to_dict()
+        )
     validate_queries(queries)
     return queries
 
 
-def write_manifest(queries: list[dict], path: Path, *, corpus_fingerprint: str | None = None,
-                   slot_fingerprint: str | None = None, targets: dict[str, int] | None = None,
-                   required_categories: set[str] | None = None) -> dict:
+def write_manifest(
+    queries: list[dict],
+    path: Path,
+    *,
+    corpus_fingerprint: str | None = None,
+    slot_fingerprint: str | None = None,
+    targets: dict[str, int] | None = None,
+    required_categories: set[str] | None = None,
+) -> dict:
     validate_queries(queries, targets=targets, required_categories=required_categories)
     result = {
         "schema_version": 1,
@@ -195,8 +276,9 @@ def write_manifest(queries: list[dict], path: Path, *, corpus_fingerprint: str |
     return result
 
 
-def build_source_slots_from_corpus(db_path: Path, *, positive_total: int = 900,
-                                   negative_total: int = 300) -> list[dict]:
+def build_source_slots_from_corpus(
+    db_path: Path, *, positive_total: int = 900, negative_total: int = 300
+) -> list[dict]:
     """Select deterministic, family-safe source slots from a frozen *copy* of the corpus.
 
     This deliberately makes no query text.  The returned private slots retain local entity IDs;
@@ -206,7 +288,9 @@ def build_source_slots_from_corpus(db_path: Path, *, positive_total: int = 900,
     cluster family, preventing their partner from later entering the other split as a singleton.
     """
     if positive_total < 1 or negative_total < len(NEGATIVE_CATEGORIES):
-        raise ValueError("positive_total must be positive and negative_total must cover every negative category")
+        raise ValueError(
+            "positive_total must be positive and negative_total must cover every negative category"
+        )
     uri = f"file:{db_path.resolve()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     try:
@@ -221,22 +305,48 @@ def build_source_slots_from_corpus(db_path: Path, *, positive_total: int = 900,
     finally:
         connection.close()
     by_id = {row[0]: row for row in rows}
-    relation_rows = [row for row in relations if row[2] in {"supersedes", "elaborates_on", "similar_to", "resolves"}
-                     and row[0] in by_id and row[1] in by_id]
+    relation_rows = [
+        row
+        for row in relations
+        if row[2] in {"supersedes", "elaborates_on", "similar_to", "resolves"}
+        and row[0] in by_id
+        and row[1] in by_id
+    ]
     reserved = {entity_id for source, target, _ in relation_rows for entity_id in (source, target)}
     ordinary = [row for row in rows if row[0] not in reserved]
     if len(ordinary) + len(relation_rows) < positive_total:
-        raise ValueError("frozen corpus lacks enough distinct source families for requested positive slots")
+        raise ValueError(
+            "frozen corpus lacks enough distinct source families for requested positive slots"
+        )
     slots: list[dict] = []
 
-    def add_slot(*, category: str, subtype: str, source_id: str, title: str, content: str,
-                 family: str, instruction: str, language: str = "English") -> None:
+    def add_slot(
+        *,
+        category: str,
+        subtype: str,
+        source_id: str,
+        title: str,
+        content: str,
+        family: str,
+        instruction: str,
+        language: str = "English",
+    ) -> None:
         number = len(slots) + 1
-        slots.append({"slot_id": f"slot-{number:04d}", "query_id": f"eval-{number:04d}",
-                      "instruction": instruction, "source_text": f"Title: {title}\n\n{content[:6000]}",
-                      "target_language": language, "lang": "en" if language == "English" else "und",
-                      "category": category, "subtype": subtype, "source_entity_ids": [source_id],
-                      "topic_family_id": family, "provenance": "pending-generation"})
+        slots.append(
+            {
+                "slot_id": f"slot-{number:04d}",
+                "query_id": f"eval-{number:04d}",
+                "instruction": instruction,
+                "source_text": f"Title: {title}\n\n{content[:6000]}",
+                "target_language": language,
+                "lang": "en" if language == "English" else "und",
+                "category": category,
+                "subtype": subtype,
+                "source_entity_ids": [source_id],
+                "topic_family_id": family,
+                "provenance": "pending-generation",
+            }
+        )
 
     # Relation slices receive priority; their categories are concrete retrieval-risk coverage.
     used = set()
@@ -247,9 +357,18 @@ def build_source_slots_from_corpus(db_path: Path, *, positive_total: int = 900,
         if chosen in used:
             continue
         row = by_id[chosen]
-        category = "current_vs_superseded" if predicate == "supersedes" else "closely_related_incident"
-        add_slot(category=category, subtype=predicate, source_id=chosen, title=row[1], content=row[2],
-                 family=f"cluster:{target}", instruction="Write a precise natural-language search query that distinguishes this memory from closely related context.")
+        category = (
+            "current_vs_superseded" if predicate == "supersedes" else "closely_related_incident"
+        )
+        add_slot(
+            category=category,
+            subtype=predicate,
+            source_id=chosen,
+            title=row[1],
+            content=row[2],
+            family=f"cluster:{target}",
+            instruction="Write a precise natural-language search query that distinguishes this memory from closely related context.",
+        )
         used.add(chosen)
     for row in ordinary:
         if len(slots) >= positive_total:
@@ -266,18 +385,36 @@ def build_source_slots_from_corpus(db_path: Path, *, positive_total: int = 900,
             "multilingual": "Write a natural search query in the requested target language.",
             "typo_partial": "Write a realistic partial-term or supported-typo search query.",
         }[category]
-        add_slot(category=category, subtype=memory_type or "fact", source_id=entity_id, title=title,
-                 content=content, family=f"entity:{entity_id}", instruction=instruction, language=language)
+        add_slot(
+            category=category,
+            subtype=memory_type or "fact",
+            source_id=entity_id,
+            title=title,
+            content=content,
+            family=f"entity:{entity_id}",
+            instruction=instruction,
+            language=language,
+        )
     if len(slots) != positive_total:
         raise ValueError("could not satisfy positive source-slot count")
     for index in range(negative_total):
         number = len(slots) + 1
         category = NEGATIVE_CATEGORIES[index % len(NEGATIVE_CATEGORIES)]
-        slots.append({"slot_id": f"slot-{number:04d}", "query_id": f"eval-{number:04d}",
-                      "instruction": f"Write one {category.replace('_', ' ')} query that has no answer in the supplied corpus.",
-                      "source_text": "", "target_language": "English", "lang": "en", "category": category,
-                      "subtype": category, "source_entity_ids": [], "topic_family_id": f"negative:{number:04d}",
-                      "provenance": "pending-generation"})
+        slots.append(
+            {
+                "slot_id": f"slot-{number:04d}",
+                "query_id": f"eval-{number:04d}",
+                "instruction": f"Write one {category.replace('_', ' ')} query that has no answer in the supplied corpus.",
+                "source_text": "",
+                "target_language": "English",
+                "lang": "en",
+                "category": category,
+                "subtype": category,
+                "source_entity_ids": [],
+                "topic_family_id": f"negative:{number:04d}",
+                "provenance": "pending-generation",
+            }
+        )
     validate_slots(slots)
     return slots
 
@@ -327,109 +464,216 @@ def deterministic_local_generation(slots: list[dict]) -> list[dict]:
     return results
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--slots", type=Path,
-                        help="Canonical local slots JSON; never send this private file externally.")
-    parser.add_argument("--db-path", type=Path,
-                        help="Frozen throwaway corpus copy from which to construct private source slots.")
-    parser.add_argument("--slots-out", type=Path,
-                        help="Write constructed private source slots here before external generation.")
-    parser.add_argument("--batches-out", type=Path,
-                        help="Write provenance-safe external request batches while retaining private slots locally.")
-    parser.add_argument("--public-batches-dir", type=Path,
-                        help="Directory for one safe JSON request file per batch (dev/blind kept separate).")
-    parser.add_argument("--generated", type=Path,
-                        help="Generator response JSON with only slot_id/query/lang records.")
+    parser.add_argument(
+        "--slots",
+        type=Path,
+        help="Canonical local slots JSON; never send this private file externally.",
+    )
+    parser.add_argument(
+        "--db-path",
+        type=Path,
+        help="Frozen throwaway corpus copy from which to construct private source slots.",
+    )
+    parser.add_argument(
+        "--slots-out",
+        type=Path,
+        help="Write constructed private source slots here before external generation.",
+    )
+    parser.add_argument(
+        "--batches-out",
+        type=Path,
+        help="Write provenance-safe external request batches while retaining private slots locally.",
+    )
+    parser.add_argument(
+        "--public-batches-dir",
+        type=Path,
+        help="Directory for one safe JSON request file per batch (dev/blind kept separate).",
+    )
+    parser.add_argument(
+        "--generated",
+        type=Path,
+        help="Generator response JSON with only slot_id/query/lang records.",
+    )
     parser.add_argument("--out", type=Path)
     parser.add_argument("--corpus-fingerprint")
     parser.add_argument("--dev-target", type=int)
     parser.add_argument("--blind-target", type=int)
     parser.add_argument("--required-category", action="append", default=[])
-    parser.add_argument("--prepare-slots-only", action="store_true",
-                        help="Freeze private source slots and stop before any external generation.")
-    parser.add_argument("--local-generated-out", type=Path,
-                        help="Write deterministic fallback results for the selected private slots and stop.")
-    parser.add_argument("--local-generate-split", choices=("dev", "blind"),
-                        help="Restrict deterministic fallback generation to one already-assigned split.")
-    parser.add_argument("--materialize-split", choices=("dev", "blind"),
-                        help="Materialize exactly one already-assigned split without reassignment.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--prepare-slots-only",
+        action="store_true",
+        help="Freeze private source slots and stop before any external generation.",
+    )
+    parser.add_argument(
+        "--local-generated-out",
+        type=Path,
+        help="Write deterministic fallback results for the selected private slots and stop.",
+    )
+    parser.add_argument(
+        "--local-generate-split",
+        choices=("dev", "blind"),
+        help="Restrict deterministic fallback generation to one already-assigned split.",
+    )
+    parser.add_argument(
+        "--materialize-split",
+        choices=("dev", "blind"),
+        help="Materialize exactly one already-assigned split without reassignment.",
+    )
+    return parser
+
+
+def _prepare_slots(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[dict]:
     if bool(args.slots) == bool(args.db_path):
         parser.error("supply exactly one of --slots or --db-path")
-    if args.db_path:
-        slots = build_source_slots_from_corpus(args.db_path)
-        if not args.slots_out:
-            parser.error("--db-path requires --slots-out so private source selection is frozen first")
-        dev_target = args.dev_target if args.dev_target is not None else 400
-        blind_target = args.blind_target if args.blind_target is not None else 800
-        slots = assign_slots(slots, dev_target, blind_target)
-        args.slots_out.parent.mkdir(parents=True, exist_ok=True)
-        args.slots_out.write_text(json.dumps({"schema_version": 1, "slots": slots,
-                                               "fingerprint": artifact_fingerprint(slots)}, indent=2, ensure_ascii=False))
-        if args.batches_out:
-            args.batches_out.parent.mkdir(parents=True, exist_ok=True)
-            # The packet itself does not reveal the split, but separate local files/arrays keep
-            # us from generating blind query text before the dev shortlist is persisted.
-            args.batches_out.write_text(json.dumps({"schema_version": 1,
-                                                     "dev_batches": build_batches([slot for slot in slots if slot["split"] == "dev"]),
-                                                     "blind_batches": build_batches([slot for slot in slots if slot["split"] == "blind"]),
-                                                     "slots_fingerprint": artifact_fingerprint(slots)},
-                                                    indent=2, ensure_ascii=False))
-        if args.public_batches_dir:
-            for split in ("dev", "blind"):
-                split_dir = args.public_batches_dir / split
-                split_dir.mkdir(parents=True, exist_ok=True)
-                for index, batch in enumerate(build_batches([slot for slot in slots if slot["split"] == split]), start=1):
-                    (split_dir / f"request-{index:02d}.json").write_text(
-                        json.dumps({"schema_version": 1, "items": batch}, indent=2, ensure_ascii=False)
-                    )
-        if args.prepare_slots_only:
-            return
-    else:
+    if not args.db_path:
         slots_value = json.loads(args.slots.read_text())
-        slots = slots_value.get("slots", slots_value) if isinstance(slots_value, dict) else slots_value
-    if args.local_generated_out:
-        selected = [slot for slot in slots if not args.local_generate_split or slot.get("split") == args.local_generate_split]
-        if not selected:
-            parser.error("no slots matched --local-generate-split")
-        results = deterministic_local_generation(selected)
-        args.local_generated_out.parent.mkdir(parents=True, exist_ok=True)
-        args.local_generated_out.write_text(json.dumps({"schema_version": 1, "generator": "local:deterministic-fallback",
-                                                        "results": results, "slots_fingerprint": artifact_fingerprint(selected)},
-                                                       indent=2, ensure_ascii=False))
+        return (
+            slots_value.get("slots", slots_value) if isinstance(slots_value, dict) else slots_value
+        )
+
+    slots = build_source_slots_from_corpus(args.db_path)
+    if not args.slots_out:
+        parser.error("--db-path requires --slots-out so private source selection is frozen first")
+    dev_target = args.dev_target if args.dev_target is not None else 400
+    blind_target = args.blind_target if args.blind_target is not None else 800
+    slots = assign_slots(slots, dev_target, blind_target)
+    args.slots_out.parent.mkdir(parents=True, exist_ok=True)
+    args.slots_out.write_text(
+        json.dumps(
+            {"schema_version": 1, "slots": slots, "fingerprint": artifact_fingerprint(slots)},
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    _write_batch_artifacts(args, slots)
+    if args.prepare_slots_only:
+        return []
+    return slots
+
+
+def _write_batch_artifacts(args: argparse.Namespace, slots: list[dict]) -> None:
+    if args.batches_out:
+        args.batches_out.parent.mkdir(parents=True, exist_ok=True)
+        args.batches_out.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "dev_batches": build_batches(
+                        [slot for slot in slots if slot["split"] == "dev"]
+                    ),
+                    "blind_batches": build_batches(
+                        [slot for slot in slots if slot["split"] == "blind"]
+                    ),
+                    "slots_fingerprint": artifact_fingerprint(slots),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    if not args.public_batches_dir:
+        return
+    for split in ("dev", "blind"):
+        split_dir = args.public_batches_dir / split
+        split_dir.mkdir(parents=True, exist_ok=True)
+        for index, batch in enumerate(
+            build_batches([slot for slot in slots if slot["split"] == split]), start=1
+        ):
+            (split_dir / f"request-{index:02d}.json").write_text(
+                json.dumps({"schema_version": 1, "items": batch}, indent=2, ensure_ascii=False)
+            )
+
+
+def _write_local_generated(
+    args: argparse.Namespace, slots: list[dict], parser: argparse.ArgumentParser
+) -> bool:
+    if not args.local_generated_out:
+        return False
+    selected = [
+        slot
+        for slot in slots
+        if not args.local_generate_split or slot.get("split") == args.local_generate_split
+    ]
+    if not selected:
+        parser.error("no slots matched --local-generate-split")
+    results = deterministic_local_generation(selected)
+    args.local_generated_out.parent.mkdir(parents=True, exist_ok=True)
+    args.local_generated_out.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generator": "local:deterministic-fallback",
+                "results": results,
+                "slots_fingerprint": artifact_fingerprint(selected),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return True
+
+
+def _write_split_manifest(
+    args: argparse.Namespace,
+    slots: list[dict],
+    generated: list[dict],
+    parser: argparse.ArgumentParser,
+) -> bool:
+    if not args.materialize_split:
+        return False
+    selected = [slot for slot in slots if slot.get("split") == args.materialize_split]
+    if not selected:
+        parser.error("no assigned slots matched --materialize-split")
+    queries = materialize_queries(selected, generated)
+    other = "blind" if args.materialize_split == "dev" else "dev"
+    write_manifest(
+        queries,
+        args.out,
+        corpus_fingerprint=args.corpus_fingerprint,
+        slot_fingerprint=artifact_fingerprint(selected),
+        targets={args.materialize_split: len(selected), other: 0},
+        required_categories=set(args.required_category),
+    )
+    return True
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    slots = _prepare_slots(args, parser)
+    if not slots:
+        return
+    if _write_local_generated(args, slots, parser):
         return
     if not args.generated:
         parser.error("--generated is required unless --prepare-slots-only is used with --db-path")
     if not args.out:
         parser.error("--out is required when materializing generated queries")
     generated_value = json.loads(args.generated.read_text())
-    generated = generated_value.get("results", generated_value) if isinstance(generated_value, dict) else generated_value
+    generated = (
+        generated_value.get("results", generated_value)
+        if isinstance(generated_value, dict)
+        else generated_value
+    )
     if isinstance(generated_value, dict) and generated_value.get("generator"):
         generated = [{**item, "provenance": generated_value["generator"]} for item in generated]
-    if args.materialize_split:
-        selected = [slot for slot in slots if slot.get("split") == args.materialize_split]
-        if not selected:
-            parser.error("no assigned slots matched --materialize-split")
-        queries = materialize_queries(selected, generated)
-        other = "blind" if args.materialize_split == "dev" else "dev"
-        write_manifest(queries, args.out, corpus_fingerprint=args.corpus_fingerprint,
-                       slot_fingerprint=artifact_fingerprint(selected),
-                       targets={args.materialize_split: len(selected), other: 0},
-                       required_categories=set(args.required_category))
+    if _write_split_manifest(args, slots, generated, parser):
         return
-    targets = None
-    if args.dev_target is not None or args.blind_target is not None:
-        if args.dev_target is None or args.blind_target is None:
-            parser.error("--dev-target and --blind-target must be supplied together")
-        targets = {"dev": args.dev_target, "blind": args.blind_target}
-    if targets is None:
+    if args.dev_target is None or args.blind_target is None:
         parser.error("--dev-target and --blind-target are required to freeze a manifest")
+    targets = {"dev": args.dev_target, "blind": args.blind_target}
     assigned = assign_slots(slots, targets["dev"], targets["blind"])
     queries = materialize_queries(assigned, generated)
-    write_manifest(queries, args.out, corpus_fingerprint=args.corpus_fingerprint,
-                   slot_fingerprint=artifact_fingerprint(assigned), targets=targets,
-                   required_categories=set(args.required_category))
+    write_manifest(
+        queries,
+        args.out,
+        corpus_fingerprint=args.corpus_fingerprint,
+        slot_fingerprint=artifact_fingerprint(assigned),
+        targets=targets,
+        required_categories=set(args.required_category),
+    )
+    return
 
 
 if __name__ == "__main__":

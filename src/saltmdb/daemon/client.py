@@ -11,7 +11,7 @@ import hmac
 import logging
 import os
 import socket
-import subprocess
+import subprocess  # nosec B404 -- daemon spawn uses a fixed module argv and never shell input.
 import sys
 import time
 from typing import Any
@@ -58,7 +58,9 @@ def _identify_probe(db_path: str, key: str) -> dict[str, Any] | None:
     "nothing reachable there yet", not a hard error)."""
     port = discovery.probe_port(key)
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S) as sock:
+        with socket.create_connection(
+            ("127.0.0.1", port), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
+        ) as sock:
             sock.settimeout(DAEMON_RPC_CONNECT_TIMEOUT_S)
             protocol.send_frame(sock, {"method": "identify"})
             return protocol.recv_frame(sock)
@@ -133,7 +135,7 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         popen_kwargs["start_new_session"] = True
 
     try:
-        subprocess.Popen(
+        subprocess.Popen(  # nosec B603 -- fixed argv, shell=False, and environment contains only the DB path.
             [sys.executable, "-m", "saltmdb.daemon.server"], **popen_kwargs
         )
     finally:
@@ -255,7 +257,9 @@ class SessionConnection:
             protocol.send_frame(
                 sock,
                 protocol.build_request(
-                    "hello", {"pid": os.getpid(), "client_label": "saltmdb-adapter"}, token=info["auth_token"]
+                    "hello",
+                    {"pid": os.getpid(), "client_label": "saltmdb-adapter"},
+                    token=info["auth_token"],
                 ),
             )
             response = protocol.recv_frame(sock)
@@ -264,7 +268,9 @@ class SessionConnection:
             # as a successfully-opened session.
             if not response.get("ok"):
                 error = response.get("error") or {}
-                raise DaemonRpcError(error.get("code", "HELLO_FAILED"), error.get("message", "hello rejected"))
+                raise DaemonRpcError(
+                    error.get("code", "HELLO_FAILED"), error.get("message", "hello rejected")
+                )
         except Exception:
             # Any failure past this point (framing error, rejected hello) must not leak the
             # socket this function itself opened -- there was previously no cleanup path here.
@@ -278,7 +284,9 @@ class SessionConnection:
     def close(self) -> None:
         if self._sock is not None:
             try:
-                protocol.send_frame(self._sock, protocol.build_request("goodbye", {}, token=self._auth_token))
+                protocol.send_frame(
+                    self._sock, protocol.build_request("goodbye", {}, token=self._auth_token)
+                )
             except (OSError, protocol.FrameError) as e:
                 logger.debug("Best-effort goodbye failed (daemon likely already gone): %s", e)
             try:
@@ -299,7 +307,11 @@ class SessionConnection:
         if info is None:
             return
         current_token = info.get("auth_token")
-        if current_token and self._auth_token and hmac.compare_digest(current_token, self._auth_token):
+        if (
+            current_token
+            and self._auth_token
+            and hmac.compare_digest(current_token, self._auth_token)
+        ):
             return
         logger.info("Daemon restart detected for %s; reconnecting session.", self.db_path)
         self.close()

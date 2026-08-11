@@ -53,7 +53,8 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         consolidated_id = c_res.split("ID: ")[-1].strip()
 
         states = self.conn.execute(
-            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind", (consolidated_id,)
+            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind",
+            (consolidated_id,),
         ).fetchall()
         self.assertEqual(states, [("chunk", "queued"), ("entity", "queued")])
 

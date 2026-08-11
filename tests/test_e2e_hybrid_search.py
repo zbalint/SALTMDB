@@ -1,7 +1,6 @@
 import unittest
 import tempfile
 import os
-import time
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory, search_memory
@@ -49,6 +48,7 @@ class TestE2EHybridSearch(unittest.TestCase):
 
         # Wait for background embedding generation
         from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+
         process_embedding_jobs_sync(self.conn)
 
         # Perform hybrid search with include_related=True

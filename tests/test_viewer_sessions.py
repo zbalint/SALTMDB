@@ -73,12 +73,13 @@ class TestViewerSessions(unittest.TestCase):
     def test_pid_alive_windows_branch(self):
         target_pid = 123
 
-        with patch("sys.platform", "win32"), \
-             patch("saltmdb.db.viewer_sessions.kernel32", create=True) as mock_kernel32, \
-             patch("saltmdb.db.viewer_sessions.wintypes", create=True) as mock_wintypes, \
-             patch("ctypes.get_last_error", create=True) as mock_get_last_error, \
-             patch("ctypes.byref", create=True):
-
+        with (
+            patch("sys.platform", "win32"),
+            patch("saltmdb.db.viewer_sessions.kernel32", create=True) as mock_kernel32,
+            patch("saltmdb.db.viewer_sessions.wintypes", create=True) as mock_wintypes,
+            patch("ctypes.get_last_error", create=True) as mock_get_last_error,
+            patch("ctypes.byref", create=True),
+        ):
             mock_exit_code = MagicMock()
             mock_wintypes.DWORD.return_value = mock_exit_code
 

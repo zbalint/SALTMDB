@@ -185,7 +185,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/tags":
             self.get_tags()
         elif path == "/api/locks":
-            self.send_json({"error": "System Locks was retired", "replacement": "/api/operations"}, 410)
+            self.send_json(
+                {"error": "System Locks was retired", "replacement": "/api/operations"}, 410
+            )
         elif path == "/api/relations":
             self.get_all_relations(query)
         elif path == "/api/relations/neighborhood":
@@ -654,7 +656,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             rows = cursor.fetchall()
 
             node_map = {}
-            edges = []
+            edges: list[dict[str, Any]] = []
             for src_id, src_title, src_status, tgt_id, tgt_title, tgt_status, pred in rows:
                 if src_id not in node_map:
                     node_map[src_id] = {
@@ -768,7 +770,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
         try:
             root_id = query.get("entity_id", [""])[0]
             if not root_id or len(root_id) > 512:
-                self.send_json({"error": "entity_id is required and must be at most 512 characters"}, 400)
+                self.send_json(
+                    {"error": "entity_id is required and must be at most 512 characters"}, 400
+                )
                 return
             depth = _bounded_query_int(query, "depth", 1, 1, 2)
             max_nodes = _bounded_query_int(query, "max_nodes", 50, 1, 50)
@@ -789,14 +793,16 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 as_of = datetime.now(UTC).isoformat()
 
             conn = self.get_db_connection()
-            root = conn.execute("SELECT id, title, status FROM entities WHERE id = ?", (root_id,)).fetchone()
+            root = conn.execute(
+                "SELECT id, title, status FROM entities WHERE id = ?", (root_id,)
+            ).fetchone()
             if not root:
                 self.send_json({"error": "Entity not found"}, 404)
                 return
 
             seen = {root_id}
             frontier = {root_id}
-            edges = []
+            edges: list[dict[str, Any]] = []
             emitted_ids = set()
             has_more = False
             for _ in range(depth):
@@ -818,7 +824,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 )
                 params.extend([as_of, as_of, as_of, as_of])
                 if not include_archived:
-                    clauses.append("COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'")
+                    clauses.append(
+                        "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
+                    )
                 remaining_edges = max_edges - len(edges)
                 rows = conn.execute(
                     f"""
@@ -828,7 +836,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     FROM relations r
                     LEFT JOIN entities s ON s.id = r.source_id
                     LEFT JOIN entities t ON t.id = r.target_id
-                    WHERE {' AND '.join(clauses)}
+                    WHERE {" AND ".join(clauses)}
                     ORDER BY r.created_at ASC, r.id ASC
                     LIMIT ?
                     """,
@@ -846,9 +854,14 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                         continue
                     edges.append(
                         {
-                            "id": row[0], "source": row[1], "target": row[2], "predicate": row[3],
-                            "created_at": row[4], "source_title": row[5] or row[1],
-                            "source_status": row[6] or "raw", "target_title": row[7] or row[2],
+                            "id": row[0],
+                            "source": row[1],
+                            "target": row[2],
+                            "predicate": row[3],
+                            "created_at": row[4],
+                            "source_title": row[5] or row[1],
+                            "source_status": row[6] or "raw",
+                            "target_title": row[7] or row[2],
                             "target_status": row[8] or "raw",
                         }
                     )
@@ -873,7 +886,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 count_filters.append("r.predicate = ?")
                 count_params.append(predicate)
             if not include_archived:
-                count_filters.append("COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'")
+                count_filters.append(
+                    "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
+                )
             filter_sql = " AND ".join(count_filters)
             total_matching_edges = conn.execute(
                 f"""WITH RECURSIVE frontier(id, depth) AS (
@@ -893,7 +908,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(
                 {
                     "root_id": root_id,
-                    "nodes": [{"id": row[0], "title": row[1], "status": row[2]} for row in node_rows],
+                    "nodes": [
+                        {"id": row[0], "title": row[1], "status": row[2]} for row in node_rows
+                    ],
                     "edges": edges,
                     "returned_edges": len(edges),
                     "total_matching_edges": total_matching_edges,
@@ -944,7 +961,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
 
         gateway = getattr(self.server, "viewer_gateway", None)
         db_path = getattr(gateway, "db_path", None)
-        stats["db_size_mb"] = round(os.path.getsize(db_path) / (1024 * 1024), 2) if db_path and os.path.exists(db_path) else 0.0
+        stats["db_size_mb"] = (
+            round(os.path.getsize(db_path) / (1024 * 1024), 2)
+            if db_path and os.path.exists(db_path)
+            else 0.0
+        )
         return stats
 
     def get_stats(self):
@@ -973,7 +994,12 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             stats = self._collect_stats(conn)
             db_path = getattr(getattr(self.server, "viewer_gateway", None), "db_path", None)
             files = {}
-            for label, suffix in (("db_bytes", ""), ("wal_bytes", "-wal"), ("shm_bytes", "-shm"), ("backup_bytes", ".backup")):
+            for label, suffix in (
+                ("db_bytes", ""),
+                ("wal_bytes", "-wal"),
+                ("shm_bytes", "-shm"),
+                ("backup_bytes", ".backup"),
+            ):
                 path = f"{db_path}{suffix}" if db_path else ""
                 files[label] = os.path.getsize(path) if path and os.path.exists(path) else 0
             snapshot = state.viewer_snapshot()
@@ -1023,10 +1049,23 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                    ORDER BY e.updated_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
-            self.send_json({
-                "items": [{"id": r[0], "title": r[1], "status": r[2], "embedding_status": r[3], "quality_score": r[4], "quality_status": r[5], "quality_flags": json.loads(r[6]) if r[6] else []} for r in rows],
-                "orphan_raw": [{"id": r[0], "title": r[1]} for r in orphan_rows],
-            })
+            self.send_json(
+                {
+                    "items": [
+                        {
+                            "id": r[0],
+                            "title": r[1],
+                            "status": r[2],
+                            "embedding_status": r[3],
+                            "quality_score": r[4],
+                            "quality_status": r[5],
+                            "quality_flags": json.loads(r[6]) if r[6] else [],
+                        }
+                        for r in rows
+                    ],
+                    "orphan_raw": [{"id": r[0], "title": r[1]} for r in orphan_rows],
+                }
+            )
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
@@ -1059,12 +1098,19 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 params.append(int(is_core))
             rows = conn.execute(
                 f"""SELECT id, title, owner_id, is_core, status, memory_type
-                   FROM entities WHERE {' AND '.join(where)}
+                   FROM entities WHERE {" AND ".join(where)}
                    ORDER BY updated_at DESC LIMIT 20""",
                 params,
             ).fetchall()
             results = [
-                {"id": row[0], "title": row[1], "owner_id": row[2], "is_core": bool(row[3]), "status": row[4], "memory_type": row[5] or "fact"}
+                {
+                    "id": row[0],
+                    "title": row[1],
+                    "owner_id": row[2],
+                    "is_core": bool(row[3]),
+                    "status": row[4],
+                    "memory_type": row[5] or "fact",
+                }
                 for row in rows
             ]
             self.send_json({"query": q, "results": results})
@@ -1197,7 +1243,17 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                         ORDER BY r.created_at DESC, r.id DESC LIMIT 10""",
                     (entity_id,),
                 ).fetchall()
-                return [{"id": r[0], "source_id": r[1], "source_title": r[2] or "Unknown", "target_id": r[3], "target_title": r[4] or "Unknown", "predicate": r[5]} for r in rows]
+                return [
+                    {
+                        "id": r[0],
+                        "source_id": r[1],
+                        "source_title": r[2] or "Unknown",
+                        "target_id": r[3],
+                        "target_title": r[4] or "Unknown",
+                        "predicate": r[5],
+                    }
+                    for r in rows
+                ]
 
             outgoing = relation_preview("outgoing")
             incoming = relation_preview("incoming")
@@ -1228,8 +1284,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 "quality_flags": json.loads(row[21]) if row[21] else [],
                 "tags": tags,
                 "relations": {
-                    "outgoing": outgoing, "incoming": incoming, "all": all_rels,
-                    "outgoing_count": relation_counts[0] or 0, "incoming_count": relation_counts[1] or 0,
+                    "outgoing": outgoing,
+                    "incoming": incoming,
+                    "all": all_rels,
+                    "outgoing_count": relation_counts[0] or 0,
+                    "incoming_count": relation_counts[1] or 0,
                     "list_url": f"/api/entities/{urllib.parse.quote(entity_id, safe='')}/relations",
                 },
             }
@@ -1258,7 +1317,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 where, params = "r.target_id = ?", [entity_id]
             elif direction == "outgoing":
                 where, params = "r.source_id = ?", [entity_id]
-            total = conn.execute(f"SELECT COUNT(*) FROM relations r WHERE {where}", params).fetchone()[0]
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM relations r WHERE {where}", params
+            ).fetchone()[0]
             rows = conn.execute(
                 f"""SELECT r.id, r.source_id, COALESCE(s.title, r.source_id), r.target_id,
                            COALESCE(t.title, r.target_id), r.predicate, r.created_at
@@ -1267,11 +1328,28 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?""",
                 params + [limit, (page - 1) * limit],
             ).fetchall()
-            self.send_json({
-                "entity_id": entity_id, "direction": direction, "page": page, "limit": limit,
-                "total_count": total, "total_pages": (total + limit - 1) // limit,
-                "relations": [{"id": r[0], "source_id": r[1], "source_title": r[2], "target_id": r[3], "target_title": r[4], "predicate": r[5], "created_at": r[6]} for r in rows],
-            })
+            self.send_json(
+                {
+                    "entity_id": entity_id,
+                    "direction": direction,
+                    "page": page,
+                    "limit": limit,
+                    "total_count": total,
+                    "total_pages": (total + limit - 1) // limit,
+                    "relations": [
+                        {
+                            "id": r[0],
+                            "source_id": r[1],
+                            "source_title": r[2],
+                            "target_id": r[3],
+                            "target_title": r[4],
+                            "predicate": r[5],
+                            "created_at": r[6],
+                        }
+                        for r in rows
+                    ],
+                }
+            )
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:

@@ -40,6 +40,7 @@ def _enter_coordinator_connection(conn: sqlite3.Connection):
 def _leave_coordinator_connection(token) -> None:
     _coordinator_connection.reset(token)
 
+
 # Module-level ephemeral in-memory connection (singleton)
 EPHEMERAL_CONN = sqlite3.connect(":memory:", check_same_thread=False, timeout=10.0)
 
@@ -176,7 +177,9 @@ def write_transaction_retrying(conn: sqlite3.Connection, fn):
                 or attempt >= RETRY_MAX_ATTEMPTS
             ):
                 raise
-            delay = RETRY_BASE_DELAY_S * (2**attempt) + random.uniform(0, RETRY_JITTER_S)
+            delay = RETRY_BASE_DELAY_S * (2**attempt) + random.uniform(  # nosec B311 -- jitter is non-cryptographic lock backoff.
+                0, RETRY_JITTER_S
+            )
             logger.warning(
                 "Write transaction hit lock contention on attempt %d/%d; retrying in %.3fs",
                 attempt + 1,

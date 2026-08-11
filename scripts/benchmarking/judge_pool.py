@@ -3,6 +3,7 @@
 The public artifacts deliberately contain no ranking/configuration or ground-truth metadata.
 The private mapping is retained locally for merge/arbitration only.
 """
+
 import argparse
 import hashlib
 import json
@@ -27,7 +28,9 @@ def _seed(base_seed: int, split: str, judge: str, query_id: str) -> int:
     return int(hashlib.sha256(value).hexdigest()[:16], 16)
 
 
-def build_judge_packets(queries: list[dict], matrix: dict, judge: str, split: str, base_seed: int = 0) -> tuple[dict, dict]:
+def build_judge_packets(
+    queries: list[dict], matrix: dict, judge: str, split: str, base_seed: int = 0
+) -> tuple[dict, dict]:
     """Return (external_packet, private_mapping).  The packet is safe to send to a judge."""
     if judge not in JUDGES:
         raise ValueError(f"unknown judge {judge!r}")
@@ -69,9 +72,14 @@ def build_judge_packets(queries: list[dict], matrix: dict, judge: str, split: st
         },
         "tasks": tasks,
     }
-    private = {"schema_version": 1, "judge": judge, "split": split, "tasks": mapping,
-               "queries_fingerprint": artifact_fingerprint(queries),
-               "matrix_pools_fingerprint": artifact_fingerprint(matrix.get("pools", {}))}
+    private = {
+        "schema_version": 1,
+        "judge": judge,
+        "split": split,
+        "tasks": mapping,
+        "queries_fingerprint": artifact_fingerprint(queries),
+        "matrix_pools_fingerprint": artifact_fingerprint(matrix.get("pools", {})),
+    }
     packet["fingerprint"] = artifact_fingerprint(packet)
     private["fingerprint"] = artifact_fingerprint(private)
     return packet, private
@@ -85,39 +93,72 @@ def validate_labels(response: dict, private_mapping: dict, judge: str) -> list[d
     seen: set[tuple[str, str]] = set()
     normalized = []
     for label in response.get("labels", []):
-        task_id, candidate_id, grade = label.get("task_id"), label.get("candidate_id"), label.get("grade")
-        if task_id not in expected or candidate_id not in expected[task_id]["candidate_ids"] or grade not in VALID_GRADES:
+        task_id, candidate_id, grade = (
+            label.get("task_id"),
+            label.get("candidate_id"),
+            label.get("grade"),
+        )
+        if (
+            task_id not in expected
+            or candidate_id not in expected[task_id]["candidate_ids"]
+            or grade not in VALID_GRADES
+        ):
             raise ValueError("unknown task/candidate or invalid grade in judge response")
         key = (task_id, candidate_id)
         if key in seen:
             raise ValueError("duplicate judge label")
         seen.add(key)
-        normalized.append({"judge": judge, "query_id": expected[task_id]["query_id"],
-                           "candidate_id": expected[task_id]["candidate_entity_ids"][candidate_id], "grade": grade})
-    required = {(task_id, cid) for task_id, item in expected.items() for cid in item["candidate_ids"]}
+        normalized.append(
+            {
+                "judge": judge,
+                "query_id": expected[task_id]["query_id"],
+                "candidate_id": expected[task_id]["candidate_entity_ids"][candidate_id],
+                "grade": grade,
+            }
+        )
+    required = {
+        (task_id, cid) for task_id, item in expected.items() for cid in item["candidate_ids"]
+    }
     if seen != required:
         raise ValueError("judge response is incomplete")
     return sorted(normalized, key=lambda item: (item["query_id"], item["candidate_id"]))
 
 
-def write_packets(queries_path: Path, matrix_path: Path, out_dir: Path, mapping_dir: Path,
-                  judge: str, split: str, base_seed: int = 0) -> None:
+def write_packets(
+    queries_path: Path,
+    matrix_path: Path,
+    out_dir: Path,
+    mapping_dir: Path,
+    judge: str,
+    split: str,
+    base_seed: int = 0,
+) -> None:
     queries = json.loads(queries_path.read_text())
     if isinstance(queries, dict):
         queries = queries["queries"]
-    packet, private = build_judge_packets(queries, json.loads(matrix_path.read_text()), judge, split, base_seed)
+    packet, private = build_judge_packets(
+        queries, json.loads(matrix_path.read_text()), judge, split, base_seed
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     mapping_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"judge_packet_{judge}.json").write_text(json.dumps(packet, indent=2, ensure_ascii=False))
-    (mapping_dir / f"judge_mapping_{judge}_{split}.json").write_text(json.dumps(private, indent=2, ensure_ascii=False))
+    (out_dir / f"judge_packet_{judge}.json").write_text(
+        json.dumps(packet, indent=2, ensure_ascii=False)
+    )
+    (mapping_dir / f"judge_mapping_{judge}_{split}.json").write_text(
+        json.dumps(private, indent=2, ensure_ascii=False)
+    )
 
 
 def ingest_labels(response_path: Path, mapping_path: Path, out_path: Path, judge: str) -> dict:
     """Validate one complete response and atomically retain the normalized raw-label artifact."""
     mapping = json.loads(mapping_path.read_text())
     normalized = validate_labels(json.loads(response_path.read_text()), mapping, judge)
-    artifact = {"schema_version": 1, "judge": judge, "mapping_fingerprint": mapping.get("fingerprint"),
-                "labels": normalized}
+    artifact = {
+        "schema_version": 1,
+        "judge": judge,
+        "mapping_fingerprint": mapping.get("fingerprint"),
+        "labels": normalized,
+    }
     artifact["fingerprint"] = artifact_fingerprint(artifact)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     temp = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -133,8 +174,12 @@ def main() -> None:
     packet.add_argument("--queries", type=Path, required=True)
     packet.add_argument("--matrix", type=Path, required=True)
     packet.add_argument("--out-dir", type=Path, required=True)
-    packet.add_argument("--mapping-dir", type=Path, required=True,
-                        help="Private local directory for ground-truth and provenance mappings.")
+    packet.add_argument(
+        "--mapping-dir",
+        type=Path,
+        required=True,
+        help="Private local directory for ground-truth and provenance mappings.",
+    )
     packet.add_argument("--judge", choices=JUDGES, required=True)
     packet.add_argument("--split", choices=("dev", "blind"), required=True)
     packet.add_argument("--seed", type=int, default=0)
@@ -145,8 +190,15 @@ def main() -> None:
     ingest.add_argument("--judge", choices=JUDGES, required=True)
     args = parser.parse_args()
     if args.action == "packets":
-        write_packets(args.queries, args.matrix, args.out_dir, args.mapping_dir,
-                      args.judge, args.split, args.seed)
+        write_packets(
+            args.queries,
+            args.matrix,
+            args.out_dir,
+            args.mapping_dir,
+            args.judge,
+            args.split,
+            args.seed,
+        )
     else:
         ingest_labels(args.response, args.mapping, args.out, args.judge)
 

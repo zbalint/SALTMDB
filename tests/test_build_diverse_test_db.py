@@ -55,7 +55,9 @@ class TestSelectTopN(unittest.TestCase):
 
     def test_stable_prefix_property_various_shapes(self):
         for n_candidates in (5, 25, 60, 100):
-            candidates = [f"dataset/chunk_{i:03d}/doc_{i:06d}_part_000.md" for i in range(n_candidates)]
+            candidates = [
+                f"dataset/chunk_{i:03d}/doc_{i:06d}_part_000.md" for i in range(n_candidates)
+            ]
             sel20 = bdt.select_top_n(candidates, "seed-x", min(20, n_candidates))
             sel40 = bdt.select_top_n(candidates, "seed-x", min(40, n_candidates))
             self.assertLessEqual(set(sel20), set(sel40))
@@ -166,7 +168,9 @@ class TestFrontmatterParsing(unittest.TestCase):
         d = self.temp_dir / "ag_news"
         d.mkdir()
         path = d / "doc_000001_part_000.md"
-        path.write_text("---\nsource_dataset: ag_news\n\nbody with no closing marker", encoding="utf-8")
+        path.write_text(
+            "---\nsource_dataset: ag_news\n\nbody with no closing marker", encoding="utf-8"
+        )
         result = bdt.parse_frontmatter_file(path, "ag_news", "ag_news/doc_000001_part_000.md")
         self.assertEqual(result.outcome, "malformed_file")
         self.assertIsNotNone(result.error_detail)
@@ -178,7 +182,9 @@ class TestFrontmatterParsing(unittest.TestCase):
         # Truncated multi-byte UTF-8 sequence (lone continuation byte) -- exactly the class of
         # corruption the plan flags as a real risk for the non-English sets.
         path.write_bytes(b"---\nsource_dataset: wikipedia_russian\n---\n\n\xff\xfe not valid utf-8")
-        result = bdt.parse_frontmatter_file(path, "wikipedia_russian", "wikipedia_russian/doc_000002_part_000.md")
+        result = bdt.parse_frontmatter_file(
+            path, "wikipedia_russian", "wikipedia_russian/doc_000002_part_000.md"
+        )
         self.assertEqual(result.outcome, "malformed_file")
         self.assertIn("utf-8", result.error_detail.lower())
 
@@ -609,6 +615,7 @@ class TestCompletionBarrier(unittest.TestCase):
             if row and row[0] == "ready" and chunk:
                 return True
             from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+
             process_embedding_jobs_sync(self.conn)
             time.sleep(interval)
         return False
@@ -633,7 +640,9 @@ class TestCompletionBarrier(unittest.TestCase):
         self.assertTrue(self._poll_ready(eid))
         # Simulate a content edit that changed content_hash without the async chunk-refresh
         # having landed yet -- the chunk row's content_hash no longer matches.
-        self.conn.execute("UPDATE entities SET content_hash = 'stale-hash-xyz' WHERE id = ?", (eid,))
+        self.conn.execute(
+            "UPDATE entities SET content_hash = 'stale-hash-xyz' WHERE id = ?", (eid,)
+        )
         self.conn.commit()
         result = bdt.check_embedding_completion(self.conn, bdt.OWNER_ID)
         self.assertFalse(result["corpus_embedding_complete"])

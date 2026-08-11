@@ -109,5 +109,3 @@ class TestLibrarianService(unittest.TestCase):
             "SELECT status FROM entities WHERE id = ?", (id1,)
         ).fetchone()[0]
         self.assertEqual(p1_status, "raw")
-
-

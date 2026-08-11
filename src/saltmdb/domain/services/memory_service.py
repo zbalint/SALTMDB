@@ -2,6 +2,7 @@ import uuid
 import json
 import re
 import logging
+import sqlite3
 from datetime import datetime, UTC
 from typing import Any, Literal
 from saltmdb.config import (
@@ -19,7 +20,12 @@ from saltmdb.config import (
     SUPERSESSION_CHAIN_MAX_DEPTH,
     STRICT_OVERFETCH_CANDIDATE_CAP,
 )
-from saltmdb.db.connection import get_connection, is_coordinator_connection, write_transaction_retrying, close_connection
+from saltmdb.db.connection import (
+    get_connection,
+    is_coordinator_connection,
+    write_transaction_retrying,
+    close_connection,
+)
 from saltmdb.utils.text import (
     resolve_entity_id,
     extract_title_and_snippet,
@@ -87,8 +93,8 @@ def _resolve_existing_entity_id(
                 None,
                 f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}",
             )
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.debug("Exact content-hash lookup unavailable; continuing with title lookup: %s", exc)
     try:
         row = conn.execute(
             """
@@ -99,8 +105,8 @@ def _resolve_existing_entity_id(
         ).fetchone()
         if row:
             return row[0], None
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.debug("Title lookup unavailable; treating memory as a fresh insert: %s", exc)
     return None, None
 
 
@@ -435,7 +441,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # gate, which was itself checked AFTER entity_id could have been mutated by the
             # same-title match.
             if resolved_entity_id or skip_duplicate_check:
-                preflight = {"candidates": []}
+                preflight: dict[str, Any] = {"candidates": []}
             else:
                 preflight = disposition_service.evaluate_store_preflight(
                     conn, proposed, effective_db_path
@@ -2113,7 +2119,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             close_connection(conn)
 
 
-def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True) -> str:
+def fetch_memory_chunk(
+    entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True
+) -> str:
     """Returns full markdown text of a memory."""
     if not entity_id:
         return "Error: entity_id is mandatory."
@@ -2140,7 +2148,9 @@ def fetch_memory_chunk(entity_id: str = None, db_connection=None, db_path: str =
         if row:
             if touch:
                 now = datetime.now(UTC).isoformat()
-                conn.execute("UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id))
+                conn.execute(
+                    "UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id)
+                )
                 if not is_coordinator_connection(conn):
                     conn.commit()
             return row[2]
@@ -2223,6 +2233,7 @@ def archive_memory(  # noqa: PLR0911
                 (now, resolved_id, resolved_id),
             )
             from saltmdb.domain.services.embedding_service import cancel_embedding_jobs_for_entity
+
             cancel_embedding_jobs_for_entity(conn, resolved_id)
 
         if _in_transaction:
@@ -2345,8 +2356,10 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                     [search_terms] + params,
                 ).fetchall()
                 fts_candidates = fts_rows
-            except Exception:
-                pass
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "FTS duplicate pre-filter unavailable; using scalar fallback: %s", exc
+                )
 
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:

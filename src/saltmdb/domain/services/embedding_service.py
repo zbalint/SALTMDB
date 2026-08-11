@@ -31,7 +31,13 @@ def _now() -> str:
 
 
 def enqueue_embedding_jobs_for_entity(
-    conn: sqlite3.Connection, entity_id: str, title: str, content: str, content_hash: str, *, force: bool = True
+    conn: sqlite3.Connection,
+    entity_id: str,
+    title: str,
+    content: str,
+    content_hash: str,
+    *,
+    force: bool = True,
 ) -> bool:
     """Atomically replace active work with jobs for an entity's committed source."""
     current = {"entity": entity_source_hash(title, content), "chunk": content_hash}
@@ -63,7 +69,10 @@ def enqueue_embedding_jobs_for_entity(
             )
             changed = changed or inserted.rowcount > 0
     if changed:
-        conn.execute("UPDATE entities SET embedding_status='pending' WHERE id=? AND status != 'archived'", (entity_id,))
+        conn.execute(
+            "UPDATE entities SET embedding_status='pending' WHERE id=? AND status != 'archived'",
+            (entity_id,),
+        )
     return changed
 
 
@@ -76,7 +85,9 @@ def cancel_embedding_jobs_for_entity(conn: sqlite3.Connection, entity_id: str) -
     )
 
 
-def reconcile_embedding_jobs(conn: sqlite3.Connection, *, limit: int = 100, after_id: str | None = None) -> list[str]:
+def reconcile_embedding_jobs(
+    conn: sqlite3.Connection, *, limit: int = 100, after_id: str | None = None
+) -> list[str]:
     """Queue one conservative recovery generation for a bounded active-entity page."""
     sql = "SELECT id,title,full_content,content_hash FROM entities WHERE status != 'archived'"
     params: list[Any] = []
@@ -91,7 +102,9 @@ def reconcile_embedding_jobs(conn: sqlite3.Connection, *, limit: int = 100, afte
             # Startup recovery fills gaps and cancels obsolete source work, but
             # must preserve completed/failed diagnostics on every later daemon
             # restart.  New stores explicitly pass force=True.
-            enqueue_embedding_jobs_for_entity(conn, entity_id, title, content, content_hash, force=False)
+            enqueue_embedding_jobs_for_entity(
+                conn, entity_id, title, content, content_hash, force=False
+            )
     return [r[0] for r in rows]
 
 
@@ -108,7 +121,9 @@ class EmbedJobScheduler:
 
     def start(self) -> None:
         if self._thread is None:
-            self._thread = threading.Thread(target=self._run, daemon=True, name="saltmdb-embed-scheduler")
+            self._thread = threading.Thread(
+                target=self._run, daemon=True, name="saltmdb-embed-scheduler"
+            )
             self._thread.start()
 
     def stop(self) -> None:
@@ -127,7 +142,9 @@ class EmbedJobScheduler:
                     self._stop.wait(current_poll_interval)
                     continue
                 try:
-                    snapshot = self._coordinator.submit("claim_embedding_job", _claim_embedding_job, priority="background")
+                    snapshot = self._coordinator.submit(
+                        "claim_embedding_job", _claim_embedding_job, priority="background"
+                    )
                 except Exception as submit_exc:
                     if "DAEMON_SHUTTING_DOWN" not in str(submit_exc):
                         logger.exception("embedding job claim failed")
@@ -141,9 +158,11 @@ class EmbedJobScheduler:
                     current_poll_interval = self._poll_interval_s
                     try:
                         future = self._pool.submit(self._infer_and_persist, snapshot)
+
                         def _release_if_cancelled(f):
                             if f.cancelled():
                                 self._capacity.release()
+
                         future.add_done_callback(_release_if_cancelled)
                     except Exception as exc:
                         self._mark_failure(snapshot, exc, release_capacity=True)
@@ -159,11 +178,14 @@ class EmbedJobScheduler:
             if snapshot["job_kind"] == "entity":
                 payload: Any = embed_text(f"{snapshot['title']}\n\n{snapshot['content']}")
             else:
-                payload = compute_entity_chunk_embeddings(snapshot["entity_id"], snapshot["content"])
+                payload = compute_entity_chunk_embeddings(
+                    snapshot["entity_id"], snapshot["content"]
+                )
             future = self._coordinator.submit(
                 f"persist_{snapshot['job_kind']}_embedding",
                 lambda conn: _persist_embedding_if_current(conn, snapshot, payload),
-                priority="background", wait=False,
+                priority="background",
+                wait=False,
             )
             future.add_done_callback(lambda done: self._persist_done(snapshot, done))
         except Exception as exc:
@@ -182,12 +204,15 @@ class EmbedJobScheduler:
             self._capacity.release()
             raise
 
-    def _mark_failure(self, snapshot: dict[str, Any], exc: BaseException, *, release_capacity: bool = False) -> None:
+    def _mark_failure(
+        self, snapshot: dict[str, Any], exc: BaseException, *, release_capacity: bool = False
+    ) -> None:
         try:
             future = self._coordinator.submit(
                 "retry_embedding_job",
                 lambda conn: _retry_embedding_job(conn, snapshot["id"], str(exc)),
-                priority="background", wait=False,
+                priority="background",
+                wait=False,
             )
             if release_capacity:
                 future.add_done_callback(lambda _: self._capacity.release())
@@ -209,7 +234,8 @@ def _claim_embedding_job(conn: sqlite3.Connection) -> dict[str, Any] | None:
     )
     conn.execute(
         "UPDATE embedding_jobs SET state='retry_wait', next_attempt_at=?, lease_expires_at=NULL, updated_at=? "
-        "WHERE state='running' AND lease_expires_at < ?", (now, now, now)
+        "WHERE state='running' AND lease_expires_at < ?",
+        (now, now, now),
     )
     row = conn.execute(
         "SELECT j.id,j.entity_id,j.job_kind,j.source_hash,j.attempt_count,e.title,e.full_content,e.content_hash "
@@ -226,47 +252,103 @@ def _claim_embedding_job(conn: sqlite3.Connection) -> dict[str, Any] | None:
         "UPDATE embedding_jobs SET state='running',attempt_count=attempt_count+1,lease_expires_at=?,updated_at=? WHERE id=?",
         (lease, now, job_id),
     )
-    return {"id": job_id, "entity_id": entity_id, "job_kind": kind, "source_hash": source_hash,
-            "attempt_count": attempts + 1, "title": title, "content": content, "content_hash": content_hash}
+    return {
+        "id": job_id,
+        "entity_id": entity_id,
+        "job_kind": kind,
+        "source_hash": source_hash,
+        "attempt_count": attempts + 1,
+        "title": title,
+        "content": content,
+        "content_hash": content_hash,
+    }
 
 
-def _persist_embedding_if_current(conn: sqlite3.Connection, snapshot: dict[str, Any], payload: Any) -> None:
-    row = conn.execute("SELECT state,source_hash FROM embedding_jobs WHERE id=?", (snapshot["id"],)).fetchone()
-    entity = conn.execute("SELECT title,full_content,content_hash,status FROM entities WHERE id=?", (snapshot["entity_id"],)).fetchone()
-    if not row or row[0] != "running" or row[1] != snapshot["source_hash"] or not entity or entity[3] == "archived":
+def _persist_embedding_if_current(
+    conn: sqlite3.Connection, snapshot: dict[str, Any], payload: Any
+) -> None:
+    row = conn.execute(
+        "SELECT state,source_hash FROM embedding_jobs WHERE id=?", (snapshot["id"],)
+    ).fetchone()
+    entity = conn.execute(
+        "SELECT title,full_content,content_hash,status FROM entities WHERE id=?",
+        (snapshot["entity_id"],),
+    ).fetchone()
+    if (
+        not row
+        or row[0] != "running"
+        or row[1] != snapshot["source_hash"]
+        or not entity
+        or entity[3] == "archived"
+    ):
         return
-    current_hash = entity_source_hash(entity[0], entity[1]) if snapshot["job_kind"] == "entity" else entity[2]
+    current_hash = (
+        entity_source_hash(entity[0], entity[1]) if snapshot["job_kind"] == "entity" else entity[2]
+    )
     if current_hash != snapshot["source_hash"]:
         now = _now()
-        conn.execute("UPDATE embedding_jobs SET state='cancelled',updated_at=?,completed_at=?,lease_expires_at=NULL WHERE id=? AND state='running'", (now, now, snapshot["id"]))
+        conn.execute(
+            "UPDATE embedding_jobs SET state='cancelled',updated_at=?,completed_at=?,lease_expires_at=NULL WHERE id=? AND state='running'",
+            (now, now, snapshot["id"]),
+        )
         return
     if sqlite_vec is None:
         return
     if snapshot["job_kind"] == "entity":
         conn.execute("DELETE FROM entity_embeddings WHERE entity_id=?", (snapshot["entity_id"],))
-        conn.execute("INSERT INTO entity_embeddings(entity_id,embedding) VALUES (?,?)", (snapshot["entity_id"], sqlite_vec.serialize_float32(payload)))
-        conn.execute("UPDATE entities SET embedding_status='ready' WHERE id=?", (snapshot["entity_id"],))
+        conn.execute(
+            "INSERT INTO entity_embeddings(entity_id,embedding) VALUES (?,?)",
+            (snapshot["entity_id"], sqlite_vec.serialize_float32(payload)),
+        )
+        conn.execute(
+            "UPDATE entities SET embedding_status='ready' WHERE id=?", (snapshot["entity_id"],)
+        )
     else:
-        conn.execute("DELETE FROM entity_chunk_embeddings WHERE entity_id=?", (snapshot["entity_id"],))
+        conn.execute(
+            "DELETE FROM entity_chunk_embeddings WHERE entity_id=?", (snapshot["entity_id"],)
+        )
         if payload:
             conn.executemany(
                 "INSERT INTO entity_chunk_embeddings (id,entity_id,embedding,chunk_index,char_start,char_end,content_hash) VALUES (?,?,?,?,?,?,?)",
-                [(r["id"], r["entity_id"], sqlite_vec.serialize_float32(r["embedding"]), r["chunk_index"], r["char_start"], r["char_end"], snapshot["source_hash"]) for r in payload],
+                [
+                    (
+                        r["id"],
+                        r["entity_id"],
+                        sqlite_vec.serialize_float32(r["embedding"]),
+                        r["chunk_index"],
+                        r["char_start"],
+                        r["char_end"],
+                        snapshot["source_hash"],
+                    )
+                    for r in payload
+                ],
             )
     now = _now()
-    conn.execute("UPDATE embedding_jobs SET state='succeeded',updated_at=?,completed_at=?,lease_expires_at=NULL,last_error=NULL WHERE id=?", (now, now, snapshot["id"]))
+    conn.execute(
+        "UPDATE embedding_jobs SET state='succeeded',updated_at=?,completed_at=?,lease_expires_at=NULL,last_error=NULL WHERE id=?",
+        (now, now, snapshot["id"]),
+    )
 
 
 def _retry_embedding_job(conn: sqlite3.Connection, job_id: str, error: str) -> None:
-    row = conn.execute("SELECT attempt_count,state FROM embedding_jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute(
+        "SELECT attempt_count,state FROM embedding_jobs WHERE id=?", (job_id,)
+    ).fetchone()
     if not row or row[1] != "running":
         return
     now = _now()
     if row[0] >= len(EMBEDDING_RETRY_DELAYS_S):
-        conn.execute("UPDATE embedding_jobs SET state='failed',last_error=?,updated_at=?,completed_at=?,lease_expires_at=NULL WHERE id=?", (error[:2000], now, now, job_id))
+        conn.execute(
+            "UPDATE embedding_jobs SET state='failed',last_error=?,updated_at=?,completed_at=?,lease_expires_at=NULL WHERE id=?",
+            (error[:2000], now, now, job_id),
+        )
         return
     due = (datetime.now(UTC) + timedelta(seconds=EMBEDDING_RETRY_DELAYS_S[row[0] - 1])).isoformat()
-    conn.execute("UPDATE embedding_jobs SET state='retry_wait',next_attempt_at=?,last_error=?,updated_at=?,lease_expires_at=NULL WHERE id=?", (due, error[:2000], now, job_id))
+    conn.execute(
+        "UPDATE embedding_jobs SET state='retry_wait',next_attempt_at=?,last_error=?,updated_at=?,lease_expires_at=NULL WHERE id=?",
+        (due, error[:2000], now, job_id),
+    )
+
 
 _model_lock = threading.Lock()
 _model = None
@@ -374,10 +456,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return results
 
 
-
-
-
-
 def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[dict]:
     """Chunk full_content and batch-embed each chunk. Pure, no DB I/O.
 
@@ -408,12 +486,10 @@ def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[d
     ]
 
 
-
-
-
 def process_embedding_jobs_sync(conn) -> None:
     """Test utility to synchronously process all pending embedding jobs on the caller thread."""
     from saltmdb.db.connection import write_transaction
+
     while True:
         with write_transaction(conn):
             snapshot = _claim_embedding_job(conn)
@@ -421,9 +497,13 @@ def process_embedding_jobs_sync(conn) -> None:
             break
         try:
             if snapshot["job_kind"] == "entity":
-                payload = embed_text(f"{snapshot['title']}\n\n{snapshot['content']}")
+                payload: list[float] | list[dict[str, Any]] = embed_text(
+                    f"{snapshot['title']}\n\n{snapshot['content']}"
+                )
             else:
-                payload = compute_entity_chunk_embeddings(snapshot["entity_id"], snapshot["content"])
+                payload = compute_entity_chunk_embeddings(
+                    snapshot["entity_id"], snapshot["content"]
+                )
         except Exception as exc:
             with write_transaction(conn):
                 _retry_embedding_job(conn, snapshot["id"], str(exc))

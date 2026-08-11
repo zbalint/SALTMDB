@@ -270,6 +270,7 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
             if rows:
                 return True
             from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+
             process_embedding_jobs_sync(self.conn)
             time.sleep(interval)
         return False
@@ -464,7 +465,10 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
         semantic_rows = [(entity_a, 0.1), (entity_b, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -493,7 +497,10 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
         semantic_rows = [(entity_b, 0.1)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -543,8 +550,9 @@ class TestRrfGapGateSmoke(unittest.TestCase):
 
     def test_gap_gate_does_not_crash_real_search(self):
         self._store("Gap Gate Smoke A", "Some real content for the gap gate smoke test.")
-        eid = self._store("Gap Gate Smoke B", "Some other real content, a different topic entirely.")
+        self._store("Gap Gate Smoke B", "Some other real content, a different topic entirely.")
         from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+
         process_embedding_jobs_sync(self.conn)
 
         results = search_memory(

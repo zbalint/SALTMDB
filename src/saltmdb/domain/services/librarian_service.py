@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 _librarian_trigger_pool = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="saltmdb-librarian-trigger"
 )
+
+
 def trigger_librarian(db_path: str = None, *, coordinator=None):
     """Fire-and-forget: schedules the cooldown check + maintenance pass on a background
     thread so this never blocks or adds write-lock contention to the caller's request."""
@@ -49,7 +51,9 @@ def run_librarian_now(db_path: str = None, force: bool = True, coordinator=None)
     db_path = db_path or get_db_path()
     if coordinator is not None:
         result = coordinator.submit(
-            "librarian_mutations", lambda conn: _run_maintenance_pass_on_connection(conn, force), priority="background"
+            "librarian_mutations",
+            lambda conn: _run_maintenance_pass_on_connection(conn, force),
+            priority="background",
         )
         coordinator.submit_maintenance("librarian_checkpoint_optimize", _run_librarian_maintenance)
         return result

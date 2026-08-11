@@ -148,7 +148,9 @@ def _safe_repr(obj, max_len: int = 4000) -> str:
     return s if len(s) <= max_len else s[:max_len] + f"...<truncated {len(s) - max_len} chars>"
 
 
-def _probe_and_only_fts(memory_service, conn, sanitized_query, where_clauses, params, limit, offset):
+def _probe_and_only_fts(
+    memory_service, conn, sanitized_query, where_clauses, params, limit, offset
+):
     """Independently issue the equivalent AND-only FTS5 query `_run_fts_search` would run,
     using the SAME sql shape (bm25 weights, snippet extraction, where_clauses/params/limit/
     offset) -- reproduced here rather than imported, since the AND branch is not exposed as
@@ -206,7 +208,10 @@ def build_patches(memory_service, reranker_service, recorder: RequestRecorder):
                     rows = result
                     or_fallback_fired = and_count == 0 and len(rows) > 0
                 recorder.record(
-                    name, args[1:], kwargs, rows,
+                    name,
+                    args[1:],
+                    kwargs,
+                    rows,
                     extra={
                         "and_only_would_return_rows": and_count,
                         "and_only_query": and_query,
@@ -236,7 +241,9 @@ def build_patches(memory_service, reranker_service, recorder: RequestRecorder):
     return ctxs
 
 
-def reconstruct_topic_rerank_order(recorder: RequestRecorder, pre_rerank_pool_ids: list[str] | None) -> dict | None:
+def reconstruct_topic_rerank_order(
+    recorder: RequestRecorder, pre_rerank_pool_ids: list[str] | None
+) -> dict | None:
     """Reconstruct `sorted(pool_ids, key=lambda eid: -topic_scores_map_[eid]["topic_score"])`
     (search_memory's inline full-override topic-rerank sort, no dedicated seam of its own)
     from the LAST `_score_topics_with_fallback` call's raw result in this request (the
@@ -245,7 +252,8 @@ def reconstruct_topic_rerank_order(recorder: RequestRecorder, pre_rerank_pool_id
     instruction, since it re-derives rather than directly observes the resulting order.
     """
     topic_rows = [
-        r for r in recorder.rows
+        r
+        for r in recorder.rows
         if r["seam"] in ("_score_topics_with_fallback", "rerank_candidates_by_topic")
     ]
     if not topic_rows:
@@ -284,7 +292,9 @@ def reconstruct_cross_encoder_order(recorder: RequestRecorder) -> dict | None:
     }
 
 
-def run_one_call(memory_service, reranker_service, snapshot_path: str, label: str, kwargs: dict) -> dict:
+def run_one_call(
+    memory_service, reranker_service, snapshot_path: str, label: str, kwargs: dict
+) -> dict:
     request_id = str(uuid.uuid4())
     recorder = RequestRecorder(request_id, label)
     patches = build_patches(memory_service, reranker_service, recorder)
@@ -326,7 +336,11 @@ def run_one_call(memory_service, reranker_service, snapshot_path: str, label: st
     # (widest/final) attempt in this request -- exactly what "final rank pre/post each
     # ranking-flag stage" in the plan's Phase 1c spec asks for.
     stage_pre_post = {}
-    for seam in ("_apply_type_bias", "_apply_supersession_demotion", "_apply_strict_ranking_defaults"):
+    for seam in (
+        "_apply_type_bias",
+        "_apply_supersession_demotion",
+        "_apply_strict_ranking_defaults",
+    ):
         seam_rows = [r for r in recorder.rows if r["seam"] == seam]
         if seam_rows:
             last = seam_rows[-1]
@@ -349,7 +363,9 @@ def run_one_call(memory_service, reranker_service, snapshot_path: str, label: st
         "kwargs": kwargs,
         "error": error,
         "final_result_ids": final_ids,
-        "final_result_titles": [item.get("title") for item in result] if isinstance(result, list) else None,
+        "final_result_titles": [item.get("title") for item in result]
+        if isinstance(result, list)
+        else None,
         "final_result_topic_scores": (
             [item.get("topic_score") for item in result] if isinstance(result, list) else None
         ),
@@ -362,9 +378,17 @@ def run_one_call(memory_service, reranker_service, snapshot_path: str, label: st
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--snapshot", required=True, help="Path to a WAL-safe snapshot .db file (must contain 'snapshot' in its path).")
+    ap.add_argument(
+        "--snapshot",
+        required=True,
+        help="Path to a WAL-safe snapshot .db file (must contain 'snapshot' in its path).",
+    )
     ap.add_argument("--out", default=None, help="Output JSON path for the evidence table.")
-    ap.add_argument("--label-filter", default=None, help="Only run recovered calls whose label contains this substring.")
+    ap.add_argument(
+        "--label-filter",
+        default=None,
+        help="Only run recovered calls whose label contains this substring.",
+    )
     args = ap.parse_args()
 
     _refuse_live_path(args.snapshot)
@@ -379,7 +403,9 @@ def main():
     all_results = []
     for i, call in enumerate(calls):
         print(f"[{i + 1}/{len(calls)}] {call['label']} ...", file=sys.stderr)
-        out = run_one_call(memory_service, reranker_service, args.snapshot, call["label"], call["kwargs"])
+        out = run_one_call(
+            memory_service, reranker_service, args.snapshot, call["label"], call["kwargs"]
+        )
         out["source_exec_call_id"] = call["source_exec_call_id"]
         out["expected_id"] = call["expected_id"]
         if call["expected_id"]:

@@ -114,9 +114,7 @@ def merge_query_judgments(
     return results
 
 
-def apply_arbitration_override(
-    merged: MergedJudgment, arbitrated_grade: int
-) -> MergedJudgment:
+def apply_arbitration_override(merged: MergedJudgment, arbitrated_grade: int) -> MergedJudgment:
     """Records a 4th-pass Claude arbitration result. Only valid on an already-escalated item
     (arbitration is triggered BY escalation, not applied speculatively)."""
     if not merged.escalated or arbitrated_grade not in VALID_GRADES:
@@ -147,7 +145,10 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:
         pairs = set()
         for item in labels:
             pair = (item.get("query_id"), item.get("candidate_id"))
-            if not all(isinstance(x, str) and x for x in pair) or item.get("grade") not in VALID_GRADES:
+            if (
+                not all(isinstance(x, str) and x for x in pair)
+                or item.get("grade") not in VALID_GRADES
+            ):
                 raise ValueError("invalid raw judgment")
             if pair in pairs:
                 raise ValueError("duplicate raw judgment")
@@ -177,7 +178,9 @@ def merge_all_judgments(queries: list[dict], label_artifacts: list[dict]) -> lis
     return sorted(merged, key=lambda item: (item.query_id, item.candidate_id))
 
 
-def build_arbitration_packet(merged: list[MergedJudgment], queries: list[dict], matrix: dict) -> dict:
+def build_arbitration_packet(
+    merged: list[MergedJudgment], queries: list[dict], matrix: dict
+) -> dict:
     """Create a non-blind packet: raw grades/context, never a ground-truth marker."""
     query_by_id = {q["id"]: q for q in queries}
     tasks = []
@@ -187,14 +190,19 @@ def build_arbitration_packet(merged: list[MergedJudgment], queries: list[dict], 
         candidate = matrix.get("pools", {}).get(item.query_id, {}).get(item.candidate_id)
         if candidate is None:
             raise ValueError("escalated candidate absent from local candidate pool")
-        tasks.append({
-            "task_id": f"arbitration:{item.query_id}:{item.candidate_id}",
-            "query": query_by_id[item.query_id]["query"],
-            "candidate": {"candidate_id": item.candidate_id, "title": candidate.get("title", ""),
-                          "snippet": candidate.get("snippet", "")},
-            "raw_grades": item.raw_grades,
-            "reason": item.escalation_reason,
-        })
+        tasks.append(
+            {
+                "task_id": f"arbitration:{item.query_id}:{item.candidate_id}",
+                "query": query_by_id[item.query_id]["query"],
+                "candidate": {
+                    "candidate_id": item.candidate_id,
+                    "title": candidate.get("title", ""),
+                    "snippet": candidate.get("snippet", ""),
+                },
+                "raw_grades": item.raw_grades,
+                "reason": item.escalation_reason,
+            }
+        )
     packet = {"schema_version": 1, "tasks": tasks}
     packet["fingerprint"] = artifact_fingerprint(packet)
     return packet
@@ -217,26 +225,51 @@ def apply_arbitration_results(merged: list[MergedJudgment], response: dict) -> l
     return merged
 
 
-def merged_artifact(merged: list[MergedJudgment], raw_artifacts: list[dict], queries: list[dict]) -> dict:
-    source_map = {q["id"]: q.get("source_entity_ids", []) for q in queries
-                  if q.get("provenance") == "squad-ground-truth"}
+def merged_artifact(
+    merged: list[MergedJudgment], raw_artifacts: list[dict], queries: list[dict]
+) -> dict:
+    source_map = {
+        q["id"]: q.get("source_entity_ids", [])
+        for q in queries
+        if q.get("provenance") == "squad-ground-truth"
+    }
     raw = _raw_from_artifacts(raw_artifacts)
     agreements = []
     for i, judge_a in enumerate(JUDGES):
-        for judge_b in JUDGES[i + 1:]:
+        for judge_b in JUDGES[i + 1 :]:
             agreement = compute_pairwise_agreement(raw, judge_a, judge_b)
-            agreements.append({"judges": [judge_a, judge_b], "n": agreement.n,
-                               "exact_agreement_rate": agreement.exact_agreement_rate,
-                               "cohens_kappa": agreement.cohens_kappa,
-                               "confusion": {f"{a}:{b}": count for (a, b), count in agreement.confusion.items()}})
-    labels = [{"query_id": item.query_id, "candidate_id": item.candidate_id,
-               "raw_grades": item.raw_grades, "median_grade": item.median_grade,
-               "escalated": item.escalated, "escalation_reason": item.escalation_reason,
-               "arbitrated_grade": item.arbitrated_grade, "final_grade": item.final_grade}
-              for item in merged]
-    result = {"schema_version": 1, "labels": labels, "raw_labels_fingerprint": artifact_fingerprint(raw_artifacts),
-              "calibration": calibration_accuracy(merged, source_map), "agreement": agreements,
-              "escalation": {"count": sum(item.escalated for item in merged), "total": len(merged)}}
+            agreements.append(
+                {
+                    "judges": [judge_a, judge_b],
+                    "n": agreement.n,
+                    "exact_agreement_rate": agreement.exact_agreement_rate,
+                    "cohens_kappa": agreement.cohens_kappa,
+                    "confusion": {
+                        f"{a}:{b}": count for (a, b), count in agreement.confusion.items()
+                    },
+                }
+            )
+    labels = [
+        {
+            "query_id": item.query_id,
+            "candidate_id": item.candidate_id,
+            "raw_grades": item.raw_grades,
+            "median_grade": item.median_grade,
+            "escalated": item.escalated,
+            "escalation_reason": item.escalation_reason,
+            "arbitrated_grade": item.arbitrated_grade,
+            "final_grade": item.final_grade,
+        }
+        for item in merged
+    ]
+    result = {
+        "schema_version": 1,
+        "labels": labels,
+        "raw_labels_fingerprint": artifact_fingerprint(raw_artifacts),
+        "calibration": calibration_accuracy(merged, source_map),
+        "agreement": agreements,
+        "escalation": {"count": sum(item.escalated for item in merged), "total": len(merged)},
+    }
     result["fingerprint"] = artifact_fingerprint(result)
     return result
 
@@ -245,23 +278,34 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--queries", type=Path, required=True)
     parser.add_argument("--matrix", type=Path, required=True)
-    parser.add_argument("--labels", type=Path, nargs=3, required=True,
-                        help="Validated raw label artifacts, one per judge.")
+    parser.add_argument(
+        "--labels",
+        type=Path,
+        nargs=3,
+        required=True,
+        help="Validated raw label artifacts, one per judge.",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--arbitration-packet", type=Path)
     parser.add_argument("--arbitration-response", type=Path)
     args = parser.parse_args()
     query_value = json.loads(args.queries.read_text())
-    queries = query_value.get("queries", query_value) if isinstance(query_value, dict) else query_value
+    queries = (
+        query_value.get("queries", query_value) if isinstance(query_value, dict) else query_value
+    )
     raw_artifacts = [json.loads(path.read_text()) for path in args.labels]
     merged = merge_all_judgments(queries, raw_artifacts)
     packet = build_arbitration_packet(merged, queries, json.loads(args.matrix.read_text()))
     if packet["tasks"] and not args.arbitration_response:
         if not args.arbitration_packet:
-            raise RuntimeError("escalations require --arbitration-packet before merged labels can be finalized")
+            raise RuntimeError(
+                "escalations require --arbitration-packet before merged labels can be finalized"
+            )
         args.arbitration_packet.parent.mkdir(parents=True, exist_ok=True)
         args.arbitration_packet.write_text(json.dumps(packet, indent=2, ensure_ascii=False))
-        print(f"Wrote {args.arbitration_packet}; collect arbitration labels and re-run with --arbitration-response")
+        print(
+            f"Wrote {args.arbitration_packet}; collect arbitration labels and re-run with --arbitration-response"
+        )
         return
     if args.arbitration_response:
         apply_arbitration_results(merged, json.loads(args.arbitration_response.read_text()))
@@ -285,7 +329,9 @@ if __name__ == "__main__":
 class PairwiseAgreement:
     judge_a: str
     judge_b: str
-    confusion: dict[tuple[int, int], int] = field(default_factory=dict)  # (grade_a, grade_b) -> count
+    confusion: dict[tuple[int, int], int] = field(
+        default_factory=dict
+    )  # (grade_a, grade_b) -> count
     n: int = 0
 
     @property

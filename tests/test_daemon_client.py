@@ -103,11 +103,15 @@ class TestSessionConnectionOpen(unittest.TestCase):
         return session
 
     def test_open_raises_and_closes_socket_on_rejected_hello(self):
-        server = _FakeDaemonServer(protocol.build_error_response("x", protocol.AUTH_FAILED, "stale token"))
+        server = _FakeDaemonServer(
+            protocol.build_error_response("x", protocol.AUTH_FAILED, "stale token")
+        )
         try:
             session = self._blank_session()
             with patch.object(
-                client, "ensure_daemon_running", return_value={"service_port": server.port, "auth_token": "tok"}
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": server.port, "auth_token": "tok"},
             ):
                 with self.assertRaises(client.DaemonRpcError):
                     session.open()
@@ -141,8 +145,14 @@ class TestSessionConnectionOpen(unittest.TestCase):
         try:
             session = self._blank_session()
             with (
-                patch.object(client, "ensure_daemon_running", return_value={"service_port": server.port, "auth_token": "tok"}),
-                patch.object(client.socket, "create_connection", side_effect=_capturing_create_connection),
+                patch.object(
+                    client,
+                    "ensure_daemon_running",
+                    return_value={"service_port": server.port, "auth_token": "tok"},
+                ),
+                patch.object(
+                    client.socket, "create_connection", side_effect=_capturing_create_connection
+                ),
             ):
                 with self.assertRaises((protocol.FrameError, OSError)):
                     session.open()
@@ -150,7 +160,9 @@ class TestSessionConnectionOpen(unittest.TestCase):
             self.assertIsNone(client._current_session)
             self.assertEqual(len(created_sockets), 1)
             self.assertEqual(
-                created_sockets[0].fileno(), -1, "client socket was not closed on the framing-failure path"
+                created_sockets[0].fileno(),
+                -1,
+                "client socket was not closed on the framing-failure path",
             )
         finally:
             server.close()
@@ -160,7 +172,9 @@ class TestSessionConnectionOpen(unittest.TestCase):
         try:
             session = self._blank_session()
             with patch.object(
-                client, "ensure_daemon_running", return_value={"service_port": server.port, "auth_token": "tok"}
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": server.port, "auth_token": "tok"},
             ):
                 session.open()
             self.assertIsNotNone(session._sock)

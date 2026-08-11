@@ -10,6 +10,7 @@ kernel32 = None
 if sys.platform == "win32":
     import ctypes
     from ctypes import wintypes
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -25,6 +26,7 @@ def _pid_alive(pid: int) -> bool:  # noqa: PLR0911
     """Checks whether a process with the given PID is currently alive on Linux or Windows."""
     if sys.platform == "win32":
         import ctypes
+
         try:
             # PROCESS_QUERY_LIMITED_INFORMATION (0x1000): sufficient for
             # GetExitCodeProcess without needing the SYNCHRONIZE right.
@@ -39,13 +41,16 @@ def _pid_alive(pid: int) -> bool:  # noqa: PLR0911
                         alive = exit_code.value == 259
                         logger.info(
                             "[win32] PID %s: GetExitCodeProcess exit_code=%s alive=%s",
-                            pid, exit_code.value, alive,
+                            pid,
+                            exit_code.value,
+                            alive,
                         )
                         return alive
                     err = ctypes.get_last_error()
                     logger.warning(
                         "[win32] PID %s: GetExitCodeProcess failed, error=%s; assuming alive",
-                        pid, err,
+                        pid,
+                        err,
                     )
                     return True
                 finally:
@@ -55,10 +60,14 @@ def _pid_alive(pid: int) -> bool:  # noqa: PLR0911
                 if error == 5:  # ERROR_ACCESS_DENIED: process exists, no permission
                     logger.info("[win32] PID %s: OpenProcess ACCESS_DENIED, treating as alive", pid)
                     return True
-                logger.warning("[win32] PID %s: OpenProcess failed, error=%s, treating as dead", pid, error)
+                logger.warning(
+                    "[win32] PID %s: OpenProcess failed, error=%s, treating as dead", pid, error
+                )
                 return False
         except Exception as e:
-            logger.warning("Failed to check PID liveness on Windows for PID %s: %s", pid, e, exc_info=True)
+            logger.warning(
+                "Failed to check PID liveness on Windows for PID %s: %s", pid, e, exc_info=True
+            )
             return False
     else:
         try:

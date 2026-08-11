@@ -12,9 +12,7 @@ benchmark runs still depend on in its original 2-history-config shape).
 import importlib.util
 from pathlib import Path
 
-_SHARED_MODULE_PATH = (
-    Path(__file__).parent / "benchmark_search_option_matrix.py"
-)
+_SHARED_MODULE_PATH = Path(__file__).parent / "benchmark_search_option_matrix.py"
 
 
 def _load_shared_build_configs():
@@ -34,9 +32,7 @@ def _build_evaluation_configs() -> list[dict]:
     shared_build_configs = _load_shared_build_configs()
     shared_configs = shared_build_configs()
 
-    broad_and_strict = [
-        cfg for cfg in shared_configs if cfg["mode"] in ("broad", "strict")
-    ]
+    broad_and_strict = [cfg for cfg in shared_configs if cfg["mode"] in ("broad", "strict")]
     assert len(broad_and_strict) == 21, (
         f"expected 16 broad + 5 strict = 21 configs from the shared builder, got "
         f"{len(broad_and_strict)} -- shared _build_configs() may have changed shape; "

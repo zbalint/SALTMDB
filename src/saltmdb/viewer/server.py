@@ -1,6 +1,7 @@
 import sys
 import socketserver
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
 
     daemon_threads = True
+    daemon_state: Any
+    viewer_gateway: Any
 
     def handle_error(self, request, client_address):
         exc_type, exc_value, exc_tb = sys.exc_info()
@@ -35,7 +38,11 @@ def main() -> None:
     import argparse
     from saltmdb.daemon import client as daemon_client, discovery
 
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    )
 
     parser = argparse.ArgumentParser(prog="saltmdb-viewer")
     parser.parse_args()
@@ -64,7 +71,9 @@ def main() -> None:
         return
 
     viewer_port = status.get("port")
-    print(f"SALTMDB Database Viewer is running! Open it in your browser at http://localhost:{viewer_port}")
+    print(
+        f"SALTMDB Database Viewer is running! Open it in your browser at http://localhost:{viewer_port}"
+    )
 
 
 if __name__ == "__main__":

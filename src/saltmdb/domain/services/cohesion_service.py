@@ -20,7 +20,7 @@ def _centroid(vectors: list) -> list[float]:
     norms[norms == 0] = 1e-10
     normalized = matrix / norms
     mean_vec = normalized.mean(axis=0)
-    mean_norm = np.linalg.norm(mean_vec)
+    mean_norm = float(np.linalg.norm(mean_vec))
     if mean_norm == 0:
         mean_norm = 1e-10
     return (mean_vec / mean_norm).tolist()
@@ -185,7 +185,7 @@ def get_fresh_entity_centroids(  # noqa: C901, PLR0912, PLR0915
         except Exception as e:
             logger.warning("get_fresh_entity_centroids: fallback failed for %s: %s", entity_id, e)
             unresolved[entity_id] = f"fallback embedding failed: {e}"
-            if row_status is not None:
+            if row_status is not None and row_content_hash is not None:
                 observed_state[entity_id] = (row_content_hash, row_status)
 
     return centroids, unresolved, observed_state

@@ -14,10 +14,7 @@ import unittest
 from pathlib import Path
 
 _MODULE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "benchmarking"
-    / "squad_question_extractor.py"
+    Path(__file__).resolve().parents[1] / "scripts" / "benchmarking" / "squad_question_extractor.py"
 )
 _spec = importlib.util.spec_from_file_location("squad_question_extractor", _MODULE_PATH)
 sqe = importlib.util.module_from_spec(_spec)
@@ -25,9 +22,7 @@ _spec.loader.exec_module(sqe)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _REAL_WRAPPED_FILE = _REPO_ROOT / "test_data" / "squad" / "chunk_431" / "doc_431751_part_000.md"
-_REAL_HEX_ESCAPE_FILE = (
-    _REPO_ROOT / "test_data" / "squad" / "chunk_414" / "doc_414004_part_000.md"
-)
+_REAL_HEX_ESCAPE_FILE = _REPO_ROOT / "test_data" / "squad" / "chunk_414" / "doc_414004_part_000.md"
 
 
 class TestSquadQuestionExtractorSynthetic(unittest.TestCase):
@@ -46,7 +41,15 @@ class TestSquadQuestionExtractorSynthetic(unittest.TestCase):
     def test_single_line_plain_scalar_question(self):
         p = self._write(
             "doc1.md",
-            ["---", "source_dataset: squad", "question: What color is the sky?", "title: Sky", "---", "", "The sky is blue."],
+            [
+                "---",
+                "source_dataset: squad",
+                "question: What color is the sky?",
+                "title: Sky",
+                "---",
+                "",
+                "The sky is blue.",
+            ],
         )
         self.assertEqual(sqe.extract_question(p), "What color is the sky?")
 
@@ -85,12 +88,12 @@ class TestSquadQuestionExtractorSynthetic(unittest.TestCase):
                 "Body text.",
             ],
         )
-        self.assertEqual(
-            sqe.extract_question(p), "Who named Beyoncé the Artist of the Decade?"
-        )
+        self.assertEqual(sqe.extract_question(p), "Who named Beyoncé the Artist of the Decade?")
 
     def test_missing_question_key_returns_none(self):
-        p = self._write("doc4.md", ["---", "source_dataset: squad", "title: NoQuestion", "---", "", "Body."])
+        p = self._write(
+            "doc4.md", ["---", "source_dataset: squad", "title: NoQuestion", "---", "", "Body."]
+        )
         self.assertIsNone(sqe.extract_question(p))
 
     def test_malformed_no_frontmatter_returns_none(self):
@@ -103,7 +106,14 @@ class TestSquadQuestionExtractorSynthetic(unittest.TestCase):
         escape/continuation, the exact failure mode round-3 review checked for)."""
         p = self._write(
             "doc6.md",
-            ["---", "source_dataset: squad", 'question: "Simple quoted question?"', "---", "", "Body."],
+            [
+                "---",
+                "source_dataset: squad",
+                'question: "Simple quoted question?"',
+                "---",
+                "",
+                "Body.",
+            ],
         )
         q = sqe.extract_question(p)
         self.assertNotIn("\\", q)
@@ -130,7 +140,8 @@ class TestSquadQuestionExtractorRealCorpusFiles(unittest.TestCase):
     def test_real_hex_escaped_continuation_file(self):
         q = sqe.extract_question(_REAL_HEX_ESCAPE_FILE)
         self.assertEqual(
-            q, "What year was Beyoncé featured both on the Time 100 list as well as the cover of the issue?"
+            q,
+            "What year was Beyoncé featured both on the Time 100 list as well as the cover of the issue?",
         )
         self.assertNotIn("\\", q)
 

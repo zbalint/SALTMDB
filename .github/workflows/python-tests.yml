@@ -59,12 +59,11 @@ jobs:
       - name: mypy
         run: uv run mypy src
 
-      - name: bandit (baselined)
-        run: uv run bandit -c pyproject.toml -r src -b .bandit-baseline.json -q
+      - name: bandit
+        run: uv run bandit -c pyproject.toml -r src -q
 
       - name: pip-audit
         run: uv run pip-audit --skip-editable
 
       - name: deptry
         run: uv run deptry src
-

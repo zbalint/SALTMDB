@@ -95,7 +95,7 @@ def build_request(method: str, params: dict[str, Any], token: str | None = None)
     return {"id": str(uuid.uuid4()), "token": token, "method": method, "params": params}
 
 
-def build_ok_response(request_id: str, result: Any) -> dict[str, Any]:
+def build_ok_response(request_id: str | None, result: Any) -> dict[str, Any]:
     return {"id": request_id, "ok": True, "result": result}
 
 

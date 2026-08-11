@@ -1,4 +1,8 @@
 import re
+import logging
+import sqlite3
+
+logger = logging.getLogger(__name__)
 
 UUID_REGEX = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -16,8 +20,10 @@ def resolve_entity_id(conn, input_val: str) -> str | None:
         cursor = conn.execute("SELECT id FROM entities WHERE id = ?", (input_val,))
         if cursor.fetchone():
             return input_val
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.debug(
+            "Exact entity-id lookup unavailable; continuing with textual resolution: %s", exc
+        )
 
     # 1. Exact UUID pattern
     if UUID_REGEX.fullmatch(input_val):
@@ -37,8 +43,8 @@ def resolve_entity_id(conn, input_val: str) -> str | None:
         row = cursor.fetchone()
         if row:
             return row[0]
-    except Exception:
-        pass
+    except sqlite3.Error as exc:
+        logger.debug("Entity-title lookup unavailable; returning input unchanged: %s", exc)
 
     return input_val
 

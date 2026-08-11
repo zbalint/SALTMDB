@@ -22,7 +22,6 @@ is used for every config's scoring of that query -- never rebuilt per-config.
 import math
 import random
 import statistics
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 

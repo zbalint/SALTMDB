@@ -312,9 +312,7 @@ class TestBuildCandidateEvidence(unittest.TestCase):
         in_fts_and is False and in_fts_or_only is True."""
         fts_rows = [self._fts_row("a")]
         rrf_map = {"a": 0.5}
-        ev = _build_candidate_evidence(
-            ["a"], rrf_map, fts_rows, [], {}, {}, used_or_fallback=True
-        )
+        ev = _build_candidate_evidence(["a"], rrf_map, fts_rows, [], {}, {}, used_or_fallback=True)
         self.assertTrue(ev["a"]["in_fts"])
         self.assertFalse(ev["a"]["in_fts_and"])
         self.assertTrue(ev["a"]["in_fts_or_only"])
@@ -482,7 +480,10 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         fts_rows = [self._fts_row("a")]
         semantic_rows = [("b", 0.1)]
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -502,7 +503,10 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("fts_hit", 0.05), ("semantic_only_no_grounding", 0.3)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -535,7 +539,10 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("fts_hit", 0.05), ("semantic_only_grounded", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -562,7 +569,9 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("semantic_only_no_grounding", 0.3)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -594,7 +603,10 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("older", 0.1), ("newer", 0.2)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -626,7 +638,10 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         self._insert_entity("a")
         fts_rows = [self._fts_row("a")]
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch("saltmdb.domain.services.memory_service.semantic_search", return_value=[]),
         ):
             results = search_memory(

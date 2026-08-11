@@ -43,63 +43,202 @@ def _add(source_exec_call_id, label, kwargs, expected_id=None):
 
 # --- call_5cFsCcSDfF8MfrWa8Z2W1CPN: 5 queries (first exploratory batch) ---------------------
 _C1 = "call_5cFsCcSDfF8MfrWa8Z2W1CPN"
-_add(_C1, "explore/daemon-linux-windows", dict(
-    query_keywords="daemon Linux Windows validation", include_related=False, limit=8, mode="broad"))
-_add(_C1, "explore/persistent-daemon-windows-compat+topic", dict(
-    query_keywords="persistent daemon Windows compatibility", include_related=False, limit=8,
-    mode="broad", rerank_by_topic=True))
-_add(_C1, "explore/avoid-live-db-dev-server+strict+topic", dict(
-    query_keywords="how to ensure development server avoids live default database",
-    include_related=False, limit=8, mode="strict", rerank_by_topic=True))
-_add(_C1, "explore/viewer-pid-isolation", dict(
-    query_keywords="viewer pid file test isolation", include_related=False, limit=8, mode="broad"))
-_add(_C1, "explore/negative-quantum-cooking+strict", dict(
-    query_keywords="unrelated quantum entanglement cooking recipes", include_related=False,
-    limit=8, mode="strict"))
+_add(
+    _C1,
+    "explore/daemon-linux-windows",
+    dict(
+        query_keywords="daemon Linux Windows validation",
+        include_related=False,
+        limit=8,
+        mode="broad",
+    ),
+)
+_add(
+    _C1,
+    "explore/persistent-daemon-windows-compat+topic",
+    dict(
+        query_keywords="persistent daemon Windows compatibility",
+        include_related=False,
+        limit=8,
+        mode="broad",
+        rerank_by_topic=True,
+    ),
+)
+_add(
+    _C1,
+    "explore/avoid-live-db-dev-server+strict+topic",
+    dict(
+        query_keywords="how to ensure development server avoids live default database",
+        include_related=False,
+        limit=8,
+        mode="strict",
+        rerank_by_topic=True,
+    ),
+)
+_add(
+    _C1,
+    "explore/viewer-pid-isolation",
+    dict(
+        query_keywords="viewer pid file test isolation",
+        include_related=False,
+        limit=8,
+        mode="broad",
+    ),
+)
+_add(
+    _C1,
+    "explore/negative-quantum-cooking+strict",
+    dict(
+        query_keywords="unrelated quantum entanglement cooking recipes",
+        include_related=False,
+        limit=8,
+        mode="strict",
+    ),
+)
 
 # --- call_9HrARuo2yo4wcMNyToC8zH9w: 6 cases, daemon-completion wording sweep ----------------
 _C2 = "call_9HrARuo2yo4wcMNyToC8zH9w"
 _DAEMON_EXACT_Q = "Track B Goal Closed daemon validated live both Linux WSL2 native Windows"
 _DAEMON_OPWORD_Q = "new daemon based version works on Linux and Windows validation complete"
-_add(_C2, "sweep/exact-completion", dict(
-    query_keywords=_DAEMON_EXACT_Q, include_related=False, limit=5, mode="broad",
-    rerank_by_topic=False))
-_add(_C2, "sweep/exact-completion+topic", dict(
-    query_keywords=_DAEMON_EXACT_Q, include_related=False, limit=5, mode="broad",
-    rerank_by_topic=True))
-_add(_C2, "sweep/operational-wording", dict(
-    query_keywords=_DAEMON_OPWORD_Q, include_related=False, limit=5, mode="broad",
-    rerank_by_topic=False))
-_add(_C2, "sweep/operational-wording+strict+topic", dict(
-    query_keywords=_DAEMON_OPWORD_Q, include_related=False, limit=5, mode="strict",
-    rerank_by_topic=True))
-_add(_C2, "sweep/boundary-question+strict+topic", dict(
-    query_keywords="can Windows and WSL daemon processes share the same SALTMDB database file",
-    include_related=False, limit=5, mode="strict", rerank_by_topic=True))
-_add(_C2, "sweep/negative-sourdough+strict+topic", dict(
-    query_keywords="How do I bake sourdough bread with a cast iron dutch oven",
-    include_related=False, limit=5, mode="strict", rerank_by_topic=True))
+_add(
+    _C2,
+    "sweep/exact-completion",
+    dict(
+        query_keywords=_DAEMON_EXACT_Q,
+        include_related=False,
+        limit=5,
+        mode="broad",
+        rerank_by_topic=False,
+    ),
+)
+_add(
+    _C2,
+    "sweep/exact-completion+topic",
+    dict(
+        query_keywords=_DAEMON_EXACT_Q,
+        include_related=False,
+        limit=5,
+        mode="broad",
+        rerank_by_topic=True,
+    ),
+)
+_add(
+    _C2,
+    "sweep/operational-wording",
+    dict(
+        query_keywords=_DAEMON_OPWORD_Q,
+        include_related=False,
+        limit=5,
+        mode="broad",
+        rerank_by_topic=False,
+    ),
+)
+_add(
+    _C2,
+    "sweep/operational-wording+strict+topic",
+    dict(
+        query_keywords=_DAEMON_OPWORD_Q,
+        include_related=False,
+        limit=5,
+        mode="strict",
+        rerank_by_topic=True,
+    ),
+)
+_add(
+    _C2,
+    "sweep/boundary-question+strict+topic",
+    dict(
+        query_keywords="can Windows and WSL daemon processes share the same SALTMDB database file",
+        include_related=False,
+        limit=5,
+        mode="strict",
+        rerank_by_topic=True,
+    ),
+)
+_add(
+    _C2,
+    "sweep/negative-sourdough+strict+topic",
+    dict(
+        query_keywords="How do I bake sourdough bread with a cast iron dutch oven",
+        include_related=False,
+        limit=5,
+        mode="strict",
+        rerank_by_topic=True,
+    ),
+)
 
 # --- call_eGidjigAGcHv27dzdmaoKncf: 1 broad meta-query --------------------------------------
-_add("call_eGidjigAGcHv27dzdmaoKncf", "meta/precision-false-positives", dict(
-    query_keywords="search precision false positives strict mode topic rerank evaluation",
-    include_related=False, limit=8, mode="broad"))
+_add(
+    "call_eGidjigAGcHv27dzdmaoKncf",
+    "meta/precision-false-positives",
+    dict(
+        query_keywords="search precision false positives strict mode topic rerank evaluation",
+        include_related=False,
+        limit=8,
+        mode="broad",
+    ),
+)
 
 # --- call_CgVBRaGrfVgpgP1jgsXe3EvT: core 12-case x 4-mode evidence matrix (48 calls) --------
 _C4 = "call_CgVBRaGrfVgpgP1jgsXe3EvT"
 _MATRIX_CASES = [
     ("A1", "exact", TRACK_B_CLOSURE, _DAEMON_EXACT_Q),
-    ("A2", "paraphrase", TRACK_B_CLOSURE, "the new daemon works on Linux and Windows and validation is complete"),
-    ("A3", "state", TRACK_B_CLOSURE, "is the backend daemon implementation still pending review or has it been completed and validated"),
-    ("B1", "exact incident", VIEWER_PID_INCIDENT, "viewer pid file test isolation leak corrupts live viewer_8080.pid"),
-    ("B2", "paraphrase", VIEWER_PID_INCIDENT, "tests accidentally modify the production viewer PID file"),
-    ("C1", "policy", WSL_WINDOWS_DB_POLICY, "can a Windows daemon and WSL daemon share a single SALTMDB database file"),
-    ("C2", "policy paraphrase", WSL_WINDOWS_DB_POLICY, "is cross filesystem database sharing supported between native Windows and WSL"),
-    ("D1", "procedure", DEV_SMOKE_TEST_PROCEDURE, "how should I smoke test python -m saltmdb safely during development"),
-    ("D2", "procedure paraphrase", DEV_SMOKE_TEST_PROCEDURE, "prevent my development server startup check from touching the real default database"),
+    (
+        "A2",
+        "paraphrase",
+        TRACK_B_CLOSURE,
+        "the new daemon works on Linux and Windows and validation is complete",
+    ),
+    (
+        "A3",
+        "state",
+        TRACK_B_CLOSURE,
+        "is the backend daemon implementation still pending review or has it been completed and validated",
+    ),
+    (
+        "B1",
+        "exact incident",
+        VIEWER_PID_INCIDENT,
+        "viewer pid file test isolation leak corrupts live viewer_8080.pid",
+    ),
+    (
+        "B2",
+        "paraphrase",
+        VIEWER_PID_INCIDENT,
+        "tests accidentally modify the production viewer PID file",
+    ),
+    (
+        "C1",
+        "policy",
+        WSL_WINDOWS_DB_POLICY,
+        "can a Windows daemon and WSL daemon share a single SALTMDB database file",
+    ),
+    (
+        "C2",
+        "policy paraphrase",
+        WSL_WINDOWS_DB_POLICY,
+        "is cross filesystem database sharing supported between native Windows and WSL",
+    ),
+    (
+        "D1",
+        "procedure",
+        DEV_SMOKE_TEST_PROCEDURE,
+        "how should I smoke test python -m saltmdb safely during development",
+    ),
+    (
+        "D2",
+        "procedure paraphrase",
+        DEV_SMOKE_TEST_PROCEDURE,
+        "prevent my development server startup check from touching the real default database",
+    ),
     ("E1", "negative", None, "How do I bake sourdough bread with a cast iron dutch oven"),
     ("E2", "negative", None, "What is the capital city of Mongolia"),
-    ("E3", "false premise", None, "Which SALTMDB function calculates the nutritional value of recipes"),
+    (
+        "E3",
+        "false premise",
+        None,
+        "Which SALTMDB function calculates the nutritional value of recipes",
+    ),
 ]
 _MATRIX_MODES = [
     ("broad_default", dict(mode="broad", rerank_by_topic=False)),
@@ -109,17 +248,36 @@ _MATRIX_MODES = [
 ]
 for _case_id, _kind, _expected, _q in _MATRIX_CASES:
     for _cfg_name, _cfg in _MATRIX_MODES:
-        _add(_C4, f"matrix/{_case_id}/{_cfg_name}",
-             dict(query_keywords=_q, include_related=False, limit=5, **_cfg),
-             expected_id=_expected)
+        _add(
+            _C4,
+            f"matrix/{_case_id}/{_cfg_name}",
+            dict(query_keywords=_q, include_related=False, limit=5, **_cfg),
+            expected_id=_expected,
+        )
 
 # --- call_EmPAQbg4X2ToWI5AkQNSMs0N: re-run of C1/C2/D1/D2 subset (16 calls) -----------------
 _C5 = "call_EmPAQbg4X2ToWI5AkQNSMs0N"
 _SUBSET_CASES = [
-    ("C1", WSL_WINDOWS_DB_POLICY, "can a Windows daemon and WSL daemon share a single SALTMDB database file"),
-    ("C2", WSL_WINDOWS_DB_POLICY, "is cross filesystem database sharing supported between native Windows and WSL"),
-    ("D1", DEV_SMOKE_TEST_PROCEDURE, "how should I smoke test python -m saltmdb safely during development"),
-    ("D2", DEV_SMOKE_TEST_PROCEDURE, "prevent my development server startup check from touching the real default database"),
+    (
+        "C1",
+        WSL_WINDOWS_DB_POLICY,
+        "can a Windows daemon and WSL daemon share a single SALTMDB database file",
+    ),
+    (
+        "C2",
+        WSL_WINDOWS_DB_POLICY,
+        "is cross filesystem database sharing supported between native Windows and WSL",
+    ),
+    (
+        "D1",
+        DEV_SMOKE_TEST_PROCEDURE,
+        "how should I smoke test python -m saltmdb safely during development",
+    ),
+    (
+        "D2",
+        DEV_SMOKE_TEST_PROCEDURE,
+        "prevent my development server startup check from touching the real default database",
+    ),
 ]
 _SUBSET_MODES = [
     ("B", dict(mode="broad", rerank_by_topic=False)),
@@ -129,37 +287,110 @@ _SUBSET_MODES = [
 ]
 for _case_id, _expected, _q in _SUBSET_CASES:
     for _cfg_name, _cfg in _SUBSET_MODES:
-        _add(_C5, f"resweep/{_case_id}/{_cfg_name}",
-             dict(query_keywords=_q, include_related=False, limit=5, **_cfg),
-             expected_id=_expected)
+        _add(
+            _C5,
+            f"resweep/{_case_id}/{_cfg_name}",
+            dict(query_keywords=_q, include_related=False, limit=5, **_cfg),
+            expected_id=_expected,
+        )
 
 # --- call_yZzv4IL6PvDTAdBxpFLMQooK: 8 variants (supersession/type-bias/related checks) ------
 _C6 = "call_yZzv4IL6PvDTAdBxpFLMQooK"
 _BLOAT_Q = "live database 425MB bloat root cause investigation"
-_add(_C6, "variant/R1-bloat-no-flags", dict(
-    query_keywords=_BLOAT_Q, limit=8, mode="broad", rerank_by_topic=False,
-    prefer_durable_types=False, demote_superseded=False, include_related=False))
-_add(_C6, "variant/R2-bloat-flags-on", dict(
-    query_keywords=_BLOAT_Q, limit=8, mode="broad", rerank_by_topic=False,
-    prefer_durable_types=True, demote_superseded=True, include_related=False))
-_add(_C6, "variant/R3-bloat-history", dict(
-    query_keywords=_BLOAT_Q, limit=8, mode="history", rerank_by_topic=False,
-    prefer_durable_types=False, demote_superseded=False, include_related=False))
-_add(_C6, "variant/R4-bloat-strict", dict(
-    query_keywords=_BLOAT_Q, limit=8, mode="strict", rerank_by_topic=False,
-    include_related=False))
-_add(_C6, "variant/I1-daemon-related-true", dict(
-    query_keywords=_DAEMON_EXACT_Q, limit=8, mode="broad", rerank_by_topic=False,
-    include_related=True))
-_add(_C6, "variant/I2-daemon-related-false", dict(
-    query_keywords=_DAEMON_EXACT_Q, limit=8, mode="broad", rerank_by_topic=False,
-    include_related=False))
-_add(_C6, "variant/N1-negative-kimchi+strict", dict(
-    query_keywords="how do I make kimchi at home", limit=8, mode="strict",
-    rerank_by_topic=False, include_related=False))
-_add(_C6, "variant/N2-negative-laplace+strict", dict(
-    query_keywords="differential equations Laplace transform initial value problem", limit=8,
-    mode="strict", rerank_by_topic=False, include_related=False))
+_add(
+    _C6,
+    "variant/R1-bloat-no-flags",
+    dict(
+        query_keywords=_BLOAT_Q,
+        limit=8,
+        mode="broad",
+        rerank_by_topic=False,
+        prefer_durable_types=False,
+        demote_superseded=False,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/R2-bloat-flags-on",
+    dict(
+        query_keywords=_BLOAT_Q,
+        limit=8,
+        mode="broad",
+        rerank_by_topic=False,
+        prefer_durable_types=True,
+        demote_superseded=True,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/R3-bloat-history",
+    dict(
+        query_keywords=_BLOAT_Q,
+        limit=8,
+        mode="history",
+        rerank_by_topic=False,
+        prefer_durable_types=False,
+        demote_superseded=False,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/R4-bloat-strict",
+    dict(
+        query_keywords=_BLOAT_Q,
+        limit=8,
+        mode="strict",
+        rerank_by_topic=False,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/I1-daemon-related-true",
+    dict(
+        query_keywords=_DAEMON_EXACT_Q,
+        limit=8,
+        mode="broad",
+        rerank_by_topic=False,
+        include_related=True,
+    ),
+)
+_add(
+    _C6,
+    "variant/I2-daemon-related-false",
+    dict(
+        query_keywords=_DAEMON_EXACT_Q,
+        limit=8,
+        mode="broad",
+        rerank_by_topic=False,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/N1-negative-kimchi+strict",
+    dict(
+        query_keywords="how do I make kimchi at home",
+        limit=8,
+        mode="strict",
+        rerank_by_topic=False,
+        include_related=False,
+    ),
+)
+_add(
+    _C6,
+    "variant/N2-negative-laplace+strict",
+    dict(
+        query_keywords="differential equations Laplace transform initial value problem",
+        limit=8,
+        mode="strict",
+        rerank_by_topic=False,
+        include_related=False,
+    ),
+)
 
 # --- call_eciPBcbaubuzpXdSCC20TjXU: fetch_full entity lookups (not pipeline calls) ----------
 FETCH_FULL_CALLS = [

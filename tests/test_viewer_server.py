@@ -12,7 +12,9 @@ class TestSALTMDBTCPServer(unittest.TestCase):
 
     def test_handle_error_suppresses_client_disconnect_tracebacks(self):
         server = SALTMDBTCPServer.__new__(SALTMDBTCPServer)  # bypass __init__, no real bind
-        with patch("sys.exc_info", return_value=(ConnectionResetError, ConnectionResetError(), None)):
+        with patch(
+            "sys.exc_info", return_value=(ConnectionResetError, ConnectionResetError(), None)
+        ):
             with patch.object(SALTMDBTCPServer.__bases__[1], "handle_error") as mock_super:
                 server.handle_error(MagicMock(), ("127.0.0.1", 12345))
                 mock_super.assert_not_called()
@@ -50,7 +52,11 @@ class TestViewerServerMain(unittest.TestCase):
     @patch("saltmdb.daemon.client.call_method", return_value={"enabled": True, "port": 8080})
     @patch(
         "saltmdb.daemon.discovery.read",
-        return_value={"db_path": "/tmp/saltmdb_test_viewer_server.db", "service_port": 1, "auth_token": "t"},
+        return_value={
+            "db_path": "/tmp/saltmdb_test_viewer_server.db",
+            "service_port": 1,
+            "auth_token": "t",
+        },
     )
     def test_main_reports_viewer_url_when_daemon_reachable(self, mock_read, mock_call):
         # Track B round-1 Codex finding: status must come from the daemon's own viewer_status RPC
@@ -62,7 +68,11 @@ class TestViewerServerMain(unittest.TestCase):
     @patch("saltmdb.daemon.client.call_method", return_value={"enabled": False, "port": None})
     @patch(
         "saltmdb.daemon.discovery.read",
-        return_value={"db_path": "/tmp/saltmdb_test_viewer_server.db", "service_port": 1, "auth_token": "t"},
+        return_value={
+            "db_path": "/tmp/saltmdb_test_viewer_server.db",
+            "service_port": 1,
+            "auth_token": "t",
+        },
     )
     def test_main_reports_viewer_disabled_when_daemon_says_so(self, mock_read, mock_call):
         with patch("sys.argv", ["saltmdb-viewer"]):
@@ -71,7 +81,11 @@ class TestViewerServerMain(unittest.TestCase):
     @patch("saltmdb.daemon.client.call_method", side_effect=RuntimeError("connection refused"))
     @patch(
         "saltmdb.daemon.discovery.read",
-        return_value={"db_path": "/tmp/saltmdb_test_viewer_server.db", "service_port": 1, "auth_token": "t"},
+        return_value={
+            "db_path": "/tmp/saltmdb_test_viewer_server.db",
+            "service_port": 1,
+            "auth_token": "t",
+        },
     )
     def test_main_exits_when_daemon_unreachable(self, mock_read, mock_call):
         with patch("sys.argv", ["saltmdb-viewer"]):

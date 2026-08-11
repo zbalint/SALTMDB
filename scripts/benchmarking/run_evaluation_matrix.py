@@ -117,6 +117,52 @@ def _fetch_entity_stub(conn, entity_id: str) -> dict | None:
     return {"id": eid, "title": title, "snippet": snippet, "memory_type": memory_type}
 
 
+def _run_query_configs(
+    conn, db_path: str, query: dict, configs: list[dict], limit: int
+) -> tuple[dict[str, list[str]], dict[str, dict], dict[str, float], list[dict]]:
+    query_id = query["id"]
+    rankings: dict[str, list[str]] = {}
+    pool: dict[str, dict] = {}
+    latencies: dict[str, float] = {}
+    errors: list[dict] = []
+    for cfg in configs:
+        items, latency_ms, error = run_one_config(conn, db_path, query["query"], cfg, limit=limit)
+        latencies[cfg["name"]] = latency_ms
+        if error:
+            errors.append({"query_id": query_id, "config_name": cfg["name"], "error": error})
+        rankings[cfg["name"]] = [item["id"] for item in items]
+        for item in items:
+            pool.setdefault(
+                item["id"],
+                {
+                    "title": item.get("title"),
+                    "snippet": item.get("snippet"),
+                    "memory_type": item.get("memory_type"),
+                    "ground_truth_forced_include": False,
+                },
+            )
+    for source_id in query.get("source_entity_ids") or []:
+        if source_id in pool:
+            continue
+        stub = _fetch_entity_stub(conn, source_id)
+        if stub is None:
+            errors.append(
+                {
+                    "query_id": query_id,
+                    "config_name": None,
+                    "error": f"source_entity_id {source_id!r} not found/archived in corpus",
+                }
+            )
+            continue
+        pool[source_id] = {
+            "title": stub["title"],
+            "snippet": stub["snippet"],
+            "memory_type": stub["memory_type"],
+            "ground_truth_forced_include": True,
+        }
+    return rankings, pool, latencies, errors
+
+
 def run_matrix_for_queries(
     conn,
     db_path: str,
@@ -159,56 +205,32 @@ def run_matrix_for_queries(
         query_id = q["id"]
         if query_id in completed_query_ids:
             continue
-        query_text = q["query"]
-        config_rankings[query_id] = {}
-        pool_for_query: dict[str, dict] = {}
-
-        for cfg in configs:
-            items, latency_ms, error = run_one_config(conn, db_path, query_text, cfg, limit=limit)
-            latencies_ms[cfg["name"]].append(latency_ms)
-            if error:
-                errors.append({"query_id": query_id, "config_name": cfg["name"], "error": error})
-            ids_in_order = [item["id"] for item in items]
-            config_rankings[query_id][cfg["name"]] = ids_in_order
-            for item in items:
-                if item["id"] not in pool_for_query:
-                    pool_for_query[item["id"]] = {
-                        "title": item.get("title"),
-                        "snippet": item.get("snippet"),
-                        "memory_type": item.get("memory_type"),
-                        "ground_truth_forced_include": False,
-                    }
-
-        # §0b item 17: force-include predeclared source_entity_ids even if no config retrieved
-        # them.
-        for source_id in q.get("source_entity_ids") or []:
-            if source_id not in pool_for_query:
-                stub = _fetch_entity_stub(conn, source_id)
-                if stub is not None:
-                    pool_for_query[source_id] = {
-                        "title": stub["title"],
-                        "snippet": stub["snippet"],
-                        "memory_type": stub["memory_type"],
-                        "ground_truth_forced_include": True,
-                    }
-                else:
-                    errors.append(
-                        {
-                            "query_id": query_id,
-                            "config_name": None,
-                            "error": f"source_entity_id {source_id!r} not found/archived in corpus",
-                        }
-                    )
-
+        rankings, pool_for_query, query_latencies, query_errors = _run_query_configs(
+            conn, db_path, q, configs, limit
+        )
+        config_rankings[query_id] = rankings
+        for config_name, latency_ms in query_latencies.items():
+            latencies_ms[config_name].append(latency_ms)
+        errors.extend(query_errors)
         pools[query_id] = pool_for_query
 
         completed_query_ids.add(query_id)
-        if checkpoint_path and checkpoint_every and len(completed_query_ids) % checkpoint_every == 0:
-            _atomic_json_write(checkpoint_path, {
-                "config_rankings": config_rankings, "pools": pools, "latencies_ms": latencies_ms,
-                "errors": errors, "completed_query_ids": sorted(completed_query_ids),
-                "resume_meta": resume_meta,
-            })
+        if (
+            checkpoint_path
+            and checkpoint_every
+            and len(completed_query_ids) % checkpoint_every == 0
+        ):
+            _atomic_json_write(
+                checkpoint_path,
+                {
+                    "config_rankings": config_rankings,
+                    "pools": pools,
+                    "latencies_ms": latencies_ms,
+                    "errors": errors,
+                    "completed_query_ids": sorted(completed_query_ids),
+                    "resume_meta": resume_meta,
+                },
+            )
         if progress_every and (i + 1) % progress_every == 0:
             print(f"  ... {i + 1}/{total} queries done", file=sys.stderr)
 
@@ -230,8 +252,12 @@ def main():
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--checkpoint-every", type=int, default=10)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--config-name", action="append", dest="config_names",
-                        help="Run only named configuration(s); diagnostic-only, never a final matrix artifact.")
+    parser.add_argument(
+        "--config-name",
+        action="append",
+        dest="config_names",
+        help="Run only named configuration(s); diagnostic-only, never a final matrix artifact.",
+    )
     args = parser.parse_args()
 
     _refuse_unsafe_db_path(args.db_path)
@@ -248,8 +274,12 @@ def main():
         if {config["name"] for config in configs} != wanted:
             raise RuntimeError("unknown --config-name")
     checkpoint_path = Path(args.checkpoint_path or (args.out + ".checkpoint.json"))
-    expected = {"queries_fingerprint": _fingerprint(queries), "configs_fingerprint": _fingerprint(configs),
-                "limit": args.limit, "reranker_model": RERANKER_MODEL}
+    expected = {
+        "queries_fingerprint": _fingerprint(queries),
+        "configs_fingerprint": _fingerprint(configs),
+        "limit": args.limit,
+        "reranker_model": RERANKER_MODEL,
+    }
     resume_result = None
     if args.resume:
         checkpoint = json.loads(checkpoint_path.read_text())
@@ -259,10 +289,17 @@ def main():
 
     conn = get_connection(args.db_path)
     try:
-        result = run_matrix_for_queries(conn, args.db_path, queries, configs, limit=args.limit,
-                                        checkpoint_path=checkpoint_path,
-                                        checkpoint_every=args.checkpoint_every,
-                                        resume_result=resume_result, resume_meta=expected)
+        result = run_matrix_for_queries(
+            conn,
+            args.db_path,
+            queries,
+            configs,
+            limit=args.limit,
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=args.checkpoint_every,
+            resume_result=resume_result,
+            resume_meta=expected,
+        )
     finally:
         close_connection(conn)
 
@@ -277,7 +314,9 @@ def main():
     result["resume_meta"] = expected
     if result["errors"]:
         _atomic_json_write(checkpoint_path, result)
-        raise RuntimeError(f"matrix contains {len(result['errors'])} errors; refusing final artifact")
+        raise RuntimeError(
+            f"matrix contains {len(result['errors'])} errors; refusing final artifact"
+        )
     _atomic_json_write(checkpoint_path, result)
     _atomic_json_write(Path(args.out), result)
     print(f"Wrote {args.out} ({len(queries)} queries x {len(configs)} configs)")

@@ -75,9 +75,7 @@ class TestFmtMemory(unittest.TestCase):
     def test_title_newline_replaced_with_space(self):
         result = _fmt_memory(_mem(title="Line1\nLine2"))
         # The YAML title line must be a single line
-        title_line = next(
-            (l for l in result.split("\n") if l.startswith("title:")), None
-        )
+        title_line = next((line for line in result.split("\n") if line.startswith("title:")), None)
         self.assertIsNotNone(title_line)
         self.assertNotIn("\n", title_line)
         self.assertIn("Line1 Line2", title_line)

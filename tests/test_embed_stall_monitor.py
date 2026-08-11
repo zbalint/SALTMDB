@@ -24,18 +24,30 @@ class EmbedStallMonitorTestCase(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _insert_pending_entity(self, entity_id: str, age_seconds: float = 0) -> None:
-        created_at = (datetime.now(UTC) - timedelta(seconds=age_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        created_at = (datetime.now(UTC) - timedelta(seconds=age_seconds)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         self.conn.execute(
             "INSERT INTO entities "
             "(id, created_at, updated_at, last_accessed_at, owner_id, status, title, "
             "full_content, content_hash, memory_type, embedding_status) "
             "VALUES (?, ?, ?, ?, 'test_user', 'raw', ?, ?, ?, 'fact', 'pending')",
-            (entity_id, created_at, created_at, created_at, entity_id, f"content for {entity_id}", entity_id),
+            (
+                entity_id,
+                created_at,
+                created_at,
+                created_at,
+                entity_id,
+                f"content for {entity_id}",
+                entity_id,
+            ),
         )
         self.conn.commit()
 
     def _resolve_entity(self, entity_id: str) -> None:
-        self.conn.execute("UPDATE entities SET embedding_status = 'ready' WHERE id = ?", (entity_id,))
+        self.conn.execute(
+            "UPDATE entities SET embedding_status = 'ready' WHERE id = ?", (entity_id,)
+        )
         self.conn.commit()
 
 

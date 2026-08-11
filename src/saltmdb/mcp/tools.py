@@ -1,12 +1,16 @@
 from typing import Literal
 import json
+import logging
 from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
 from saltmdb.daemon import protocol
+
 # ephemeral_service is the sole domain.services import remaining in this module (see
 # ephemeral_memory below): EPHEMERAL_CONN never touches the persistent DB, so ephemeral_memory
 # never goes over RPC and stays adapter-local, exactly as before Track B.
 from saltmdb.domain.services import ephemeral_service
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_list_or_str(val) -> list:
@@ -22,8 +26,10 @@ def _normalize_list_or_str(val) -> list:
                 parsed = json.loads(val_str)
                 if isinstance(parsed, list):
                     return parsed
-            except Exception:
-                pass
+            except json.JSONDecodeError as exc:
+                logger.debug(
+                    "Ignoring malformed JSON list input and applying string fallback: %s", exc
+                )
         if "," in val_str:
             return [s.strip() for s in val_str.split(",") if s.strip()]
         return [val_str]

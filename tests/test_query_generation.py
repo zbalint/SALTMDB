@@ -5,7 +5,9 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "benchmarking" / "query_generation.py"
+_MODULE_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "benchmarking" / "query_generation.py"
+)
 _spec = importlib.util.spec_from_file_location("query_generation", _MODULE_PATH)
 qg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(qg)
@@ -105,7 +107,9 @@ class TestTopicFamilyId(unittest.TestCase):
         self.assertEqual(result, "cluster:root1")
 
     def test_dataset_and_title_used_when_no_cluster(self):
-        result = qg.compute_topic_family_id(dataset="squad", source_title="Classical_music", entity_id="e1")
+        result = qg.compute_topic_family_id(
+            dataset="squad", source_title="Classical_music", entity_id="e1"
+        )
         self.assertEqual(result, "squad:Classical_music")
 
     def test_falls_back_to_entity_id(self):
@@ -116,7 +120,9 @@ class TestTopicFamilyId(unittest.TestCase):
         # Must literally match build_diverse_test_db.py's compute_split_group_id shape
         # (f"{dataset}:{source_title}") so family grouping never contradicts that script's own
         # split_group_id for the same entities.
-        result = qg.compute_topic_family_id(dataset="wikipedia_french", source_title="Paris", entity_id="e1")
+        result = qg.compute_topic_family_id(
+            dataset="wikipedia_french", source_title="Paris", entity_id="e1"
+        )
         self.assertEqual(result, "wikipedia_french:Paris")
 
 
@@ -161,17 +167,35 @@ class TestSplitAssignment(unittest.TestCase):
 class TestQueryRow(unittest.TestCase):
     def test_to_dict_round_trips_all_fields(self):
         row = qg.QueryRow(
-            id="q1", query="what color is the sky", lang="en", category="exact_title",
-            subtype="squad", split="dev", source_entity_ids=["e1"], topic_family_id="fam1",
-            length_bucket="short", provenance="squad-ground-truth",
+            id="q1",
+            query="what color is the sky",
+            lang="en",
+            category="exact_title",
+            subtype="squad",
+            split="dev",
+            source_entity_ids=["e1"],
+            topic_family_id="fam1",
+            length_bucket="short",
+            provenance="squad-ground-truth",
         )
         d = row.to_dict()
         self.assertEqual(d["id"], "q1")
         self.assertEqual(d["source_entity_ids"], ["e1"])
-        self.assertEqual(set(d.keys()), {
-            "id", "query", "lang", "category", "subtype", "split", "source_entity_ids",
-            "topic_family_id", "length_bucket", "provenance",
-        })
+        self.assertEqual(
+            set(d.keys()),
+            {
+                "id",
+                "query",
+                "lang",
+                "category",
+                "subtype",
+                "split",
+                "source_entity_ids",
+                "topic_family_id",
+                "length_bucket",
+                "provenance",
+            },
+        )
 
 
 if __name__ == "__main__":

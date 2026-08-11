@@ -15,17 +15,19 @@ def _fmt_memory(m: dict) -> str:
     content = (m.get("full_content") or m.get("snippet") or "").replace(
         "</memory>", "&lt;/memory&gt;"
     )
-    return "\n".join([
-        f'<memory id="{mid}" type="{mtype}" is_core="{is_core}">',
-        "---",
-        f'title: "{title}"',
-        f"type: {mtype}",
-        f"is_core: {is_core}",
-        "---",
-        "",
-        content,
-        "</memory>",
-    ])
+    return "\n".join(
+        [
+            f'<memory id="{mid}" type="{mtype}" is_core="{is_core}">',
+            "---",
+            f'title: "{title}"',
+            f"type: {mtype}",
+            f"is_core: {is_core}",
+            "---",
+            "",
+            content,
+            "</memory>",
+        ]
+    )
 
 
 def _fmt_digest(core: list, project: list, project_keywords: str | None) -> str:
@@ -136,9 +138,14 @@ def cmd_bootstrap_digest(args):
                     "search_memory",
                     _search_memory_defaults(entity_id=item["id"], fetch_full=True),
                 )
-                item["full_content"] = full_text if isinstance(full_text, str) else item.get("snippet", "")
+                item["full_content"] = (
+                    full_text if isinstance(full_text, str) else item.get("snippet", "")
+                )
             except Exception as e:
-                print(f"# Warning: Failed to fetch full context for {item.get('id')}: {e}", file=sys.stderr)
+                print(
+                    f"# Warning: Failed to fetch full context for {item.get('id')}: {e}",
+                    file=sys.stderr,
+                )
                 item["full_content"] = item.get("snippet", "")
 
     all_items = [i for i in (core + project) if isinstance(i, dict) and "id" in i]

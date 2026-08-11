@@ -30,7 +30,8 @@ class TestEmbeddingTrigger(unittest.TestCase):
         entity_id = res.split("ID: ")[1]
 
         states = self.conn.execute(
-            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind", (entity_id,)
+            "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind",
+            (entity_id,),
         ).fetchall()
         self.assertEqual(states, [("chunk", "queued"), ("entity", "queued")])
 

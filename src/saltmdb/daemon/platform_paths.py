@@ -83,7 +83,9 @@ def classify_db_path(resolved_db_path: str) -> Classification:  # noqa: PLR0911
         lowered = resolved_db_path.lower()
         if lowered.startswith("\\\\wsl.localhost\\") or lowered.startswith("\\\\wsl$\\"):
             return "cross_boundary"
-        if lowered.startswith("\\\\?\\unc\\wsl$\\") or lowered.startswith("\\\\?\\unc\\wsl.localhost\\"):
+        if lowered.startswith("\\\\?\\unc\\wsl$\\") or lowered.startswith(
+            "\\\\?\\unc\\wsl.localhost\\"
+        ):
             return "cross_boundary"
         return _classify_windows_drive(resolved_db_path)
     else:

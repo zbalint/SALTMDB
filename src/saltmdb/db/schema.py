@@ -526,7 +526,9 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
                     )
                 conn.execute("PRAGMA user_version = 1")
         except sqlite3.OperationalError as e:
-            logger.warning("Track A migration sweep skipped/failed (will retry next startup): %s", e)
+            logger.warning(
+                "Track A migration sweep skipped/failed (will retry next startup): %s", e
+            )
 
     write_transaction_retrying(conn, _write)
     return conn

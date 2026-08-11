@@ -17,7 +17,7 @@ import socketserver
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from saltmdb.domain.services.embedding_service import EmbedJobScheduler
@@ -88,7 +88,12 @@ class _DaemonState:
     def unregister_session(self, session_id: int) -> None:
         with self._lock:
             self._sessions.discard(session_id)
-            if not self._sessions and not self._inflight and not self._draining and not self.foreground:
+            if (
+                not self._sessions
+                and not self._inflight
+                and not self._draining
+                and not self.foreground
+            ):
                 self._start_grace_timer()
 
     def _start_grace_timer(self) -> None:
@@ -129,7 +134,12 @@ class _DaemonState:
     def _release_inflight(self) -> None:
         with self._lock:
             self._inflight -= 1
-            if not self._sessions and not self._inflight and not self._draining and not self.foreground:
+            if (
+                not self._sessions
+                and not self._inflight
+                and not self._draining
+                and not self.foreground
+            ):
                 self._start_grace_timer()
 
     def begin_draining(self) -> None:
@@ -146,7 +156,9 @@ class _DaemonState:
             "service_port": self.service_port,
         }
 
-    def handle_request(self, request: dict[str, Any], session_id: int | None = None) -> dict[str, Any]:  # noqa: PLR0911
+    def handle_request(  # noqa: PLR0911
+        self, request: dict[str, Any], session_id: int | None = None
+    ) -> dict[str, Any]:
         request_id: str | None = request.get("id")
         if self._draining:
             return protocol.build_error_response(
@@ -154,7 +166,9 @@ class _DaemonState:
             )
         token = request.get("token")
         if not (token and self.auth_token and hmac.compare_digest(token, self.auth_token)):
-            return protocol.build_error_response(request_id, protocol.AUTH_FAILED, "invalid or missing token")
+            return protocol.build_error_response(
+                request_id, protocol.AUTH_FAILED, "invalid or missing token"
+            )
 
         method = request.get("method")
         params = request.get("params")
@@ -164,7 +178,9 @@ class _DaemonState:
             # Codex round-2 finding: `request.get("params") or {}` previously let ANY falsy
             # wrong-type value ([], "", 0, False) silently pass through as {} without ever
             # reaching this check, since `or` short-circuits before isinstance() even runs.
-            return protocol.build_error_response(request_id, protocol.MALFORMED_REQUEST, "params must be an object")
+            return protocol.build_error_response(
+                request_id, protocol.MALFORMED_REQUEST, "params must be an object"
+            )
 
         if method in ("hello", "goodbye", "ping", "viewer_status"):
             return self._handle_session_method(method, request_id, session_id)
@@ -223,11 +239,15 @@ class _DaemonState:
                 request_id, protocol.UNKNOWN_TOOL, f"unknown tool: {tool}"
             )
         if self.coordinator is None:
-            return protocol.build_error_response(request_id, protocol.INTERNAL_ERROR, "database writer unavailable")
+            return protocol.build_error_response(
+                request_id, protocol.INTERNAL_ERROR, "database writer unavailable"
+            )
         result = dispatch_tool(tool, params.get("kwargs") or {}, self.coordinator)
         return protocol.build_ok_response(request_id, result)
 
-    def _handle_run_librarian(self, request_id: str | None, params: dict[str, Any]) -> dict[str, Any]:
+    def _handle_run_librarian(
+        self, request_id: str | None, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Run an on-demand librarian maintenance pass."""
         from saltmdb.domain.services import librarian_service
 
@@ -248,21 +268,30 @@ class _DaemonState:
         total = 0
         while True:
             # submit() with wait=True (default) always returns T directly, never Future[T].
-            ids: list[str] = self.coordinator.submit(  # type: ignore[assignment]
-                "run_backfill_chunk_embeddings_now",
-                lambda conn, cursor=after_id: reconcile_embedding_jobs(conn, limit=100, after_id=cursor),
-                priority="background",
+            def _reconcile(conn, cursor=after_id) -> list[str]:
+                return reconcile_embedding_jobs(conn, limit=100, after_id=cursor)
+
+            ids = cast(
+                list[str],
+                self.coordinator.submit(
+                    "run_backfill_chunk_embeddings_now",
+                    _reconcile,
+                    priority="background",
+                ),
             )
             if not ids:
                 break
             total += len(ids)
             after_id = ids[-1]
-        return protocol.build_ok_response(request_id, f"{total} entities queued for durable embedding.")
+        return protocol.build_ok_response(
+            request_id, f"{total} entities queued for durable embedding."
+        )
 
 
 class _ThreadingRpcServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = False  # service port is OS-assigned fresh each start; no reuse needed
+    daemon_state: _DaemonState
 
 
 class _RpcRequestHandler(socketserver.BaseRequestHandler):
@@ -321,7 +350,9 @@ def _probe_accept_loop(probe_sock: socket.socket, state: _DaemonState) -> None:
         ).start()
 
 
-def _handle_probe_connection(conn: socket.socket, state: _DaemonState, semaphore: threading.Semaphore) -> None:
+def _handle_probe_connection(
+    conn: socket.socket, state: _DaemonState, semaphore: threading.Semaphore
+) -> None:
     try:
         conn.settimeout(config.DAEMON_IDENTIFY_READ_TIMEOUT_S)
         try:
@@ -344,7 +375,9 @@ def _handle_probe_connection(conn: socket.socket, state: _DaemonState, semaphore
 
 def _probe_identify(port: int) -> dict[str, Any] | None:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=config.DAEMON_IDENTIFY_READ_TIMEOUT_S) as sock:
+        with socket.create_connection(
+            ("127.0.0.1", port), timeout=config.DAEMON_IDENTIFY_READ_TIMEOUT_S
+        ) as sock:
             sock.settimeout(config.DAEMON_IDENTIFY_READ_TIMEOUT_S)
             protocol.send_frame(sock, {"method": "identify"})
             return protocol.recv_frame(sock)
@@ -416,7 +449,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         _daemon_log_redirect(db_path)
     _configure_stdio_logging()
 
-    for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    for _blas_var in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
         os.environ.setdefault(_blas_var, "1")
 
     # Step 1-2: cross-OS mount refusal check, first -- cheapest, most safety-critical.
@@ -463,28 +501,41 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     # Start the probe accept-loop thread immediately -- before init_db or anything else -- so the
     # "initializing" identify state is accurate for the whole remainder of startup.
-    probe_thread = threading.Thread(target=_probe_accept_loop, args=(probe_sock, state), daemon=True)
+    probe_thread = threading.Thread(
+        target=_probe_accept_loop, args=(probe_sock, state), daemon=True
+    )
     probe_thread.start()
 
     # Step 4: the bootstrap connection is the only writer before the coordinator.
     conn = init_db(db_path)
     conn.close()
     try:
-        from saltmdb.domain.services.embedding_service import EmbedJobScheduler, reconcile_embedding_jobs
+        from saltmdb.domain.services.embedding_service import (
+            EmbedJobScheduler,
+            reconcile_embedding_jobs,
+        )
 
         state.coordinator = DbWriteCoordinator(db_path)
         state.coordinator.start()
         from saltmdb.db.connection import enable_daemon_connection_boundary
+
         enable_daemon_connection_boundary()
         # One deliberate, conservative recovery generation for every active
         # legacy row.  Each page is a bounded background transaction.
         after_id = None
         reconciled = 0
         while True:
-            page = state.coordinator.submit(
-                "reconcile_embedding_jobs",
-                lambda c, cursor=after_id: reconcile_embedding_jobs(c, limit=100, after_id=cursor),
-                priority="background",
+
+            def _reconcile_page(c, cursor=after_id) -> list[str]:
+                return reconcile_embedding_jobs(c, limit=100, after_id=cursor)
+
+            page = cast(
+                list[str],
+                state.coordinator.submit(
+                    "reconcile_embedding_jobs",
+                    _reconcile_page,
+                    priority="background",
+                ),
             )
             if not page:
                 break
@@ -503,7 +554,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     # Step 5: service-port TCP listener, OS-assigned port.
     service_server = _ThreadingRpcServer(("127.0.0.1", 0), _RpcRequestHandler)
-    service_server.daemon_state = state  # type: ignore[attr-defined]
+    service_server.daemon_state = state
     service_port = service_server.server_address[1]
     state.service_port = service_port
 
@@ -583,7 +634,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     def _shutdown_watcher() -> None:
         shutdown_requested.wait()
-        _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor)
+        _shutdown_sequence(
+            state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor
+        )
 
     watcher_thread = threading.Thread(target=_shutdown_watcher, daemon=True)
     watcher_thread.start()
@@ -616,7 +669,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     watcher_thread.join()
 
 
-def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor=None) -> None:
+def _shutdown_sequence(
+    state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor=None
+) -> None:
     """Ordered shutdown -- latency/resource hygiene, NOT a data-safety mechanism (see
     scratch/plans/track_b_daemon_detailed.md §6's reframing: SQLite's own WAL+busy_timeout+retry
     concurrency machinery, already relied on throughout this codebase, is what actually makes
@@ -645,7 +700,11 @@ def _shutdown_sequence(state, service_server, probe_sock, guard, viewer_httpd, k
 
     from saltmdb.domain.services import librarian_service, memory_service
 
-    for pool in (memory_service._embed_pool, memory_service._search_pool, librarian_service._librarian_trigger_pool):
+    for pool in (
+        memory_service._embed_pool,
+        memory_service._search_pool,
+        librarian_service._librarian_trigger_pool,
+    ):
         try:
             pool.shutdown(wait=False, cancel_futures=True)
         except Exception as e:

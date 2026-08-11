@@ -1,0 +1,40 @@
+import unittest
+from unittest.mock import patch
+
+from saltmdb.daemon.dispatch import (
+    _dispatch_commit_consolidation,
+    _dispatch_search_memory,
+    _dispatch_store_memory,
+)
+
+
+class TestDispatchRequestDefaults(unittest.TestCase):
+    @patch("saltmdb.daemon.dispatch.memory_service.store_memory", return_value="stored")
+    def test_store_omitted_options_match_service_defaults(self, store):
+        _dispatch_store_memory(content="valid content", owner_id="owner", title="A title")
+        call = store.call_args.kwargs
+        self.assertEqual(call["scope"], "shared")
+        self.assertEqual(call["weight"], 1)
+        self.assertFalse(call["skip_duplicate_check"])
+
+    @patch("saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[])
+    def test_search_omitted_options_match_service_defaults(self, search):
+        _dispatch_search_memory(owner_id="owner", query_keywords="query")
+        call = search.call_args.kwargs
+        self.assertFalse(call["explain_mode"])
+        self.assertEqual(call["limit"], 5)
+        self.assertEqual(call["tag_operator"], "AND")
+        self.assertEqual(call["mode"], "broad")
+        self.assertTrue(call["include_related"])
+        self.assertTrue(call["prefer_durable_types"])
+        self.assertTrue(call["demote_superseded"])
+
+    def test_consolidation_requires_title_and_content(self):
+        with self.assertRaisesRegex(ValueError, "title is required"):
+            _dispatch_commit_consolidation(parent_ids=["parent"], content="content")
+        with self.assertRaisesRegex(ValueError, "content is required"):
+            _dispatch_commit_consolidation(parent_ids=["parent"], title="title")
+
+
+if __name__ == "__main__":
+    unittest.main()

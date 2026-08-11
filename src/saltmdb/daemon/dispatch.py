@@ -22,6 +22,82 @@ from saltmdb.domain.services import (
     memory_service,
     relation_service,
 )
+from typing import Any, Literal
+
+
+def _optional_bool(kw: dict[str, Any], key: str, default: bool) -> bool:
+    value = kw.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _optional_int(kw: dict[str, Any], key: str, default: int) -> int:
+    value = kw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _optional_scope(kw: dict[str, Any], key: str = "scope") -> Literal["private", "shared"]:
+    value = kw.get(key)
+    if value is None:
+        return "shared"
+    if value not in {"private", "shared"}:
+        raise ValueError(f"{key} must be 'private' or 'shared'")
+    return value
+
+
+def _optional_mode(kw: dict[str, Any]) -> Literal["strict", "broad", "history"]:
+    value = kw.get("mode")
+    if value is None:
+        return "broad"
+    if value not in {"strict", "broad", "history"}:
+        raise ValueError("mode must be 'strict', 'broad', or 'history'")
+    return value
+
+
+def _required_str(kw: dict[str, Any], key: str) -> str:
+    value = kw.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} is required")
+    return value
+
+
+def _required_str_list(kw: dict[str, Any], key: str) -> list[str]:
+    value = kw.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key} must be a list of strings")
+    return value
+
+
+def _required_str_or_list(kw: dict[str, Any], key: str) -> str | list[str]:
+    value = kw.get(key)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise ValueError(f"{key} must be a string or list of strings")
+
+
+def _optional_tag_operator(kw: dict[str, Any]) -> Literal["AND", "OR"]:
+    value = kw.get("tag_operator")
+    if value is None:
+        return "AND"
+    if value not in {"AND", "OR"}:
+        raise ValueError("tag_operator must be 'AND' or 'OR'")
+    return value
+
+
+def _required_list(kw: dict[str, Any], key: str) -> list[Any]:
+    value = kw.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return value
 
 
 def _dispatch_store_memory(**kw):
@@ -37,8 +113,8 @@ def _dispatch_store_memory(**kw):
         content=kw.get("content"),
         tags=kw.get("tags"),
         owner_id=kw.get("owner_id"),
-        scope=kw.get("scope"),
-        weight=kw.get("weight"),
+        scope=_optional_scope(kw),
+        weight=_optional_int(kw, "weight", 1),
         is_core=kw.get("is_core"),
         memory_type=kw.get("memory_type"),
         title=kw.get("title"),
@@ -48,7 +124,7 @@ def _dispatch_store_memory(**kw):
         novelty=kw.get("novelty"),
         actionability=kw.get("actionability"),
         metadata=kw.get("metadata"),
-        skip_duplicate_check=kw.get("skip_duplicate_check"),
+        skip_duplicate_check=_optional_bool(kw, "skip_duplicate_check", False),
         context_id=kw.get("context_id"),
         review_token=kw.get("review_token"),
         dispositions=kw.get("dispositions"),
@@ -67,19 +143,19 @@ def _dispatch_search_memory(**kw):
         query_keywords=kw.get("query_keywords"),
         tags_filter=kw.get("tags_filter"),
         metadata_filter=kw.get("metadata_filter"),
-        explain_mode=kw.get("explain_mode"),
-        limit=kw.get("limit"),
+        explain_mode=_optional_bool(kw, "explain_mode", False),
+        limit=_optional_int(kw, "limit", 5),
         context_id=kw.get("context_id"),
         is_core=kw.get("is_core"),
         memory_type_filter=kw.get("memory_type_filter"),
-        tag_operator=kw.get("tag_operator"),
+        tag_operator=_optional_tag_operator(kw),
         cursor=kw.get("cursor"),
-        mode=kw.get("mode"),
-        include_related=kw.get("include_related"),
-        rerank_by_topic=kw.get("rerank_by_topic"),
-        prefer_durable_types=kw.get("prefer_durable_types"),
-        demote_superseded=kw.get("demote_superseded"),
-        use_cross_encoder=kw.get("use_cross_encoder"),
+        mode=_optional_mode(kw),
+        include_related=_optional_bool(kw, "include_related", True),
+        rerank_by_topic=_optional_bool(kw, "rerank_by_topic", False),
+        prefer_durable_types=_optional_bool(kw, "prefer_durable_types", True),
+        demote_superseded=_optional_bool(kw, "demote_superseded", True),
+        use_cross_encoder=_optional_bool(kw, "use_cross_encoder", False),
         disable_semantic=kw.get("disable_semantic", False),
     )
 
@@ -93,15 +169,19 @@ def _dispatch_archive_memory(**kw):
     # addendum per standing practice).
     mode = kw.get("mode")
     if mode == "bulk":
-        return memory_service.bulk_archive_memory(archive_requests=kw.get("archive_requests"))
+        return memory_service.bulk_archive_memory(
+            archive_requests=_required_list(kw, "archive_requests")
+        )
     elif mode == "single":
-        return memory_service.archive_memory(entity_id=kw.get("entity_id"), owner_id=kw.get("owner_id"))
+        return memory_service.archive_memory(
+            entity_id=kw.get("entity_id"), owner_id=kw.get("owner_id")
+        )
     return memory_service.archive_memory(entity_id=None, owner_id=kw.get("owner_id"))
 
 
 def _dispatch_manage_relation(**kw):
     if kw.get("relations"):
-        return relation_service.bulk_store_relations(relations=kw.get("relations"))
+        return relation_service.bulk_store_relations(relations=_required_list(kw, "relations"))
     if kw.get("invalidate"):
         return relation_service.invalidate_relation(
             source_id=kw.get("source_id"),
@@ -121,15 +201,17 @@ def _dispatch_manage_relation(**kw):
 
 def _dispatch_commit_consolidation(**kw):
     if kw.get("consolidations"):
-        return relation_service.bulk_commit_consolidation(consolidations=kw.get("consolidations"))
+        return relation_service.bulk_commit_consolidation(
+            consolidations=_required_list(kw, "consolidations")
+        )
     return relation_service.commit_consolidation(
-        parent_ids=kw.get("parent_ids"),
-        title=kw.get("title"),
-        content=kw.get("content"),
+        parent_ids=_required_str_list(kw, "parent_ids"),
+        title=_required_str(kw, "title"),
+        content=_required_str(kw, "content"),
         is_core=kw.get("is_core"),
         tags=kw.get("tags"),
-        scope=kw.get("scope"),
-        weight=kw.get("weight"),
+        scope=_optional_scope(kw),
+        weight=_optional_int(kw, "weight", 1),
         owner_id=kw.get("owner_id"),
         context_id=kw.get("context_id"),
         override_justification=kw.get("override_justification"),
@@ -156,7 +238,7 @@ def _dispatch_get_events(**kw):
     mode = kw.get("mode") or "events"
     session_id = kw.get("session_id")
     if session_id or mode == "session":
-        return event_service.get_session_summary(session_id=session_id)
+        return event_service.get_session_summary(session_id=_required_str(kw, "session_id"))
     elif mode == "memories":
         return memory_service.scan_memories(
             owner_id=kw.get("owner_id"),
@@ -181,7 +263,9 @@ DISPATCH_TABLE = {
     "get_canonical_predicates": lambda **kw: relation_service.get_canonical_predicates(**kw),
     "merge_tags": lambda **kw: librarian_service.merge_tags(**kw),
     "dismiss_event": lambda **kw: event_service.dismiss_events(
-        kw.get("event_ids"), kw.get("reason"), kw.get("agent_id")
+        _required_str_or_list(kw, "event_ids"),
+        _required_str(kw, "reason"),
+        kw.get("agent_id") or "system",
     ),
     # Multi-branch
     "store_memory": _dispatch_store_memory,
@@ -197,7 +281,15 @@ DISPATCH_TABLE = {
 # through ``dispatch_tool`` so even legacy service implementations execute on
 # the coordinator-owned SQLite connection.
 MUTATING_TOOLS = frozenset(
-    {"log_event", "merge_tags", "dismiss_event", "store_memory", "archive_memory", "manage_relation", "commit_consolidation"}
+    {
+        "log_event",
+        "merge_tags",
+        "dismiss_event",
+        "store_memory",
+        "archive_memory",
+        "manage_relation",
+        "commit_consolidation",
+    }
 )
 
 

@@ -11,8 +11,6 @@ dependency, kept import-free of any DB/CADET/codex call so it's unit-testable no
 """
 
 import random
-import re
-import unicodedata
 from dataclasses import asdict, dataclass
 
 # Same convention as benchmark_precision_snapshot.py's LENGTH_BUCKETS -- reused for query-text
@@ -61,7 +59,9 @@ def perturb_typo(text: str, seed: int, n_edits: int = 1) -> str:
     rng = random.Random(seed)
     chars = list(text)
     editable_positions = [
-        i for i, c in enumerate(chars) if c.isalpha() and i + 1 < len(chars) and chars[i + 1].isalpha()
+        i
+        for i, c in enumerate(chars)
+        if c.isalpha() and i + 1 < len(chars) and chars[i + 1].isalpha()
     ]
     if not editable_positions:
         return text  # nothing safe to edit (e.g. very short/no-letters text)
@@ -110,9 +110,29 @@ _VOWELS = "aeiou"
 # no real linguistic material at all). Matches the source plan's explicit split between "pure
 # gibberish" and "partial-real-word nonsense" negative categories.
 _REAL_FRAGMENTS = [
-    "photo", "graph", "bio", "logy", "micro", "scope", "trans", "port",
-    "hydro", "electro", "static", "dynamic", "auto", "matic", "super",
-    "hyper", "para", "meta", "phase", "cycle", "therm", "al", "istic",
+    "photo",
+    "graph",
+    "bio",
+    "logy",
+    "micro",
+    "scope",
+    "trans",
+    "port",
+    "hydro",
+    "electro",
+    "static",
+    "dynamic",
+    "auto",
+    "matic",
+    "super",
+    "hyper",
+    "para",
+    "meta",
+    "phase",
+    "cycle",
+    "therm",
+    "al",
+    "istic",
 ]
 
 
@@ -123,9 +143,7 @@ def generate_gibberish_query(seed: int, n_tokens: int = 3) -> str:
     tokens = []
     for _ in range(n_tokens):
         length = rng.randint(4, 8)
-        token = "".join(
-            rng.choice(_CONSONANTS if i % 2 == 0 else _VOWELS) for i in range(length)
-        )
+        token = "".join(rng.choice(_CONSONANTS if i % 2 == 0 else _VOWELS) for i in range(length))
         tokens.append(token)
     return " ".join(tokens) + "?"
 
@@ -145,7 +163,10 @@ def generate_partial_word_nonsense_query(seed: int, n_fragments: int = 3) -> str
 
 
 def compute_topic_family_id(
-    dataset: str | None, source_title: str | None, entity_id: str, cluster_root_id: str | None = None
+    dataset: str | None,
+    source_title: str | None,
+    entity_id: str,
+    cluster_root_id: str | None = None,
 ) -> str:
     """One topic_family_id per underlying source/topic, per §2b's hard rule. Three cases, in
     priority order:

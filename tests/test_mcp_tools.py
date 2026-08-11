@@ -88,7 +88,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_b, 0.1)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -146,7 +149,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_event, 0.1), (entity_decision, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
@@ -184,11 +190,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
         only a mock that inspects the actual forwarded kwarg can prove the WRAPPER's fallback
         itself is True, not just that the end-to-end result happens to look reordered (Codex
         diff-review finding)."""
-        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
+        with patch(
+            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
+        ) as mock_search:
             tools.search_memory(query_keywords="pdt wrapper mock test", owner_id="pdt_owner")
         self.assertTrue(mock_search.call_args.kwargs["prefer_durable_types"])
 
-        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
+        with patch(
+            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
+        ) as mock_search:
             tools.search_memory(
                 query_keywords="pdt wrapper mock test",
                 owner_id="pdt_owner",
@@ -201,11 +211,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
         test_search_memory_prefer_durable_types_wrapper_forwards_true_when_omitted above, for
         demote_superseded -- demote_superseded has no kwarg alias to also cover (unlike
         prefer_durable_types/prefer_durable), so this is the whole wrapper-layer proof needed."""
-        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
+        with patch(
+            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
+        ) as mock_search:
             tools.search_memory(query_keywords="ds wrapper mock test", owner_id="ds_owner")
         self.assertTrue(mock_search.call_args.kwargs["demote_superseded"])
 
-        with patch("saltmdb.domain.services.memory_service.search_memory", return_value=[]) as mock_search:
+        with patch(
+            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
+        ) as mock_search:
             tools.search_memory(
                 query_keywords="ds wrapper mock test",
                 owner_id="ds_owner",
@@ -246,7 +260,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         semantic_rows = [(entity_superseded, 0.1), (entity_current, 0.5)]
 
         with (
-            patch("saltmdb.domain.services.memory_service._run_fts_search", return_value=(fts_rows, False)),
+            patch(
+                "saltmdb.domain.services.memory_service._run_fts_search",
+                return_value=(fts_rows, False),
+            ),
             patch(
                 "saltmdb.domain.services.memory_service.semantic_search",
                 return_value=semantic_rows,
