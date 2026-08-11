@@ -25,7 +25,9 @@ class TestJudgePool(unittest.TestCase):
         }
 
     def test_packet_hides_provenance_and_validates_complete_labels(self):
-        packet, private = jp.build_judge_packets(self.queries, self.matrix, "codex", "dev", 3)
+        packet, private = jp.build_judge_packets(
+            self.queries, self.matrix, "agent_eval_judge_a", "dev", 3
+        )
         rendered = str(packet)
         self.assertNotIn("dev", rendered)
         self.assertNotIn("q1", rendered)
@@ -50,11 +52,13 @@ class TestJudgePool(unittest.TestCase):
                 for c in packet["tasks"][0]["candidates"]
             ]
         }
-        normalized = jp.validate_labels(labels, private, "codex")
+        normalized = jp.validate_labels(labels, private, "agent_eval_judge_a")
         self.assertEqual({x["candidate_id"] for x in normalized}, {"truth", "other"})
 
     def test_rejects_missing_label(self):
-        packet, private = jp.build_judge_packets(self.queries, self.matrix, "codex", "dev")
+        packet, private = jp.build_judge_packets(
+            self.queries, self.matrix, "agent_eval_judge_a", "dev"
+        )
         with self.assertRaises(ValueError):
             jp.validate_labels(
                 {
@@ -67,7 +71,7 @@ class TestJudgePool(unittest.TestCase):
                     ]
                 },
                 private,
-                "codex",
+                "agent_eval_judge_a",
             )
 
 

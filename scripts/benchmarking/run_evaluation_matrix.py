@@ -35,7 +35,87 @@ RERANKER_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"  # pinned, §1 / §0b item 5
 
 
 def _fingerprint(value: object) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def verify_artifact_fingerprint(value: object, *, field: str = "artifact_fingerprint") -> None:
+    if not isinstance(value, dict) or not isinstance(value.get(field), str):
+        raise ValueError(f"artifact lacks {field}")
+    unsigned = dict(value)
+    stored = unsigned.pop(field)
+    if stored != _fingerprint(unsigned):
+        raise ValueError(f"artifact {field} mismatch")
+
+
+def _validate_matrix_contract(
+    result: dict, queries: list[dict], configs: list[dict], limit: int
+) -> None:
+    """Prove every completed query has every configuration and structurally valid rankings."""
+    query_ids = [query.get("id") for query in queries]
+    if any(not isinstance(query_id, str) or not query_id for query_id in query_ids):
+        raise ValueError("queries must have non-empty string IDs")
+    if len(query_ids) != len(set(query_ids)):
+        raise ValueError("queries contain duplicate IDs")
+    config_names = [cfg.get("name") for cfg in configs]
+    if len(config_names) != len(set(config_names)):
+        raise ValueError("configs contain duplicate names")
+    expected_queries, expected_configs = set(query_ids), set(config_names)
+    rankings = result.get("config_rankings", {})
+    pools = result.get("pools", {})
+    if not set(rankings).issubset(expected_queries) or not set(pools).issubset(expected_queries):
+        raise ValueError("matrix contains an unknown query")
+    for query_id in rankings:
+        by_config = rankings[query_id]
+        if set(by_config) != expected_configs:
+            raise ValueError(f"matrix query {query_id!r} lacks complete config coverage")
+        for name, ranking in by_config.items():
+            if not isinstance(ranking, list) or len(ranking) > limit:
+                raise ValueError(f"invalid ranking for {query_id!r}/{name!r}")
+            if any(not isinstance(candidate_id, str) or not candidate_id for candidate_id in ranking):
+                raise ValueError("ranking contains an invalid candidate ID")
+            if len(ranking) != len(set(ranking)):
+                raise ValueError("ranking contains duplicate candidate IDs")
+    for query_id, pool in pools.items():
+        if not isinstance(pool, dict):
+            raise ValueError("matrix pool is not an object")
+        for candidate_id, item in pool.items():
+            if not isinstance(candidate_id, str) or not isinstance(item, dict):
+                raise ValueError("matrix pool contains an invalid candidate")
+            if not isinstance(item.get("ground_truth_forced_include"), bool):
+                raise ValueError("pool candidate lacks ground_truth_forced_include flag")
+    errors = result.get("errors", [])
+    if not isinstance(errors, list):
+        raise ValueError("matrix errors must be a list")
+
+
+def validate_matrix_artifact(value: dict) -> None:
+    """Verify the top-level fingerprint and input fingerprints on a finalized matrix."""
+    verify_artifact_fingerprint(value)
+    meta = value.get("meta", {})
+    resume_meta = value.get("resume_meta", {})
+    if meta.get("queries_fingerprint") != resume_meta.get("queries_fingerprint"):
+        raise ValueError("matrix query fingerprint metadata mismatch")
+    if meta.get("configs_fingerprint") != resume_meta.get("configs_fingerprint"):
+        raise ValueError("matrix config fingerprint metadata mismatch")
+
+
+def _load_signed_queries(path: Path) -> tuple[list[dict], str | None]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
+        raise ValueError("matrix input must be a signed query manifest")
+    # build_evaluation_queries writes manifest_fingerprint; accepting only that signed wrapper
+    # prevents a caller from swapping the query body after source-slot assignment.
+    if not isinstance(value.get("manifest_fingerprint"), str):
+        raise ValueError("query manifest lacks manifest_fingerprint")
+    unsigned = dict(value)
+    stored = unsigned.pop("manifest_fingerprint")
+    if stored != _fingerprint(unsigned):
+        raise ValueError("query manifest manifest_fingerprint mismatch")
+    if value.get("queries_fingerprint") != _fingerprint(value["queries"]):
+        raise ValueError("query manifest queries_fingerprint mismatch")
+    return value["queries"], value["manifest_fingerprint"]
 
 
 def _atomic_json_write(path: Path, value: object) -> None:
@@ -234,13 +314,15 @@ def run_matrix_for_queries(
         if progress_every and (i + 1) % progress_every == 0:
             print(f"  ... {i + 1}/{total} queries done", file=sys.stderr)
 
-    return {
+    result = {
         "config_rankings": config_rankings,
         "pools": pools,
         "latencies_ms": latencies_ms,
         "errors": errors,
         "completed_query_ids": sorted(completed_query_ids),
     }
+    _validate_matrix_contract(result, queries, configs, limit)
+    return result
 
 
 def main():
@@ -263,9 +345,7 @@ def main():
     _refuse_unsafe_db_path(args.db_path)
     os.environ["SALTMDB_RERANKER_MODEL"] = RERANKER_MODEL  # §0b item 5
 
-    queries = json.loads(Path(args.queries).read_text())
-    if isinstance(queries, dict):
-        queries = queries.get("queries", [])
+    queries, queries_manifest_fingerprint = _load_signed_queries(Path(args.queries))
 
     configs = _build_evaluation_configs()
     if args.config_names:
@@ -279,6 +359,7 @@ def main():
         "configs_fingerprint": _fingerprint(configs),
         "limit": args.limit,
         "reranker_model": RERANKER_MODEL,
+        "queries_manifest_fingerprint": queries_manifest_fingerprint,
     }
     resume_result = None
     if args.resume:
@@ -310,8 +391,13 @@ def main():
         "n_configs": len(configs),
         "reranker_model_intended": RERANKER_MODEL,
         "reranker_model_env_resolved": os.environ.get("SALTMDB_RERANKER_MODEL"),
+        "queries_fingerprint": expected["queries_fingerprint"],
+        "configs_fingerprint": expected["configs_fingerprint"],
+        "queries_manifest_fingerprint": queries_manifest_fingerprint,
+        "config_manifest": configs,
     }
     result["resume_meta"] = expected
+    result["artifact_fingerprint"] = _fingerprint(result)
     if result["errors"]:
         _atomic_json_write(checkpoint_path, result)
         raise RuntimeError(

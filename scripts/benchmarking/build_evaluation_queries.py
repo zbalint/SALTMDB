@@ -76,6 +76,16 @@ def artifact_fingerprint(value: object) -> str:
     ).hexdigest()
 
 
+def verify_artifact_fingerprint(value: object, *, field: str = "fingerprint") -> None:
+    """Verify a signed JSON artifact before allowing it into another pipeline stage."""
+    if not isinstance(value, dict) or not isinstance(value.get(field), str):
+        raise ValueError(f"artifact lacks {field}")
+    unsigned = dict(value)
+    stored = unsigned.pop(field)
+    if stored != artifact_fingerprint(unsigned):
+        raise ValueError(f"artifact {field} mismatch")
+
+
 def validate_slots(slots: list[dict]) -> None:
     """Reject ambiguous slot input before it can be disclosed to a generator.
 
@@ -83,6 +93,8 @@ def validate_slots(slots: list[dict]) -> None:
     entity bookkeeping leaks into an external generation batch by accident.
     """
     seen_slots, seen_queries = set(), set()
+    source_families: dict[str, str] = {}
+    family_splits: dict[str, str] = {}
     for slot in slots:
         if set(slot) not in (CANONICAL_SLOT_KEYS, CANONICAL_SLOT_KEYS | {"split"}):
             raise ValueError("slot does not have the canonical key set")
@@ -111,6 +123,15 @@ def validate_slots(slots: list[dict]) -> None:
             raise ValueError("duplicate slot_id or query_id")
         if "split" in slot and slot["split"] not in {"dev", "blind"}:
             raise ValueError("assigned slot split must be dev or blind")
+        family = slot["topic_family_id"]
+        if "split" in slot:
+            previous_split = family_splits.setdefault(family, slot["split"])
+            if previous_split != slot["split"]:
+                raise ValueError("topic family occurs in both dev and blind slots")
+        for source_id in slot["source_entity_ids"]:
+            previous_family = source_families.setdefault(source_id, family)
+            if previous_family != family:
+                raise ValueError("source entity is assigned to multiple topic families")
         seen_slots.add(slot["slot_id"])
         seen_queries.add(slot["query_id"])
 
@@ -269,11 +290,37 @@ def write_manifest(
         "corpus_fingerprint": corpus_fingerprint,
         "slot_fingerprint": slot_fingerprint,
     }
+    result["manifest_fingerprint"] = artifact_fingerprint(result)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     temporary.replace(path)
     return result
+
+
+def load_manifest(
+    path: Path,
+    *,
+    expected_split: str | None = None,
+    expected_corpus_fingerprint: str | None = None,
+    expected_slot_fingerprint: str | None = None,
+) -> dict:
+    """Load and verify a frozen query manifest before matrix or judging execution."""
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
+        raise ValueError("query manifest must contain a queries list")
+    verify_artifact_fingerprint(value, field="manifest_fingerprint")
+    if value.get("queries_fingerprint") != artifact_fingerprint(value["queries"]):
+        raise ValueError("query manifest queries_fingerprint mismatch")
+    if expected_corpus_fingerprint is not None and value.get("corpus_fingerprint") != expected_corpus_fingerprint:
+        raise ValueError("query manifest corpus fingerprint mismatch")
+    if expected_slot_fingerprint is not None and value.get("slot_fingerprint") != expected_slot_fingerprint:
+        raise ValueError("query manifest slot fingerprint mismatch")
+    queries = value["queries"]
+    validate_queries(queries)
+    if expected_split is not None and any(item.get("split") != expected_split for item in queries):
+        raise ValueError("query manifest contains a different split")
+    return value
 
 
 def build_source_slots_from_corpus(

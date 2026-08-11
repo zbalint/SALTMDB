@@ -14,13 +14,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 VALID_GRADES = {0, 1, 2}
-JUDGES = ("claude", "cadet_gemini_flash", "codex")
+# The baseline protocol is deliberately Luna-only.  These are stable domain role IDs rather
+# than provider/model names: a packet may be executed by any approved Luna worker, while the
+# role identity remains auditable and cannot silently regress to the legacy judge set.
+JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
+ARBITRATOR = "agent_eval_adjudicator"
 
 
 def artifact_fingerprint(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def verify_artifact_fingerprint(value: object, *, field: str = "fingerprint") -> None:
+    """Reject an artifact whose signed content no longer matches its stored fingerprint."""
+    if not isinstance(value, dict) or not isinstance(value.get(field), str):
+        raise ValueError(f"artifact lacks {field}")
+    unsigned = dict(value)
+    stored = unsigned.pop(field)
+    if stored != artifact_fingerprint(unsigned):
+        raise ValueError(f"artifact {field} mismatch")
 
 
 def _seed(base_seed: int, split: str, judge: str, query_id: str) -> int:
@@ -39,13 +53,22 @@ def build_judge_packets(
     query_by_id = {q["id"]: q for q in queries}
     if len(query_by_id) != len(queries):
         raise ValueError("duplicate query IDs")
+    pools = matrix.get("pools")
+    if not isinstance(pools, dict) or set(pools) != set(query_by_id):
+        raise ValueError("matrix pools must cover exactly the supplied queries")
     tasks, mapping = [], {}
-    for task_index, (query_id, candidates) in enumerate(matrix["pools"].items(), start=1):
+    for task_index, (query_id, candidates) in enumerate(pools.items(), start=1):
         query = query_by_id[query_id]
+        if query.get("split") is not None and query["split"] != split:
+            raise ValueError("query split does not match packet split")
+        if not isinstance(candidates, dict) or not candidates:
+            raise ValueError(f"query {query_id!r} has no pooled candidates")
         rendered_candidates = [
             (candidate_id, {"title": item.get("title") or "", "snippet": item.get("snippet") or ""})
             for candidate_id, item in candidates.items()
         ]
+        if len({candidate_id for candidate_id, _ in rendered_candidates}) != len(rendered_candidates):
+            raise ValueError(f"query {query_id!r} has duplicate candidate IDs")
         random.Random(_seed(base_seed, split, judge, query_id)).shuffle(rendered_candidates)
         task_id = f"task-{task_index:04d}"
         rendered = [
@@ -78,18 +101,31 @@ def build_judge_packets(
         "split": split,
         "tasks": mapping,
         "queries_fingerprint": artifact_fingerprint(queries),
-        "matrix_pools_fingerprint": artifact_fingerprint(matrix.get("pools", {})),
+        "matrix_pools_fingerprint": artifact_fingerprint(pools),
     }
     packet["fingerprint"] = artifact_fingerprint(packet)
+    private["packet_fingerprint"] = packet["fingerprint"]
+    private["coverage_fingerprint"] = artifact_fingerprint(
+        sorted((task_id, sorted(item["candidate_ids"])) for task_id, item in mapping.items())
+    )
     private["fingerprint"] = artifact_fingerprint(private)
     return packet, private
 
 
 def validate_labels(response: dict, private_mapping: dict, judge: str) -> list[dict]:
     """Validate a complete judge response and normalize it for merge_judgments."""
+    verify_artifact_fingerprint(private_mapping)
+    if private_mapping.get("split") not in {"dev", "blind"}:
+        raise ValueError("private mapping has invalid split")
+    if private_mapping.get("judge") not in JUDGES:
+        raise ValueError("private mapping is not for a configured Luna judge")
+    if "shard" in private_mapping or private_mapping.get("is_shard"):
+        raise ValueError("sharded judge mappings are not accepted")
     if judge != private_mapping.get("judge"):
         raise ValueError("judge does not match private mapping")
     expected = private_mapping["tasks"]
+    if not isinstance(expected, dict) or not expected:
+        raise ValueError("private mapping has no complete task coverage")
     seen: set[tuple[str, str]] = set()
     normalized = []
     for label in response.get("labels", []):
@@ -157,6 +193,8 @@ def ingest_labels(response_path: Path, mapping_path: Path, out_path: Path, judge
         "schema_version": 1,
         "judge": judge,
         "mapping_fingerprint": mapping.get("fingerprint"),
+        "coverage_fingerprint": mapping.get("coverage_fingerprint"),
+        "label_count": len(normalized),
         "labels": normalized,
     }
     artifact["fingerprint"] = artifact_fingerprint(artifact)

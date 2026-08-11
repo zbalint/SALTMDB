@@ -1,6 +1,6 @@
 """Merges 3 judges' raw per-(query,candidate) grades into final labels, per plan §4/§0b items
-11-12/17 (`scratch/plans/precision_first_search_evaluation.md`). Pure computation -- no CADET/
-codex/DB dependency -- so it's fully unit-testable against synthetic judge output now, before any
+11-12/17 (`scratch/plans/precision_first_search_evaluation.md`). Pure computation -- no external
+provider/DB dependency -- so it's fully unit-testable against synthetic judge output now, before any
 real judging batch is dispatched. `judge_pool.py` (prompt construction + response parsing for
 each judge) feeds this module's `merge_query_judgments` its raw grades once real judging runs.
 
@@ -25,7 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-JUDGES = ("claude", "cadet_gemini_flash", "codex")
+JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
+ARBITRATOR = "agent_eval_adjudicator"
 VALID_GRADES = {0, 1, 2}
 
 
@@ -35,11 +36,20 @@ def artifact_fingerprint(value: object) -> str:
     ).hexdigest()
 
 
+def verify_artifact_fingerprint(value: object, *, field: str = "fingerprint") -> None:
+    if not isinstance(value, dict) or not isinstance(value.get(field), str):
+        raise ValueError(f"artifact lacks {field}")
+    unsigned = dict(value)
+    stored = unsigned.pop(field)
+    if stored != artifact_fingerprint(unsigned):
+        raise ValueError(f"artifact {field} mismatch")
+
+
 @dataclass
 class RawJudgment:
     """One judge's grade for one (query, candidate) pooled item."""
 
-    judge: str  # "claude" | "cadet_gemini_flash" | "codex"
+    judge: str  # one of the three agent_eval_judge_* Luna roles
     query_id: str
     candidate_id: str
     grade: int  # 0, 1, or 2
@@ -83,13 +93,24 @@ def merge_query_judgments(
     candidate_id, computes the median + escalation trigger for each. source_entity_ids is that
     query's predeclared ground truth (empty/None for LLM-paraphrase-only positive queries and all
     negative queries) -- used only for the ground-truth-conflict escalation trigger."""
+    if not raw_judgments:
+        return []
+    query_ids = {item.query_id for item in raw_judgments}
+    if len(query_ids) != 1:
+        raise ValueError("merge_query_judgments accepts one query at a time")
     by_candidate: dict[str, dict[str, int]] = {}
     for rj in raw_judgments:
-        by_candidate.setdefault(rj.candidate_id, {})[rj.judge] = rj.grade
+        if rj.judge not in JUDGES or rj.grade not in VALID_GRADES:
+            raise ValueError("unknown judge role or invalid grade")
+        if rj.judge in by_candidate.setdefault(rj.candidate_id, {}):
+            raise ValueError("duplicate judge judgment")
+        by_candidate[rj.candidate_id][rj.judge] = rj.grade
 
     source_set = set(source_entity_ids or [])
     results = []
     for candidate_id, judge_grades in by_candidate.items():
+        if set(judge_grades) != set(JUDGES):
+            raise ValueError("candidate lacks complete three-way Luna coverage")
         grades = list(judge_grades.values())
         median = _median_int(grades)
         full_disagreement = len(set(grades)) == 3
@@ -130,12 +151,15 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:
     """Accept exactly three complete, non-overlapping judge artifacts."""
     by_judge: dict[str, list[dict]] = {}
     for artifact in label_artifacts:
+        verify_artifact_fingerprint(artifact)
         judge = artifact.get("judge")
         if judge not in JUDGES or judge in by_judge:
             raise ValueError("need one raw-label artifact for each configured judge")
         labels = artifact.get("labels")
         if not isinstance(labels, list):
             raise ValueError("raw-label artifact lacks labels")
+        if artifact.get("label_count") != len(labels):
+            raise ValueError("raw-label artifact label_count mismatch")
         by_judge[judge] = labels
     if set(by_judge) != set(JUDGES):
         raise ValueError("need exactly the three configured judge label sets")
@@ -161,10 +185,24 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:
     return result
 
 
-def merge_all_judgments(queries: list[dict], label_artifacts: list[dict]) -> list[MergedJudgment]:
+def merge_all_judgments(
+    queries: list[dict], label_artifacts: list[dict], matrix: dict | None = None
+) -> list[MergedJudgment]:
     """Merge only after complete three-way coverage is proven for every pooled item."""
     query_sources = {q["id"]: q.get("source_entity_ids", []) for q in queries}
     raw = _raw_from_artifacts(label_artifacts)
+    if matrix is not None:
+        pools = matrix.get("pools")
+        if not isinstance(pools, dict) or set(pools) != set(query_sources):
+            raise ValueError("matrix pools do not cover exactly the supplied queries")
+        expected_pairs = {
+            (query_id, candidate_id)
+            for query_id, candidates in pools.items()
+            for candidate_id in candidates
+        }
+        actual_pairs = {(item.query_id, item.candidate_id) for item in raw}
+        if actual_pairs != expected_pairs:
+            raise ValueError("raw labels are incomplete or sharded relative to the matrix pool")
     grouped: dict[str, list[RawJudgment]] = {}
     for item in raw:
         if item.query_id not in query_sources:
@@ -203,12 +241,14 @@ def build_arbitration_packet(
                 "reason": item.escalation_reason,
             }
         )
-    packet = {"schema_version": 1, "tasks": tasks}
+    packet = {"schema_version": 1, "adjudicator": ARBITRATOR, "tasks": tasks}
     packet["fingerprint"] = artifact_fingerprint(packet)
     return packet
 
 
 def apply_arbitration_results(merged: list[MergedJudgment], response: dict) -> list[MergedJudgment]:
+    if response.get("adjudicator") not in {None, ARBITRATOR}:
+        raise ValueError("arbitration response has an invalid Luna adjudicator")
     by_task = {f"arbitration:{m.query_id}:{m.candidate_id}": m for m in merged if m.escalated}
     submitted = response.get("labels", [])
     if len(submitted) != len(by_task):
@@ -264,11 +304,25 @@ def merged_artifact(
     ]
     result = {
         "schema_version": 1,
+        "judges": list(JUDGES),
+        "adjudicator": ARBITRATOR,
         "labels": labels,
         "raw_labels_fingerprint": artifact_fingerprint(raw_artifacts),
         "calibration": calibration_accuracy(merged, source_map),
         "agreement": agreements,
-        "escalation": {"count": sum(item.escalated for item in merged), "total": len(merged)},
+        "escalation": {
+            "count": sum(item.escalated for item in merged),
+            "total": len(merged),
+            "rate": (sum(item.escalated for item in merged) / len(merged)) if merged else None,
+            "median_grade_counts": {
+                str(grade): sum(item.median_grade == grade for item in merged)
+                for grade in sorted(VALID_GRADES)
+            },
+            "final_grade_counts": {
+                str(grade): sum(item.final_grade == grade for item in merged)
+                for grade in sorted(VALID_GRADES)
+            },
+        },
     }
     result["fingerprint"] = artifact_fingerprint(result)
     return result
@@ -294,8 +348,9 @@ def main() -> None:
         query_value.get("queries", query_value) if isinstance(query_value, dict) else query_value
     )
     raw_artifacts = [json.loads(path.read_text()) for path in args.labels]
-    merged = merge_all_judgments(queries, raw_artifacts)
-    packet = build_arbitration_packet(merged, queries, json.loads(args.matrix.read_text()))
+    matrix = json.loads(args.matrix.read_text())
+    merged = merge_all_judgments(queries, raw_artifacts, matrix)
+    packet = build_arbitration_packet(merged, queries, matrix)
     if packet["tasks"] and not args.arbitration_response:
         if not args.arbitration_packet:
             raise RuntimeError(
@@ -314,10 +369,6 @@ def main() -> None:
     temp = args.out.with_suffix(args.out.suffix + ".tmp")
     temp.write_text(json.dumps(artifact, indent=2, ensure_ascii=False))
     temp.replace(args.out)
-
-
-if __name__ == "__main__":
-    main()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -408,3 +459,7 @@ def calibration_accuracy(
         "n": total,
         "accuracy": (correct / total) if total else float("nan"),
     }
+
+
+if __name__ == "__main__":
+    main()
