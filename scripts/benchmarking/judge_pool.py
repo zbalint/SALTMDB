@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from analyze_evaluation_matrix import validate_frozen_shortlist  # noqa: E402
 
 VALID_GRADES = {0, 1, 2}
 # The baseline protocol is deliberately Luna-only.  These are stable domain role IDs rather
@@ -35,6 +36,13 @@ def verify_artifact_fingerprint(value: object, *, field: str = "fingerprint") ->
     stored = unsigned.pop(field)
     if stored != artifact_fingerprint(unsigned):
         raise ValueError(f"artifact {field} mismatch")
+
+
+def require_frozen_dev_shortlist(path: Path | None) -> None:
+    """Refuse blind packets until the signed development shortlist is available."""
+    if path is None or not path.exists():
+        raise RuntimeError("blind packets require a signed --dev-shortlist")
+    validate_frozen_shortlist(json.loads(path.read_text()))
 
 
 def _seed(base_seed: int, split: str, judge: str, query_id: str) -> int:
@@ -220,6 +228,11 @@ def main() -> None:
     )
     packet.add_argument("--judge", choices=JUDGES, required=True)
     packet.add_argument("--split", choices=("dev", "blind"), required=True)
+    packet.add_argument(
+        "--dev-shortlist",
+        type=Path,
+        help="Signed development shortlist, required for blind packet generation.",
+    )
     packet.add_argument("--seed", type=int, default=0)
     ingest = actions.add_parser("ingest")
     ingest.add_argument("--response", type=Path, required=True)
@@ -228,6 +241,8 @@ def main() -> None:
     ingest.add_argument("--judge", choices=JUDGES, required=True)
     args = parser.parse_args()
     if args.action == "packets":
+        if args.split == "blind":
+            require_frozen_dev_shortlist(args.dev_shortlist)
         write_packets(
             args.queries,
             args.matrix,

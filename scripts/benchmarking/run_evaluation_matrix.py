@@ -25,6 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 from eval_configs import _build_evaluation_configs  # noqa: E402
+from analyze_evaluation_matrix import validate_frozen_shortlist  # noqa: E402
 
 from saltmdb.config import get_db_path  # noqa: E402
 from saltmdb.db.connection import close_connection, get_connection  # noqa: E402
@@ -123,6 +124,13 @@ def _atomic_json_write(path: Path, value: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True))
     temporary.replace(path)
+
+
+def require_frozen_dev_shortlist(path: Path | None) -> None:
+    """Enforce the development/blind boundary before a blind matrix can be executed."""
+    if path is None or not path.exists():
+        raise RuntimeError("blind matrix requires a signed --dev-shortlist")
+    validate_frozen_shortlist(json.loads(path.read_text()))
 
 
 def _refuse_unsafe_db_path(db_path: str) -> None:
@@ -335,12 +343,24 @@ def main():
     parser.add_argument("--checkpoint-every", type=int, default=10)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--dev-shortlist",
+        type=Path,
+        help="Signed development shortlist, required when --queries is the blind manifest.",
+    )
+    parser.add_argument(
         "--config-name",
         action="append",
         dest="config_names",
         help="Run only named configuration(s); diagnostic-only, never a final matrix artifact.",
     )
     args = parser.parse_args()
+
+    # The signed manifest's query rows are the authority for the split.  Check the wrapper
+    # before opening the corpus or constructing any blind query execution state.
+    raw_queries = json.loads(Path(args.queries).read_text())
+    manifest_queries = raw_queries.get("queries") if isinstance(raw_queries, dict) else None
+    if isinstance(manifest_queries, list) and any(q.get("split") == "blind" for q in manifest_queries):
+        require_frozen_dev_shortlist(args.dev_shortlist)
 
     _refuse_unsafe_db_path(args.db_path)
     os.environ["SALTMDB_RERANKER_MODEL"] = RERANKER_MODEL  # §0b item 5

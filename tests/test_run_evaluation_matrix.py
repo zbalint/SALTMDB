@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
@@ -208,6 +209,37 @@ class TestRunMatrixForQueries(unittest.TestCase):
         self.assertEqual(result["config_rankings"], {})
         self.assertEqual(result["pools"], {})
 
+    def test_non_list_search_result_is_recorded_as_a_structured_matrix_error(self):
+        """A service-level error object must never reach item[\"id\"] dereferencing.
+
+        This is the regression for the initial system-Python matrix attempt, where a missing
+        sqlite_vec dependency made ``search_memory`` return a dict and the runner crashed with
+        ``KeyError('id')`` before it could persist a diagnostic checkpoint.
+        """
+        config = next(
+            c
+            for c in eval_configs._build_evaluation_configs()
+            if c["name"] == eval_configs.CURRENT_DEFAULT_CONFIG_NAME
+        )
+        query = {
+            "id": "q-non-list",
+            "query": "distributed cache invalidation",
+            "source_entity_ids": [],
+            "category": "exact_title",
+        }
+        with patch.object(rem, "search_memory", return_value={"unexpected": "service shape"}):
+            result = rem.run_matrix_for_queries(
+                self.conn, self.db_path, [query], [config], progress_every=0
+            )
+
+        self.assertEqual(
+            result["config_rankings"][query["id"]][config["name"]], []
+        )
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["query_id"], query["id"])
+        self.assertEqual(result["errors"][0]["config_name"], config["name"])
+        self.assertIn("unexpected result type", result["errors"][0]["error"])
+
     def test_resume_does_not_repeat_completed_query(self):
         config = next(
             c
@@ -267,6 +299,14 @@ class TestRunMatrixForQueries(unittest.TestCase):
                     "pools": {},
                 },
             )
+
+    def test_blind_matrix_gate_rejects_missing_or_invalid_shortlist(self):
+        with self.assertRaisesRegex(RuntimeError, "signed --dev-shortlist"):
+            rem.require_frozen_dev_shortlist(None)
+        invalid = Path(self.temp_dir) / "invalid-shortlist.json"
+        invalid.write_text("{}")
+        with self.assertRaises(ValueError):
+            rem.require_frozen_dev_shortlist(invalid)
 
 
 if __name__ == "__main__":

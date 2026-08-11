@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +75,15 @@ class TestJudgePool(unittest.TestCase):
                 private,
                 "agent_eval_judge_a",
             )
+
+    def test_blind_packet_gate_rejects_missing_or_invalid_shortlist(self):
+        with self.assertRaisesRegex(RuntimeError, "signed --dev-shortlist"):
+            jp.require_frozen_dev_shortlist(None)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid = Path(temp_dir) / "invalid-shortlist.json"
+            invalid.write_text(json.dumps({}))
+            with self.assertRaises(ValueError):
+                jp.require_frozen_dev_shortlist(invalid)
 
 
 if __name__ == "__main__":
