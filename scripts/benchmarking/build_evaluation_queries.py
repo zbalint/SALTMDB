@@ -68,6 +68,42 @@ POSITIVE_CATEGORIES = (
     "typo_partial",
 )
 
+# The pre-registered corpus quotas are expressed per split.  Short/long/typo are
+# generation variants (kept in ``subtype`` where needed), not independent quota
+# rows; the seven categories below are the complete scoring strata.
+EVALUATION_CATEGORY_TARGETS = {
+    "dev": {
+        "exact_title": 60,
+        "paraphrase": 60,
+        "durable_decision": 40,
+        "current_vs_superseded": 25,
+        "closely_related_incident": 25,
+        "multilingual": 60,
+        "body_text": 30,
+        "pure_gibberish": 20,
+        "partial_real_word_nonsense": 20,
+        "nl_off_topic": 20,
+        "false_premise": 20,
+        "fictional_unanswerable": 10,
+        "vocabulary_overlap_mismatch": 10,
+    },
+    "blind": {
+        "exact_title": 120,
+        "paraphrase": 120,
+        "durable_decision": 80,
+        "current_vs_superseded": 50,
+        "closely_related_incident": 50,
+        "multilingual": 120,
+        "body_text": 60,
+        "pure_gibberish": 40,
+        "partial_real_word_nonsense": 40,
+        "nl_off_topic": 40,
+        "false_premise": 40,
+        "fictional_unanswerable": 20,
+        "vocabulary_overlap_mismatch": 20,
+    },
+}
+
 
 def artifact_fingerprint(value: object) -> str:
     """Stable content fingerprint for every cross-stage JSON artifact."""
@@ -172,16 +208,80 @@ def validate_queries(
         raise ValueError(f"required categories missing: {sorted(missing)}")
 
 
+def _exact_family_subset(families: list[tuple[str, int]], target: int) -> set[str]:
+    """Return a deterministic family subset whose slot count equals ``target``."""
+    reachable: dict[int, tuple[int, str | None]] = {0: (-1, None)}
+    for family, count in families:
+        for total in sorted(tuple(reachable), reverse=True):
+            candidate = total + count
+            if candidate > target or candidate in reachable:
+                continue
+            reachable[candidate] = (total, family)
+    if target not in reachable:
+        raise ValueError("family sizes cannot satisfy exact category quota")
+    selected: set[str] = set()
+    total = target
+    while total:
+        previous, family = reachable[total]
+        if family is None:
+            raise ValueError("invalid family subset reconstruction")
+        selected.add(family)
+        total = previous
+    return selected
+
+
 def assign_slots(
-    slots: list[dict], dev_target: int, blind_target: int, seed: int = 0
+    slots: list[dict],
+    dev_target: int,
+    blind_target: int,
+    seed: int = 0,
+    category_targets: dict[str, dict[str, int]] | None = None,
 ) -> list[dict]:
     validate_slots(slots)
     families: dict[str, list[dict]] = {}
     for slot in slots:
         families.setdefault(slot["topic_family_id"], []).append(slot)
-    # Lock at least one source family for every category on each side before filling capacity.
-    # This is essential for adversarial-negative coverage: a pure greedy cardinality split can
-    # otherwise put an entire required negative subtype into blind only.
+    if category_targets is None and (dev_target, blind_target) == (400, 800):
+        category_targets = EVALUATION_CATEGORY_TARGETS
+    if category_targets is not None:
+        expected_splits = {"dev", "blind"}
+        if set(category_targets) != expected_splits:
+            raise ValueError("category targets must define exactly dev and blind")
+        if sum(category_targets["dev"].values()) != dev_target or sum(
+            category_targets["blind"].values()
+        ) != blind_target:
+            raise ValueError("category quotas do not match split totals")
+        family_categories = {
+            family: {member["category"] for member in members}
+            for family, members in families.items()
+        }
+        if any(len(categories) != 1 for categories in family_categories.values()):
+            raise ValueError("exact category quotas require one category per topic family")
+        assigned: dict[str, str] = {}
+        for category in sorted(category_targets["dev"]):
+            candidates = sorted(
+                (
+                    (family, len(families[family]))
+                    for family, categories in family_categories.items()
+                    if categories == {category}
+                ),
+                key=lambda item: item[0],
+            )
+            selected = _exact_family_subset(candidates, category_targets["dev"][category])
+            for family, _ in candidates:
+                assigned[family] = "dev" if family in selected else "blind"
+        if set(assigned) != set(families):
+            raise ValueError("slots contain a category absent from the quota declaration")
+        counts = {split: {} for split in ("dev", "blind")}
+        for family, split in assigned.items():
+            category = next(iter(family_categories[family]))
+            counts[split][category] = counts[split].get(category, 0) + len(families[family])
+        if counts != category_targets:
+            raise ValueError(f"assigned category counts {counts} do not match quotas")
+        return [{**slot, "split": assigned[slot["topic_family_id"]]} for slot in slots]
+
+    # Without a declared quota, retain the generic family-safe cardinality split used by
+    # small harness fixtures and exploratory callers.
     assigned: dict[str, str] = {}
     used = {"dev": 0, "blind": 0}
     for category in sorted({slot["category"] for slot in slots}):
@@ -395,58 +495,191 @@ def build_source_slots_from_corpus(
             }
         )
 
-    # Relation slices receive priority; their categories are concrete retrieval-risk coverage.
-    used = set()
-    for source, target, predicate in relation_rows:
-        if len(slots) >= min(positive_total, 80):
-            break
-        chosen = target if predicate == "supersedes" else source
-        if chosen in used:
-            continue
-        row = by_id[chosen]
-        category = (
-            "current_vs_superseded" if predicate == "supersedes" else "closely_related_incident"
+    if (positive_total, negative_total) == (900, 300):
+        # The full run has fixed category quotas.  Build each category as whole source families
+        # first, then assign those families with the exact quota-aware splitter below.  Relation
+        # rows are repeated only as deterministic query-variant slots (never as new sources).
+        current_rows = [
+            (source, target, predicate)
+            for source, target, predicate in relation_rows
+            if predicate == "supersedes"
+            and source != target
+            and by_id[source][3] in {"fact", "event", "decision"}
+        ]
+        related_rows = [
+            (source, target, predicate)
+            for source, target, predicate in relation_rows
+            if predicate != "supersedes" and by_id[source][3] == "fact"
+        ]
+        if not current_rows or not related_rows:
+            raise ValueError("frozen corpus lacks relation rows for registered quotas")
+
+        def add_relation_variants(
+            rows_for_category, category: str, target_count: int, *, choose_target: bool = False
+        ) -> set[str]:
+            source_ids: set[str] = set()
+            unique_rows = []
+            seen_ids: set[str] = set()
+            for source, target, predicate in rows_for_category:
+                chosen = target if choose_target else source
+                if chosen in seen_ids:
+                    continue
+                seen_ids.add(chosen)
+                unique_rows.append((source, target, predicate, chosen))
+            if len(unique_rows) < 30 and category == "current_vs_superseded":
+                raise ValueError("frozen corpus lacks 30 independent current-guidance families")
+            if category == "current_vs_superseded":
+                unique_rows = unique_rows[:30]
+                family_counts = [3] * 15 + [2] * 15
+                row_schedule = [
+                    row for row, count in zip(unique_rows, family_counts) for _ in range(count)
+                ]
+            else:
+                row_schedule = unique_rows[:target_count]
+            if len(row_schedule) < target_count:
+                raise ValueError("frozen corpus lacks enough related-incident families")
+            for source, target, predicate, chosen in row_schedule[:target_count]:
+                row = by_id[chosen]
+                source_ids.add(chosen)
+                add_slot(
+                    category=category,
+                    subtype=predicate,
+                    source_id=chosen,
+                    title=row[1],
+                    content=row[2],
+                    family=f"entity:{chosen}",
+                    instruction="Write a precise natural-language search query that distinguishes this memory from closely related context.",
+                )
+            return source_ids
+
+        relation_source_ids = add_relation_variants(
+            current_rows, "current_vs_superseded", 75
         )
-        add_slot(
-            category=category,
-            subtype=predicate,
-            source_id=chosen,
-            title=row[1],
-            content=row[2],
-            family=f"cluster:{target}",
-            instruction="Write a precise natural-language search query that distinguishes this memory from closely related context.",
+        related_rows = [
+            row for row in related_rows
+            if row[0] not in relation_source_ids
+        ]
+        if not related_rows:
+            raise ValueError("frozen corpus lacks independent related-incident families")
+        relation_source_ids |= add_relation_variants(
+            related_rows, "closely_related_incident", 75
         )
-        used.add(chosen)
-    for row in ordinary:
-        if len(slots) >= positive_total:
-            break
-        entity_id, title, content, memory_type = row
-        category = POSITIVE_CATEGORIES[len(slots) % len(POSITIVE_CATEGORIES)]
-        language = "French" if category == "multilingual" and len(slots) % 2 else "English"
-        instruction = {
-            "exact_title": "Write a concise exact-fact lookup query.",
-            "paraphrase": "Write a paraphrased conceptual search query; do not copy the title.",
-            "body_text": "Write a query whose answer is supported by the body rather than title words.",
-            "short_natural_language": "Write a short natural-language search query.",
-            "long_natural_language": "Write a detailed natural-language search query with a necessary distinction.",
-            "multilingual": "Write a natural search query in the requested target language.",
-            "typo_partial": "Write a realistic partial-term or supported-typo search query.",
-        }[category]
-        add_slot(
-            category=category,
-            subtype=memory_type or "fact",
-            source_id=entity_id,
-            title=title,
-            content=content,
-            family=f"entity:{entity_id}",
-            instruction=instruction,
-            language=language,
+
+        durable_rows = [
+            row
+            for row in rows
+            if row[3] in {"decision", "event", "procedure"}
+            and row[0] not in relation_source_ids
+        ]
+        if len(durable_rows) < 60:
+            raise ValueError("frozen corpus lacks 60 durable source families")
+        for row_index, row in enumerate(durable_rows[:60]):
+            variants = 3 if row_index < 30 else 1
+            for _ in range(variants):
+                entity_id, title, content, memory_type = row
+                add_slot(
+                    category="durable_decision",
+                    subtype=memory_type or "fact",
+                    source_id=entity_id,
+                    title=title,
+                    content=content,
+                    family=f"entity:{entity_id}",
+                    instruction="Write a precise query about the documented decision, procedure, or fix.",
+                )
+
+        ordinary_full = [
+            row for row in rows if row[0] not in relation_source_ids and row[0] not in {
+                item[0] for item in durable_rows[:60]
+            }
+        ]
+        category_plan = (
+            ("exact_title", 180, "Write a concise exact-fact lookup query.", "English"),
+            ("paraphrase", 180, "Write a paraphrased conceptual search query; do not copy the title.", "English"),
+            ("multilingual", 180, "Write a natural search query in the requested target language.", "French"),
+            ("body_text", 90, "Write a query whose answer is supported by the body rather than title words.", "English"),
         )
+        cursor = 0
+        for category, count, instruction, language in category_plan:
+            for row in ordinary_full[cursor : cursor + count]:
+                entity_id, title, content, memory_type = row
+                add_slot(
+                    category=category,
+                    subtype=memory_type or "fact",
+                    source_id=entity_id,
+                    title=title,
+                    content=content,
+                    family=f"entity:{entity_id}",
+                    instruction=instruction,
+                    language=language,
+                )
+            cursor += count
+        if cursor != 630 or len(slots) != 900:
+            raise ValueError("could not satisfy full positive category quotas")
+    else:
+        # Small fixtures and exploratory callers retain the historical compact selector.
+        used = set()
+        for source, target, predicate in relation_rows:
+            if len(slots) >= min(positive_total, 80):
+                break
+            chosen = target if predicate == "supersedes" else source
+            if chosen in used:
+                continue
+            row = by_id[chosen]
+            category = (
+                "current_vs_superseded" if predicate == "supersedes" else "closely_related_incident"
+            )
+            add_slot(
+                category=category,
+                subtype=predicate,
+                source_id=chosen,
+                title=row[1],
+                content=row[2],
+                family=f"cluster:{target}",
+                instruction="Write a precise natural-language search query that distinguishes this memory from closely related context.",
+            )
+            used.add(chosen)
+        for row in ordinary:
+            if len(slots) >= positive_total:
+                break
+            entity_id, title, content, memory_type = row
+            category = POSITIVE_CATEGORIES[len(slots) % len(POSITIVE_CATEGORIES)]
+            language = "French" if category == "multilingual" and len(slots) % 2 else "English"
+            instruction = {
+                "exact_title": "Write a concise exact-fact lookup query.",
+                "paraphrase": "Write a paraphrased conceptual search query; do not copy the title.",
+                "body_text": "Write a query whose answer is supported by the body rather than title words.",
+                "short_natural_language": "Write a short natural-language search query.",
+                "long_natural_language": "Write a detailed natural-language search query with a necessary distinction.",
+                "multilingual": "Write a natural search query in the requested target language.",
+                "typo_partial": "Write a realistic partial-term or supported-typo search query.",
+            }[category]
+            add_slot(
+                category=category,
+                subtype=memory_type or "fact",
+                source_id=entity_id,
+                title=title,
+                content=content,
+                family=f"entity:{entity_id}",
+                instruction=instruction,
+                language=language,
+            )
     if len(slots) != positive_total:
         raise ValueError("could not satisfy positive source-slot count")
-    for index in range(negative_total):
+    negative_plan = (
+        ("pure_gibberish", 60),
+        ("partial_real_word_nonsense", 60),
+        ("nl_off_topic", 60),
+        ("false_premise", 60),
+        ("fictional_unanswerable", 30),
+        ("vocabulary_overlap_mismatch", 30),
+    )
+    negative_categories = (
+        [category for category, count in negative_plan for _ in range(count)]
+        if negative_total == 300
+        else [NEGATIVE_CATEGORIES[index % len(NEGATIVE_CATEGORIES)] for index in range(negative_total)]
+    )
+    for index, category in enumerate(negative_categories):
         number = len(slots) + 1
-        category = NEGATIVE_CATEGORIES[index % len(NEGATIVE_CATEGORIES)]
         slots.append(
             {
                 "slot_id": f"slot-{number:04d}",
@@ -473,6 +706,7 @@ def deterministic_local_generation(slots: list[dict]) -> list[dict]:
     queries cannot be mistaken for independent LLM paraphrases in the final decision record.
     """
     results = []
+    seen_queries: set[str] = set()
     for index, slot in enumerate(slots):
         title = slot["source_text"].split("\n", 1)[0].removeprefix("Title: ").strip()
         category = slot["category"]
@@ -480,6 +714,8 @@ def deterministic_local_generation(slots: list[dict]) -> list[dict]:
             query = title
         elif category == "paraphrase":
             query = f"What does the record about {title} explain?"
+        elif category == "durable_decision":
+            query = f"What documented decision, procedure, or fix concerns {title}?"
         elif category == "body_text":
             body = slot["source_text"].split("\n\n", 1)[-1].split(".", 1)[0].strip()
             query = f"Which memory explains: {body[:180]}?"
@@ -507,6 +743,9 @@ def deterministic_local_generation(slots: list[dict]) -> list[dict]:
             query = templates.get(category, title)
             if category in NEGATIVE_CATEGORIES:
                 query = f"{query} [{index + 1}]"
+        if query.casefold() in seen_queries:
+            query = f"{query} [variant-{index + 1}]"
+        seen_queries.add(query.casefold())
         results.append({"slot_id": slot["slot_id"], "query": query, "lang": slot["lang"]})
     return results
 

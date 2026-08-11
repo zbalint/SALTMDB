@@ -29,6 +29,24 @@ def _slot(number, family=None):
     }
 
 
+def _quota_slots():
+    slots = []
+    number = 1
+    for split in ("dev", "blind"):
+        for category, count in beq.EVALUATION_CATEGORY_TARGETS[split].items():
+            # Use one family per slot so this fixture isolates quota accounting from
+            # source-selection details; multi-slot-family reconstruction is tested below.
+            for _ in range(count):
+                item = _slot(number, family=f"{category}:{number}")
+                item["category"] = category
+                if category in beq.NEGATIVE_CATEGORIES:
+                    item["source_text"] = ""
+                    item["source_entity_ids"] = []
+                slots.append(item)
+                number += 1
+    return slots
+
+
 class TestBuildEvaluationQueries(unittest.TestCase):
     def test_canonical_slot_rejects_provenance_extra_field(self):
         slot = _slot(1)
@@ -79,6 +97,25 @@ class TestBuildEvaluationQueries(unittest.TestCase):
         self.assertEqual(len(slots), 10)
         self.assertEqual(sum(item["category"] in beq.NEGATIVE_CATEGORIES for item in slots), 6)
         self.assertTrue(any(item["topic_family_id"].startswith("cluster:") for item in slots))
+
+    def test_full_quota_assignment_is_exact_and_family_safe(self):
+        assigned = beq.assign_slots(_quota_slots(), 400, 800)
+        counts = {split: {} for split in ("dev", "blind")}
+        families = {}
+        for slot in assigned:
+            family = slot["topic_family_id"]
+            previous = families.setdefault(family, slot["split"])
+            self.assertEqual(previous, slot["split"])
+            category = slot["category"]
+            counts[slot["split"]][category] = counts[slot["split"]].get(category, 0) + 1
+        self.assertEqual(counts, beq.EVALUATION_CATEGORY_TARGETS)
+
+    def test_quota_assignment_rejects_mixed_category_family(self):
+        first = _slot(1, family="mixed")
+        second = _slot(2, family="mixed")
+        second["category"] = "paraphrase"
+        with self.assertRaises(ValueError):
+            beq.assign_slots([first, second], 1, 1, category_targets={"dev": {"exact_title": 1}, "blind": {"exact_title": 1}})
 
 
 if __name__ == "__main__":
