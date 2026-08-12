@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "benchm
 
 import bakeoff_state as bs  # noqa: E402
 import build_query_slots as bqs  # noqa: E402
-from build_evaluation_queries import assign_slots, materialize_queries  # noqa: E402
+from build_evaluation_queries import assign_slots, load_manifest, materialize_queries  # noqa: E402
 
 
 # ---------------------------------------------------------------------------------------------
@@ -529,3 +529,55 @@ def test_deterministic_local_generation_dedups_identical_text_with_variant_suffi
     assert texts[0] == "Repeated line."
     assert texts[1] == "Repeated line. [variant-2]"
     assert texts[0].casefold() != texts[1].casefold()
+
+
+# ---------------------------------------------------------------------------------------------
+# 9. --dev-out CLI provenance regression (the Gate D StaleArtifactError fix)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_dev_out_cli_produces_signed_provenance_not_legacy_unbound(tmp_path, monkeypatch):
+    """``build_query_slots.py --dev-out`` must emit a real signed provenance envelope.
+
+    Regression test for the bug where ``main()`` called ``write_manifest`` without
+    ``commit_fingerprint``/``random_seed``/``config_fingerprint``/``judge_version_fingerprint``,
+    so every produced dev manifest silently fell back to ``{"status": "legacy_unbound", "stale":
+    True}`` and was unconditionally rejected by
+    ``build_evaluation_queries.load_manifest(..., require_provenance=True)`` --
+    ``run_retrieval_bakeoff.py``'s hardcoded consumer call.
+    """
+    export_path, manifest_path = _synthetic_corpus(tmp_path)
+    slots_out = tmp_path / "source_slots.json"
+    assignments_out = tmp_path / "query_slot_assignments.json"
+    dev_out = tmp_path / "queries_dev.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_query_slots.py",
+            "--export",
+            str(export_path),
+            "--manifest",
+            str(manifest_path),
+            "--slots-out",
+            str(slots_out),
+            "--assignments-out",
+            str(assignments_out),
+            "--dev-out",
+            str(dev_out),
+        ],
+    )
+    bqs.main()
+
+    manifest = json.loads(dev_out.read_text())
+    provenance = manifest["provenance"]
+    assert provenance.get("status") != "legacy_unbound"
+    assert provenance["schema_version"] == 1
+    assert provenance["random_seed"] == bqs.DEV_MANIFEST_RANDOM_SEED
+    assert provenance["config_fingerprint"] == bqs.GENERATION_PROMPT_HASH
+
+    # The real consumer path (run_retrieval_bakeoff.py:313) must accept this manifest.
+    loaded = load_manifest(dev_out, expected_split="dev", require_provenance=True)
+    assert loaded["provenance"]["schema_version"] == 1
+    assert len(loaded["queries"]) == 400

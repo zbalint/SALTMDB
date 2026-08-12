@@ -75,6 +75,8 @@ from build_evaluation_queries import (  # noqa: E402
     validate_slots,
     write_manifest,
 )
+from evaluation_artifacts import git_commit_fingerprint  # noqa: E402
+from judge_pool import judge_version_fingerprint  # noqa: E402
 from query_generation import (  # noqa: E402
     generate_gibberish_query,
     generate_partial_word_nonsense_query,
@@ -146,6 +148,16 @@ GENERATION_PROMPT = json.dumps(
     {"version": GENERATION_PROMPT_VERSION, "facets": FACET_INSTRUCTIONS}, sort_keys=True
 )
 GENERATION_PROMPT_HASH = hashlib.sha256(GENERATION_PROMPT.encode()).hexdigest()
+
+# Pre-declared, arbitrary-but-fixed seed identity for the ``--dev-out`` provenance envelope's
+# ``random_seed`` field.  This module performs no actual randomized sampling (slot/family
+# assignment here is fully deterministic: sorted iteration + greedy pairing), so the value does
+# not drive any RNG -- it is a declared identity for the "slot assignment" axis of a run, matched
+# deliberately to ``build_bakeoff_spec.DEFAULT_SEEDS["split"]`` (also ``7``), whose own docstring
+# describes ``split`` as seeding "any residual randomized-but-deterministic slot/family assignment
+# step" -- exactly the conceptual axis this module governs.  Reusing the same constant is a
+# deliberate, documented choice, not a coincidence.
+DEV_MANIFEST_RANDOM_SEED = 7
 
 _STOPWORDS = frozenset(
     {
@@ -663,6 +675,10 @@ def main() -> None:
             slot_fingerprint=artifact_fingerprint(dev_slots),
             targets={"dev": 400, "blind": 0},
             required_categories=set(MANDATORY_FACETS),
+            commit_fingerprint=git_commit_fingerprint(),
+            random_seed=DEV_MANIFEST_RANDOM_SEED,
+            config_fingerprint=GENERATION_PROMPT_HASH,
+            judge_version_fingerprint=judge_version_fingerprint(),
         )
 
 
