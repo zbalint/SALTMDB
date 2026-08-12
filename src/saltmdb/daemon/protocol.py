@@ -37,6 +37,7 @@ READ_TOOLS = frozenset(
         "get_canonical_predicates",
         "inspect_graph",
         "get_events",
+        "export_corpus_snapshot",
     }
 )
 

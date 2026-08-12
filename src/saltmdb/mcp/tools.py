@@ -826,6 +826,42 @@ def get_events(
 
 
 @mcp.tool()
+def export_corpus_snapshot(
+    owner_id: str,
+    page_size: int = None,
+    cursor: str = None,
+    snapshot_hash: str = None,
+    include_archived: bool = None,
+    **kwargs,
+) -> dict:
+    """Exports authoritative entity pages for an immutable evaluation corpus snapshot.
+
+    The first call omits cursor/snapshot_hash.  Subsequent calls pass both values returned by the
+    previous page; a changed production corpus or schema fails closed instead of mixing pages.
+    The service owns the SQLite read transaction and benchmark callers must not query SQL.
+    """
+    kw = _unwrap_kwargs(kwargs)
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    if not isinstance(owner_id_, str) or not owner_id_:
+        raise ValueError("owner_id is mandatory for corpus snapshot export")
+    page_size_ = _resolve(page_size, kw, kwargs, "page_size", "limit")
+    cursor_ = _resolve(cursor, kw, kwargs, "cursor", "after_id")
+    snapshot_hash_ = _resolve(snapshot_hash, kw, kwargs, "snapshot_hash", "snapshot_id")
+    include_archived_ = _resolve(include_archived, kw, kwargs, "include_archived", "include_archived_entities")
+    include_archived_ = include_archived_ if include_archived_ is not None else False
+    return _backend_or_raise().call(
+        "export_corpus_snapshot",
+        {
+            "owner_id": owner_id_,
+            "page_size": page_size_,
+            "cursor": cursor_,
+            "snapshot_hash": snapshot_hash_,
+            "include_archived": include_archived_,
+        },
+    )
+
+
+@mcp.tool()
 def dismiss_event(
     event_id: str | list[str] | None = None,
     reason: str | None = None,

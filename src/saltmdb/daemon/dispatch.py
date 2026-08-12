@@ -17,6 +17,7 @@ persistent DB, so it was never in scope for this boundary to begin with).
 """
 
 from saltmdb.domain.services import (
+    corpus_snapshot_service,
     event_service,
     librarian_service,
     memory_service,
@@ -292,6 +293,17 @@ def _dispatch_get_events(**kw):
         )
 
 
+def _dispatch_export_corpus_snapshot(**kw):
+    """Export one read-only, provenance-bound authoritative corpus page."""
+    return corpus_snapshot_service.export_corpus_snapshot_page(
+        owner_id=_required_str(kw, "owner_id"),
+        page_size=_optional_int(kw, "page_size", corpus_snapshot_service.DEFAULT_PAGE_SIZE),
+        cursor=kw.get("cursor"),
+        snapshot_hash=kw.get("snapshot_hash"),
+        include_archived=_optional_bool(kw, "include_archived", False),
+    )
+
+
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
@@ -311,6 +323,7 @@ DISPATCH_TABLE = {
     "commit_consolidation": _dispatch_commit_consolidation,
     "inspect_graph": _dispatch_inspect_graph,
     "get_events": _dispatch_get_events,
+    "export_corpus_snapshot": _dispatch_export_corpus_snapshot,
 }
 
 # Tool calls that can mutate persistent state.  The daemon server calls these

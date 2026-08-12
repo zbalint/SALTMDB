@@ -1211,8 +1211,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            13,
-            f"MCP server tool count must be exactly 13, got {registered_count}",
+            14,
+            f"MCP server tool count must be exactly 14, got {registered_count}",
         )
 
 
