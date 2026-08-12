@@ -484,7 +484,51 @@ def validate_blind_unlock(
     return value
 
 
-def validate_promotion_decision(artifact: object, spec: Mapping[str, Any]) -> dict[str, Any]:
+def build_blind_manifest_receipt(
+    spec: Mapping[str, Any],
+    winner: Mapping[str, Any],
+    unlock: Mapping[str, Any],
+    file_hash: str,
+    *,
+    custodian: str = MAIN_CUSTODIAN,
+) -> dict[str, Any]:
+    """Bind post-unlock blind query bytes to the frozen winner and generation prompt."""
+    validate_blind_unlock(unlock, spec, winner)
+    if custodian != MAIN_CUSTODIAN:
+        raise BlindAccessError("only the main custodian may sign a blind manifest receipt")
+    _require_hash(file_hash, "blind manifest file hash")
+    return sign_artifact(
+        "BlindQueryManifestReceipt",
+        {
+            "run_id": spec["run_id"],
+            "spec_fingerprint": spec["artifact_fingerprint"],
+            "development_winner_fingerprint": winner["artifact_fingerprint"],
+            "blind_unlock_fingerprint": unlock["artifact_fingerprint"],
+            "query_prompt_hash": spec["query_prompt_hash"],
+            "file_sha256": file_hash,
+            "custodian": custodian,
+        },
+    )
+
+
+def validate_blind_manifest_receipt(
+    receipt: object,
+    spec: Mapping[str, Any],
+    winner: Mapping[str, Any],
+    unlock: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = validate_signed_artifact(receipt, kind="BlindQueryManifestReceipt")
+    expected = build_blind_manifest_receipt(
+        spec, winner, unlock, value.get("file_sha256", ""), custodian=MAIN_CUSTODIAN
+    )
+    if value != expected:
+        raise BlindAccessError("blind manifest receipt does not match the frozen experiment")
+    return value
+
+
+def validate_promotion_decision(  # noqa: C901, PLR0912
+    artifact: object, spec: Mapping[str, Any]
+) -> dict[str, Any]:
     value = validate_signed_artifact(artifact, kind="PromotionDecision")
     _require_exact_keys(
         value,
@@ -523,6 +567,8 @@ def validate_promotion_decision(artifact: object, spec: Mapping[str, Any]) -> di
         for item in deltas.values()
     ):
         raise BakeoffContractError("accuracy deltas must be finite")
+    if not -1.0 <= float(deltas["ndcg_at_10"]) <= 1.0:
+        raise BakeoffContractError("NDCG delta must be within [-1, 1]")
     intervals = value["confidence_intervals"]
     ndcg_ci = intervals.get("ndcg_delta_ci95") if isinstance(intervals, dict) else None
     if (
@@ -540,6 +586,15 @@ def validate_promotion_decision(artifact: object, spec: Mapping[str, Any]) -> di
     ) if isinstance(holm, list) else None
     if comparison is None or not isinstance(comparison.get("adjusted_p"), (int, float)):
         raise BakeoffContractError("Holm results lack the same-specific-fact comparison")
+    adjusted_p = float(comparison["adjusted_p"])
+    if not math.isfinite(adjusted_p) or not 0.0 <= adjusted_p <= 1.0:
+        raise BakeoffContractError("Holm adjusted p-value must be finite and within [0, 1]")
+    declared_comparisons = set(spec["holm_comparison_family"])
+    observed_comparisons = {
+        item.get("comparison") for item in holm if isinstance(item, dict)
+    }
+    if observed_comparisons != declared_comparisons:
+        raise BakeoffContractError("Holm results do not cover the predeclared comparison family")
     safety = value["safety_deltas"]
     if not isinstance(safety, dict) or set(safety) != {"exact", "keyword", "strict_negative"}:
         raise BakeoffContractError("safety deltas are incomplete")
@@ -556,7 +611,7 @@ def validate_promotion_decision(artifact: object, spec: Mapping[str, Any]) -> di
         float(ndcg_ci[0]) > 0.0
         and float(deltas["grade2_recall_at_20"]) >= 0.03
         and float(deltas["same_specific_fact_grade2_top1"]) > 0.0
-        and float(comparison["adjusted_p"]) < 0.05
+        and adjusted_p < 0.05
         and all(float(item) <= 0.01 for item in safety.values())
         and not failures
         and value["blind_metrics"]["benchmark_failures"] == 0
@@ -593,6 +648,26 @@ class BakeoffStateMachine:
     def checkpoint_path(self) -> Path:
         return self.run_dir / "state_checkpoint.json"
 
+    @property
+    def spec_path(self) -> Path:
+        return self.run_dir / "bakeoff_spec.json"
+
+    @property
+    def history_dir(self) -> Path:
+        return self.run_dir / "checkpoint_history"
+
+    @property
+    def evidence_dir(self) -> Path:
+        return self.run_dir / "evidence"
+
+    def _write_checkpoint(self, checkpoint: Mapping[str, Any]) -> None:
+        sequence = len(list(self.history_dir.glob("*.json")))
+        history_path = self.history_dir / f"{sequence:03d}-{checkpoint['state']}.json"
+        if history_path.exists():
+            raise BakeoffContractError("checkpoint history collision")
+        _atomic_write_json(history_path, checkpoint)
+        _atomic_write_json(self.checkpoint_path, checkpoint)
+
     def initialize(self, spec: Mapping[str, Any]) -> dict[str, Any]:
         validate_bakeoff_spec(spec)
         if self.checkpoint_path.exists():
@@ -608,7 +683,8 @@ class BakeoffStateMachine:
                 "terminal": False,
             },
         )
-        _atomic_write_json(self.checkpoint_path, checkpoint)
+        _atomic_write_json(self.spec_path, spec)
+        self._write_checkpoint(checkpoint)
         return checkpoint
 
     def load(self) -> dict[str, Any]:
@@ -616,7 +692,61 @@ class BakeoffStateMachine:
             raise BakeoffContractError("run checkpoint does not exist")
         value = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
         validate_signed_artifact(value, kind="BakeoffCheckpoint")
+        history = sorted(self.history_dir.glob("*.json"))
+        if not history:
+            raise BakeoffContractError("checkpoint history is missing")
+        latest = json.loads(history[-1].read_text(encoding="utf-8"))
+        validate_signed_artifact(latest, kind="BakeoffCheckpoint")
+        if latest["artifact_fingerprint"] != value["artifact_fingerprint"]:
+            raise BakeoffContractError("current checkpoint diverges from immutable history")
+        previous = None
+        for path in history:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            validate_signed_artifact(receipt, kind="BakeoffCheckpoint")
+            if receipt.get("previous_checkpoint_fingerprint") != previous:
+                raise BakeoffContractError("checkpoint history chain is broken")
+            previous = receipt["artifact_fingerprint"]
         return value
+
+    def _validate_transition_artifact(  # noqa: C901, PLR0912
+        self,
+        target: RunState,
+        artifact: Mapping[str, Any],
+        spec: Mapping[str, Any],
+        evidence: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        if artifact.get("run_id") != spec["run_id"] or artifact.get(
+            "spec_fingerprint"
+        ) != spec["artifact_fingerprint"]:
+            raise BakeoffContractError("transition evidence is bound to a different run/spec")
+        if target is RunState.DEV_INDEXED:
+            if artifact.get("coverage_complete") is not True or artifact.get("failures") != []:
+                raise BakeoffContractError("development index receipt is incomplete")
+        elif target is RunState.DEV_RETRIEVED:
+            if artifact.get("complete_query_count") != 400 or artifact.get("failures") != []:
+                raise BakeoffContractError("development retrieval bundle is incomplete")
+        elif target is RunState.DEV_JUDGED:
+            if artifact.get("judge_artifact_count") != 3 or artifact.get(
+                "unresolved_disagreements"
+            ) != 0:
+                raise BakeoffContractError("development judgments are incomplete")
+        elif target is RunState.DEV_WINNER_SIGNED:
+            validate_development_winner(artifact, spec)
+        elif target is RunState.BLIND_UNLOCKED:
+            winner_artifact = next(
+                (item for item in evidence.values() if item.get("kind") == "DevelopmentWinner"),
+                None,
+            )
+            if winner_artifact is None:
+                raise BakeoffContractError("blind unlock transition requires its development winner")
+            validate_blind_unlock(artifact, spec, winner_artifact)
+        elif target is RunState.BLIND_COMPLETE:
+            if artifact.get("complete_query_count") != 800 or artifact.get(
+                "configuration_mutated_after_first_result"
+            ) is not False:
+                raise BakeoffContractError("blind evaluation is incomplete or mutated")
+        elif target in {RunState.PROMOTED, RunState.RETAINED}:
+            validate_promotion_decision(artifact, spec)
 
     def transition(
         self,
@@ -626,6 +756,8 @@ class BakeoffStateMachine:
         expected_spec_fingerprint: str,
     ) -> dict[str, Any]:
         current = self.load()
+        spec = json.loads(self.spec_path.read_text(encoding="utf-8"))
+        validate_bakeoff_spec(spec)
         if current.get("terminal") is True:
             raise BakeoffContractError("terminal runs cannot be restarted under the same run ID")
         if current.get("spec_fingerprint") != expected_spec_fingerprint:
@@ -646,6 +778,8 @@ class BakeoffStateMachine:
             raise BakeoffContractError(
                 f"transition to {target.value} requires {required_kind} evidence"
             )
+        required_artifact = next(item for item in evidence.values() if item["kind"] == required_kind)
+        self._validate_transition_artifact(target, required_artifact, spec, evidence)
         if target in {RunState.PROMOTED, RunState.RETAINED}:
             decision = next(item for item in evidence.values() if item["kind"] == required_kind)
             expected_promotion = target is RunState.PROMOTED
@@ -662,7 +796,11 @@ class BakeoffStateMachine:
                 "terminal": target in {RunState.PROMOTED, RunState.RETAINED},
             },
         )
-        _atomic_write_json(self.checkpoint_path, checkpoint)
+        for artifact in evidence.values():
+            evidence_path = self.evidence_dir / f"{artifact['artifact_fingerprint']}.json"
+            if not evidence_path.exists():
+                _atomic_write_json(evidence_path, artifact)
+        self._write_checkpoint(checkpoint)
         return checkpoint
 
 
@@ -719,13 +857,14 @@ def authorize_blind_file(
     spec_path: Path,
     winner_path: Path,
     unlock_path: Path,
+    manifest_receipt_path: Path,
     *,
     custodian: str = MAIN_CUSTODIAN,
-) -> None:
+) -> bytes:
     """Validate authorization before a caller opens a private blind artifact.
 
-    The authorization artifacts are intentionally separate from the blind file.  This function
-    never reads ``blind_path``; callers invoke it immediately before their own first read.
+    The authorization artifacts are separate from the blind file.  After validating them, this
+    function performs the only target read, verifies its frozen hash, and returns those bytes.
     """
     if custodian != MAIN_CUSTODIAN:
         raise BlindAccessError("only the main custodian may authorize blind file access")
@@ -737,3 +876,9 @@ def authorize_blind_file(
     winner = json.loads(winner_path.read_text(encoding="utf-8"))
     unlock = json.loads(unlock_path.read_text(encoding="utf-8"))
     validate_blind_unlock(unlock, spec, winner)
+    receipt = json.loads(manifest_receipt_path.read_text(encoding="utf-8"))
+    validate_blind_manifest_receipt(receipt, spec, winner, unlock)
+    payload = blind_path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != receipt["file_sha256"]:
+        raise BlindAccessError("blind artifact bytes do not match the frozen manifest hash")
+    return payload

@@ -53,8 +53,10 @@ def _hash(value: object) -> str:
     ).hexdigest()
 
 
-def _load_queries(path: Path) -> list[dict]:
-    value = json.loads(path.read_text())
+def _load_queries(path: Path, authorized_bytes: bytes | None = None) -> list[dict]:
+    value = json.loads(
+        authorized_bytes.decode("utf-8") if authorized_bytes is not None else path.read_text()
+    )
     return value.get("queries", []) if isinstance(value, dict) else value
 
 
@@ -596,28 +598,32 @@ def main() -> None:
     parser.add_argument("--bakeoff-spec", type=Path)
     parser.add_argument("--development-winner", type=Path)
     parser.add_argument("--blind-unlock", type=Path)
+    parser.add_argument("--blind-manifest-receipt", type=Path)
     parser.add_argument("--resamples", type=int, default=10000)
     args = parser.parse_args()
     if args.split == "blind" and (not args.dev_contenders or not args.dev_contenders.exists()):
         raise RuntimeError("blind analysis requires frozen --dev-contenders")
+    authorized_query_bytes = None
     if args.split == "blind":
         authorization_paths = (
             args.blind_vault_dir,
             args.bakeoff_spec,
             args.development_winner,
             args.blind_unlock,
+            args.blind_manifest_receipt,
         )
         if any(path is None for path in authorization_paths):
             raise RuntimeError("blind analysis requires vault and matching BlindUnlock paths")
-        authorize_blind_file(
+        authorized_query_bytes = authorize_blind_file(
             args.queries,
             args.blind_vault_dir,
             args.bakeoff_spec,
             args.development_winner,
             args.blind_unlock,
+            args.blind_manifest_receipt,
         )
     analysis = analyze(
-        _load_queries(args.queries),
+        _load_queries(args.queries, authorized_query_bytes),
         json.loads(args.matrix.read_text()),
         json.loads(args.labels.read_text()),
         args.resamples,

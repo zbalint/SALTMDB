@@ -17,6 +17,7 @@ from bakeoff_state import (  # noqa: E402
     RunState,
     authorize_blind_file,
     build_blind_unlock,
+    build_blind_manifest_receipt,
     fingerprint,
     sign_artifact,
     validate_bakeoff_spec,
@@ -92,6 +93,33 @@ def winner(frozen_spec):
             "development_metrics": metrics(),
             "upstream_fingerprints": {"retrieval": _hash("retrieval")},
             "development_query_ids": [f"dev-{index:03d}" for index in range(400)],
+        },
+    )
+
+
+def retained_decision(frozen_spec):
+    return sign_artifact(
+        "PromotionDecision",
+        {
+            "run_id": frozen_spec["run_id"],
+            "spec_fingerprint": frozen_spec["artifact_fingerprint"],
+            "blind_metrics": metrics(),
+            "accuracy_deltas": {
+                "ndcg_at_10": 0.0,
+                "grade2_recall_at_20": 0.0,
+                "same_specific_fact_grade2_top1": 0.0,
+            },
+            "confidence_intervals": {"ndcg_delta_ci95": [-0.1, 0.1]},
+            "holm_results": [
+                {
+                    "comparison": "winner_vs_baseline_same_specific_fact",
+                    "adjusted_p": 1.0,
+                }
+            ],
+            "safety_deltas": {"exact": 0.0, "keyword": 0.0, "strict_negative": 0.0},
+            "failures": [],
+            "latency": {"candidate_warm_p95_seconds": 0.5},
+            "promotion": False,
         },
     )
 
@@ -179,7 +207,10 @@ def test_state_machine_is_atomic_sequential_and_terminal(tmp_path):
     machine = BakeoffStateMachine(tmp_path / "run")
     checkpoint = machine.initialize(frozen)
     assert checkpoint["state"] == "SPEC_FROZEN"
-    evidence = sign_artifact("IndexBuildReceipt", {"coverage": 1.0})
+    common = {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]}
+    evidence = sign_artifact(
+        "IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []}
+    )
     next_checkpoint = machine.transition(
         RunState.DEV_INDEXED,
         {"indexes": evidence},
@@ -195,23 +226,43 @@ def test_state_machine_is_atomic_sequential_and_terminal(tmp_path):
             expected_spec_fingerprint=frozen["artifact_fingerprint"],
         )
 
-    evidence_kinds = {
-        RunState.DEV_RETRIEVED: "RetrievalRunBundle",
-        RunState.DEV_JUDGED: "DevelopmentJudgments",
-        RunState.DEV_WINNER_SIGNED: "DevelopmentWinner",
-        RunState.BLIND_UNLOCKED: "BlindUnlock",
-        RunState.BLIND_COMPLETE: "BlindEvaluation",
-        RunState.RETAINED: "PromotionDecision",
+    selected = winner(frozen)
+    evidence_by_state = {
+        RunState.DEV_RETRIEVED: {
+            "evidence": sign_artifact(
+                "RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []}
+            )
+        },
+        RunState.DEV_JUDGED: {
+            "evidence": sign_artifact(
+                "DevelopmentJudgments",
+                {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0},
+            )
+        },
+        RunState.DEV_WINNER_SIGNED: {"evidence": selected},
+        RunState.BLIND_UNLOCKED: {
+            "unlock": build_blind_unlock(frozen, selected),
+            "winner": selected,
+        },
+        RunState.BLIND_COMPLETE: {
+            "evidence": sign_artifact(
+                "BlindEvaluation",
+                {
+                    **common,
+                    "complete_query_count": 800,
+                    "configuration_mutated_after_first_result": False,
+                },
+            )
+        },
+        RunState.RETAINED: {"evidence": retained_decision(frozen)},
     }
-    for state, kind in evidence_kinds.items():
-        payload = {"state": state.value}
-        if state is RunState.RETAINED:
-            payload["promotion"] = False
+    for state, state_evidence in evidence_by_state.items():
         machine.transition(
             state,
-            {"evidence": sign_artifact(kind, payload)},
+            state_evidence,
             expected_spec_fingerprint=frozen["artifact_fingerprint"],
         )
+    assert len(list(machine.history_dir.glob("*.json"))) == 8
     with pytest.raises(BakeoffContractError, match="terminal"):
         machine.transition(
             RunState.PROMOTED,
@@ -304,9 +355,81 @@ def test_blind_file_authorization_checks_unlock_before_opening_target(tmp_path):
     spec_path = tmp_path / "spec.json"
     winner_path = tmp_path / "winner.json"
     unlock_path = tmp_path / "unlock.json"
+    receipt_path = tmp_path / "manifest-receipt.json"
     spec_path.write_text(json.dumps(frozen))
     winner_path.write_text(json.dumps(selected))
     unlock_path.write_text(json.dumps(unlock))
-    authorize_blind_file(target, vault, spec_path, winner_path, unlock_path)
+    expected_hash = __import__("hashlib").sha256(target.read_bytes()).hexdigest()
+    receipt_path.write_text(
+        json.dumps(build_blind_manifest_receipt(frozen, selected, unlock, expected_hash))
+    )
+    assert authorize_blind_file(
+        target,
+        vault,
+        spec_path,
+        winner_path,
+        unlock_path,
+        receipt_path,
+    ) == b"blind material"
     with pytest.raises(BlindAccessError):
-        authorize_blind_file(tmp_path / "public.json", vault, spec_path, winner_path, unlock_path)
+        authorize_blind_file(
+            tmp_path / "public.json",
+            vault,
+            spec_path,
+            winner_path,
+            unlock_path,
+            receipt_path,
+        )
+    target.write_text("tampered")
+    with pytest.raises(BlindAccessError, match="bytes"):
+        authorize_blind_file(
+            target,
+            vault,
+            spec_path,
+            winner_path,
+            unlock_path,
+            receipt_path,
+        )
+
+
+def test_promotion_decision_rejects_impossible_delta_and_nonfinite_holm():
+    frozen = spec()
+    decision = retained_decision(frozen)
+    impossible = sign_artifact(
+        "PromotionDecision",
+        {**decision, "accuracy_deltas": {**decision["accuracy_deltas"], "ndcg_at_10": -999}},
+    )
+    from bakeoff_state import validate_promotion_decision
+
+    with pytest.raises(BakeoffContractError, match="NDCG delta"):
+        validate_promotion_decision(impossible, frozen)
+    nonfinite = sign_artifact(
+        "PromotionDecision",
+        {
+            **decision,
+            "holm_results": [
+                {
+                    "comparison": "winner_vs_baseline_same_specific_fact",
+                    "adjusted_p": float("nan"),
+                }
+            ],
+        },
+    )
+    with pytest.raises(BakeoffContractError, match="p-value"):
+        validate_promotion_decision(nonfinite, frozen)
+
+
+def test_state_transition_rejects_structurally_empty_receipt(tmp_path):
+    frozen = spec()
+    machine = BakeoffStateMachine(tmp_path / "run")
+    machine.initialize(frozen)
+    empty = sign_artifact(
+        "IndexBuildReceipt",
+        {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]},
+    )
+    with pytest.raises(BakeoffContractError, match="incomplete"):
+        machine.transition(
+            RunState.DEV_INDEXED,
+            {"receipt": empty},
+            expected_spec_fingerprint=frozen["artifact_fingerprint"],
+        )

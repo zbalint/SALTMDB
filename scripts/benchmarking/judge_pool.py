@@ -453,8 +453,15 @@ def write_packets(
     judge: str,
     split: str,
     base_seed: int = 0,
+    authorized_query_bytes: bytes | None = None,
 ) -> None:
-    queries = json.loads(queries_path.read_text())
+    if split == "blind" and authorized_query_bytes is None:
+        raise RuntimeError("direct blind packet generation requires authorized query bytes")
+    queries = json.loads(
+        authorized_query_bytes.decode("utf-8")
+        if authorized_query_bytes is not None
+        else queries_path.read_text()
+    )
     if isinstance(queries, dict):
         queries = queries["queries"]
     packet, private = build_judge_packets(
@@ -523,6 +530,7 @@ def main() -> None:
     packet.add_argument("--bakeoff-spec", type=Path)
     packet.add_argument("--development-winner", type=Path)
     packet.add_argument("--blind-unlock", type=Path)
+    packet.add_argument("--blind-manifest-receipt", type=Path)
     packet.add_argument("--seed", type=int, default=0)
     ingest = actions.add_parser("ingest")
     ingest.add_argument("--response", type=Path, required=True)
@@ -531,6 +539,7 @@ def main() -> None:
     ingest.add_argument("--judge", choices=JUDGES, required=True)
     args = parser.parse_args()
     if args.action == "packets":
+        authorized_query_bytes = None
         if args.split == "blind":
             require_frozen_dev_shortlist(args.dev_shortlist)
             authorization_paths = (
@@ -538,15 +547,17 @@ def main() -> None:
                 args.bakeoff_spec,
                 args.development_winner,
                 args.blind_unlock,
+                args.blind_manifest_receipt,
             )
             if any(path is None for path in authorization_paths):
                 raise RuntimeError("blind packets require vault and matching BlindUnlock paths")
-            authorize_blind_file(
+            authorized_query_bytes = authorize_blind_file(
                 args.queries,
                 args.blind_vault_dir,
                 args.bakeoff_spec,
                 args.development_winner,
                 args.blind_unlock,
+                args.blind_manifest_receipt,
             )
         write_packets(
             args.queries,
@@ -556,6 +567,7 @@ def main() -> None:
             args.judge,
             args.split,
             args.seed,
+            authorized_query_bytes,
         )
     else:
         ingest_labels(args.response, args.mapping, args.out, args.judge)

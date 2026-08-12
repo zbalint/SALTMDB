@@ -176,8 +176,12 @@ def summarize_cross_encoder_execution(result: dict, configs: list[dict]) -> dict
     return summary
 
 
-def _load_signed_queries(path: Path, *, expected_split: str | None = None) -> tuple[list[dict], str]:
-    value = json.loads(path.read_text())
+def _load_signed_queries(
+    path: Path, *, expected_split: str | None = None, authorized_bytes: bytes | None = None
+) -> tuple[list[dict], str]:
+    value = json.loads(
+        authorized_bytes.decode("utf-8") if authorized_bytes is not None else path.read_text()
+    )
     if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
         raise ValueError("matrix input must be a signed query manifest")
     # build_evaluation_queries writes manifest_fingerprint; accepting only that signed wrapper
@@ -222,20 +226,33 @@ def authorize_query_manifest(
     bakeoff_spec: Path | None = None,
     development_winner: Path | None = None,
     blind_unlock: Path | None = None,
-) -> None:
-    """Authorize a query manifest without opening it; development is unrestricted."""
+    blind_manifest_receipt: Path | None = None,
+) -> bytes | None:
+    """Authorize and read a blind manifest once; development remains caller-loaded."""
     if split != "blind":
-        return
+        return None
     require_frozen_dev_shortlist(dev_shortlist)
-    authorization_paths = (blind_vault_dir, bakeoff_spec, development_winner, blind_unlock)
+    authorization_paths = (
+        blind_vault_dir,
+        bakeoff_spec,
+        development_winner,
+        blind_unlock,
+        blind_manifest_receipt,
+    )
     if any(path is None for path in authorization_paths):
         raise RuntimeError(
             "blind matrix requires --blind-vault-dir, --bakeoff-spec, "
-            "--development-winner, and --blind-unlock"
+            "--development-winner, --blind-unlock, and --blind-manifest-receipt"
         )
     assert blind_vault_dir and bakeoff_spec and development_winner and blind_unlock
-    authorize_blind_file(
-        query_path, blind_vault_dir, bakeoff_spec, development_winner, blind_unlock
+    assert blind_manifest_receipt
+    return authorize_blind_file(
+        query_path,
+        blind_vault_dir,
+        bakeoff_spec,
+        development_winner,
+        blind_unlock,
+        blind_manifest_receipt,
     )
 
 
@@ -510,7 +527,7 @@ def main():  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db-path", required=True, help="Throwaway copy of the frozen corpus.")
     parser.add_argument("--queries", required=True, help="Path to a queries_{dev,blind}.json file.")
-    parser.add_argument("--split", choices=("dev", "blind"), required=True)
+    parser.add_argument("--split", choices=("dev", "blind"), default="dev")
     parser.add_argument("--out", required=True, help="Output path for the matrix run JSON.")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument(
@@ -539,6 +556,7 @@ def main():  # noqa: PLR0915
     parser.add_argument("--bakeoff-spec", type=Path)
     parser.add_argument("--development-winner", type=Path)
     parser.add_argument("--blind-unlock", type=Path)
+    parser.add_argument("--blind-manifest-receipt", type=Path)
     parser.add_argument(
         "--config-name",
         action="append",
@@ -548,7 +566,7 @@ def main():  # noqa: PLR0915
     args = parser.parse_args()
 
     # Blind authorization is validated before the first read of the blind query manifest.
-    authorize_query_manifest(
+    authorized_query_bytes = authorize_query_manifest(
         Path(args.queries),
         args.split,
         dev_shortlist=args.dev_shortlist,
@@ -556,13 +574,16 @@ def main():  # noqa: PLR0915
         bakeoff_spec=args.bakeoff_spec,
         development_winner=args.development_winner,
         blind_unlock=args.blind_unlock,
+        blind_manifest_receipt=args.blind_manifest_receipt,
     )
 
     _refuse_unsafe_db_path(args.db_path)
     os.environ["SALTMDB_RERANKER_MODEL"] = RERANKER_MODEL  # §0b item 5
 
     queries, queries_manifest_fingerprint = _load_signed_queries(
-        Path(args.queries), expected_split=args.split
+        Path(args.queries),
+        expected_split=args.split,
+        authorized_bytes=authorized_query_bytes,
     )
 
     configs = _build_evaluation_configs()

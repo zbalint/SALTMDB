@@ -85,6 +85,19 @@ class TestJudgePool(unittest.TestCase):
             with self.assertRaises(ValueError):
                 jp.require_frozen_dev_shortlist(invalid)
 
+    def test_direct_blind_write_requires_authorized_query_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "authorized query bytes"):
+                jp.write_packets(
+                    root / "queries_blind.json",
+                    root / "matrix.json",
+                    root / "packets",
+                    root / "mappings",
+                    jp.JUDGES[0],
+                    "blind",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
