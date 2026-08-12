@@ -28,6 +28,7 @@ from bakeoff_state import (  # noqa: E402
 )
 from build_evaluation_queries import load_manifest  # noqa: E402
 from lexical_adapter import bm25_search, include_current_heads  # noqa: E402
+from materialize_model_locks import PINNED_MODELS  # noqa: E402
 from retrieval_adapters import (  # noqa: E402
     DenseEmbeddingAdapter,
     LateInteractionEmbeddingAdapter,
@@ -62,13 +63,32 @@ def _text_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _resolve_logical_model_id(source_repository: str) -> str:
+    """Reverse-lookup the fastembed-canonical alias for a Gate-A ``source_repository``.
+
+    ``ModelLock.source_repository`` is the literal HF onnx-mirror repo id used at download time
+    (e.g. ``"Qdrant/bge-small-en-v1.5-onnx-Q"``).  FastEmbed's ``TextEmbedding``/
+    ``LateInteractionTextEmbedding`` only accept their own canonical alias strings (e.g.
+    ``"BAAI/bge-small-en-v1.5"``) for ``model_name`` -- passing the raw download repo id fails
+    registry validation before any file I/O.  Fails closed rather than silently falling back to
+    ``source_repository`` so an unpinned model can never slip into a bakeoff run.
+    """
+    for pinned in PINNED_MODELS:
+        if pinned.source_repository == source_repository:
+            return pinned.logical_model_id
+    raise RetrievalBakeoffError(
+        f"no pinned model in the Gate-A inventory declares source_repository {source_repository!r}"
+    )
+
+
 def adapter_model_lock(artifact: Mapping[str, Any], cache_dir: Path, *, kind: str) -> ModelLock:
     """Translate the signed cross-stage ModelLock into the executable local adapter lock."""
     validated = validate_model_lock_artifact(dict(artifact))
     if kind not in {"dense", "late_interaction"}:
         raise RetrievalBakeoffError("retrieval kind must be dense or late_interaction")
+    logical_model_id = _resolve_logical_model_id(validated["source_repository"])
     spec = EmbeddingSpec(
-        model_id=validated["source_repository"],
+        model_id=logical_model_id,
         revision=validated["resolved_revision"],
         dimension=validated["dimension"],
         query_prefix=validated["query_prefix"],

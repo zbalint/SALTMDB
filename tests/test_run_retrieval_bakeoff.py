@@ -32,7 +32,7 @@ def artifacts(tmp_path):
     lock = sign_artifact(
         "ModelLock",
         {
-            "source_repository": "fake/model",
+            "source_repository": "Qdrant/bge-small-en-v1.5-onnx-Q",
             "resolved_revision": "a" * 40,
             "files": [{"path": "model.onnx", "sha256": file_hash, "size_bytes": 5}],
             "dimension": 2,
@@ -111,3 +111,36 @@ def test_corpus_export_content_hash_mismatch_fails_closed(tmp_path):
     export["entities"][0]["chunks"] = ["Changed"]
     with pytest.raises(RetrievalBakeoffError, match="chunk hash"):
         load_frozen_documents(export, manifest, "entity")
+
+
+def test_adapter_model_lock_resolves_fastembed_canonical_model_id(tmp_path):
+    """model_id must be the fastembed-canonical logical_model_id, never the raw download repo."""
+    cache, lock_artifact, _manifest, _export, _spec = artifacts(tmp_path)
+    lock = adapter_model_lock(lock_artifact, cache, kind="dense")
+    assert lock.spec.model_id == "BAAI/bge-small-en-v1.5"
+    # The raw Gate-A download repo id must never leak into the resolved spec's model_id.
+    assert lock.spec.model_id != "Qdrant/bge-small-en-v1.5-onnx-Q"
+    # tokenizer is intentionally left as the raw source_repository (unaffected by this fix).
+    assert lock.spec.tokenizer == "Qdrant/bge-small-en-v1.5-onnx-Q"
+
+
+def test_adapter_model_lock_rejects_unpinned_source_repository(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.onnx").write_bytes(b"model")
+    file_hash = hashlib.sha256(b"model").hexdigest()
+    lock_artifact = sign_artifact(
+        "ModelLock",
+        {
+            "source_repository": "nobody/not-a-pinned-model",
+            "resolved_revision": "a" * 40,
+            "files": [{"path": "model.onnx", "sha256": file_hash, "size_bytes": 5}],
+            "dimension": 2,
+            "normalization": "l2",
+            "maximum_input_tokens": 32,
+            "query_prefix": "query: ",
+            "document_prefix": "passage: ",
+        },
+    )
+    with pytest.raises(RetrievalBakeoffError, match="no pinned model"):
+        adapter_model_lock(lock_artifact, cache, kind="dense")

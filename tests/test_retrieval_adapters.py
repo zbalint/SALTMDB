@@ -151,6 +151,7 @@ def test_dense_adapter_verifies_cache_before_factory_and_renders_prefixes_once(t
         "model_name": "fake/dense",
         "cache_dir": str(tmp_path / "dense-cache"),
         "local_files_only": True,
+        "specific_model_path": str(tmp_path / "dense-cache"),
     }
     assert isinstance(backend, FakeDense)
     assert backend.documents == ["passage: first", "passage: second"]
@@ -265,6 +266,79 @@ def test_dense_adapter_accepts_explicit_none_normalization_without_mutating_vect
     assert np.array_equal(result, [2.0, 0.0, 0.0])
 
 
+def test_dense_adapter_passes_specific_model_path_equal_to_cache_path(tmp_path: Path):
+    """fastembed's hub-cache file discovery must be bypassed via specific_model_path.
+
+    Gate A's flat snapshot_download(..., local_dir=...) layout is not a hub-cache layout, so
+    cache_dir alone is not enough; specific_model_path must be forwarded and must equal the
+    ModelLock's own cache_path (as a string), never merely a directory that happens to be near it.
+    """
+    _adapter, _backend, calls = _dense_adapter(tmp_path)
+    assert calls["specific_model_path"] == str(tmp_path / "dense-cache")
+    assert calls["cache_dir"] == str(tmp_path / "dense-cache")
+
+
+def test_late_adapter_passes_specific_model_path_equal_to_cache_path(tmp_path: Path):
+    _adapter, _backend, calls = _late_adapter(tmp_path)
+    assert calls["specific_model_path"] == str(tmp_path / "late-cache")
+    assert calls["cache_dir"] == str(tmp_path / "late-cache")
+
+
+def test_fastembed_dense_factory_forwards_specific_model_path_kwarg(monkeypatch):
+    """Proves the real (not fake) factory function forwards specific_model_path to fastembed."""
+    captured: dict[str, object] = {}
+
+    class SpyTextEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    import fastembed
+
+    monkeypatch.setattr(fastembed, "TextEmbedding", SpyTextEmbedding)
+
+    from retrieval_adapters import fastembed_dense_factory
+
+    fastembed_dense_factory(
+        model_name="BAAI/bge-small-en-v1.5",
+        cache_dir="/some/cache",
+        local_files_only=True,
+        specific_model_path="/some/cache",
+    )
+    assert captured == {
+        "model_name": "BAAI/bge-small-en-v1.5",
+        "cache_dir": "/some/cache",
+        "local_files_only": True,
+        "specific_model_path": "/some/cache",
+    }
+
+
+def test_fastembed_late_interaction_factory_forwards_specific_model_path_kwarg(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class SpyLateInteractionTextEmbedding:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    import fastembed
+
+    monkeypatch.setattr(fastembed, "LateInteractionTextEmbedding", SpyLateInteractionTextEmbedding)
+
+    from retrieval_adapters import fastembed_late_interaction_factory
+
+    fastembed_late_interaction_factory(
+        model_name="answerdotai/answerai-colbert-small-v1",
+        cache_dir="/some/cache",
+        local_files_only=True,
+        specific_model_path="/some/cache",
+    )
+    assert captured == {
+        "model_name": "answerdotai/answerai-colbert-small-v1",
+        "cache_dir": "/some/cache",
+        "local_files_only": True,
+        "specific_model_path": "/some/cache",
+    }
+
+
 def test_dense_backend_factory_failure_has_no_online_fallback(tmp_path: Path):
     attempted: list[dict[str, object]] = []
 
@@ -288,6 +362,7 @@ def test_late_adapter_uses_separate_passage_backend_and_pure_maxsim(tmp_path: Pa
     assert query.shape == (2, 2)
     assert score == pytest.approx(2.0)
     assert calls["local_files_only"] is True
+    assert calls["specific_model_path"] == str(tmp_path / "late-cache")
     assert isinstance(backend, FakeLate)
     assert backend.documents == ["passage: one", "passage: two", "passage: one"]
     assert backend.queries == ["query: question", "query: question"]

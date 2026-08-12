@@ -443,9 +443,20 @@ BackendFactory = Callable[..., object]
 
 
 def fastembed_dense_factory(
-    *, model_name: str, cache_dir: str, local_files_only: bool
+    *,
+    model_name: str,
+    cache_dir: str,
+    local_files_only: bool,
+    specific_model_path: str | None = None,
 ) -> object:
-    """Lazy real FastEmbed factory; callers must still supply a verified local ModelLock."""
+    """Lazy real FastEmbed factory; callers must still supply a verified local ModelLock.
+
+    ``specific_model_path`` bypasses FastEmbed's hub-cache-layout file discovery entirely: when
+    set, ``fastembed.common.model_management.download_model`` returns that path directly instead
+    of guessing a hub-style directory layout under ``cache_dir``.  Gate A's flat
+    ``snapshot_download(..., local_dir=...)`` download does not produce that hub layout, so this
+    is the correct bypass, not merely an optional hint.
+    """
     try:
         from fastembed import TextEmbedding
     except ImportError as exc:  # pragma: no cover - dependency is declared by the project
@@ -454,13 +465,22 @@ def fastembed_dense_factory(
         model_name=model_name,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
+        specific_model_path=specific_model_path,
     )
 
 
 def fastembed_late_interaction_factory(
-    *, model_name: str, cache_dir: str, local_files_only: bool
+    *,
+    model_name: str,
+    cache_dir: str,
+    local_files_only: bool,
+    specific_model_path: str | None = None,
 ) -> object:
-    """Lazy real ColBERT factory with the same offline-only adapter boundary."""
+    """Lazy real ColBERT factory with the same offline-only adapter boundary.
+
+    See :func:`fastembed_dense_factory` for why ``specific_model_path`` is required rather than
+    optional in practice: it is the only way to point FastEmbed at a flat, non-hub-layout cache.
+    """
     try:
         from fastembed import LateInteractionTextEmbedding
     except ImportError as exc:  # pragma: no cover - dependency is declared by the project
@@ -469,6 +489,7 @@ def fastembed_late_interaction_factory(
         model_name=model_name,
         cache_dir=cache_dir,
         local_files_only=local_files_only,
+        specific_model_path=specific_model_path,
     )
 
 
@@ -478,12 +499,19 @@ def _create_local_backend(
     model_name: str,
     cache_path: Path,
 ) -> object:
-    """Instantiate an injected backend with the non-negotiable offline controls."""
+    """Instantiate an injected backend with the non-negotiable offline controls.
+
+    ``specific_model_path`` is passed alongside ``cache_dir`` so FastEmbed's real factories can
+    bypass hub-cache-layout file discovery entirely (see :func:`fastembed_dense_factory`); passing
+    both is harmless for fakes/tests and gives FastEmbed a sane fallback location if
+    ``specific_model_path`` were ever unused by some other injected factory.
+    """
     try:
         backend = factory(
             model_name=model_name,
             cache_dir=str(cache_path),
             local_files_only=True,
+            specific_model_path=str(cache_path),
         )
     except Exception as exc:
         raise BackendContractError(
