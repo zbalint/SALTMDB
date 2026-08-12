@@ -63,6 +63,26 @@ RERANK_BROAD_THEME_THRESHOLD = (
     0.5322  # topic_score >= this (and below SAME_TOPIC) -> "BROADLY_RELATED_THEMES"
 )
 
+# Stage-2 chunk candidate generation (search_memory's opt-in
+# ``use_chunk_candidates`` path).  The values are intentionally a small, explicit experiment
+# matrix: callers may choose only these windows/multipliers so benchmark fingerprints cannot
+# accidentally describe an unbounded or incomparable search.  These defaults are used only when
+# the opt-in flag is enabled; the ordinary two-channel search never changes its candidate-window
+# or pagination mechanics.
+CHUNK_CANDIDATE_OVERSAMPLING_OPTIONS = (4, 8, 12)
+CHUNK_CANDIDATE_WINDOW_OPTIONS = (20, 40, 60)
+CHUNK_CANDIDATE_DEFAULT_OVERSAMPLING = 4
+CHUNK_CANDIDATE_DEFAULT_WINDOW = 20
+CHUNK_RRF_WEIGHT_OPTIONS = (0.5, 1.0, 1.5)
+CHUNK_CANDIDATE_DEFAULT_WEIGHT = 1.0
+
+# Optional caller-supplied retrieval text.  This is deliberately a separate source from
+# ``full_content``: it is an opt-in candidate-generation aid, never authoritative memory data.
+RETRIEVAL_TEXT_MAX_CHARS = 4000
+RETRIEVAL_TEXT_RRF_WEIGHT_OPTIONS = (0.5, 1.0, 1.5)
+RETRIEVAL_TEXT_DEFAULT_FTS_WEIGHT = 1.0
+RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT = 1.0
+
 # Confidence gate on rerank_by_topic itself (search_memory's _rrf_gap_confident, see
 # memory_service.py). A structurally different axis from the two RERANK_* thresholds above: those
 # score topic *purity* via raw cosine similarity, this scores hybrid-search *confidence* via
@@ -252,10 +272,12 @@ CROSS_ENCODER_SUPPORTED_MODELS = frozenset(
         "jinaai/jina-reranker-v2-base-multilingual",
     }
 )
-CROSS_ENCODER_MAX_CANDIDATES = 10  # <= RERANK_CANDIDATE_POOL_SIZE (20); cross-encoder cost is one
+CROSS_ENCODER_CANDIDATE_CAP_OPTIONS = (10, 15, 20)
+CROSS_ENCODER_TEXT_CAP_OPTIONS = (1000, 2000)
+CROSS_ENCODER_MAX_CANDIDATES = 10  # default experiment cap; opt-in calls may use 15 or 20
 # forward pass per candidate, materially more expensive per-item than the bi-encoder's single
 # batched call
-CROSS_ENCODER_MAX_CHARS = 800  # per-candidate truncation cap before scoring; tune from benchmark
+CROSS_ENCODER_MAX_CHARS = 1000  # default candidate text cap; opt-in calls may use 2000
 # latency data if warranted, not a pre-committed final value
 CROSS_ENCODER_MAX_QUERY_CHARS = 300  # query is concatenated into EVERY pair scored -- capped
 # independently of candidate length (Codex plan-review round-1 finding)

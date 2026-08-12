@@ -513,6 +513,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         from saltmdb.domain.services.embedding_service import (
             EmbedJobScheduler,
             reconcile_embedding_jobs,
+            reconcile_retrieval_embedding_jobs,
         )
 
         state.coordinator = DbWriteCoordinator(db_path)
@@ -541,7 +542,30 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 break
             reconciled += len(page)
             after_id = page[-1]
-        logger.info("Reconciled durable embedding jobs for %d active entities.", reconciled)
+        retrieval_after_id = None
+        retrieval_reconciled = 0
+        while True:
+
+            def _reconcile_retrieval_page(c, cursor=retrieval_after_id) -> list[str]:
+                return reconcile_retrieval_embedding_jobs(c, limit=100, after_id=cursor)
+
+            page = cast(
+                list[str],
+                state.coordinator.submit(
+                    "reconcile_retrieval_embedding_jobs",
+                    _reconcile_retrieval_page,
+                    priority="background",
+                ),
+            )
+            if not page:
+                break
+            retrieval_reconciled += len(page)
+            retrieval_after_id = page[-1]
+        logger.info(
+            "Reconciled durable embedding jobs for %d active entities (%d retrieval-text rows).",
+            reconciled,
+            retrieval_reconciled,
+        )
         state.embedding_scheduler = EmbedJobScheduler(state.coordinator)
         state.embedding_scheduler.start()
     except Exception as e:

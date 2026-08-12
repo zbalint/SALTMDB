@@ -108,6 +108,10 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "quality_status TEXT",
             "quality_flags TEXT",
             "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'",
+            # Optional caller-supplied candidate-generation text.  It is intentionally nullable
+            # and hash-separated from the authoritative full_content/content_hash pair.
+            "retrieval_text TEXT",
+            "retrieval_text_hash TEXT",
         ]:
             _add_column_if_missing(conn, "entities", col)
 
@@ -194,6 +198,31 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_embedding_jobs_due "
             "ON embedding_jobs(state, next_attempt_at, lease_expires_at)"
+        )
+
+        # Retrieval-text embeddings have an independent lifecycle from authoritative entity and
+        # chunk embeddings.  Keeping a separate table means a caller can replace/clear this
+        # optional signal without changing base embedding status or jobs.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS retrieval_embedding_jobs (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN
+                ('queued', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at DATETIME,
+            lease_expires_at DATETIME,
+            last_error TEXT,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            completed_at DATETIME,
+            UNIQUE(entity_id, source_hash)
+        );
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieval_embedding_jobs_due "
+            "ON retrieval_embedding_jobs(state, next_attempt_at, lease_expires_at)"
         )
 
         # 3. Tags Table (Folksonomy with support for canonical aliases)
@@ -349,9 +378,36 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         except sqlite3.OperationalError:
             pass
 
+        # Dedicated optional retrieval-text FTS index.  It intentionally contains no
+        # authoritative title/content columns, and all writes are maintained transactionally by
+        # the triggers below.  A best-effort backfill keeps upgrades idempotent.
+        try:
+            retrieval_cols = [
+                r[1] for r in conn.execute("PRAGMA table_info(retrieval_fts)").fetchall()
+            ]
+            if not retrieval_cols or "retrieval_text" not in retrieval_cols:
+                conn.execute("DROP TABLE IF EXISTS retrieval_fts")
+                conn.execute("""
+                CREATE VIRTUAL TABLE retrieval_fts USING fts5(
+                    id UNINDEXED,
+                    retrieval_text,
+                    tokenize='porter'
+                );
+                """)
+                conn.execute("""
+                INSERT INTO retrieval_fts (id, retrieval_text)
+                SELECT id, retrieval_text FROM entities
+                WHERE status != 'archived' AND retrieval_text IS NOT NULL AND retrieval_text != '';
+                """)
+        except sqlite3.OperationalError:
+            # FTS5 is available in supported SQLite builds; preserve the existing graceful
+            # startup posture for unusual builds that omit it.
+            pass
+
         from saltmdb.db.vector_schema import (
             init_vector_schema,
             init_entity_chunk_vector_schema,
+            init_retrieval_vector_schema,
             migrate_entity_chunk_embeddings_schema,
         )
 
@@ -371,6 +427,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         try:
             init_vector_schema(conn)
             init_entity_chunk_vector_schema(conn)
+            init_retrieval_vector_schema(conn)
         except Exception as e:
             logger.warning("Vector schema init deferred/failed: %s", e)
 
@@ -406,6 +463,16 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts_unarchived")
+        conn.execute("DROP TRIGGER IF EXISTS insert_retrieval_fts")
+        conn.execute("DROP TRIGGER IF EXISTS update_retrieval_fts")
+        conn.execute("DROP TRIGGER IF EXISTS archive_retrieval_fts")
+        conn.execute("DROP TRIGGER IF EXISTS delete_retrieval_fts")
+        conn.execute("DROP TRIGGER IF EXISTS delete_retrieval_embedding_jobs")
+        # Older development revisions briefly created vec0-referencing triggers.  Remove them
+        # idempotently: ordinary daemon/read connections do not load sqlite-vec, so such triggers
+        # make even unrelated entity INSERT/UPDATE statements fail with "no such module: vec0".
+        conn.execute("DROP TRIGGER IF EXISTS archive_retrieval_embedding_vector")
+        conn.execute("DROP TRIGGER IF EXISTS delete_retrieval_embedding_vector")
 
         # Triggers to keep FTS5 and Entities in sync
         conn.execute("""
@@ -467,6 +534,59 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         END;
         """)
 
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS insert_retrieval_fts
+        AFTER INSERT ON entities
+        WHEN NEW.status != 'archived' AND NEW.retrieval_text IS NOT NULL AND NEW.retrieval_text != ''
+        BEGIN
+            INSERT INTO retrieval_fts(id, retrieval_text) VALUES (NEW.id, NEW.retrieval_text);
+        END;
+        """)
+
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS update_retrieval_fts
+        AFTER UPDATE ON entities
+        WHEN NEW.status != 'archived' AND OLD.status != 'archived'
+        BEGIN
+            DELETE FROM retrieval_fts WHERE id = OLD.id;
+            INSERT INTO retrieval_fts(id, retrieval_text)
+            SELECT NEW.id, NEW.retrieval_text
+            WHERE NEW.retrieval_text IS NOT NULL AND NEW.retrieval_text != '';
+        END;
+        """)
+
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS archive_retrieval_fts
+        AFTER UPDATE ON entities
+        WHEN NEW.status = 'archived'
+        BEGIN
+            DELETE FROM retrieval_fts WHERE id = OLD.id;
+        END;
+        """)
+
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS delete_retrieval_fts
+        AFTER DELETE ON entities
+        BEGIN
+            DELETE FROM retrieval_fts WHERE id = OLD.id;
+        END;
+        """)
+
+        # vec0 rows have no ordinary FK and are cleaned by the domain archive/delete paths.  The
+        # job trigger below has no sqlite-vec dependency, so ordinary SQLite-only installations
+        # retain lifecycle maintenance instead of failing writes when the optional extension is
+        # unavailable.
+        conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS delete_retrieval_embedding_jobs
+        AFTER DELETE ON entities
+        BEGIN
+            UPDATE retrieval_embedding_jobs
+            SET state='cancelled', updated_at=CURRENT_TIMESTAMP, completed_at=CURRENT_TIMESTAMP,
+                lease_expires_at=NULL
+            WHERE entity_id=OLD.id AND state IN ('queued','running','retry_wait');
+        END;
+        """)
+
         # Performance indexes for high-traffic filtering columns
         for index_sql in [
             "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
@@ -475,6 +595,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",

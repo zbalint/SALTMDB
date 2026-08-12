@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import copy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,6 +70,15 @@ class TestRefuseUnsafeDbPath(unittest.TestCase):
             rem._refuse_unsafe_db_path(db_path)  # must not raise
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_matrix_validation_rejects_missing_provenance_by_default(self):
+        artifact = {
+            "meta": {"queries_fingerprint": "q", "configs_fingerprint": "c"},
+            "resume_meta": {"queries_fingerprint": "q", "configs_fingerprint": "c"},
+        }
+        artifact["artifact_fingerprint"] = rem._fingerprint(artifact)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            rem.validate_matrix_artifact(artifact)
 
 
 class TestRunMatrixForQueries(unittest.TestCase):
@@ -232,9 +242,7 @@ class TestRunMatrixForQueries(unittest.TestCase):
                 self.conn, self.db_path, [query], [config], progress_every=0
             )
 
-        self.assertEqual(
-            result["config_rankings"][query["id"]][config["name"]], []
-        )
+        self.assertEqual(result["config_rankings"][query["id"]][config["name"]], [])
         self.assertEqual(len(result["errors"]), 1)
         self.assertEqual(result["errors"][0]["query_id"], query["id"])
         self.assertEqual(result["errors"][0]["config_name"], config["name"])
@@ -307,6 +315,35 @@ class TestRunMatrixForQueries(unittest.TestCase):
         invalid.write_text("{}")
         with self.assertRaises(ValueError):
             rem.require_frozen_dev_shortlist(invalid)
+
+    def test_cross_encoder_preflight_is_required_and_finite(self):
+        configs = [{"name": "ce", "use_cross_encoder": True}]
+        ready = {"ready": True, "scores": [1.0, 0.0], "diagnostics": {"finite_and_sized": True}}
+        with patch.object(
+            rem.reranker_service, "score_pairs_preflight", return_value=ready
+        ) as probe:
+            self.assertEqual(rem.preflight_cross_encoder_configs(configs), ready)
+        probe.assert_called_once()
+        with patch.object(
+            rem.reranker_service,
+            "score_pairs_preflight",
+            return_value={"ready": False, "scores": None, "diagnostics": {"reason": "malformed"}},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "preflight failed"):
+                rem.preflight_cross_encoder_configs(configs)
+
+    def test_cross_encoder_zero_execution_invalidates_experiment(self):
+        configs = [{"name": "ce", "use_cross_encoder": True}]
+        zero = {"execution_diagnostics": {"q": {"ce": {"cross_encoder": {"executed": False}}}}}
+        with self.assertRaisesRegex(RuntimeError, "zero successful executions"):
+            rem.summarize_cross_encoder_execution(zero, configs)
+        ran = copy.deepcopy(zero)
+        ran["execution_diagnostics"]["q"]["ce"]["cross_encoder"] = {
+            "executed": True,
+            "execution_count": 1,
+        }
+        summary = rem.summarize_cross_encoder_execution(ran, configs)
+        self.assertEqual(summary["execution_rate"], 1.0)
 
 
 if __name__ == "__main__":

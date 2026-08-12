@@ -17,7 +17,7 @@ import logging
 import math
 import os
 import threading
-from typing import Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ _model = None
 _model_name = None  # tracks which name _model was loaded for; a changed env var mid-process
 # (test isolation, not a real prod scenario) forces a fresh load rather than silently reusing a
 # stale singleton for the wrong model name.
+_score_diagnostics = threading.local()
 
 # The one bundled candidate (see module docstring). Layout note: unlike embedding_service.py's
 # bi-encoder bundle (a flat directory containing model_optimized.onnx directly),
@@ -142,7 +143,22 @@ def get_model(model_name: str):
     return _model
 
 
-def score_pairs(query: str, candidates: list[str]) -> list[float] | None:
+def _set_score_diagnostics(value: dict[str, Any]) -> None:
+    _score_diagnostics.value = dict(value)
+
+
+def get_last_score_diagnostics() -> dict[str, Any]:
+    """Return this worker thread's latest score-pair execution evidence."""
+    return dict(getattr(_score_diagnostics, "value", {}))
+
+
+def score_pairs(  # noqa: PLR0911
+    query: str,
+    candidates: list[str],
+    *,
+    candidate_cap: int | None = None,
+    text_cap_chars: int | None = None,
+) -> list[float] | None:
     """Returns per-candidate raw cross-encoder logits, index-aligned with `candidates`, or None
     on ANY of: disabled (no/unsupported SALTMDB_RERANKER_MODEL), empty candidates, a runner
     exception (model load failure, OOM, malformed input), or a malformed/untrustworthy model
@@ -161,25 +177,61 @@ def score_pairs(query: str, candidates: list[str]) -> list[float] | None:
     unscored at the tail; this function never silently drops caller-visible items, it just doesn't
     score all of them).
     """
-    if not candidates or not is_cross_encoder_enabled():
-        return None
-
     from saltmdb.config import (
+        CROSS_ENCODER_CANDIDATE_CAP_OPTIONS,
         CROSS_ENCODER_MAX_CANDIDATES,
         CROSS_ENCODER_MAX_CHARS,
         CROSS_ENCODER_MAX_QUERY_CHARS,
+        CROSS_ENCODER_TEXT_CAP_OPTIONS,
     )
+
+    cap = CROSS_ENCODER_MAX_CANDIDATES if candidate_cap is None else candidate_cap
+    text_cap = CROSS_ENCODER_MAX_CHARS if text_cap_chars is None else text_cap_chars
+    _set_score_diagnostics(
+        {
+            "requested": True,
+            "executed": False,
+            "requested_candidates": len(candidates),
+            "candidate_cap": cap,
+            "text_cap_chars": text_cap,
+            "model": get_reranker_model_name(),
+            "reason": None,
+        }
+    )
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, int)
+        or cap not in CROSS_ENCODER_CANDIDATE_CAP_OPTIONS
+    ):
+        _score_diagnostics.value["reason"] = "invalid_candidate_cap"
+        return None
+    if (
+        isinstance(text_cap, bool)
+        or not isinstance(text_cap, int)
+        or text_cap not in CROSS_ENCODER_TEXT_CAP_OPTIONS
+    ):
+        _score_diagnostics.value["reason"] = "invalid_text_cap_chars"
+        return None
+    if not candidates:
+        _score_diagnostics.value["reason"] = "empty_candidates"
+        return None
+    if not is_cross_encoder_enabled():
+        _score_diagnostics.value["reason"] = "disabled_or_unsupported_model"
+        return None
 
     model_name = get_reranker_model_name()
     if model_name is None:
+        _score_diagnostics.value["reason"] = "disabled_or_unsupported_model"
         return None
     capped_query = (query or "")[:CROSS_ENCODER_MAX_QUERY_CHARS]
-    capped = [c[:CROSS_ENCODER_MAX_CHARS] for c in candidates[:CROSS_ENCODER_MAX_CANDIDATES]]
+    capped = [c[:text_cap] for c in candidates[:cap]]
     try:
         model = get_model(model_name)
         scores = list(model.rerank(capped_query, capped))
     except Exception as e:
         logger.warning("Cross-encoder reranking failed (model=%s): %s", model_name, e)
+        _score_diagnostics.value["reason"] = "runner_failure"
+        _score_diagnostics.value["error"] = str(e)
         return None
 
     # A short/long/non-numeric/NaN/bool output would otherwise silently produce a partial zip()
@@ -198,5 +250,49 @@ def score_pairs(query: str, candidates: list[str]) -> list[float] | None:
             len(capped),
             scores,
         )
+        _score_diagnostics.value["reason"] = "malformed_output"
+        _score_diagnostics.value["returned_scores"] = len(scores)
         return None
+    _score_diagnostics.value.update(
+        {
+            "executed": True,
+            "scored_candidates": len(capped),
+            "returned_scores": len(scores),
+            "reason": "ok",
+        }
+    )
     return scores
+
+
+def score_pairs_preflight(
+    *,
+    query: str = "cross encoder preflight",
+    candidates: list[str] | None = None,
+    candidate_cap: int | None = None,
+    text_cap_chars: int | None = None,
+) -> dict[str, Any]:
+    """Run a real score-pair probe and return finite/cardinality diagnostics.
+
+    Benchmark callers use this before collecting quality numbers so a missing model, malformed
+    runner, or zero-execution no-op cannot be mistaken for a valid all-misses result.  It reuses
+    the existing public ``score_pairs`` path and does not introduce a second model loader.
+    """
+    probe = candidates if candidates is not None else ["preflight candidate"]
+    scores = score_pairs(
+        query,
+        probe,
+        candidate_cap=candidate_cap,
+        text_cap_chars=text_cap_chars,
+    )
+    diagnostics = get_last_score_diagnostics()
+    cap = diagnostics.get("candidate_cap", len(probe))
+    finite = bool(
+        scores is not None
+        and len(scores) == min(len(probe), cap)
+        and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            for value in scores
+        )
+    )
+    diagnostics.update({"preflight": True, "finite_and_sized": finite})
+    return {"scores": scores, "diagnostics": diagnostics, "ready": finite}

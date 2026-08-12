@@ -132,7 +132,7 @@ def _mcnemar(b: int, c: int) -> tuple[float, float]:
         return statistic, math.erfc(math.sqrt(statistic / 2.0))
 
 
-def _validate_inputs(
+def _validate_inputs(  # noqa: C901, PLR0912
     queries: list[dict], matrix: dict, relevance: dict[str, dict[str, int]], split: str
 ) -> list[str]:
     if matrix.get("errors"):
@@ -175,7 +175,7 @@ def _validate_inputs(
     return sorted(expected_configs)
 
 
-def analyze(
+def analyze(  # noqa: C901, PLR0912
     queries: list[dict],
     matrix: dict,
     merged_labels: list[dict] | dict,
@@ -195,12 +195,7 @@ def analyze(
         "misleading_top1",
         "false_accept_rate",
     )
-    rows = {
-        name: {
-            metric: {} for metric in metric_names
-        }
-        for name in configs
-    }
+    rows = {name: {metric: {} for metric in metric_names} for name in configs}
     category_rows = {name: {} for name in configs}
     slices = {name: {} for name in configs}
     top1_vectors = {name: [] for name in configs}
@@ -209,9 +204,7 @@ def analyze(
         category: {name: [] for name in configs} for category in HIGH_VALUE_CATEGORIES
     }
     slice_query_ids: dict[str, list[str]] = {category: [] for category in HIGH_VALUE_CATEGORIES}
-    metric_families_by_metric = {
-        name: {metric: {} for metric in metric_names} for name in configs
-    }
+    metric_families_by_metric = {name: {metric: {} for metric in metric_names} for name in configs}
     query_categories: dict[str, str] = {}
     for query in queries:
         qid, family, category = query["id"], query["topic_family_id"], query["category"]
@@ -272,8 +265,7 @@ def analyze(
     per_category = {
         category: {
             name: {
-                metric: _with_ci(values, n_resamples)
-                for metric, values in category_values.items()
+                metric: _with_ci(values, n_resamples) for metric, values in category_values.items()
             }
             for name, config_values in category_rows.items()
             for category_values in [config_values.get(category, {})]
@@ -306,8 +298,7 @@ def analyze(
         "category_metrics": per_category,
         "per_config_categories": {
             name: {
-                category: per_category.get(category, {}).get(name, {})
-                for category in per_category
+                category: per_category.get(category, {}).get(name, {}) for category in per_category
             }
             for name in configs
         },
@@ -345,11 +336,7 @@ def freeze_dev_contenders(analysis: dict) -> dict:
                 if metrics[name]["ndcg_at_10"]["value"] is not None
                 else -1
             ),
-            -(
-                metrics[name]["mrr"]["value"]
-                if metrics[name]["mrr"]["value"] is not None
-                else -1
-            ),
+            -(metrics[name]["mrr"]["value"] if metrics[name]["mrr"]["value"] is not None else -1),
             name,
         ),
     )
@@ -410,10 +397,14 @@ def paired_comparisons(
     analysis: dict, comparisons: list[list[str]], n_resamples: int = 10000
 ) -> list[dict]:
     """Compute exactly the predeclared paired tests; caller controls comparison list."""
-    if len(comparisons) != 4 or any(not isinstance(pair, list) or len(pair) != 2 for pair in comparisons):
+    if len(comparisons) != 4 or any(
+        not isinstance(pair, list) or len(pair) != 2 for pair in comparisons
+    ):
         raise ValueError("blind analysis requires exactly four predeclared comparisons")
     names = set(analysis["metrics"])
-    if any(pair[0] not in names or pair[1] not in names or pair[0] == pair[1] for pair in comparisons):
+    if any(
+        pair[0] not in names or pair[1] not in names or pair[0] == pair[1] for pair in comparisons
+    ):
         raise ValueError("comparison references an unknown or duplicate configuration")
     result, pvalues = [], []
     families_by_metric = analysis.get("metric_families_by_metric", {})
@@ -517,20 +508,16 @@ def blind_decision(analysis: dict, comparisons: list[dict], shortlist: dict) -> 
     for contender in shortlist["contenders"]:
         item = by_contender[contender]
         delta = float(item["ndcg_delta"])
-        primary = (
-            item["holm_adjusted_p"] < 0.05
-            and delta >= 0.04
-            and delta > 0
-        )
+        primary = item["holm_adjusted_p"] < 0.05 and delta >= 0.04 and delta > 0
         ndcg_ci = item.get("ndcg_delta_ci95", [None, None])
-        tied_ndcg = (
-            ndcg_ci[0] is not None
-            and ndcg_ci[1] is not None
-            and ci_includes_zero(*ndcg_ci)
+        tied_ndcg = ndcg_ci[0] is not None and ndcg_ci[1] is not None and ci_includes_zero(*ndcg_ci)
+        slice_wins = all(
+            slices[category][contender]["wins_slice"] for category in HIGH_VALUE_CATEGORIES
         )
-        slice_wins = all(slices[category][contender]["wins_slice"] for category in HIGH_VALUE_CATEGORIES)
         value_only = tied_ndcg and slice_wins
-        status = "WIN" if primary else "NO-PRIMARY-WIN-BUT-WINS-ON-VALUE" if value_only else "NO_WIN"
+        status = (
+            "WIN" if primary else "NO-PRIMARY-WIN-BUT-WINS-ON-VALUE" if value_only else "NO_WIN"
+        )
         if primary or value_only:
             qualifying[contender] = delta
         evidence[contender] = {

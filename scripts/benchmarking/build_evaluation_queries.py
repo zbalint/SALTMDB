@@ -19,6 +19,7 @@ from query_generation import (
     generate_partial_word_nonsense_query,
     perturb_typo,
 )
+from evaluation_artifacts import build_provenance  # noqa: E402
 
 
 CANONICAL_SLOT_KEYS = frozenset(
@@ -122,7 +123,7 @@ def verify_artifact_fingerprint(value: object, *, field: str = "fingerprint") ->
         raise ValueError(f"artifact {field} mismatch")
 
 
-def validate_slots(slots: list[dict]) -> None:
+def validate_slots(slots: list[dict]) -> None:  # noqa: C901
     """Reject ambiguous slot input before it can be disclosed to a generator.
 
     Slots are intentionally strict: unknown fields are a common way that local provenance or
@@ -230,7 +231,7 @@ def _exact_family_subset(families: list[tuple[str, int]], target: int) -> set[st
     return selected
 
 
-def assign_slots(
+def assign_slots(  # noqa: C901, PLR0912
     slots: list[dict],
     dev_target: int,
     blind_target: int,
@@ -247,9 +248,10 @@ def assign_slots(
         expected_splits = {"dev", "blind"}
         if set(category_targets) != expected_splits:
             raise ValueError("category targets must define exactly dev and blind")
-        if sum(category_targets["dev"].values()) != dev_target or sum(
-            category_targets["blind"].values()
-        ) != blind_target:
+        if (
+            sum(category_targets["dev"].values()) != dev_target
+            or sum(category_targets["blind"].values()) != blind_target
+        ):
             raise ValueError("category quotas do not match split totals")
         family_categories = {
             family: {member["category"] for member in members}
@@ -381,6 +383,11 @@ def write_manifest(
     slot_fingerprint: str | None = None,
     targets: dict[str, int] | None = None,
     required_categories: set[str] | None = None,
+    commit_fingerprint: str | None = None,
+    random_seed: int | None = None,
+    config_fingerprint: str | None = None,
+    judge_version_fingerprint: str | None = None,
+    machine_fingerprint: str | None = None,
 ) -> dict:
     validate_queries(queries, targets=targets, required_categories=required_categories)
     result = {
@@ -390,6 +397,29 @@ def write_manifest(
         "corpus_fingerprint": corpus_fingerprint,
         "slot_fingerprint": slot_fingerprint,
     }
+    provenance_fields = (
+        commit_fingerprint,
+        corpus_fingerprint,
+        random_seed,
+        config_fingerprint,
+        judge_version_fingerprint,
+    )
+    if all(value is not None for value in provenance_fields):
+        result["provenance"] = build_provenance(
+            commit_fingerprint=commit_fingerprint,
+            corpus_fingerprint=corpus_fingerprint,
+            query_manifest_fingerprint=result["queries_fingerprint"],
+            random_seed=random_seed,
+            config_fingerprint=config_fingerprint,
+            judge_version_fingerprint=judge_version_fingerprint,
+            machine_fingerprint_value=machine_fingerprint,
+            artifact_kind="query_manifest",
+        )
+    else:
+        # Existing exploratory manifests remain readable, but are explicitly marked unbound so a
+        # promotion-grade caller can reject them instead of silently treating missing provenance
+        # as compatible with the current run.
+        result["provenance"] = {"status": "legacy_unbound", "stale": True}
     result["manifest_fingerprint"] = artifact_fingerprint(result)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -404,6 +434,7 @@ def load_manifest(
     expected_split: str | None = None,
     expected_corpus_fingerprint: str | None = None,
     expected_slot_fingerprint: str | None = None,
+    require_provenance: bool = False,
 ) -> dict:
     """Load and verify a frozen query manifest before matrix or judging execution."""
     value = json.loads(path.read_text())
@@ -412,10 +443,20 @@ def load_manifest(
     verify_artifact_fingerprint(value, field="manifest_fingerprint")
     if value.get("queries_fingerprint") != artifact_fingerprint(value["queries"]):
         raise ValueError("query manifest queries_fingerprint mismatch")
-    if expected_corpus_fingerprint is not None and value.get("corpus_fingerprint") != expected_corpus_fingerprint:
+    if (
+        expected_corpus_fingerprint is not None
+        and value.get("corpus_fingerprint") != expected_corpus_fingerprint
+    ):
         raise ValueError("query manifest corpus fingerprint mismatch")
-    if expected_slot_fingerprint is not None and value.get("slot_fingerprint") != expected_slot_fingerprint:
+    if (
+        expected_slot_fingerprint is not None
+        and value.get("slot_fingerprint") != expected_slot_fingerprint
+    ):
         raise ValueError("query manifest slot fingerprint mismatch")
+    if require_provenance:
+        provenance = value.get("provenance")
+        if not isinstance(provenance, dict) or provenance.get("stale"):
+            raise ValueError("query manifest provenance is missing or stale")
     queries = value["queries"]
     validate_queries(queries)
     if expected_split is not None and any(item.get("split") != expected_split for item in queries):
@@ -423,7 +464,7 @@ def load_manifest(
     return value
 
 
-def build_source_slots_from_corpus(
+def build_source_slots_from_corpus(  # noqa: C901, PLR0912, PLR0915
     db_path: Path, *, positive_total: int = 900, negative_total: int = 300
 ) -> list[dict]:
     """Select deterministic, family-safe source slots from a frozen *copy* of the corpus.
@@ -552,24 +593,16 @@ def build_source_slots_from_corpus(
                 )
             return source_ids
 
-        relation_source_ids = add_relation_variants(
-            current_rows, "current_vs_superseded", 75
-        )
-        related_rows = [
-            row for row in related_rows
-            if row[0] not in relation_source_ids
-        ]
+        relation_source_ids = add_relation_variants(current_rows, "current_vs_superseded", 75)
+        related_rows = [row for row in related_rows if row[0] not in relation_source_ids]
         if not related_rows:
             raise ValueError("frozen corpus lacks independent related-incident families")
-        relation_source_ids |= add_relation_variants(
-            related_rows, "closely_related_incident", 75
-        )
+        relation_source_ids |= add_relation_variants(related_rows, "closely_related_incident", 75)
 
         durable_rows = [
             row
             for row in rows
-            if row[3] in {"decision", "event", "procedure"}
-            and row[0] not in relation_source_ids
+            if row[3] in {"decision", "event", "procedure"} and row[0] not in relation_source_ids
         ]
         if len(durable_rows) < 60:
             raise ValueError("frozen corpus lacks 60 durable source families")
@@ -588,15 +621,31 @@ def build_source_slots_from_corpus(
                 )
 
         ordinary_full = [
-            row for row in rows if row[0] not in relation_source_ids and row[0] not in {
-                item[0] for item in durable_rows[:60]
-            }
+            row
+            for row in rows
+            if row[0] not in relation_source_ids
+            and row[0] not in {item[0] for item in durable_rows[:60]}
         ]
         category_plan = (
             ("exact_title", 180, "Write a concise exact-fact lookup query.", "English"),
-            ("paraphrase", 180, "Write a paraphrased conceptual search query; do not copy the title.", "English"),
-            ("multilingual", 180, "Write a natural search query in the requested target language.", "French"),
-            ("body_text", 90, "Write a query whose answer is supported by the body rather than title words.", "English"),
+            (
+                "paraphrase",
+                180,
+                "Write a paraphrased conceptual search query; do not copy the title.",
+                "English",
+            ),
+            (
+                "multilingual",
+                180,
+                "Write a natural search query in the requested target language.",
+                "French",
+            ),
+            (
+                "body_text",
+                90,
+                "Write a query whose answer is supported by the body rather than title words.",
+                "English",
+            ),
         )
         cursor = 0
         for category, count, instruction, language in category_plan:
@@ -676,7 +725,9 @@ def build_source_slots_from_corpus(
     negative_categories = (
         [category for category, count in negative_plan for _ in range(count)]
         if negative_total == 300
-        else [NEGATIVE_CATEGORIES[index % len(NEGATIVE_CATEGORIES)] for index in range(negative_total)]
+        else [
+            NEGATIVE_CATEGORIES[index % len(NEGATIVE_CATEGORIES)] for index in range(negative_total)
+        ]
     )
     for index, category in enumerate(negative_categories):
         number = len(slots) + 1
@@ -699,7 +750,7 @@ def build_source_slots_from_corpus(
     return slots
 
 
-def deterministic_local_generation(slots: list[dict]) -> list[dict]:
+def deterministic_local_generation(slots: list[dict]) -> list[dict]:  # noqa: C901, PLR0912
     """Auditable fallback when an approved external generator cannot return artifacts.
 
     It intentionally records `local:deterministic-fallback` provenance downstream, so these

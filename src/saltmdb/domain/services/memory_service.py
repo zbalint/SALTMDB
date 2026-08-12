@@ -3,6 +3,10 @@ import json
 import re
 import logging
 import sqlite3
+import hashlib
+import math
+import threading
+import unicodedata
 from datetime import datetime, UTC
 from typing import Any, Literal
 from saltmdb.config import (
@@ -19,6 +23,10 @@ from saltmdb.config import (
     SNIPPET_ELLIPSIS,
     SUPERSESSION_CHAIN_MAX_DEPTH,
     STRICT_OVERFETCH_CANDIDATE_CAP,
+    RETRIEVAL_TEXT_MAX_CHARS,
+    RETRIEVAL_TEXT_DEFAULT_FTS_WEIGHT,
+    RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT,
+    RETRIEVAL_TEXT_RRF_WEIGHT_OPTIONS,
 )
 from saltmdb.db.connection import (
     get_connection,
@@ -39,10 +47,161 @@ from concurrent.futures import ThreadPoolExecutor
 logger = logging.getLogger(__name__)
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
 _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-search")
+_search_diagnostics = threading.local()
 
 
 TITLE_MIN_LENGTH = 5
 TITLE_MAX_LENGTH = 120
+RETRIEVAL_TEXT_UNSET = object()
+
+
+def _retrieval_text_hash(value: str | None) -> str | None:
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest() if value else None
+
+
+def normalize_retrieval_text(value: str) -> str | None:
+    """Normalize/redact optional retrieval text, returning ``None`` for an explicit clear.
+
+    The authoritative memory body is never passed through this helper.  NFKC makes equivalent
+    Unicode spellings comparable for FTS/vector jobs, surrounding whitespace is removed, and the
+    post-redaction cap is measured in Python Unicode code points (not UTF-8 bytes).
+    """
+    if not isinstance(value, str):
+        raise ValueError("retrieval_text must be a string; JSON null is ambiguous and rejected")
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized:
+        return None
+    redacted = redact_secrets(normalized)
+    if len(redacted) > RETRIEVAL_TEXT_MAX_CHARS:
+        raise ValueError(
+            f"retrieval_text exceeds the maximum length of {RETRIEVAL_TEXT_MAX_CHARS} Unicode characters"
+        )
+    return redacted
+
+
+def _set_search_diagnostics(value: dict[str, Any]) -> None:
+    """Publish diagnostics for the current search thread without changing legacy result shapes.
+
+    The daemon serves searches concurrently, so a module-global ``last`` value would allow one
+    request to overwrite another request's benchmark evidence.  Thread-local storage keeps the
+    lightweight diagnostics available to direct benchmark callers while ``return_diagnostics``
+    provides an explicit transport-safe envelope for MCP/RPC callers that request it.
+    """
+    _search_diagnostics.value = dict(value)
+
+
+def get_last_search_diagnostics() -> dict[str, Any]:
+    """Return a copy of the most recent search diagnostics for this worker thread."""
+    return dict(getattr(_search_diagnostics, "value", {}))
+
+
+def _validate_chunk_candidate_controls(
+    use_chunk_candidates: bool,
+    oversampling_multiplier: int | None,
+    candidate_window: int | None,
+    chunk_weight: float | None,
+) -> tuple[int, int, float]:
+    """Validate and normalize the bounded chunk-candidate experiment controls.
+
+    Stage-1's frozen broad baseline intentionally carries sentinel values (1/0/0.0) while the
+    feature is disabled.  Those sentinels remain accepted and ignored in that mode so adding the
+    fields to a benchmark manifest cannot alter ordinary search.  Once enabled, only the signed
+    experiment values are accepted.
+    """
+    from saltmdb.config import (
+        CHUNK_CANDIDATE_DEFAULT_OVERSAMPLING,
+        CHUNK_CANDIDATE_DEFAULT_WINDOW,
+        CHUNK_CANDIDATE_OVERSAMPLING_OPTIONS,
+        CHUNK_CANDIDATE_WINDOW_OPTIONS,
+        CHUNK_RRF_WEIGHT_OPTIONS,
+    )
+
+    if not use_chunk_candidates:
+        return (
+            CHUNK_CANDIDATE_DEFAULT_OVERSAMPLING,
+            CHUNK_CANDIDATE_DEFAULT_WINDOW,
+            CHUNK_RRF_WEIGHT_OPTIONS[1],
+        )
+
+    oversampling = (
+        CHUNK_CANDIDATE_DEFAULT_OVERSAMPLING
+        if oversampling_multiplier is None
+        else oversampling_multiplier
+    )
+    window = CHUNK_CANDIDATE_DEFAULT_WINDOW if candidate_window is None else candidate_window
+    weight = CHUNK_RRF_WEIGHT_OPTIONS[1] if chunk_weight is None else chunk_weight
+    if isinstance(oversampling, bool) or not isinstance(oversampling, int):
+        raise ValueError("oversampling_multiplier must be one of 4, 8, or 12")
+    if oversampling not in CHUNK_CANDIDATE_OVERSAMPLING_OPTIONS:
+        raise ValueError("oversampling_multiplier must be one of 4, 8, or 12")
+    if isinstance(window, bool) or not isinstance(window, int):
+        raise ValueError("candidate_window must be one of 20, 40, or 60")
+    if window not in CHUNK_CANDIDATE_WINDOW_OPTIONS:
+        raise ValueError("candidate_window must be one of 20, 40, or 60")
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        raise ValueError("chunk_weight must be one of 0.5, 1.0, or 1.5")
+    if float(weight) not in CHUNK_RRF_WEIGHT_OPTIONS:
+        raise ValueError("chunk_weight must be one of 0.5, 1.0, or 1.5")
+    return oversampling, window, float(weight)
+
+
+def _validate_retrieval_text_controls(
+    enabled: bool,
+    retrieval_fts_weight: float | None,
+    retrieval_vector_weight: float | None,
+) -> tuple[float, float]:
+    """Validate independent retrieval-text channel weights without changing disabled defaults."""
+    if not enabled:
+        return 0.0, 0.0
+    fts_weight = (
+        RETRIEVAL_TEXT_DEFAULT_FTS_WEIGHT if retrieval_fts_weight is None else retrieval_fts_weight
+    )
+    vector_weight = (
+        RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT
+        if retrieval_vector_weight is None
+        else retrieval_vector_weight
+    )
+    for name, value in (
+        ("retrieval_fts_weight", fts_weight),
+        ("retrieval_vector_weight", vector_weight),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be one of 0.5, 1.0, or 1.5")
+        if float(value) not in RETRIEVAL_TEXT_RRF_WEIGHT_OPTIONS:
+            raise ValueError(f"{name} must be one of 0.5, 1.0, or 1.5")
+    return float(fts_weight), float(vector_weight)
+
+
+def _validate_cross_encoder_controls(
+    candidate_cap: int | None, text_cap_chars: int | None, *, enabled: bool = True
+) -> tuple[int, int]:
+    """Validate bounded cross-encoder controls and return config defaults for omitted values."""
+    from saltmdb.config import (
+        CROSS_ENCODER_CANDIDATE_CAP_OPTIONS,
+        CROSS_ENCODER_MAX_CHARS,
+        CROSS_ENCODER_MAX_CANDIDATES,
+        CROSS_ENCODER_TEXT_CAP_OPTIONS,
+    )
+
+    cap = CROSS_ENCODER_MAX_CANDIDATES if candidate_cap is None else candidate_cap
+    text_cap = CROSS_ENCODER_MAX_CHARS if text_cap_chars is None else text_cap_chars
+    if not enabled:
+        # Optional controls are inert when CE itself is disabled.  This preserves ordinary search
+        # compatibility for callers carrying experiment metadata alongside the legacy path.
+        return CROSS_ENCODER_MAX_CANDIDATES, CROSS_ENCODER_MAX_CHARS
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, int)
+        or cap not in CROSS_ENCODER_CANDIDATE_CAP_OPTIONS
+    ):
+        raise ValueError("cross_encoder_candidate_cap must be one of 10, 15, or 20")
+    if (
+        isinstance(text_cap, bool)
+        or not isinstance(text_cap, int)
+        or text_cap not in CROSS_ENCODER_TEXT_CAP_OPTIONS
+    ):
+        raise ValueError("cross_encoder_text_cap_chars must be one of 1000 or 2000")
+    return cap, text_cap
 
 
 def validate_memory_input(title: str, content: str, metadata: dict | None) -> None:
@@ -110,7 +269,7 @@ def _resolve_existing_entity_id(
     return None, None
 
 
-def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR0912, PLR0915
+def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, PLR0912, PLR0915
     """Persists `proposed` as a plain raw entity (a temporal upsert if `resolved_entity_id` names
     an already-existing row, otherwise a fresh insert) -- the same insert/tag/`#core`-sync logic
     `store_memory` has always run, factored out so `disposition_service.commit_disposed_write`'s
@@ -134,25 +293,40 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
     quality_status = proposed["quality_status"]
     quality_flags_str = proposed["quality_flags_str"]
     tags = proposed.get("tags")
+    retrieval_text_provided = bool(proposed.get("retrieval_text_provided", False))
+    requested_retrieval_text = proposed.get("retrieval_text")
     now = datetime.now(UTC).isoformat()
 
     cursor = conn.execute(
-        "SELECT created_at, owner_id, valid_from FROM entities WHERE id = ?", (entity_id,)
+        "SELECT created_at, owner_id, valid_from, title, full_content, content_hash "
+        "FROM entities WHERE id = ?",
+        (entity_id,),
     )
     existing = cursor.fetchone()
+    existing_retrieval_text = None
+    existing_retrieval_hash = None
     if existing:
-        created_at, owner, valid_from = existing
+        created_at, owner, valid_from, prior_title, prior_content, prior_content_hash = existing
+        base_source_changed = (
+            prior_title != title
+            or prior_content != redacted_content
+            or prior_content_hash != content_hash
+        )
+        prior_retrieval = conn.execute(
+            "SELECT retrieval_text,retrieval_text_hash FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if prior_retrieval:
+            existing_retrieval_text, existing_retrieval_hash = prior_retrieval
         hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
 
         conn.execute(
             """
-             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type)
-             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type
+             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash)
+             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash
              FROM entities WHERE id = ?
          """,
             (hist_id, valid_from if valid_from else created_at, now, entity_id),
         )
-
         conn.execute(
             """
              INSERT INTO entity_tags (entity_id, tag_id)
@@ -160,11 +334,29 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
          """,
             (hist_id, entity_id),
         )
+    else:
+        base_source_changed = True
 
     if tags is not None:
         conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
 
     metadata_str = json.dumps(metadata) if metadata else None
+    if existing:
+        if retrieval_text_provided:
+            final_retrieval_text = requested_retrieval_text
+            final_retrieval_hash = (
+                _retrieval_text_hash(final_retrieval_text)
+                if final_retrieval_text is not None
+                else None
+            )
+        else:
+            final_retrieval_text = existing_retrieval_text
+            final_retrieval_hash = existing_retrieval_hash
+    else:
+        final_retrieval_text = requested_retrieval_text if retrieval_text_provided else None
+        final_retrieval_hash = (
+            _retrieval_text_hash(final_retrieval_text) if final_retrieval_text is not None else None
+        )
     if is_core is None:
         is_core_val = None
     else:
@@ -172,8 +364,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
 
     conn.execute(
         """
-        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type)
-        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
+        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash)
+        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             updated_at = excluded.updated_at,
             last_accessed_at = excluded.last_accessed_at,
@@ -193,7 +385,9 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
             quality_score = excluded.quality_score,
             quality_status = excluded.quality_status,
             quality_flags = excluded.quality_flags,
-            memory_type = COALESCE(?, entities.memory_type)
+            memory_type = COALESCE(?, entities.memory_type),
+            retrieval_text = excluded.retrieval_text,
+            retrieval_text_hash = excluded.retrieval_text_hash
     """,
         (
             entity_id,
@@ -215,6 +409,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
             quality_status,
             quality_flags_str,
             memory_type,
+            final_retrieval_text,
+            final_retrieval_hash,
             is_core_val,
             memory_type,
         ),
@@ -272,9 +468,21 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: PLR091
     # This is intentionally part of the same transaction as the entity
     # version/tag update: a committed active source always has durable work,
     # even if the daemon dies before the scheduler can dispatch inference.
-    from saltmdb.domain.services.embedding_service import enqueue_embedding_jobs_for_entity
+    from saltmdb.domain.services.embedding_service import (
+        enqueue_embedding_jobs_for_entity,
+        enqueue_retrieval_embedding_job_for_entity,
+    )
 
-    enqueue_embedding_jobs_for_entity(conn, entity_id, title, redacted_content, content_hash)
+    if base_source_changed:
+        enqueue_embedding_jobs_for_entity(conn, entity_id, title, redacted_content, content_hash)
+    if retrieval_text_provided or not existing:
+        enqueue_retrieval_embedding_job_for_entity(
+            conn,
+            entity_id,
+            final_retrieval_text,
+            final_retrieval_hash,
+            force=True,
+        )
 
     return entity_id, bool(existing)
 
@@ -302,6 +510,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     *,
     review_token: str | None = None,
     dispositions: list | None = None,
+    retrieval_text: str | None | object = RETRIEVAL_TEXT_UNSET,
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
@@ -361,6 +570,19 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     try:
         redacted_content = redact_secrets(content)
 
+        retrieval_text_provided = retrieval_text is not RETRIEVAL_TEXT_UNSET
+        if retrieval_text_provided:
+            if retrieval_text is None:
+                return "Error: retrieval_text JSON null is ambiguous; omit the field to preserve or use an empty string to clear."
+            if not isinstance(retrieval_text, str):
+                return "Error: retrieval_text must be a string"
+            try:
+                normalized_retrieval_text = normalize_retrieval_text(retrieval_text)
+            except ValueError as exc:
+                return f"Error: {exc}"
+        else:
+            normalized_retrieval_text = None
+
         if not title:
             title, _ = extract_title_and_snippet(redacted_content)
         else:
@@ -414,6 +636,8 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "quality_score": quality_score,
             "quality_status": quality_status,
             "quality_flags_str": quality_flags_str,
+            "retrieval_text": normalized_retrieval_text,
+            "retrieval_text_provided": retrieval_text_provided,
         }
 
         # Deferred import: disposition_service imports relation_service, which imports this very
@@ -588,6 +812,101 @@ def _run_fts_search(
     return (rows, used_or_fallback) if return_fallback_flag else rows
 
 
+def _run_retrieval_fts_search(
+    conn,
+    sanitized_query: str,
+    where_clauses: list,
+    params: list,
+    limit: int,
+    offset: int,
+) -> list[tuple[str, float]]:
+    """Return ranked ids from the optional retrieval-text FTS channel.
+
+    Only the entity id and opaque BM25 rank leave this helper.  In particular, retrieval text is
+    never selected into a result/diagnostic payload.  The equality guard against the live entity
+    value makes direct legacy writes fail closed until the maintenance trigger catches up.
+    """
+    raw_terms = sanitized_query.split()
+    terms = [t for t in raw_terms if t.lower() not in STOP_WORDS] or raw_terms
+    if not terms:
+        return []
+    fts_query = " ".join(f'"{term}"*' for term in terms)
+    where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
+    sql = f"""
+        SELECT e.id, bm25(retrieval_fts) AS rank_score
+        FROM retrieval_fts
+        JOIN entities e ON e.id = retrieval_fts.id
+        WHERE retrieval_fts MATCH ?
+          AND e.retrieval_text IS NOT NULL
+          AND retrieval_fts.retrieval_text = e.retrieval_text
+          {where_sql}
+        ORDER BY bm25(retrieval_fts) ASC, e.updated_at DESC
+        LIMIT ? OFFSET ?
+    """
+    rows = conn.execute(sql, [fts_query] + params + [limit, offset]).fetchall()
+    if not rows and len(terms) > 1:
+        fallback = " OR ".join(f'"{term}"*' for term in terms)
+        rows = conn.execute(sql, [fallback] + params + [limit, offset]).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+def retrieval_vector_search(
+    query: str,
+    where_clauses: list[str],
+    params: list,
+    limit: int,
+    db_path: str,
+    offset: int = 0,
+) -> list[tuple[str, float]]:
+    """Return fresh, successfully persisted retrieval-text vector candidates.
+
+    A vector participates only when its auxiliary source hash equals the live entity hash and a
+    matching retrieval job is in ``succeeded`` state.  Both checks are synchronous, so missing,
+    stale, queued, retrying, or failed embeddings contribute no candidates.
+    """
+    conn = None
+    try:
+        import sqlite_vec
+        from saltmdb.domain.services import embedding_service
+
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        query_vector = embedding_service.embed_text(query)
+        knn_k = limit + offset
+        # vec0 rejects ordinary WHERE predicates on auxiliary columns in its KNN query.  Keep
+        # this first read pure MATCH+k, then synchronously reapply hash/job/status/caller filters
+        # against ordinary tables (same pattern as chunk_candidate_search).
+        rows = conn.execute(
+            "SELECT entity_id,distance,source_hash FROM retrieval_embeddings "
+            "WHERE embedding MATCH ? AND k = ?",
+            [sqlite_vec.serialize_float32(query_vector), knn_k],
+        ).fetchall()
+        if not rows:
+            return []
+        entity_ids = list({row[0] for row in rows})
+        placeholders = ",".join("?" for _ in entity_ids)
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        entity_rows = conn.execute(
+            f"SELECT e.id,e.retrieval_text_hash,e.status FROM entities e "
+            f"JOIN retrieval_embedding_jobs rj ON rj.entity_id=e.id "
+            f"AND rj.source_hash=e.retrieval_text_hash AND rj.state='succeeded' "
+            f"WHERE e.id IN ({placeholders}) AND e.retrieval_text IS NOT NULL AND {where_sql}",
+            entity_ids + params,
+        ).fetchall()
+        fresh = {row[0]: row[1] for row in entity_rows if row[2] != "archived"}
+        ranked = [
+            (entity_id, distance)
+            for entity_id, distance, source_hash in rows
+            if entity_id in fresh and source_hash == fresh[entity_id]
+        ]
+        return ranked[offset : offset + limit]
+    finally:
+        if conn:
+            close_connection(conn)
+
+
 def semantic_search(
     query: str,
     where_clauses: list[str],
@@ -642,6 +961,107 @@ def semantic_search(
         exec_params = [sqlite_vec.serialize_float32(query_vector), knn_k] + params + [limit, offset]
         rows = conn.execute(sql, exec_params).fetchall()
         return [(row[0], row[1]) for row in rows]
+    finally:
+        if conn:
+            close_connection(conn)
+
+
+def chunk_candidate_search(
+    query: str,
+    where_clauses: list[str],
+    params: list,
+    candidate_window: int,
+    oversampling_multiplier: int,
+    db_path: str,
+) -> tuple[list[tuple[str, float]], dict[str, Any]]:
+    """Return fresh entity candidates generated from the chunk-vector KNN index.
+
+    The vec0 query deliberately asks for ``candidate_window * oversampling_multiplier`` chunk
+    rows, then performs the entity-level deduplication in Python using the minimum distance.  A
+    stale row can never consume a candidate slot: the join requires the chunk's content hash to
+    equal the currently-live entity hash, and archived entities are excluded before the KNN rows
+    reach the deduper.  This helper does not alter the entity-vector or FTS windows, preserving
+    the legacy pagination contract when the feature is disabled.
+
+    The second return value is transport-safe execution evidence for benchmark runs.  In
+    particular, ``candidate_shortfall`` records how many unique entities were unavailable after
+    freshness filtering/deduplication, rather than silently making a small chunk pool look like a
+    full one.
+    """
+    if not query:
+        return [], {
+            "requested_chunk_rows": 0,
+            "candidate_window": candidate_window,
+            "oversampling_multiplier": oversampling_multiplier,
+            "raw_chunk_rows": 0,
+            "unique_fresh_entities": 0,
+            "candidate_shortfall": candidate_window,
+        }
+    conn = None
+    requested_rows = candidate_window * oversampling_multiplier
+    try:
+        import sqlite_vec
+
+        from saltmdb.domain.services import embedding_service
+
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        query_vector = embedding_service.embed_text(query)
+        # MATCH + k is vec0's indexed KNN execution path.  vec0 rejects ordinary WHERE/JOIN
+        # constraints in a KNN query (``illegal WHERE constraint``), so the indexed read must be
+        # a pure vector lookup.  Freshness/status/caller filters are reapplied immediately below
+        # on the ordinary entities table before a row can enter the deduper.
+        sql = """
+            SELECT c.entity_id, c.distance, c.content_hash
+            FROM entity_chunk_embeddings c
+            WHERE c.embedding MATCH ? AND k = ?
+        """
+        rows = conn.execute(
+            sql,
+            [sqlite_vec.serialize_float32(query_vector), requested_rows],
+        ).fetchall()
+        entity_ids = list({row[0] for row in rows})
+        entity_info: dict[str, tuple[str | None, str | None]] = {}
+        if entity_ids:
+            placeholders = ",".join("?" for _ in entity_ids)
+            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            entity_rows = conn.execute(
+                f"SELECT e.id, e.content_hash, e.status FROM entities e "
+                f"WHERE e.id IN ({placeholders}) AND {where_sql}",
+                entity_ids + list(params),
+            ).fetchall()
+            entity_info = {row[0]: (row[1], row[2]) for row in entity_rows}
+        best_distance: dict[str, float] = {}
+        for entity_id, distance, chunk_hash in rows:
+            current = entity_info.get(entity_id)
+            if current is None or current[1] == "archived" or chunk_hash != current[0]:
+                continue
+            # sqlite_vec returns numeric distances, but keep a defensive finite check here so a
+            # malformed extension row cannot poison sorting/RRF with NaN.
+            try:
+                distance_value = float(distance)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(distance_value):
+                continue
+            previous = best_distance.get(entity_id)
+            if previous is None or distance_value < previous:
+                best_distance[entity_id] = distance_value
+        ranked = sorted(best_distance.items(), key=lambda item: (item[1], item[0]))[
+            :candidate_window
+        ]
+        diagnostics = {
+            "requested_chunk_rows": requested_rows,
+            "candidate_window": candidate_window,
+            "oversampling_multiplier": oversampling_multiplier,
+            "raw_chunk_rows": len(rows),
+            "unique_fresh_entities": len(best_distance),
+            "returned_entities": len(ranked),
+            "candidate_shortfall": max(0, candidate_window - len(ranked)),
+        }
+        return ranked, diagnostics
     finally:
         if conn:
             close_connection(conn)
@@ -837,6 +1257,53 @@ def reciprocal_rank_fusion(
     return dict(ranked[:limit])
 
 
+def weighted_reciprocal_rank_fusion(
+    fts_results: list,
+    semantic_results: list[tuple[str, float]],
+    chunk_results: list[tuple[str, float]],
+    limit: int,
+    *,
+    chunk_weight: float = 1.0,
+    retrieval_fts_results: list[tuple[str, float]] | None = None,
+    retrieval_vector_results: list[tuple[str, float]] | None = None,
+    retrieval_fts_weight: float = 1.0,
+    retrieval_vector_weight: float = 1.0,
+    k: int = 60,
+) -> dict[str, float]:
+    """Fuse named FTS/entity-vector/chunk/retrieval-text ranked lists with weighted RRF.
+
+    FTS and entity-vector channels are intentionally fixed at weight ``1``.  The chunk channel
+    is the only experimental weight (0.5/1.0/1.5).  Ties retain first-seen channel/rank order,
+    matching Python's stable sort and the exact legacy ``reciprocal_rank_fusion`` behavior when no
+    chunk rows are supplied.
+    """
+    retrieval_fts_results = retrieval_fts_results or []
+    retrieval_vector_results = retrieval_vector_results or []
+    if not chunk_results and not retrieval_fts_results and not retrieval_vector_results:
+        # Keep the old implementation as the disabled/empty-third-channel path rather than
+        # duplicating its insertion-order/tie behavior in a second implementation.
+        return reciprocal_rank_fusion(fts_results, semantic_results, limit, k=k)
+    scores: dict[str, float] = {}
+    for rank, row in enumerate(fts_results):
+        entity_id = row[0]
+        scores[entity_id] = scores.get(entity_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, (entity_id, _distance) in enumerate(semantic_results):
+        scores[entity_id] = scores.get(entity_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, (entity_id, _distance) in enumerate(chunk_results):
+        scores[entity_id] = scores.get(entity_id, 0.0) + float(chunk_weight) / (k + rank + 1)
+    for rank, row in enumerate(retrieval_fts_results):
+        entity_id = row[0]
+        scores[entity_id] = scores.get(entity_id, 0.0) + float(retrieval_fts_weight) / (
+            k + rank + 1
+        )
+    for rank, (entity_id, _distance) in enumerate(retrieval_vector_results):
+        scores[entity_id] = scores.get(entity_id, 0.0) + float(retrieval_vector_weight) / (
+            k + rank + 1
+        )
+    ranked = sorted(scores.items(), key=lambda item: -item[1])
+    return dict(ranked[:limit])
+
+
 def _rrf_gap_confident(rrf_score_map: dict[str, float], fts_ids: set, semantic_ids: set) -> bool:
     """True when RRF's top1 candidate is (a) matched by BOTH the FTS and dense-vector channels
     and (b) separated from top2 by RERANK_GAP_SKIP_RATIO or more -- hybrid search already has a
@@ -974,6 +1441,220 @@ def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     return [eid for eid in ordered_ids if eid not in superseded_ids] + [
         eid for eid in ordered_ids if eid in superseded_ids
     ]
+
+
+def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
+    ordered_ids: list[str], conn
+) -> list[str]:
+    """Collapse eligible broad-mode ``supersedes`` chains without injecting rows.
+
+    A family is eligible only when its active, full-bitemporal supersedes component is an
+    acyclic, nonforking chain, all of its members are live, and every member (including the
+    newest head) is already present in ``ordered_ids`` after the caller's filters.  The scan is
+    intentionally left-to-right: the first family member emits the head's own id at that exact
+    position, while subsequent members are skipped.  Because the head must already be in the
+    pool, this operation never bypasses a filter or fabricates a row/score.
+
+    This helper is deliberately separate from strict/history behavior.  Strict resolves and
+    substitutes each matched predecessor through its existing relevance gate; history preserves
+    every matched row and tags it.  Neither mode calls this family-collapse operation.
+    """
+    if not ordered_ids:
+        return []
+    now = datetime.now(UTC).isoformat()
+    rows = conn.execute(
+        """
+        SELECT r.source_id, r.target_id
+        FROM relations r
+        WHERE r.predicate = 'supersedes'
+          AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+          AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+          AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+        """,
+        (now, now, now, now),
+    ).fetchall()
+    if not rows:
+        return list(ordered_ids)
+
+    source_to_targets: dict[str, set[str]] = {}
+    target_to_sources: dict[str, set[str]] = {}
+    undirected: dict[str, set[str]] = {}
+    for source_id, target_id in rows:
+        source_to_targets.setdefault(source_id, set()).add(target_id)
+        target_to_sources.setdefault(target_id, set()).add(source_id)
+        undirected.setdefault(source_id, set()).add(target_id)
+        undirected.setdefault(target_id, set()).add(source_id)
+
+    pool = set(ordered_ids)
+    touched = set()
+    components: dict[str, tuple[set[str], str] | None] = {}
+    # Only inspect components that touch this result pool.  The relation scan is global so a
+    # branch/future/archive node outside the pool still makes the touched family ineligible.
+    for seed in pool:
+        if seed not in undirected or seed in touched:
+            continue
+        component: set[str] = set()
+        stack = [seed]
+        while stack:
+            node = stack.pop()
+            if node in component:
+                continue
+            component.add(node)
+            stack.extend(undirected.get(node, ()))
+        touched.update(component)
+
+        eligible = component <= pool
+        info_rows = []
+        if eligible:
+            placeholders = ",".join("?" for _ in component)
+            info_rows = conn.execute(
+                f"SELECT id, status FROM entities WHERE id IN ({placeholders})", list(component)
+            ).fetchall()
+            info = {row[0]: row[1] for row in info_rows}
+            eligible = len(info) == len(component) and all(
+                status != "archived" for status in info.values()
+            )
+        # A nonforking chain has at most one older target per newer source and at most one newer
+        # source per older target.  The live head is the newest node with no newer source pointing
+        # at it (no incoming edge); the scan emits this head in the first member's position.
+        if eligible:
+            eligible = all(
+                len(source_to_targets.get(node, ())) <= 1
+                and len(target_to_sources.get(node, ())) <= 1
+                for node in component
+            )
+            heads = [node for node in component if not target_to_sources.get(node)]
+            eligible = eligible and len(heads) == 1
+            head = heads[0] if eligible else ""
+            if eligible:
+                walked: set[str] = set()
+                node = head
+                while node not in walked:
+                    walked.add(node)
+                    successors = source_to_targets.get(node, set())
+                    if not successors:
+                        break
+                    node = next(iter(successors))
+                eligible = walked == component and node not in source_to_targets
+        else:
+            head = ""
+        for member in component:
+            components[member] = (component, head) if eligible else None
+
+    emitted: list[str] = []
+    skipped: set[str] = set()
+    for entity_id in ordered_ids:
+        if entity_id in skipped:
+            continue
+        family = components.get(entity_id)
+        if family is None:
+            emitted.append(entity_id)
+            continue
+        members, head = family
+        emitted.append(head)
+        skipped.update(members)
+    return emitted
+
+
+def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
+    query_text: str,
+    candidate_ids: list[str],
+    conn,
+    db_path: str,
+) -> dict[str, str]:
+    """Build CE inputs from title + the best fresh query-matching chunk.
+
+    ``entity_chunk_embeddings`` is read only for the capped candidate prefix.  A chunk is
+    eligible only when its content hash matches the live entity hash and the entity is not
+    archived.  If no fresh chunk exists, the authoritative entity title plus leading content is
+    returned.  The final character cap remains in ``reranker_service.score_pairs`` so direct
+    callers and benchmark probes share one truncation rule.
+    """
+    if not candidate_ids:
+        return {}
+    placeholders = ",".join("?" for _ in candidate_ids)
+    entity_rows = conn.execute(
+        f"""
+        SELECT id, title, full_content, content_hash
+        FROM entities
+        WHERE id IN ({placeholders}) AND status != 'archived'
+        """,
+        list(candidate_ids),
+    ).fetchall()
+    base = {row[0]: (row[1] or "", row[2] or "", row[3]) for row in entity_rows}
+    if not base:
+        return {}
+
+    best_chunks: dict[str, tuple[float, int | None, int | None, str]] = {}
+    chunk_conn = None
+    try:
+        import sqlite_vec
+        from saltmdb.domain.services import embedding_service
+
+        query_vector = embedding_service.embed_text(query_text)
+        chunk_conn = get_connection(db_path)
+        chunk_conn.enable_load_extension(True)
+        sqlite_vec.load(chunk_conn)
+        chunk_conn.enable_load_extension(False)
+        fresh_ids = list(base)
+        fresh_placeholders = ",".join("?" for _ in fresh_ids)
+        rows = chunk_conn.execute(
+            f"""
+            SELECT c.entity_id, c.chunk_index, c.char_start, c.char_end,
+                   e.full_content, vec_distance_cosine(c.embedding, ?) AS distance
+            FROM entity_chunk_embeddings c
+            JOIN entities e ON e.id = c.entity_id
+            WHERE c.entity_id IN ({fresh_placeholders})
+              AND e.status != 'archived'
+              AND c.content_hash IS e.content_hash
+            """,
+            [sqlite_vec.serialize_float32(query_vector)] + fresh_ids,
+        ).fetchall()
+        for entity_id, chunk_index, char_start, char_end, content, distance in rows:
+            try:
+                distance_value = float(distance)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(distance_value):
+                continue
+            prior = best_chunks.get(entity_id)
+            if prior is None or distance_value < prior[0]:
+                best_chunks[entity_id] = (
+                    distance_value,
+                    char_start,
+                    char_end,
+                    str(content or ""),
+                )
+    except Exception as exc:
+        # CE text construction is an optional enhancement.  A missing sqlite_vec/chunk table
+        # must fall back to authoritative leading content, never suppress an otherwise valid CE
+        # rerank call.
+        logger.debug("Fresh chunk lookup for cross-encoder inputs failed: %s", exc)
+    finally:
+        if chunk_conn:
+            close_connection(chunk_conn)
+
+    result: dict[str, str] = {}
+    for entity_id in candidate_ids:
+        if entity_id not in base:
+            continue
+        title, content, _content_hash = base[entity_id]
+        best = best_chunks.get(entity_id)
+        if best is not None:
+            _distance, char_start, char_end, chunk_content = best
+            if char_start is not None and char_end is not None:
+                try:
+                    chunk_text = content[int(char_start) : int(char_end)]
+                except (TypeError, ValueError):
+                    chunk_text = chunk_content
+            else:
+                chunk_text = chunk_content
+            evidence = chunk_text or content[:2000]
+        else:
+            evidence = content[:2000]
+        result[entity_id] = f"{title}\n\n{evidence}"
+    return result
 
 
 def _apply_strict_ranking_defaults(ordered_ids: list, conn) -> list:
@@ -1413,8 +2094,20 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     prefer_durable_types: bool = False,
     demote_superseded: bool = False,
     use_cross_encoder: bool = False,
+    cross_encoder_candidate_cap: int | None = None,
+    cross_encoder_text_cap_chars: int | None = None,
+    force_cross_encoder: bool = False,
+    use_chunk_candidates: bool = False,
+    oversampling_multiplier: int | None = None,
+    candidate_window: int | None = None,
+    chunk_weight: float | None = None,
+    collapse_supersedes_families: bool = False,
+    return_diagnostics: bool = False,
     mode: Literal["strict", "broad", "history"] = "broad",
     disable_semantic: bool = False,
+    use_retrieval_text_candidates: bool = False,
+    retrieval_fts_weight: float | None = None,
+    retrieval_vector_weight: float | None = None,
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
@@ -1479,6 +2172,54 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     if mode not in ("strict", "broad", "history"):
         logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
         mode = "broad"
+
+    chunk_oversampling, chunk_window, configured_chunk_weight = _validate_chunk_candidate_controls(
+        use_chunk_candidates, oversampling_multiplier, candidate_window, chunk_weight
+    )
+    if collapse_supersedes_families and mode != "broad":
+        raise ValueError("collapse_supersedes_families is supported only in broad mode")
+    ce_candidate_cap, ce_text_cap = _validate_cross_encoder_controls(
+        cross_encoder_candidate_cap,
+        cross_encoder_text_cap_chars,
+        enabled=use_cross_encoder,
+    )
+    configured_retrieval_fts_weight, configured_retrieval_vector_weight = (
+        _validate_retrieval_text_controls(
+            use_retrieval_text_candidates,
+            retrieval_fts_weight,
+            retrieval_vector_weight,
+        )
+    )
+    diagnostics: dict[str, Any] = {
+        "use_chunk_candidates": bool(use_chunk_candidates),
+        "chunk_candidate": {
+            "requested": bool(use_chunk_candidates),
+            "oversampling_multiplier": chunk_oversampling,
+            "candidate_window": chunk_window,
+            "chunk_weight": configured_chunk_weight,
+            "candidate_shortfall": 0,
+            "executed": False,
+        },
+        "collapse_supersedes_families": bool(collapse_supersedes_families),
+        "retrieval_text": {
+            "requested": bool(use_retrieval_text_candidates),
+            "retrieval_fts_weight": configured_retrieval_fts_weight,
+            "retrieval_vector_weight": configured_retrieval_vector_weight,
+            "fts_candidate_count": 0,
+            "vector_candidate_count": 0,
+            "candidate_evidence": {},
+            "executed": False,
+        },
+        "cross_encoder": {
+            "requested": bool(use_cross_encoder),
+            "forced": bool(force_cross_encoder),
+            "candidate_cap": ce_candidate_cap,
+            "text_cap_chars": ce_text_cap,
+            "executed": False,
+            "execution_count": 0,
+            "reason": None,
+        },
+    }
 
     should_close = False
     conn = db_connection
@@ -1589,6 +2330,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 logger.debug("rerank_by_topic ignored: explain_mode takes precedence.")
             if use_cross_encoder:
                 logger.debug("use_cross_encoder ignored: explain_mode takes precedence.")
+            if force_cross_encoder:
+                logger.debug("force_cross_encoder ignored: explain_mode takes precedence.")
             if mode != "broad":
                 logger.debug("mode=%r ignored: explain_mode takes precedence.", mode)
             terms = sanitized_query.split() if sanitized_query else []
@@ -1609,7 +2352,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     if not c:
                         invalid_tags.append(tf)
 
-            return {
+            explain_result = {
                 "explain": {
                     "searched_terms_found": searched_terms,
                     "invalid_tags_suggestions": invalid_tags,
@@ -1617,6 +2360,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     "where_clauses": where_clauses,
                 }
             }
+            if return_diagnostics:
+                explain_result["diagnostics"] = diagnostics
+            _set_search_diagnostics(diagnostics)
+            return explain_result
 
         rows: list[Any] = []
         # Populated only when rerank_by_topic actually runs (Part B); left empty on every other
@@ -1662,8 +2409,103 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     semantic_rows_ = semantic_search(
                         query_keywords, where_clauses, params, candidate_window, db_path, 0
                     )
+                    chunk_rows_: list[tuple[str, float]] = []
+                    chunk_diagnostics_: dict[str, Any] = {
+                        "requested_chunk_rows": 0,
+                        "candidate_window": chunk_window,
+                        "oversampling_multiplier": chunk_oversampling,
+                        "raw_chunk_rows": 0,
+                        "unique_fresh_entities": 0,
+                        "returned_entities": 0,
+                        "candidate_shortfall": 0,
+                        "executed": False,
+                    }
+                    if use_chunk_candidates:
+                        chunk_rows_, chunk_diagnostics_ = chunk_candidate_search(
+                            query_keywords,
+                            where_clauses,
+                            params,
+                            chunk_window,
+                            chunk_oversampling,
+                            db_path,
+                        )
+                        chunk_diagnostics_["executed"] = True
+                        diagnostics["chunk_candidate"] = dict(chunk_diagnostics_)
 
-                    rrf_map = reciprocal_rank_fusion(fts_rows_, semantic_rows_, candidate_window)
+                    retrieval_fts_rows_: list[tuple[str, float]] = []
+                    retrieval_vector_rows_: list[tuple[str, float]] = []
+                    if use_retrieval_text_candidates:
+                        retrieval_fts_rows_ = _run_retrieval_fts_search(
+                            conn,
+                            sanitized_query,
+                            where_clauses,
+                            params,
+                            candidate_window,
+                            0,
+                        )
+                        retrieval_vector_rows_ = retrieval_vector_search(
+                            query_keywords,
+                            where_clauses,
+                            params,
+                            candidate_window,
+                            db_path,
+                            0,
+                        )
+                        retrieval_diag = diagnostics["retrieval_text"]
+                        retrieval_diag["executed"] = True
+                        retrieval_diag["fts_candidate_count"] = len(retrieval_fts_rows_)
+                        retrieval_diag["vector_candidate_count"] = len(retrieval_vector_rows_)
+                        # Hash/presence/rank evidence is safe to expose; retrieval text itself is
+                        # intentionally never selected or copied into diagnostics.
+                        retrieval_ids = {row[0] for row in retrieval_fts_rows_} | {
+                            row[0] for row in retrieval_vector_rows_
+                        }
+                        if retrieval_ids:
+                            placeholders = ",".join("?" for _ in retrieval_ids)
+                            hash_rows = conn.execute(
+                                f"SELECT id,retrieval_text_hash FROM entities WHERE id IN ({placeholders})",
+                                list(retrieval_ids),
+                            ).fetchall()
+                            fts_rank = {
+                                row[0]: rank for rank, row in enumerate(retrieval_fts_rows_)
+                            }
+                            vector_rank = {
+                                row[0]: rank for rank, row in enumerate(retrieval_vector_rows_)
+                            }
+                            retrieval_diag["candidate_evidence"] = {
+                                eid: {
+                                    "present": True,
+                                    "hash": next((h for i, h in hash_rows if i == eid), None),
+                                    "fts_rank": fts_rank.get(eid),
+                                    "vector_rank": vector_rank.get(eid),
+                                }
+                                for eid in retrieval_ids
+                            }
+
+                    rrf_map = weighted_reciprocal_rank_fusion(
+                        fts_rows_,
+                        semantic_rows_,
+                        chunk_rows_,
+                        candidate_window,
+                        chunk_weight=configured_chunk_weight,
+                        retrieval_fts_results=retrieval_fts_rows_,
+                        retrieval_vector_results=retrieval_vector_rows_,
+                        retrieval_fts_weight=configured_retrieval_fts_weight,
+                        retrieval_vector_weight=configured_retrieval_vector_weight,
+                    )
+                    if use_retrieval_text_candidates:
+                        evidence = diagnostics["retrieval_text"].get("candidate_evidence", {})
+                        for eid, details in evidence.items():
+                            contribution = 0.0
+                            if details.get("fts_rank") is not None:
+                                contribution += configured_retrieval_fts_weight / (
+                                    60 + details["fts_rank"] + 1
+                                )
+                            if details.get("vector_rank") is not None:
+                                contribution += configured_retrieval_vector_weight / (
+                                    60 + details["vector_rank"] + 1
+                                )
+                            details["rrf_contribution"] = round(contribution, 9)
                     fts_ids_ = {r[0] for r in fts_rows_}
                     # True-AND-only id set (H1 fix): empty whenever used_or_fallback_ is True,
                     # since every row in fts_rows_ then came from the OR-joined retry, not a
@@ -1731,14 +2573,22 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                         # gate's premise ("hybrid already has a decisive winner, Stage-2 has
                         # nothing to add") doesn't depend on which Stage-2 implementation would
                         # have run.
+                        # The v1 gap gate deliberately ignores chunk-only evidence.  It uses a
+                        # legacy two-channel map so adding a chunk candidate can never make a
+                        # previously ambiguous FTS/entity-vector query appear decisive.
+                        gap_rrf_map = reciprocal_rank_fusion(
+                            fts_rows_, semantic_rows_, candidate_window
+                        )
                         gap_confident = (
                             rerank_by_topic or use_cross_encoder
-                        ) and _rrf_gap_confident(rrf_map, fts_ids_, semantic_ids_)
+                        ) and _rrf_gap_confident(gap_rrf_map, fts_ids_, semantic_ids_)
                         if gap_confident:
                             logger.debug(
                                 "Stage-2 rerank skipped: RRF top1/top2 gap already decisive "
                                 "(dual-channel top1, ratio >= RERANK_GAP_SKIP_RATIO)."
                             )
+                            if use_cross_encoder and not force_cross_encoder:
+                                diagnostics["cross_encoder"]["reason"] = "gap_gate"
                         if rerank_by_topic and not gap_confident:
                             # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks
                             # the whole candidate_window, then offset/limit slices the reranked
@@ -1775,7 +2625,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                     query_keywords, ungrounded_ids, db_path
                                 )
 
-                        if use_cross_encoder and not gap_confident and ranked_pool_:
+                        if (
+                            use_cross_encoder
+                            and (not gap_confident or force_cross_encoder)
+                            and ranked_pool_
+                        ):
                             # Independent Stage-2 alternative to rerank_by_topic (roadmap
                             # ba2cf66f P1#7) -- NOT a dependency of it. If rerank_by_topic already
                             # reordered ranked_pool_ above this pass, cross-encoder runs on top of
@@ -1784,7 +2638,6 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             # opting into both gets its final say on ordering. topic_score stays
                             # attached to the result item regardless -- cross-encoder never erases
                             # it, it only adds cross_encoder_score alongside it.
-                            from saltmdb.config import CROSS_ENCODER_MAX_CANDIDATES
                             from saltmdb.domain.services import reranker_service
 
                             ce_scores = None
@@ -1799,19 +2652,23 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 # be a pointless, potentially large, unbounded-with-corpus-growth
                                 # SQL read for no benefit -- score_pairs itself caps input length
                                 # regardless, so nothing downstream needs the wider fetch.
-                                ce_pool_ids = list(ranked_pool_)[:CROSS_ENCODER_MAX_CANDIDATES]
-                                placeholders_ce = ",".join("?" for _ in ce_pool_ids)
-                                ce_rows = conn.execute(
-                                    f"SELECT id, title, full_content FROM entities WHERE id IN ({placeholders_ce})",
-                                    ce_pool_ids,
-                                ).fetchall()
-                                ce_text_by_id = {row[0]: f"{row[1]}\n\n{row[2]}" for row in ce_rows}
+                                ce_pool_ids = list(ranked_pool_)[:ce_candidate_cap]
+                                ce_text_by_id = _build_cross_encoder_candidate_texts(
+                                    query_keywords, ce_pool_ids, conn, db_path
+                                )
 
                                 scored_ids_in_order = [
                                     eid for eid in ce_pool_ids if eid in ce_text_by_id
                                 ]
                                 ce_texts = [ce_text_by_id[eid] for eid in scored_ids_in_order]
-                                ce_scores = reranker_service.score_pairs(query_keywords, ce_texts)
+                                score_kwargs = {}
+                                if cross_encoder_candidate_cap is not None:
+                                    score_kwargs["candidate_cap"] = ce_candidate_cap
+                                if cross_encoder_text_cap_chars is not None:
+                                    score_kwargs["text_cap_chars"] = ce_text_cap
+                                ce_scores = reranker_service.score_pairs(
+                                    query_keywords, ce_texts, **score_kwargs
+                                )
                             if ce_scores is not None:
                                 cross_encoder_scores_map_ = dict(
                                     zip(scored_ids_in_order, ce_scores)
@@ -1826,6 +2683,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                     if eid not in cross_encoder_scores_map_
                                 ]
                                 ranked_pool_ = reordered + unscored_tail
+                                ce_diagnostics = reranker_service.get_last_score_diagnostics()
+                                diagnostics["cross_encoder"].update(ce_diagnostics)
+                                diagnostics["cross_encoder"]["executed"] = True
+                                diagnostics["cross_encoder"]["execution_count"] = (
+                                    diagnostics["cross_encoder"].get("execution_count", 0) + 1
+                                )
+                            else:
+                                ce_diagnostics = reranker_service.get_last_score_diagnostics()
+                                diagnostics["cross_encoder"].update(ce_diagnostics)
                             # ce_scores is None (disabled/unsupported model/runner failure/
                             # malformed output): ranked_pool_ is left exactly as it was before this
                             # block -- deterministic fallback to current behavior, no widening.
@@ -1876,6 +2742,18 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                         # byte-identical, unaffected by this addition.
                         if mode == "strict":
                             ranked_pool_ = _apply_strict_ranking_defaults(ranked_pool_, conn)
+                        elif mode == "broad" and collapse_supersedes_families:
+                            # Collapse only after all existing broad-mode ordering flags.  The
+                            # head is already in rrf_map and therefore retains its own score and
+                            # row; this merely moves that existing id to the first family-member
+                            # position and skips later members.
+                            before_collapse = len(ranked_pool_)
+                            ranked_pool_ = _collapse_supersedes_families(ranked_pool_, conn)
+                            diagnostics["supersedes_collapse"] = {
+                                "executed": True,
+                                "before_count": before_collapse,
+                                "after_count": len(ranked_pool_),
+                            }
                     else:
                         ranked_pool_ = []
                         superseded_ids_ = set()
@@ -1884,7 +2762,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     # corpus is exhausted for this query at this window size; growing
                     # candidate_window further cannot reveal more candidates (Part C2).
                     exhausted_ = (
-                        len(fts_rows_) < candidate_window and len(semantic_rows_) < candidate_window
+                        len(fts_rows_) < candidate_window
+                        and len(semantic_rows_) < candidate_window
+                        and (
+                            not use_retrieval_text_candidates
+                            or (
+                                len(retrieval_fts_rows_) < candidate_window
+                                and len(retrieval_vector_rows_) < candidate_window
+                            )
+                        )
                     )
                     return {
                         "ordered_ids": ranked_pool_,
@@ -1900,6 +2786,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                         # rerank_by_topic's topic_score reordered `ordered_ids` (topic_score is
                         # attached separately, it never replaces this field).
                         "rrf_score_map": rrf_map,
+                        "chunk_diagnostics": chunk_diagnostics_,
                     }
 
                 if (
@@ -2021,6 +2908,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 logger.debug("rerank_by_topic ignored: query_keywords is empty.")
             if use_cross_encoder:
                 logger.debug("use_cross_encoder ignored: query_keywords is empty.")
+            if force_cross_encoder:
+                logger.debug("force_cross_encoder ignored: query_keywords is empty.")
             sql = f"""
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
@@ -2034,6 +2923,12 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             exec_params = params + [limit, offset]
             cursor_obj = conn.execute(sql, exec_params)
             rows = cursor_obj.fetchall()
+
+        diagnostics["result_count"] = len(rows)
+        diagnostics["cross_encoder"]["execution_rate"] = (
+            1.0 if diagnostics["cross_encoder"].get("execution_count", 0) > 0 else 0.0
+        )
+        _set_search_diagnostics(diagnostics)
 
         # Batch-fetch all related entities in a single query to avoid N+1. Ordering invariant:
         # this always runs on the FINAL rows/merged_ids-derived set -- Part B's candidate-window
@@ -2110,9 +3005,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
 
             results.append(item)
 
+        if return_diagnostics:
+            return {"results": results, "diagnostics": diagnostics}
         return results
     except Exception as e:
         logger.error("Error searching memory: %s", e)
+        diagnostics["error"] = str(e)
+        _set_search_diagnostics(diagnostics)
+        if return_diagnostics:
+            return {"results": [], "diagnostics": diagnostics, "error": str(e)}
         return [{"error": str(e)}]
     finally:
         if should_close:
@@ -2232,9 +3133,13 @@ def archive_memory(  # noqa: PLR0911
             """,
                 (now, resolved_id, resolved_id),
             )
-            from saltmdb.domain.services.embedding_service import cancel_embedding_jobs_for_entity
+            from saltmdb.domain.services.embedding_service import (
+                cancel_embedding_jobs_for_entity,
+                cancel_retrieval_embedding_jobs_for_entity,
+            )
 
             cancel_embedding_jobs_for_entity(conn, resolved_id)
+            cancel_retrieval_embedding_jobs_for_entity(conn, resolved_id, clear_vector=True)
 
         if _in_transaction:
             _do_archive()

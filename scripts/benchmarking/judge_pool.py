@@ -20,6 +20,21 @@ VALID_GRADES = {0, 1, 2}
 # role identity remains auditable and cannot silently regress to the legacy judge set.
 JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
 ARBITRATOR = "agent_eval_adjudicator"
+# Bump only when the rubric/packet schema or judge-role contract changes.  The value is included
+# in every Stage-1 provenance envelope so labels from an older rubric cannot be merged silently.
+JUDGE_VERSION = "stage1-grades-0-1-2-gains-0-1-3-v1"
+
+
+def judge_version_fingerprint() -> str:
+    return artifact_fingerprint(
+        {
+            "version": JUDGE_VERSION,
+            "judges": JUDGES,
+            "arbitrator": ARBITRATOR,
+            "grades": [0, 1, 2],
+            "ndcg_gains": [0, 1, 3],
+        }
+    )
 
 
 def artifact_fingerprint(value: object) -> str:
@@ -75,7 +90,9 @@ def build_judge_packets(
             (candidate_id, {"title": item.get("title") or "", "snippet": item.get("snippet") or ""})
             for candidate_id, item in candidates.items()
         ]
-        if len({candidate_id for candidate_id, _ in rendered_candidates}) != len(rendered_candidates):
+        if len({candidate_id for candidate_id, _ in rendered_candidates}) != len(
+            rendered_candidates
+        ):
             raise ValueError(f"query {query_id!r} has duplicate candidate IDs")
         random.Random(_seed(base_seed, split, judge, query_id)).shuffle(rendered_candidates)
         task_id = f"task-{task_index:04d}"
@@ -96,6 +113,7 @@ def build_judge_packets(
     packet = {
         "schema_version": 1,
         "judge": judge,
+        "judge_version": JUDGE_VERSION,
         "rubric": {
             "0": "Irrelevant or non-answer to the query.",
             "1": "Related context or partial relevance, but not a direct answer to the query.",
@@ -107,6 +125,9 @@ def build_judge_packets(
         "schema_version": 1,
         "judge": judge,
         "split": split,
+        "judge_version": JUDGE_VERSION,
+        "judge_version_fingerprint": judge_version_fingerprint(),
+        "random_seed": base_seed,
         "tasks": mapping,
         "queries_fingerprint": artifact_fingerprint(queries),
         "matrix_pools_fingerprint": artifact_fingerprint(pools),
@@ -125,6 +146,10 @@ def validate_labels(response: dict, private_mapping: dict, judge: str) -> list[d
     verify_artifact_fingerprint(private_mapping)
     if private_mapping.get("split") not in {"dev", "blind"}:
         raise ValueError("private mapping has invalid split")
+    if private_mapping.get("judge_version") != JUDGE_VERSION:
+        raise ValueError("private mapping uses a stale judge rubric version")
+    if private_mapping.get("judge_version_fingerprint") != judge_version_fingerprint():
+        raise ValueError("private mapping judge-version fingerprint mismatch")
     if private_mapping.get("judge") not in JUDGES:
         raise ValueError("private mapping is not for a configured Luna judge")
     if "shard" in private_mapping or private_mapping.get("is_shard"):
@@ -200,6 +225,9 @@ def ingest_labels(response_path: Path, mapping_path: Path, out_path: Path, judge
     artifact = {
         "schema_version": 1,
         "judge": judge,
+        "judge_version": JUDGE_VERSION,
+        "judge_version_fingerprint": judge_version_fingerprint(),
+        "random_seed": mapping.get("random_seed"),
         "mapping_fingerprint": mapping.get("fingerprint"),
         "coverage_fingerprint": mapping.get("coverage_fingerprint"),
         "label_count": len(normalized),

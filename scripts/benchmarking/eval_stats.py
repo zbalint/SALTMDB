@@ -25,6 +25,13 @@ import statistics
 from dataclasses import dataclass, field
 
 
+# Frozen judging contract: grades are 0/1/2 and NDCG gains are 0/1/3.  Exporting the mapping
+# makes downstream promotion/report code use the same gain function rather than duplicating an
+# accidental linear (0/1/2) scale.
+JUDGMENT_GRADES = (0, 1, 2)
+NDCG_GAINS = {0: 0, 1: 1, 2: 3}
+
+
 # ---------------------------------------------------------------------------------------------
 # §5a: per-query, per-config metric primitives
 # ---------------------------------------------------------------------------------------------
@@ -32,7 +39,9 @@ from dataclasses import dataclass, field
 
 def _gain(grade: int) -> float:
     """g(grade) = 2^grade - 1, per §5a."""
-    return float(2**grade - 1)
+    if grade not in NDCG_GAINS:
+        raise ValueError("judgment grade must be 0, 1, or 2")
+    return float(NDCG_GAINS[grade])
 
 
 def dcg_at_10(ranked_ids: list[str], relevance: dict[str, int]) -> float:
@@ -88,6 +97,28 @@ def pooled_recall_at_10(ranked_ids: list[str], relevance: dict[str, int]) -> flo
     top10 = set(ranked_ids[:10])
     hit = sum(1 for cand_id, g in relevance.items() if g == 2 and cand_id in top10)
     return hit / total_relevant
+
+
+def semantic_recall_at_20(ranked_ids: list[str], relevance: dict[str, int]) -> float | None:
+    """Grade-2 semantic recall@20 used by the Stage-1 promotion gate.
+
+    This is the same unified relevance denominator as :func:`pooled_recall_at_10`, but evaluates
+    the candidate's first twenty results.  ``None`` means no grade-2 judged item exists for the
+    query and is excluded from an aggregate rather than treated as a vacuous pass.
+    """
+    total_relevant = sum(1 for grade in relevance.values() if grade == 2)
+    if total_relevant == 0:
+        return None
+    top20 = set(ranked_ids[:20])
+    hit = sum(
+        1 for candidate_id, grade in relevance.items() if grade == 2 and candidate_id in top20
+    )
+    return hit / total_relevant
+
+
+# Short aliases used by promotion/report code and hidden fixture consumers.
+recall_at_20 = semantic_recall_at_20
+grade2_semantic_recall_at_20 = semantic_recall_at_20
 
 
 def known_answer_recall_at_10(ranked_ids: list[str], source_entity_ids: list[str]) -> float | None:
@@ -228,12 +259,20 @@ def mcnemar_continuity_corrected(b: int, c: int) -> tuple[float, float]:
     missed (discordant, B-only). Returns (chi2_statistic, two_sided_p_value), df=1,
     continuity-corrected: statistic = (|b-c|-1)^2 / (b+c), per §5d. b+c==0 (no discordant pairs
     at all) returns (0.0, 1.0) -- no evidence of any difference."""
-    from scipy import stats as scipy_stats
-
     if b + c == 0:
         return 0.0, 1.0
     statistic = ((abs(b - c) - 1) ** 2) / (b + c)
-    p_value = float(scipy_stats.chi2.sf(statistic, df=1))
+    try:
+        from scipy import stats as scipy_stats
+
+        p_value = float(scipy_stats.chi2.sf(statistic, df=1))
+    except ModuleNotFoundError as exc:
+        if exc.name != "scipy":
+            raise
+        # Chi-square(1) survival function has the closed form erfc(sqrt(x/2)); keeping this
+        # fallback makes the evaluation statistics usable in the lightweight benchmark runner
+        # without making SciPy a runtime dependency.
+        p_value = math.erfc(math.sqrt(statistic / 2.0))
     return statistic, p_value
 
 

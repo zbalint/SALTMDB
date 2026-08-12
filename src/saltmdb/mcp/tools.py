@@ -13,6 +13,16 @@ from saltmdb.domain.services import ephemeral_service
 logger = logging.getLogger(__name__)
 
 
+class _UnsetRetrievalText(str):
+    """Serializable MCP-schema sentinel that still preserves Python identity for omission."""
+
+
+# A string subclass keeps FastMCP/Pydantic schema generation warning-free while identity (rather
+# than equality) distinguishes an omitted field from an explicit JSON null.  The marker is only an
+# adapter default; it is never sent to the domain service or persisted.
+_RETRIEVAL_TEXT_UNSET = _UnsetRetrievalText("__saltmdb_retrieval_text_omitted__")
+
+
 def _normalize_list_or_str(val) -> list:
     """Helper to convert stringified lists, comma-separated strings, or single string values into a Python list."""
     if val is None:
@@ -248,6 +258,7 @@ def store_memory(
     check_duplicates_only: bool = False,
     review_token: str = None,
     dispositions: list = None,
+    retrieval_text: str | None = _RETRIEVAL_TEXT_UNSET,
     **kwargs,
 ) -> str | dict:
     kw = _unwrap_kwargs(kwargs)
@@ -280,6 +291,12 @@ def store_memory(
     skip_duplicate_check = _resolve(None, kw, kwargs, "skip_duplicate_check") or False
     review_token_ = _resolve(review_token, kw, kwargs, "review_token")
     dispositions_ = _resolve(dispositions, kw, kwargs, "dispositions")
+    retrieval_text_provided = retrieval_text is not _RETRIEVAL_TEXT_UNSET
+    if not retrieval_text_provided:
+        retrieval_text_provided = "retrieval_text" in kw or "retrieval_text" in kwargs
+        retrieval_text_ = kw.get("retrieval_text") if retrieval_text_provided else None
+    else:
+        retrieval_text_ = retrieval_text
 
     return _backend_or_raise().call(
         "store_memory",
@@ -303,6 +320,8 @@ def store_memory(
             "review_token": review_token_,
             "dispositions": dispositions_,
             "check_duplicates_only": check_duplicates_only_,
+            "retrieval_text": retrieval_text_,
+            "retrieval_text_provided": retrieval_text_provided,
         },
     )
 
@@ -364,6 +383,19 @@ def store_memory(
     falls back deterministically to whatever ordering would exist without it -- never an error,
     never a widened result count.
 
+    cross_encoder_candidate_cap (10/15/20; default 10) and cross_encoder_text_cap_chars (1000/2000;
+    default 1000) bound CE work. Candidate text is the title plus the best fresh query-matching
+    chunk, with a title-plus-leading-content fallback. force_cross_encoder bypasses only the
+    decisive two-channel gap gate and has no effect unless use_cross_encoder is true.
+
+    use_chunk_candidates (opt-in, default False) adds a fresh-hash-checked chunk-vector channel.
+    It requests candidate_window * oversampling_multiplier chunk rows, deduplicates each entity by
+    minimum distance, and fuses FTS/entity-vector/chunk ranked lists. oversampling_multiplier must
+    be 4/8/12, candidate_window 20/40/60, and chunk_weight 0.5/1/1.5. collapse_supersedes_families
+    (broad mode only) collapses only eligible active, nonforking, acyclic supersedes chains already
+    wholly present in the filtered pool; it never injects a missing head. return_diagnostics=True
+    returns execution/shortfall diagnostics for benchmark callers.
+
     mode (opt-in, default "broad"): "broad" itself adds no filtering, resolution, or gating beyond
     what `rerank_by_topic`/`prefer_durable_types`/`demote_superseded`/`use_cross_encoder` already
     do -- it was byte-identical to this tool's behavior before `mode` existed, back when those four
@@ -403,8 +435,20 @@ def search_memory(
     prefer_durable_types: bool | None = None,
     demote_superseded: bool | None = None,
     use_cross_encoder: bool | None = None,
+    cross_encoder_candidate_cap: int | None = None,
+    cross_encoder_text_cap_chars: int | None = None,
+    force_cross_encoder: bool | None = None,
+    use_chunk_candidates: bool | None = None,
+    oversampling_multiplier: int | None = None,
+    candidate_window: int | None = None,
+    chunk_weight: float | None = None,
+    collapse_supersedes_families: bool | None = None,
+    return_diagnostics: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
     disable_semantic: bool | None = None,
+    use_retrieval_text_candidates: bool | None = None,
+    retrieval_fts_weight: float | None = None,
+    retrieval_vector_weight: float | None = None,
     **kwargs,
 ) -> list | dict | str:
     kw = _unwrap_kwargs(kwargs)
@@ -441,10 +485,71 @@ def search_memory(
         use_cross_encoder, kw, kwargs, "use_cross_encoder", "cross_encoder"
     )
     use_cross_encoder_ = use_cross_encoder_ if use_cross_encoder_ is not None else False
+    cross_encoder_candidate_cap_ = _resolve(
+        cross_encoder_candidate_cap,
+        kw,
+        kwargs,
+        "cross_encoder_candidate_cap",
+        "ce_candidate_cap",
+    )
+    cross_encoder_text_cap_chars_ = _resolve(
+        cross_encoder_text_cap_chars,
+        kw,
+        kwargs,
+        "cross_encoder_text_cap_chars",
+        "ce_text_cap_chars",
+    )
+    force_cross_encoder_ = _resolve(
+        force_cross_encoder, kw, kwargs, "force_cross_encoder", "force_ce"
+    )
+    force_cross_encoder_ = force_cross_encoder_ if force_cross_encoder_ is not None else False
+    use_chunk_candidates_ = _resolve(
+        use_chunk_candidates, kw, kwargs, "use_chunk_candidates", "chunk_candidates"
+    )
+    use_chunk_candidates_ = use_chunk_candidates_ if use_chunk_candidates_ is not None else False
+    oversampling_multiplier_ = _resolve(
+        oversampling_multiplier, kw, kwargs, "oversampling_multiplier", "chunk_oversampling"
+    )
+    candidate_window_ = _resolve(candidate_window, kw, kwargs, "candidate_window", "chunk_window")
+    chunk_weight_ = _resolve(chunk_weight, kw, kwargs, "chunk_weight", "chunk_rrf_weight")
+    collapse_supersedes_families_ = _resolve(
+        collapse_supersedes_families,
+        kw,
+        kwargs,
+        "collapse_supersedes_families",
+        "collapse_supersedes",
+    )
+    collapse_supersedes_families_ = (
+        collapse_supersedes_families_ if collapse_supersedes_families_ is not None else False
+    )
+    return_diagnostics_ = _resolve(
+        return_diagnostics, kw, kwargs, "return_diagnostics", "diagnostics"
+    )
+    return_diagnostics_ = return_diagnostics_ if return_diagnostics_ is not None else False
     mode_ = _resolve(mode, kw, kwargs, "mode")
     mode_ = mode_ if mode_ is not None else "broad"
     disable_semantic_ = _resolve(disable_semantic, kw, kwargs, "disable_semantic", "no_semantic")
     disable_semantic_ = disable_semantic_ if disable_semantic_ is not None else False
+    use_retrieval_text_candidates_ = _resolve(
+        use_retrieval_text_candidates,
+        kw,
+        kwargs,
+        "use_retrieval_text_candidates",
+        "retrieval_text_candidates",
+    )
+    use_retrieval_text_candidates_ = (
+        use_retrieval_text_candidates_ if use_retrieval_text_candidates_ is not None else False
+    )
+    retrieval_fts_weight_ = _resolve(
+        retrieval_fts_weight, kw, kwargs, "retrieval_fts_weight", "retrieval_text_fts_weight"
+    )
+    retrieval_vector_weight_ = _resolve(
+        retrieval_vector_weight,
+        kw,
+        kwargs,
+        "retrieval_vector_weight",
+        "retrieval_text_vector_weight",
+    )
 
     return _backend_or_raise().call(
         "search_memory",
@@ -468,7 +573,19 @@ def search_memory(
             "prefer_durable_types": prefer_durable_types_,
             "demote_superseded": demote_superseded_,
             "use_cross_encoder": use_cross_encoder_,
+            "cross_encoder_candidate_cap": cross_encoder_candidate_cap_,
+            "cross_encoder_text_cap_chars": cross_encoder_text_cap_chars_,
+            "force_cross_encoder": force_cross_encoder_,
+            "use_chunk_candidates": use_chunk_candidates_,
+            "oversampling_multiplier": oversampling_multiplier_,
+            "candidate_window": candidate_window_,
+            "chunk_weight": chunk_weight_,
+            "collapse_supersedes_families": collapse_supersedes_families_,
+            "return_diagnostics": return_diagnostics_,
             "disable_semantic": disable_semantic_,
+            "use_retrieval_text_candidates": use_retrieval_text_candidates_,
+            "retrieval_fts_weight": retrieval_fts_weight_,
+            "retrieval_vector_weight": retrieval_vector_weight_,
         },
     )
 

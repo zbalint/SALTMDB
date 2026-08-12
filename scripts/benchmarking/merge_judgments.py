@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
 ARBITRATOR = "agent_eval_adjudicator"
+JUDGE_VERSION = "stage1-grades-0-1-2-gains-0-1-3-v1"
 VALID_GRADES = {0, 1, 2}
 
 
@@ -147,7 +148,7 @@ def apply_arbitration_override(merged: MergedJudgment, arbitrated_grade: int) ->
     return merged
 
 
-def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:
+def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:  # noqa: C901
     """Accept exactly three complete, non-overlapping judge artifacts."""
     by_judge: dict[str, list[dict]] = {}
     for artifact in label_artifacts:
@@ -155,6 +156,8 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:
         judge = artifact.get("judge")
         if judge not in JUDGES or judge in by_judge:
             raise ValueError("need one raw-label artifact for each configured judge")
+        if artifact.get("judge_version") != JUDGE_VERSION:
+            raise ValueError("raw labels use a stale judge rubric version")
         labels = artifact.get("labels")
         if not isinstance(labels, list):
             raise ValueError("raw-label artifact lacks labels")
@@ -306,6 +309,9 @@ def merged_artifact(
         "schema_version": 1,
         "judges": list(JUDGES),
         "adjudicator": ARBITRATOR,
+        "judge_version": JUDGE_VERSION,
+        "judgment_grades": [0, 1, 2],
+        "ndcg_gains": [0, 1, 3],
         "labels": labels,
         "raw_labels_fingerprint": artifact_fingerprint(raw_artifacts),
         "calibration": calibration_accuracy(merged, source_map),

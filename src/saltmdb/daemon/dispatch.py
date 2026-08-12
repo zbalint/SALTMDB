@@ -43,6 +43,24 @@ def _optional_int(kw: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _optional_int_or_none(kw: dict[str, Any], key: str) -> int | None:
+    value = kw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _optional_float_or_none(kw: dict[str, Any], key: str) -> float | None:
+    value = kw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be numeric")
+    return float(value)
+
+
 def _optional_scope(kw: dict[str, Any], key: str = "scope") -> Literal["private", "shared"]:
     value = kw.get(key)
     if value is None:
@@ -109,6 +127,7 @@ def _dispatch_store_memory(**kw):
             tags=kw.get("tags"),
             context_id=kw.get("context_id"),
         )
+    retrieval_text_provided = kw.get("retrieval_text_provided", "retrieval_text" in kw)
     return memory_service.store_memory(
         content=kw.get("content"),
         tags=kw.get("tags"),
@@ -128,6 +147,11 @@ def _dispatch_store_memory(**kw):
         context_id=kw.get("context_id"),
         review_token=kw.get("review_token"),
         dispositions=kw.get("dispositions"),
+        retrieval_text=(
+            kw.get("retrieval_text")
+            if retrieval_text_provided
+            else memory_service.RETRIEVAL_TEXT_UNSET
+        ),
         coordinator=kw.get("coordinator"),
     )
 
@@ -156,7 +180,19 @@ def _dispatch_search_memory(**kw):
         prefer_durable_types=_optional_bool(kw, "prefer_durable_types", False),
         demote_superseded=_optional_bool(kw, "demote_superseded", False),
         use_cross_encoder=_optional_bool(kw, "use_cross_encoder", False),
+        cross_encoder_candidate_cap=_optional_int_or_none(kw, "cross_encoder_candidate_cap"),
+        cross_encoder_text_cap_chars=_optional_int_or_none(kw, "cross_encoder_text_cap_chars"),
+        force_cross_encoder=_optional_bool(kw, "force_cross_encoder", False),
+        use_chunk_candidates=_optional_bool(kw, "use_chunk_candidates", False),
+        oversampling_multiplier=_optional_int_or_none(kw, "oversampling_multiplier"),
+        candidate_window=_optional_int_or_none(kw, "candidate_window"),
+        chunk_weight=_optional_float_or_none(kw, "chunk_weight"),
+        collapse_supersedes_families=_optional_bool(kw, "collapse_supersedes_families", False),
+        return_diagnostics=_optional_bool(kw, "return_diagnostics", False),
         disable_semantic=kw.get("disable_semantic", False),
+        use_retrieval_text_candidates=_optional_bool(kw, "use_retrieval_text_candidates", False),
+        retrieval_fts_weight=_optional_float_or_none(kw, "retrieval_fts_weight"),
+        retrieval_vector_weight=_optional_float_or_none(kw, "retrieval_vector_weight"),
     )
 
 

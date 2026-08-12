@@ -10,9 +10,34 @@ benchmark runs still depend on in its original 2-history-config shape).
 """
 
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 
 _SHARED_MODULE_PATH = Path(__file__).parent / "benchmark_search_option_matrix.py"
+
+
+# These controls are deliberately represented in the evaluation manifest before any runtime
+# implementation exists.  Every default is the actual broad-mode runtime baseline: the current
+# search service leaves all optional ranking/candidate/family/retrieval-text behavior disabled.
+# Keeping the controls in the signed config shape prevents a future implementation from being
+# benchmarked under an ambiguous "missing field means old default" interpretation.
+FUTURE_CONTROL_DEFAULTS = {
+    "use_chunk_candidates": False,
+    "oversampling_multiplier": 1,
+    "candidate_window": 0,
+    "chunk_weight": 0.0,
+    "collapse_supersedes_families": False,
+    "cross_encoder_candidate_cap": None,
+    "cross_encoder_text_cap_chars": None,
+    "force_cross_encoder": False,
+    "use_retrieval_text_candidates": False,
+    "retrieval_fts_weight": 0.0,
+    "retrieval_vector_weight": 0.0,
+}
+
+
+RUNTIME_BASELINE_CONFIG_NAME = "broad_rt0_pdt0_ds0_ce0"
 
 
 def _load_shared_build_configs():
@@ -22,6 +47,73 @@ def _load_shared_build_configs():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module._build_configs
+
+
+def _with_future_controls(config: dict) -> dict:
+    """Return a detached config carrying the Stage-1 future-control metadata."""
+    result = dict(config)
+    for key, value in FUTURE_CONTROL_DEFAULTS.items():
+        result.setdefault(key, value)
+    # This flag is descriptive only.  It makes it possible to audit the frozen baseline without
+    # inferring it from a config name, while keeping the historical 24-config matrix shape.
+    result["is_runtime_baseline"] = result["name"] == RUNTIME_BASELINE_CONFIG_NAME
+    return result
+
+
+def validate_config(config: dict) -> None:
+    """Validate the signed config shape without executing any future runtime controls."""
+    if not isinstance(config, dict) or not isinstance(config.get("name"), str):
+        raise ValueError("config must have a non-empty name")
+    for key in (
+        "mode",
+        "rerank_by_topic",
+        "prefer_durable_types",
+        "demote_superseded",
+        "use_cross_encoder",
+    ):
+        if key not in config:
+            raise ValueError(f"config missing {key}")
+    if config["mode"] not in {"broad", "strict", "history"}:
+        raise ValueError("config mode is invalid")
+    for key in (
+        "rerank_by_topic",
+        "prefer_durable_types",
+        "demote_superseded",
+        "use_cross_encoder",
+        "use_chunk_candidates",
+        "collapse_supersedes_families",
+        "force_cross_encoder",
+        "use_retrieval_text_candidates",
+    ):
+        if not isinstance(config.get(key), bool):
+            raise ValueError(f"config {key} must be boolean")
+    for key in (
+        "oversampling_multiplier",
+        "candidate_window",
+        "chunk_weight",
+        "retrieval_fts_weight",
+        "retrieval_vector_weight",
+    ):
+        if not isinstance(config.get(key), (int, float)) or isinstance(config.get(key), bool):
+            raise ValueError(f"config {key} must be numeric")
+        if config[key] < 0:
+            raise ValueError(f"config {key} cannot be negative")
+    for key in ("cross_encoder_candidate_cap", "cross_encoder_text_cap_chars"):
+        value = config.get(key)
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        ):
+            raise ValueError(f"config {key} must be a positive integer or null")
+
+
+def config_fingerprint(configs: list[dict] | None = None) -> str:
+    """Stable fingerprint for a config manifest, including future controls."""
+    values = _build_evaluation_configs() if configs is None else configs
+    for config in values:
+        validate_config(config)
+    return hashlib.sha256(
+        json.dumps(values, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _build_evaluation_configs() -> list[dict]:
@@ -74,10 +166,12 @@ def _build_evaluation_configs() -> list[dict]:
         },
     ]
 
-    result = broad_and_strict + history_configs
+    result = [_with_future_controls(config) for config in broad_and_strict + history_configs]
     assert len(result) == 24, f"expected 24 total configs, got {len(result)}"
     names = [cfg["name"] for cfg in result]
     assert len(names) == len(set(names)), f"duplicate config names: {names}"
+    for config in result:
+        validate_config(config)
     return result
 
 
@@ -85,3 +179,32 @@ def _build_evaluation_configs() -> list[dict]:
 # comparison family. It intentionally remains the pre-rollout configuration so historical
 # shortlist and analysis artifacts stay tamper-valid after runtime defaults change.
 CURRENT_DEFAULT_CONFIG_NAME = "broad_rt0_pdt1_ds1_ce0"
+
+# ``CURRENT_DEFAULT_CONFIG_NAME`` remains the status-quo name embedded in the completed Luna
+# evaluation artifacts.  New Stage-1 runs must use this explicit runtime baseline instead; the
+# distinction prevents old shortlist/decision files from being reinterpreted after the 2026-08-12
+# broad-default flip.
+LEGACY_FROZEN_EVALUATION_BASELINE_CONFIG_NAME = CURRENT_DEFAULT_CONFIG_NAME
+
+
+def runtime_baseline_config() -> dict:
+    """Return the actual broad runtime baseline with every optional Stage-1 control disabled."""
+    configs = _build_evaluation_configs()
+    baseline = next(
+        (config for config in configs if config["name"] == RUNTIME_BASELINE_CONFIG_NAME), None
+    )
+    if baseline is None:
+        raise ValueError(f"runtime baseline {RUNTIME_BASELINE_CONFIG_NAME!r} is missing")
+    expected_false = (
+        "rerank_by_topic",
+        "prefer_durable_types",
+        "demote_superseded",
+        "use_cross_encoder",
+        "use_chunk_candidates",
+        "collapse_supersedes_families",
+        "force_cross_encoder",
+        "use_retrieval_text_candidates",
+    )
+    if baseline["mode"] != "broad" or any(baseline[key] for key in expected_false):
+        raise ValueError("runtime baseline is not the all-disabled broad configuration")
+    return dict(baseline)

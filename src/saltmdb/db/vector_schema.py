@@ -54,6 +54,29 @@ def init_vector_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
+def init_retrieval_vector_schema(conn: sqlite3.Connection) -> None:
+    """Create the optional caller-supplied retrieval-text vector index.
+
+    ``source_hash`` is an auxiliary column rather than part of the vector key.  Search joins it
+    against ``entities.retrieval_text_hash`` synchronously, so a stale row can never contribute
+    while a replacement job is queued or a worker has failed.  The table is deliberately separate
+    from both authoritative entity vectors and chunk vectors; retrieval-text lifecycle changes
+    therefore cannot affect their status/jobs.
+    """
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_embeddings USING vec0(
+            entity_id TEXT PRIMARY KEY,
+            embedding FLOAT[384],
+            +source_hash TEXT
+        );
+    """)
+
+
 def _entity_chunk_embeddings_ddl(if_not_exists: bool) -> str:
     """Shared DDL for entity_chunk_embeddings, used by both the fresh-install path
     (init_entity_chunk_vector_schema) and the drop+recreate migration path
