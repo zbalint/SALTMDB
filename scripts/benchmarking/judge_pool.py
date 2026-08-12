@@ -14,6 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bakeoff_state import authorize_blind_file  # noqa: E402
 from analyze_evaluation_matrix import validate_frozen_shortlist  # noqa: E402
 
 VALID_GRADES = {0, 1, 2}
@@ -518,6 +519,10 @@ def main() -> None:
         type=Path,
         help="Signed development shortlist, required for blind packet generation.",
     )
+    packet.add_argument("--blind-vault-dir", type=Path)
+    packet.add_argument("--bakeoff-spec", type=Path)
+    packet.add_argument("--development-winner", type=Path)
+    packet.add_argument("--blind-unlock", type=Path)
     packet.add_argument("--seed", type=int, default=0)
     ingest = actions.add_parser("ingest")
     ingest.add_argument("--response", type=Path, required=True)
@@ -528,6 +533,21 @@ def main() -> None:
     if args.action == "packets":
         if args.split == "blind":
             require_frozen_dev_shortlist(args.dev_shortlist)
+            authorization_paths = (
+                args.blind_vault_dir,
+                args.bakeoff_spec,
+                args.development_winner,
+                args.blind_unlock,
+            )
+            if any(path is None for path in authorization_paths):
+                raise RuntimeError("blind packets require vault and matching BlindUnlock paths")
+            authorize_blind_file(
+                args.queries,
+                args.blind_vault_dir,
+                args.bakeoff_spec,
+                args.development_winner,
+                args.blind_unlock,
+            )
         write_packets(
             args.queries,
             args.matrix,

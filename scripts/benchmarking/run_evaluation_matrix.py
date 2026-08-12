@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 from eval_configs import _build_evaluation_configs  # noqa: E402
 from analyze_evaluation_matrix import validate_frozen_shortlist  # noqa: E402
+from bakeoff_state import authorize_blind_file  # noqa: E402
+from build_evaluation_queries import validate_queries  # noqa: E402
 from evaluation_artifacts import (  # noqa: E402
     build_provenance,
     build_query_trace,
@@ -174,7 +176,7 @@ def summarize_cross_encoder_execution(result: dict, configs: list[dict]) -> dict
     return summary
 
 
-def _load_signed_queries(path: Path) -> tuple[list[dict], str | None]:
+def _load_signed_queries(path: Path, *, expected_split: str | None = None) -> tuple[list[dict], str]:
     value = json.loads(path.read_text())
     if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
         raise ValueError("matrix input must be a signed query manifest")
@@ -188,6 +190,12 @@ def _load_signed_queries(path: Path) -> tuple[list[dict], str | None]:
         raise ValueError("query manifest manifest_fingerprint mismatch")
     if value.get("queries_fingerprint") != _fingerprint(value["queries"]):
         raise ValueError("query manifest queries_fingerprint mismatch")
+    validate_provenance(value, artifact_label="query manifest")
+    validate_queries(value["queries"])
+    if expected_split is not None and any(
+        query.get("split") != expected_split for query in value["queries"]
+    ):
+        raise ValueError("query manifest contains rows outside the declared split")
     return value["queries"], value["manifest_fingerprint"]
 
 
@@ -203,6 +211,32 @@ def require_frozen_dev_shortlist(path: Path | None) -> None:
     if path is None or not path.exists():
         raise RuntimeError("blind matrix requires a signed --dev-shortlist")
     validate_frozen_shortlist(json.loads(path.read_text()))
+
+
+def authorize_query_manifest(
+    query_path: Path,
+    split: str,
+    *,
+    dev_shortlist: Path | None = None,
+    blind_vault_dir: Path | None = None,
+    bakeoff_spec: Path | None = None,
+    development_winner: Path | None = None,
+    blind_unlock: Path | None = None,
+) -> None:
+    """Authorize a query manifest without opening it; development is unrestricted."""
+    if split != "blind":
+        return
+    require_frozen_dev_shortlist(dev_shortlist)
+    authorization_paths = (blind_vault_dir, bakeoff_spec, development_winner, blind_unlock)
+    if any(path is None for path in authorization_paths):
+        raise RuntimeError(
+            "blind matrix requires --blind-vault-dir, --bakeoff-spec, "
+            "--development-winner, and --blind-unlock"
+        )
+    assert blind_vault_dir and bakeoff_spec and development_winner and blind_unlock
+    authorize_blind_file(
+        query_path, blind_vault_dir, bakeoff_spec, development_winner, blind_unlock
+    )
 
 
 def _refuse_unsafe_db_path(db_path: str) -> None:
@@ -476,6 +510,7 @@ def main():  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db-path", required=True, help="Throwaway copy of the frozen corpus.")
     parser.add_argument("--queries", required=True, help="Path to a queries_{dev,blind}.json file.")
+    parser.add_argument("--split", choices=("dev", "blind"), required=True)
     parser.add_argument("--out", required=True, help="Output path for the matrix run JSON.")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument(
@@ -500,6 +535,10 @@ def main():  # noqa: PLR0915
         type=Path,
         help="Signed development shortlist, required when --queries is the blind manifest.",
     )
+    parser.add_argument("--blind-vault-dir", type=Path)
+    parser.add_argument("--bakeoff-spec", type=Path)
+    parser.add_argument("--development-winner", type=Path)
+    parser.add_argument("--blind-unlock", type=Path)
     parser.add_argument(
         "--config-name",
         action="append",
@@ -508,19 +547,23 @@ def main():  # noqa: PLR0915
     )
     args = parser.parse_args()
 
-    # The signed manifest's query rows are the authority for the split.  Check the wrapper
-    # before opening the corpus or constructing any blind query execution state.
-    raw_queries = json.loads(Path(args.queries).read_text())
-    manifest_queries = raw_queries.get("queries") if isinstance(raw_queries, dict) else None
-    if isinstance(manifest_queries, list) and any(
-        q.get("split") == "blind" for q in manifest_queries
-    ):
-        require_frozen_dev_shortlist(args.dev_shortlist)
+    # Blind authorization is validated before the first read of the blind query manifest.
+    authorize_query_manifest(
+        Path(args.queries),
+        args.split,
+        dev_shortlist=args.dev_shortlist,
+        blind_vault_dir=args.blind_vault_dir,
+        bakeoff_spec=args.bakeoff_spec,
+        development_winner=args.development_winner,
+        blind_unlock=args.blind_unlock,
+    )
 
     _refuse_unsafe_db_path(args.db_path)
     os.environ["SALTMDB_RERANKER_MODEL"] = RERANKER_MODEL  # §0b item 5
 
-    queries, queries_manifest_fingerprint = _load_signed_queries(Path(args.queries))
+    queries, queries_manifest_fingerprint = _load_signed_queries(
+        Path(args.queries), expected_split=args.split
+    )
 
     configs = _build_evaluation_configs()
     if args.config_names:

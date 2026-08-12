@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bakeoff_state import authorize_blind_file  # noqa: E402
 from eval_configs import CURRENT_DEFAULT_CONFIG_NAME, _build_evaluation_configs
 from eval_stats import (
     FamilyMetricSample,
@@ -591,10 +592,30 @@ def main() -> None:
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--dev-contenders", type=Path)
+    parser.add_argument("--blind-vault-dir", type=Path)
+    parser.add_argument("--bakeoff-spec", type=Path)
+    parser.add_argument("--development-winner", type=Path)
+    parser.add_argument("--blind-unlock", type=Path)
     parser.add_argument("--resamples", type=int, default=10000)
     args = parser.parse_args()
     if args.split == "blind" and (not args.dev_contenders or not args.dev_contenders.exists()):
         raise RuntimeError("blind analysis requires frozen --dev-contenders")
+    if args.split == "blind":
+        authorization_paths = (
+            args.blind_vault_dir,
+            args.bakeoff_spec,
+            args.development_winner,
+            args.blind_unlock,
+        )
+        if any(path is None for path in authorization_paths):
+            raise RuntimeError("blind analysis requires vault and matching BlindUnlock paths")
+        authorize_blind_file(
+            args.queries,
+            args.blind_vault_dir,
+            args.bakeoff_spec,
+            args.development_winner,
+            args.blind_unlock,
+        )
     analysis = analyze(
         _load_queries(args.queries),
         json.loads(args.matrix.read_text()),

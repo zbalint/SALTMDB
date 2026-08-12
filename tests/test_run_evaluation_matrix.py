@@ -316,6 +316,13 @@ class TestRunMatrixForQueries(unittest.TestCase):
         with self.assertRaises(ValueError):
             rem.require_frozen_dev_shortlist(invalid)
 
+    def test_blind_query_authorization_refuses_before_query_file_read(self):
+        query_path = Path(self.temp_dir) / "private-vault" / "queries_blind.json"
+        with patch.object(Path, "read_text", side_effect=AssertionError("query file opened")) as read:
+            with self.assertRaisesRegex(RuntimeError, "signed --dev-shortlist"):
+                rem.authorize_query_manifest(query_path, "blind")
+            read.assert_not_called()
+
     def test_cross_encoder_preflight_is_required_and_finite(self):
         configs = [{"name": "ce", "use_cross_encoder": True}]
         ready = {"ready": True, "scores": [1.0, 0.0], "diagnostics": {"finite_and_sized": True}}
