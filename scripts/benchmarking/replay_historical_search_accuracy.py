@@ -16,13 +16,10 @@ runtime defaults, the corpus, or the live daemon.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import math
 import os
 import statistics
 import sys
-import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -43,7 +40,6 @@ from evaluation_artifacts import (  # noqa: E402
 from judge_pool import judge_version_fingerprint  # noqa: E402
 from run_evaluation_matrix import (  # noqa: E402
     RERANKER_MODEL,
-    _fetch_entity_stub,
     _refuse_unsafe_db_path,
     preflight_cross_encoder_configs,
     run_one_config,
@@ -401,27 +397,8 @@ def _run_query(
                     "ground_truth_forced_include": False,
                 },
             )
-    # Positive target IDs are added for judging even when every config missed them.  Negative
-    # controls deliberately have no source_entity_ids, so they are never force-injected.
-    for source_id in query.get("source_entity_ids") or []:
-        if source_id in pool:
-            continue
-        stub = _fetch_entity_stub(conn, source_id)
-        if stub is None:
-            errors.append(
-                {
-                    "query_id": query["id"],
-                    "config_name": None,
-                    "error": f"source_entity_id {source_id!r} not found/archived in corpus",
-                }
-            )
-            continue
-        pool[source_id] = {
-            "title": stub["title"],
-            "snippet": stub["snippet"],
-            "memory_type": stub["memory_type"],
-            "ground_truth_forced_include": True,
-        }
+    # Do not fetch a missed target by direct SQL. Exact-ID metrics need only the rankings, and
+    # relevance judging can fetch target text later through the SALTMDB service/MCP boundary.
     return rankings, pool, latencies, errors, diagnostics
 
 
@@ -593,55 +570,14 @@ def _channel_aggregate(
             else 0.0,
         },
     }
-    if config_name == CONTROL_NAME:
-        result["retrieval_text"]["target_coverage"] = _retrieval_target_coverage(conn, queries)
-    else:
-        # Coverage is corpus-level and independent of ranking; repeat the same evidence for the
-        # optional channel so each contender is self-describing in machine-readable output.
-        result["retrieval_text"]["target_coverage"] = _retrieval_target_coverage(conn, queries)
-    return result
-
-
-def _retrieval_target_coverage(conn, queries: list[dict[str, Any]]) -> dict[str, Any]:
-    target_ids = sorted(
-        {query["expected_entity_id"] for query in queries if query["category"] != "negative_control"}
-    )
-    if not target_ids:
-        return {"available": True, "target_entities": 0}
-    placeholders = ",".join("?" for _ in target_ids)
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT e.id,
-                   e.retrieval_text IS NOT NULL AND e.retrieval_text != '' AS has_text,
-                   EXISTS(
-                       SELECT 1 FROM retrieval_embedding_jobs j
-                       WHERE j.entity_id = e.id
-                         AND j.source_hash = e.retrieval_text_hash
-                         AND j.state = 'succeeded'
-                   ) AS has_embedding
-            FROM entities e
-            WHERE e.id IN ({placeholders}) AND e.status != 'archived'
-            """,
-            target_ids,
-        ).fetchall()
-    except Exception as exc:  # Compatibility for old/synthetic DBs without retrieval schema.
-        return {"available": False, "target_entities": len(target_ids), "error": str(exc)}
-    by_id = {row[0]: (bool(row[1]), bool(row[2])) for row in rows}
-    fresh_text = sum(by_id.get(entity_id, (False, False))[0] for entity_id in target_ids)
-    fresh_embedding = sum(by_id.get(entity_id, (False, False))[1] for entity_id in target_ids)
-    fully_covered = sum(
-        by_id.get(entity_id, (False, False)) == (True, True) for entity_id in target_ids
-    )
-    denominator = len(target_ids)
-    return {
-        "available": True,
-        "target_entities": denominator,
-        "fresh_retrieval_text_entities": fresh_text,
-        "succeeded_fresh_embedding_entities": fresh_embedding,
-        "fully_covered_entities": fully_covered,
-        "full_coverage_rate": fully_covered / denominator if denominator else 0.0,
+    # Candidate evidence is derived from the public search diagnostics. Target-level retrieval
+    # text coverage must be measured through the service/MCP boundary, never by querying the
+    # SALTMDB schema directly from this benchmark script.
+    result["retrieval_text"]["target_coverage"] = {
+        "available": False,
+        "reason": "not_collected_without_direct_sql",
     }
+    return result
 
 
 def aggregate_results(
@@ -758,7 +694,7 @@ def _prepare_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     return db_path, out_path, checkpoint_path, signed_manifest_path
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db-path", required=True, help="Disposable copy of the frozen corpus.")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -767,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--checkpoint-every", type=int, default=10)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--commit-fingerprint")
     parser.add_argument("--corpus-fingerprint")
