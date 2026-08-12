@@ -12,6 +12,16 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Sequence
 
 
+CROSS_ENCODER_MODELS = (
+    "Xenova/ms-marco-MiniLM-L-6-v2",
+    "Xenova/ms-marco-MiniLM-L-12-v2",
+    "jinaai/jina-reranker-v1-tiny-en",
+    "jinaai/jina-reranker-v1-turbo-en",
+    "BAAI/bge-reranker-base",
+)
+CROSS_ENCODER_TEXT_VERSION = "query-title-authoritative-body-v1"
+
+
 ALLOWED_FEATURES = frozenset(
     {
         "bm25_score",
@@ -171,6 +181,32 @@ def score_linear(candidate: RankedCandidate, weights: Mapping[str, float]) -> fl
     return sum(_finite(candidate.features.get(name, 0.0)) * weights[name] for name in schema)
 
 
+def render_cross_encoder_pair(query: str, title: str, body: str) -> tuple[str, str]:
+    """Frozen query/candidate construction shared by every CE contender."""
+    normalized_query = " ".join(query.split())
+    normalized_title = " ".join(title.split())
+    normalized_body = " ".join(body.split())
+    if not normalized_query or not (normalized_title or normalized_body):
+        raise ValueError("cross-encoder query and candidate text must be non-empty")
+    return normalized_query, "\n\n".join(
+        part for part in (normalized_title, normalized_body) if part
+    )
+
+
+def _validated_ce_scores(
+    ce_scores: Mapping[str, float] | None, candidate_ids: Sequence[str]
+) -> tuple[list[float] | None, str]:
+    if not ce_scores or any(candidate_id not in ce_scores for candidate_id in candidate_ids):
+        return None, "missing_scores"
+    try:
+        values = [float(ce_scores[candidate_id]) for candidate_id in candidate_ids]
+    except (TypeError, ValueError):
+        return None, "malformed_scores"
+    if any(not math.isfinite(score) for score in values):
+        return None, "nonfinite_scores"
+    return values, "valid"
+
+
 def conservative_ce_promote(
     retrieval_order: Sequence[RankedCandidate],
     ce_scores: Mapping[str, float] | None,
@@ -190,17 +226,16 @@ def conservative_ce_promote(
     if lexical >= policy.protect_lexical_score or agreement >= policy.protect_dual_channel_count:
         diagnostic["reason"] = "incumbent_protected"
         return original, diagnostic
-    if not ce_scores or incumbent.candidate_id not in ce_scores:
-        diagnostic["reason"] = "missing_scores"
-        return original, diagnostic
-    incumbent_score = _finite(ce_scores[incumbent.candidate_id])
     challengers = original[1 : policy.max_challenger_rank]
-    if any(challenger.candidate_id not in ce_scores for challenger in challengers):
-        diagnostic["reason"] = "missing_scores"
+    required_ids = [incumbent.candidate_id, *(item.candidate_id for item in challengers)]
+    required_scores, score_status = _validated_ce_scores(ce_scores, required_ids)
+    if required_scores is None:
+        diagnostic["reason"] = score_status
         return original, diagnostic
+    incumbent_score = required_scores[0]
     scored = [
-        (_finite(ce_scores[item.candidate_id]), index, item)
-        for index, item in enumerate(challengers, 1)
+        (score, index, item)
+        for index, (item, score) in enumerate(zip(challengers, required_scores[1:]), 1)
     ]
     diagnostic["executed"] = True
     best_score, best_index, best = max(scored, key=lambda item: (item[0], -item[1]))

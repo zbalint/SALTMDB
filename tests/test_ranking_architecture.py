@@ -6,12 +6,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "benchmarking"))
 
 from ranking_architecture import (  # noqa: E402
+    CROSS_ENCODER_MODELS,
     ConservativePromotionPolicy,
     PairwiseExample,
     RankedCandidate,
     conservative_ce_promote,
     grouped_family_folds,
     normalized_linear_fusion,
+    render_cross_encoder_pair,
     score_linear,
     train_pairwise_linear_ranker,
     validate_feature_schema,
@@ -100,3 +102,23 @@ def test_ce_ties_missing_and_malformed_scores_preserve_order():
         )
         assert order == rows
         assert diagnostic["promoted"] is False
+
+    for scores in (
+        {"a": float("nan"), "b": 10.0},
+        {"a": 0.0, "b": float("inf")},
+        {"a": 0.0, "b": "bad"},
+    ):
+        order, diagnostic = conservative_ce_promote(
+            rows, scores, policy, ambiguity_predicate=lambda _: True
+        )
+        assert order == rows
+        assert diagnostic["promoted"] is False
+
+
+def test_ce_model_set_and_text_renderer_are_frozen():
+    assert len(CROSS_ENCODER_MODELS) == 5
+    assert len(set(CROSS_ENCODER_MODELS)) == 5
+    assert render_cross_encoder_pair("  query  text ", " A title ", " body   text ") == (
+        "query text",
+        "A title\n\nbody text",
+    )
