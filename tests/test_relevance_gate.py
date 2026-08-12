@@ -612,8 +612,8 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
                 return_value=semantic_rows,
             ),
         ):
-            # prefer_durable_types/demote_superseded pinned False explicitly (default True as of
-            # v0.1.0-alpha.70): this test's subject is mode="history" itself not reordering on its
+            # prefer_durable_types/demote_superseded pinned False explicitly: this test's subject
+            # is mode="history" itself not reordering on its
             # own, independent of demote_superseded's own separate, mode-agnostic reordering
             # (which is real and by design -- see _apply_supersession_demotion) -- pinning False
             # isolates that so the assertion below stays about history mode specifically.

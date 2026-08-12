@@ -329,11 +329,11 @@ def store_memory(
     a decisive, dual-channel-confirmed top result -- rerank_by_topic=True still requests reranking,
     but the gate may decide it isn't needed for a given query.
 
-    prefer_durable_types (on by default; pass False to opt out): stable-reorders results so
+    prefer_durable_types (off by default; pass True to opt in): stable-reorders results so
     `event`-typed memories (session notes/handovers, prone to staleness) sink behind the four
     durable types (fact/decision/procedure/preference), within the widened hybrid candidate pool.
 
-    demote_superseded (on by default; pass False to opt out): stable-reorders results so a memory
+    demote_superseded (off by default; pass True to opt in): stable-reorders results so a memory
     that is the target of a `supersedes` relation whose `valid_to` is unset or still in the future
     sinks to the back of the widened hybrid candidate pool. This is a narrower, single-column check
     than the full four-column bitemporal validity (`valid_from`/`valid_to`/`valid_at`/`invalid_at`)
@@ -367,8 +367,8 @@ def store_memory(
     mode (opt-in, default "broad"): "broad" itself adds no filtering, resolution, or gating beyond
     what `rerank_by_topic`/`prefer_durable_types`/`demote_superseded`/`use_cross_encoder` already
     do -- it was byte-identical to this tool's behavior before `mode` existed, back when those four
-    flags all defaulted off; that is no longer the same claim as "identical to today's other
-    defaults" now that `prefer_durable_types`/`demote_superseded` default `True` (v0.1.0-alpha.70).
+    flags all defaulted off; that again matches today's defaults after the frozen blind evaluation
+    selected `broad_rt0_pdt0_ds0_ce0` as the replacement broad-mode default.
     "strict"
     resolves a matched-but-superseded candidate to its live, multi-hop `supersedes` successor and
     requires every surviving candidate to independently clear a calibrated relevance-abstention
@@ -379,7 +379,7 @@ def store_memory(
     regardless of `prefer_durable_types`/`demote_superseded` above. "history" leaves every
     candidate visible (like "broad") and tags a candidate that is the target of a currently-valid
     `supersedes` edge with `"is_superseded": true` -- the tagging step itself never hides or
-    reorders anything, but `prefer_durable_types`/`demote_superseded` (on by default) still apply
+    reorders anything, but opt-in `prefer_durable_types`/`demote_superseded` still apply
     under "history" exactly as they do under "broad" and can reorder its results independently of
     the tagging. Neither
     "strict" nor "history" ever exposes archived material -- both still require
@@ -434,9 +434,9 @@ def search_memory(
     prefer_durable_types_ = _resolve(
         prefer_durable_types, kw, kwargs, "prefer_durable_types", "prefer_durable"
     )
-    prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else True
+    prefer_durable_types_ = prefer_durable_types_ if prefer_durable_types_ is not None else False
     demote_superseded_ = _resolve(demote_superseded, kw, kwargs, "demote_superseded")
-    demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else True
+    demote_superseded_ = demote_superseded_ if demote_superseded_ is not None else False
     use_cross_encoder_ = _resolve(
         use_cross_encoder, kw, kwargs, "use_cross_encoder", "cross_encoder"
     )

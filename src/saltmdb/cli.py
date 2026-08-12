@@ -72,8 +72,8 @@ def _search_memory_defaults(**overrides) -> dict:
         "mode": "broad",
         "include_related": True,
         "rerank_by_topic": False,
-        "prefer_durable_types": True,
-        "demote_superseded": True,
+        "prefer_durable_types": False,
+        "demote_superseded": False,
         "use_cross_encoder": False,
         "disable_semantic": False,
     }

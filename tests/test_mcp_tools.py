@@ -114,16 +114,14 @@ class TestMCPToolsWrapper(unittest.TestCase):
             self.assertEqual(by_id[entity_b]["cross_encoder_score"], 9.0)
 
     def test_search_memory_prefer_durable_types_default_and_alias(self):
-        """v0.1.0-alpha.70: prefer_durable_types now defaults to True. Same coverage gap as the
+        """The blind-evaluation default keeps prefer_durable_types opt-in. Same coverage gap as the
         use_cross_encoder alias test above -- test_search_ranking_flags.py's seam tests exercise
         memory_service.search_memory directly, bypassing tools.py's own `_resolve`/fallback layer
         entirely, so a bug there would go undetected without a wrapper-level test like this one.
 
-        Codex diff-review finding: the alias sub-case previously passed `prefer_durable=True`,
-        which is indistinguishable from doing nothing at all -- True is also the fallback both the
-        wrapper AND the underlying service default to, so a broken alias (never recognized by
-        `_resolve`) would still silently pass. Using `prefer_durable=False` here instead is
-        discriminating: only a working alias can produce the unreordered (event-first) result."""
+        The alias sub-case explicitly passes `prefer_durable=True`: only a working alias can
+        produce the reordered decision-first result because the wrapper and service default are
+        both False."""
         res_event = tools.store_memory(
             content="content for pdt_event_entity",
             title="pdt_event_entity",
@@ -158,43 +156,34 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 return_value=semantic_rows,
             ),
         ):
-            # 1. Omitted -- this end-to-end call reflects the new True default's real effect on
-            # real output, but on its own cannot distinguish "the wrapper resolved True" from "the
-            # wrapper forwarded None and memory_service's own signature default (also True) saved
-            # it" -- see test_search_memory_prefer_durable_types_wrapper_forwards_true_when_omitted
-            # below for the mock-based test that actually isolates the wrapper's own logic.
+            # 1. Omitted -- broad hybrid ranking remains event-first without the opt-in policy.
             omitted_res = tools.search_memory(
                 query_keywords="pdt wrapper default test", owner_id="pdt_owner"
             )
-            # 2. Explicit False still opts out end-to-end through the wrapper.
-            opted_out_res = tools.search_memory(
+            # 2. Explicit True opts in end-to-end through the wrapper.
+            opted_in_res = tools.search_memory(
                 query_keywords="pdt wrapper default test",
                 owner_id="pdt_owner",
-                prefer_durable_types=False,
+                prefer_durable_types=True,
             )
-            # 3. The pre-existing `prefer_durable` alias still resolves -- False, not True, so a
-            # broken alias (silently falling through to the True default) would fail this.
+            # 3. The pre-existing alias must also enable the policy.
             alias_res = tools.search_memory(
                 query_keywords="pdt wrapper default test",
                 owner_id="pdt_owner",
-                prefer_durable=False,
+                prefer_durable=True,
             )
 
-        self.assertEqual([r["id"] for r in omitted_res], [entity_decision, entity_event])
-        self.assertEqual([r["id"] for r in opted_out_res], [entity_event, entity_decision])
-        self.assertEqual([r["id"] for r in alias_res], [entity_event, entity_decision])
+        self.assertEqual([r["id"] for r in omitted_res], [entity_event, entity_decision])
+        self.assertEqual([r["id"] for r in opted_in_res], [entity_decision, entity_event])
+        self.assertEqual([r["id"] for r in alias_res], [entity_decision, entity_event])
 
-    def test_search_memory_prefer_durable_types_wrapper_forwards_true_when_omitted(self):
-        """Isolates tools.py's own `_resolve`/fallback logic (lines ~320-323) from
-        memory_service.search_memory's own signature default -- both currently resolve to True, so
-        only a mock that inspects the actual forwarded kwarg can prove the WRAPPER's fallback
-        itself is True, not just that the end-to-end result happens to look reordered (Codex
-        diff-review finding)."""
+    def test_search_memory_prefer_durable_types_wrapper_forwards_false_when_omitted(self):
+        """The wrapper must explicitly forward the evaluated False default."""
         with patch(
             "saltmdb.domain.services.memory_service.search_memory", return_value=[]
         ) as mock_search:
             tools.search_memory(query_keywords="pdt wrapper mock test", owner_id="pdt_owner")
-        self.assertTrue(mock_search.call_args.kwargs["prefer_durable_types"])
+        self.assertFalse(mock_search.call_args.kwargs["prefer_durable_types"])
 
         with patch(
             "saltmdb.domain.services.memory_service.search_memory", return_value=[]
@@ -202,20 +191,17 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tools.search_memory(
                 query_keywords="pdt wrapper mock test",
                 owner_id="pdt_owner",
-                prefer_durable_types=False,
+                prefer_durable_types=True,
             )
-        self.assertFalse(mock_search.call_args.kwargs["prefer_durable_types"])
+        self.assertTrue(mock_search.call_args.kwargs["prefer_durable_types"])
 
-    def test_search_memory_demote_superseded_wrapper_forwards_true_when_omitted(self):
-        """Same isolation as
-        test_search_memory_prefer_durable_types_wrapper_forwards_true_when_omitted above, for
-        demote_superseded -- demote_superseded has no kwarg alias to also cover (unlike
-        prefer_durable_types/prefer_durable), so this is the whole wrapper-layer proof needed."""
+    def test_search_memory_demote_superseded_wrapper_forwards_false_when_omitted(self):
+        """The wrapper must explicitly forward the evaluated False default."""
         with patch(
             "saltmdb.domain.services.memory_service.search_memory", return_value=[]
         ) as mock_search:
             tools.search_memory(query_keywords="ds wrapper mock test", owner_id="ds_owner")
-        self.assertTrue(mock_search.call_args.kwargs["demote_superseded"])
+        self.assertFalse(mock_search.call_args.kwargs["demote_superseded"])
 
         with patch(
             "saltmdb.domain.services.memory_service.search_memory", return_value=[]
@@ -223,15 +209,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tools.search_memory(
                 query_keywords="ds wrapper mock test",
                 owner_id="ds_owner",
-                demote_superseded=False,
+                demote_superseded=True,
             )
-        self.assertFalse(mock_search.call_args.kwargs["demote_superseded"])
+        self.assertTrue(mock_search.call_args.kwargs["demote_superseded"])
 
     def test_search_memory_demote_superseded_default(self):
-        """v0.1.0-alpha.70: demote_superseded now defaults to True. Same wrapper-layer coverage
-        gap as test_search_memory_prefer_durable_types_default_and_alias above -- this end-to-end
-        test proves the real effect on real output; the mock-based test above isolates the
-        wrapper's own _resolve/fallback logic specifically (Codex diff-review finding)."""
+        """The blind-evaluation default leaves superseded ordering unchanged unless opted in."""
         res_superseded = tools.store_memory(
             content="content for ds_superseded_entity",
             title="ds_superseded_entity",
@@ -269,20 +252,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 return_value=semantic_rows,
             ),
         ):
-            # Omitted -- the new True default must reach memory_service.search_memory through the
-            # wrapper's two-line _resolve/fallback and demote the superseded entity.
+            # Omitted -- broad hybrid ranking preserves the RRF event order.
             omitted_res = tools.search_memory(
                 query_keywords="ds wrapper default test", owner_id="ds_owner"
             )
-            # Explicit False still opts out end-to-end through the wrapper.
-            opted_out_res = tools.search_memory(
+            # Explicit True enables the supersession demotion policy.
+            opted_in_res = tools.search_memory(
                 query_keywords="ds wrapper default test",
                 owner_id="ds_owner",
-                demote_superseded=False,
+                demote_superseded=True,
             )
 
-        self.assertEqual([r["id"] for r in omitted_res], [entity_current, entity_superseded])
-        self.assertEqual([r["id"] for r in opted_out_res], [entity_superseded, entity_current])
+        self.assertEqual([r["id"] for r in omitted_res], [entity_superseded, entity_current])
+        self.assertEqual([r["id"] for r in opted_in_res], [entity_current, entity_superseded])
 
     def test_search_memory_fetch_full(self):
         res = tools.store_memory(

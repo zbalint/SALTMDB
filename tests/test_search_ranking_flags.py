@@ -143,8 +143,8 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
     """Controlled-seam integration tests (same style as Part 1's TestRrfGapGateSearchMemorySeam):
     patches the FTS/semantic channels so the pre-partition pool order is deterministic, then
     confirms search_memory actually applies prefer_durable_types / demote_superseded, that both
-    now default to True (reordered) when omitted, and that explicit False still opts out --
-    default flipped True as of v0.1.0-alpha.70 (roadmap ba2cf66f, benchmark 1d886a43)."""
+    now default to False (unreordered) when omitted, and that explicit True still opts in --
+    default restored by the frozen blind evaluation selecting `broad_rt0_pdt0_ds0_ce0`."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -199,8 +199,8 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
                 prefer_durable_types=True,
                 db_path=self.db_path,
             )
-            # Flag omitted entirely -- proves the new True default (v0.1.0-alpha.70) actually
-            # takes effect at the service layer, not just when passed explicitly. This only
+            # Flag omitted entirely -- proves the evaluated False default actually takes effect
+            # at the service layer, not just when passed explicitly. This only
             # exercises memory_service.search_memory directly (this test file's own import), not
             # the MCP wrapper's separate _resolve/fallback layer -- see test_mcp_tools.py for that.
             omitted_results = search_memory(
@@ -209,7 +209,7 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
 
         self.assertEqual([r["id"] for r in opted_out_results], ["event_entity", "decision_entity"])
         self.assertEqual([r["id"] for r in biased_results], ["decision_entity", "event_entity"])
-        self.assertEqual([r["id"] for r in omitted_results], ["decision_entity", "event_entity"])
+        self.assertEqual([r["id"] for r in omitted_results], ["event_entity", "decision_entity"])
 
     def test_demote_superseded_reorders_superseded_target_behind_current(self):
         self._insert_entity("superseded_entity")
@@ -245,8 +245,8 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
                 demote_superseded=True,
                 db_path=self.db_path,
             )
-            # Flag omitted entirely -- proves the new True default (v0.1.0-alpha.70) actually
-            # takes effect at the service layer, not just when passed explicitly. This only
+            # Flag omitted entirely -- proves the evaluated False default actually takes effect
+            # at the service layer, not just when passed explicitly. This only
             # exercises memory_service.search_memory directly (this test file's own import), not
             # the MCP wrapper's separate _resolve/fallback layer -- see test_mcp_tools.py for that.
             omitted_results = search_memory(
@@ -260,7 +260,7 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
             [r["id"] for r in demoted_results], ["current_entity", "superseded_entity"]
         )
         self.assertEqual(
-            [r["id"] for r in omitted_results], ["current_entity", "superseded_entity"]
+            [r["id"] for r in omitted_results], ["superseded_entity", "current_entity"]
         )
 
 

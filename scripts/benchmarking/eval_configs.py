@@ -62,8 +62,9 @@ def _build_evaluation_configs() -> list[dict]:
             "use_cross_encoder": True,
         },
         {
-            # New reference config (§0b item 3): what mode="history" callers actually get today,
-            # matching search_memory's real post-1be6770 defaults.
+            # Historical status-quo reference for the frozen 2026-08-11 evaluation. It records
+            # the defaults that were active when the development shortlist and blind comparison
+            # family were signed; it must not track a later runtime-default rollout.
             "name": "history_current_default",
             "mode": "history",
             "rerank_by_topic": False,
@@ -80,6 +81,7 @@ def _build_evaluation_configs() -> list[dict]:
     return result
 
 
-# The plan's own name for "today's actual current default" -- both the broad-mode config AND
-# the value used throughout §5's decision rule (comparisons are always vs. this config).
+# The frozen evaluation's status-quo baseline, used throughout its signed development/blind
+# comparison family. It intentionally remains the pre-rollout configuration so historical
+# shortlist and analysis artifacts stay tamper-valid after runtime defaults change.
 CURRENT_DEFAULT_CONFIG_NAME = "broad_rt0_pdt1_ds1_ce0"

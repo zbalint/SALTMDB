@@ -26,8 +26,8 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         self.assertEqual(call["tag_operator"], "AND")
         self.assertEqual(call["mode"], "broad")
         self.assertTrue(call["include_related"])
-        self.assertTrue(call["prefer_durable_types"])
-        self.assertTrue(call["demote_superseded"])
+        self.assertFalse(call["prefer_durable_types"])
+        self.assertFalse(call["demote_superseded"])
 
     def test_consolidation_requires_title_and_content(self):
         with self.assertRaisesRegex(ValueError, "title is required"):

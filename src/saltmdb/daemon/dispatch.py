@@ -153,8 +153,8 @@ def _dispatch_search_memory(**kw):
         mode=_optional_mode(kw),
         include_related=_optional_bool(kw, "include_related", True),
         rerank_by_topic=_optional_bool(kw, "rerank_by_topic", False),
-        prefer_durable_types=_optional_bool(kw, "prefer_durable_types", True),
-        demote_superseded=_optional_bool(kw, "demote_superseded", True),
+        prefer_durable_types=_optional_bool(kw, "prefer_durable_types", False),
+        demote_superseded=_optional_bool(kw, "demote_superseded", False),
         use_cross_encoder=_optional_bool(kw, "use_cross_encoder", False),
         disable_semantic=kw.get("disable_semantic", False),
     )

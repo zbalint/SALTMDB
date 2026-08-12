@@ -301,11 +301,7 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
         ):
             # prefer_durable_types/demote_superseded pinned False explicitly (not omitted): this
             # test's whole point is "untouched under broad and history" regardless of the corrects
-            # edge -- pinning False keeps that intent legible now that omission would mean True
-            # (v0.1.0-alpha.70 default flip) instead of incidentally not mattering here (neither
-            # entity is event-typed, and demote_superseded only checks `supersedes`, not
-            # `corrects`, so the True default wouldn't have changed this test's outcome either way
-            # -- pinned anyway for clarity, not because the outcome depends on it).
+            # edge -- pinning False keeps that policy absent even if broad defaults change again.
             broad_results = search_memory(
                 query_keywords="q",
                 db_path=self.db_path,

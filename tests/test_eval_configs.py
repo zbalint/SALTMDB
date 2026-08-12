@@ -42,11 +42,11 @@ class TestBuildEvaluationConfigs(unittest.TestCase):
         self.assertTrue(kitchen_sink["demote_superseded"])
         self.assertTrue(kitchen_sink["use_cross_encoder"])
 
-        current_default = history["history_current_default"]
-        self.assertTrue(current_default["prefer_durable_types"])
-        self.assertTrue(current_default["demote_superseded"])
-        self.assertFalse(current_default["rerank_by_topic"])
-        self.assertFalse(current_default["use_cross_encoder"])
+        historical_status_quo = history["history_current_default"]
+        self.assertTrue(historical_status_quo["prefer_durable_types"])
+        self.assertTrue(historical_status_quo["demote_superseded"])
+        self.assertFalse(historical_status_quo["rerank_by_topic"])
+        self.assertFalse(historical_status_quo["use_cross_encoder"])
 
     def test_no_stale_history_default_name_present(self):
         configs = ec._build_evaluation_configs()
@@ -58,18 +58,18 @@ class TestBuildEvaluationConfigs(unittest.TestCase):
         names = [cfg["name"] for cfg in configs]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_current_default_config_present_and_matches_shipped_defaults(self):
+    def test_historical_status_quo_config_is_present_and_pinned(self):
         configs = ec._build_evaluation_configs()
         by_name = {cfg["name"]: cfg for cfg in configs}
         self.assertIn(ec.CURRENT_DEFAULT_CONFIG_NAME, by_name)
-        default_cfg = by_name[ec.CURRENT_DEFAULT_CONFIG_NAME]
-        self.assertEqual(default_cfg["mode"], "broad")
-        # Matches search_memory's real shipped defaults (v0.1.0-alpha.70, commit 1be6770):
-        # prefer_durable_types=True, demote_superseded=True, others False.
-        self.assertTrue(default_cfg["prefer_durable_types"])
-        self.assertTrue(default_cfg["demote_superseded"])
-        self.assertFalse(default_cfg["rerank_by_topic"])
-        self.assertFalse(default_cfg["use_cross_encoder"])
+        status_quo_cfg = by_name[ec.CURRENT_DEFAULT_CONFIG_NAME]
+        self.assertEqual(status_quo_cfg["mode"], "broad")
+        # Frozen evaluation baseline: prefer_durable_types=True and demote_superseded=True,
+        # while runtime defaults may legitimately change after its final blind decision.
+        self.assertTrue(status_quo_cfg["prefer_durable_types"])
+        self.assertTrue(status_quo_cfg["demote_superseded"])
+        self.assertFalse(status_quo_cfg["rerank_by_topic"])
+        self.assertFalse(status_quo_cfg["use_cross_encoder"])
 
     def test_shared_builder_file_itself_unmodified(self):
         # Guards against silent scope creep: the shared benchmark_search_option_matrix.py must
