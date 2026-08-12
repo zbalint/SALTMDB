@@ -34,6 +34,7 @@ from evaluation_artifacts import (  # noqa: E402
     file_fingerprint,
     git_commit_fingerprint,
     machine_fingerprint,
+    RETROSPECTIVE_ONLY_MARKER,
     validate_provenance,
     verify_artifact_fingerprint,
 )
@@ -258,12 +259,17 @@ def _build_signed_manifest(
         config_fingerprint=_fingerprint(configs),
         judge_version_fingerprint=judge_fingerprint,
         machine_fingerprint_value=machine_marker,
+        model_fingerprint=RERANKER_MODEL,
+        rubric_fingerprint=judge_fingerprint,
         artifact_kind=MANIFEST_KIND,
     )
     signed = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "manifest_kind": MANIFEST_KIND,
         "signed": True,
+        "evaluation_purpose": RETROSPECTIVE_ONLY_MARKER,
+        "retrospective_only": True,
+        "promotion_eligible": False,
         "source_manifest_fingerprint": _fingerprint(raw),
         "source_queries_fingerprint": raw["queries_fingerprint"],
         "queries_fingerprint": raw["queries_fingerprint"],
@@ -298,6 +304,12 @@ def load_or_bind_manifest(
         raise ValueError("manifest lacks queries")
     if raw.get("signed") is True:
         verify_artifact_fingerprint(raw, field="manifest_fingerprint")
+        if (
+            raw.get("evaluation_purpose") != RETROSPECTIVE_ONLY_MARKER
+            or raw.get("retrospective_only") is not True
+            or raw.get("promotion_eligible") is not False
+        ):
+            raise ValueError("historical replay manifest must be retrospective_only")
         _validate_frozen_configs(raw.get("configs"))
         if raw.get("source_queries_fingerprint") != raw.get("queries_fingerprint"):
             # Signed manifests use the explicit source_* name; this branch catches hand-edited
@@ -513,15 +525,15 @@ def _channel_aggregate(
         bool(item.get("fts_candidate_count", 0) or item.get("vector_candidate_count", 0))
         for item in retrieval_records
     )
-    retrieval_fts_rows = sum(int(item.get("fts_candidate_count", 0) or 0) for item in retrieval_records)
+    retrieval_fts_rows = sum(
+        int(item.get("fts_candidate_count", 0) or 0) for item in retrieval_records
+    )
     retrieval_vector_rows = sum(
         int(item.get("vector_candidate_count", 0) or 0) for item in retrieval_records
     )
 
     collapse_records = [
-        item.get("supersedes_collapse", {})
-        for item in records
-        if item.get("supersedes_collapse")
+        item.get("supersedes_collapse", {}) for item in records if item.get("supersedes_collapse")
     ]
     collapse_changed = sum(
         int(item.get("before_count", 0) or 0) > int(item.get("after_count", 0) or 0)
@@ -665,10 +677,7 @@ def aggregate_results(
                 "pass": sum(negative_pass),
                 "pass_rate": sum(negative_pass) / len(negative_pass) if negative_pass else 0.0,
             },
-            "empty_results": sum(
-                not rankings[query["id"]][name]
-                for query in queries
-            ),
+            "empty_results": sum(not rankings[query["id"]][name] for query in queries),
             "errors": errors_by_config.get(name, 0),
             "by_condition": by_condition,
             "latency_ms": {
@@ -680,9 +689,7 @@ def aggregate_results(
                 "p95": _percentile(result.get("latencies_ms", {}).get(name, []), 0.95),
                 "direct_service_diagnostic_only": True,
             },
-            "wins_losses_ties_vs_control": _win_loss_tie(
-                positive_top1, control_top1
-            ),
+            "wins_losses_ties_vs_control": _win_loss_tie(positive_top1, control_top1),
             "negative_pass_wins_losses_ties_vs_control": _win_loss_tie(
                 negative_pass, control_negative_pass
             ),
@@ -769,6 +776,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915
         result["meta"] = {
             "schema_version": 1,
             "manifest_fingerprint": signed_manifest["manifest_fingerprint"],
+            "evaluation_purpose": RETROSPECTIVE_ONLY_MARKER,
+            "retrospective_only": True,
+            "promotion_eligible": False,
             "config_fingerprint": signed_manifest["config_fingerprint"],
             "n_queries": len(queries),
             "n_configs": len(configs),

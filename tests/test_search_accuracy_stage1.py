@@ -143,6 +143,8 @@ class TestLatencyAndPromotion(unittest.TestCase):
         self.assertEqual(protocol["warmups"], WARMUP_COUNT)
         self.assertEqual(protocol["interleaved_repetitions"], INTERLEAVED_REPETITIONS)
         self.assertTrue(protocol["direct_service_diagnostic_only"])
+        self.assertEqual(protocol["p95_limit_seconds"], 5.0)
+        self.assertNotIn("max_slowdown_fraction", protocol)
         validate_latency_protocol(protocol)
         schedule = interleaved_schedule(["a", "b"])
         self.assertEqual(schedule, ["a", "b"] * INTERLEAVED_REPETITIONS)
@@ -160,6 +162,19 @@ class TestLatencyAndPromotion(unittest.TestCase):
             baseline_p95_seconds=0.9,
         )
         self.assertTrue(passed["promotion"])
+        accuracy_first = evaluate_promotion(
+            semantic_recall_delta=0.03,
+            ndcg_delta_ci95=[0.001, 0.02],
+            holm_adjusted_p=0.049,
+            exact_regression=0.01,
+            keyword_regression=0.01,
+            negative_regression=0.01,
+            benchmark_failures=0,
+            candidate_p95_seconds=5.0,
+            baseline_p95_seconds=0.5,
+        )
+        self.assertTrue(accuracy_first["promotion"])
+        self.assertNotIn("warm_p95_slowdown_within_limit", accuracy_first["checks"])
         failed = evaluate_promotion(
             semantic_recall_delta=0.029,
             ndcg_delta_ci95=[0.001, 0.02],

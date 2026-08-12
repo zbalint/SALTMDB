@@ -28,9 +28,11 @@ from eval_configs import _build_evaluation_configs  # noqa: E402
 from analyze_evaluation_matrix import validate_frozen_shortlist  # noqa: E402
 from evaluation_artifacts import (  # noqa: E402
     build_provenance,
+    build_query_trace,
     file_fingerprint,
     git_commit_fingerprint,
     machine_fingerprint,
+    validate_query_trace,
     validate_provenance,
 )
 from judge_pool import judge_version_fingerprint  # noqa: E402
@@ -77,6 +79,7 @@ def _validate_matrix_contract(  # noqa: C901, PLR0912
     expected_queries, expected_configs = set(query_ids), set(config_names)
     rankings = result.get("config_rankings", {})
     pools = result.get("pools", {})
+    traces = result.get("traces", {})
     if not set(rankings).issubset(expected_queries) or not set(pools).issubset(expected_queries):
         raise ValueError("matrix contains an unknown query")
     for query_id in rankings:
@@ -92,6 +95,13 @@ def _validate_matrix_contract(  # noqa: C901, PLR0912
                 raise ValueError("ranking contains an invalid candidate ID")
             if len(ranking) != len(set(ranking)):
                 raise ValueError("ranking contains duplicate candidate IDs")
+    if set(traces) != set(rankings):
+        raise ValueError("matrix traces must cover exactly the completed queries")
+    for query_id, by_config in traces.items():
+        if set(by_config) != expected_configs:
+            raise ValueError(f"matrix query {query_id!r} lacks complete trace coverage")
+        for trace in by_config.values():
+            validate_query_trace(trace)
     for query_id, pool in pools.items():
         if not isinstance(pool, dict):
             raise ValueError("matrix pool is not an object")
@@ -289,21 +299,52 @@ def _fetch_entity_stub(conn, entity_id: str) -> dict | None:
 
 def _run_query_configs(
     conn, db_path: str, query: dict, configs: list[dict], limit: int
-) -> tuple[dict[str, list[str]], dict[str, dict], dict[str, float], list[dict]]:
+) -> tuple[
+    dict[str, list[str]],
+    dict[str, dict],
+    dict[str, float],
+    list[dict],
+    dict[str, dict],
+    dict[str, dict],
+]:
     query_id = query["id"]
     rankings: dict[str, list[str]] = {}
     pool: dict[str, dict] = {}
     latencies: dict[str, float] = {}
     errors: list[dict] = []
     diagnostics: dict[str, dict] = {}
+    traces: dict[str, dict] = {}
     for cfg in configs:
         items, latency_ms, error = run_one_config(conn, db_path, query["query"], cfg, limit=limit)
         latencies[cfg["name"]] = latency_ms
         diagnostics[cfg["name"]] = get_last_search_diagnostics()
+        diag = diagnostics[cfg["name"]]
+        traces[cfg["name"]] = build_query_trace(
+            query["id"],
+            config_name=cfg["name"],
+            bm25=diag.get(
+                "bm25",
+                {
+                    "candidate_count": diag.get("fts_candidate_count", diag.get("fts_count", 0)),
+                },
+            ),
+            dense_entity=diag.get("dense_entity", diag.get("semantic", {})),
+            dense_chunk=diag.get("chunk_candidate", {}),
+            late_interaction=diag.get("late_interaction", {}),
+            retrieval_text=diag.get("retrieval_text", {}),
+            lifecycle=diag.get(
+                "lifecycle",
+                {"supersedes_collapse": diag.get("supersedes_collapse", {})},
+            ),
+            reranker=diag.get("cross_encoder", diag.get("reranker", {})),
+        )
+        validate_query_trace(traces[cfg["name"]])
         if error:
             errors.append({"query_id": query_id, "config_name": cfg["name"], "error": error})
         rankings[cfg["name"]] = [item["id"] for item in items]
-        for item in items:
+        # The pool is the contender union of each configuration's *top 20*, even when a
+        # diagnostic run asks the search adapter for a longer ranking.
+        for item in items[:20]:
             pool.setdefault(
                 item["id"],
                 {
@@ -332,7 +373,7 @@ def _run_query_configs(
             "memory_type": stub["memory_type"],
             "ground_truth_forced_include": True,
         }
-    return rankings, pool, latencies, errors, diagnostics
+    return rankings, pool, latencies, errors, diagnostics, traces
 
 
 def run_matrix_for_queries(
@@ -366,6 +407,7 @@ def run_matrix_for_queries(
     )
     errors: list[dict] = resume_result.get("errors", [])
     execution_diagnostics: dict[str, dict] = resume_result.get("execution_diagnostics", {})
+    execution_traces: dict[str, dict] = resume_result.get("traces", {})
     completed_query_ids = set(resume_result.get("completed_query_ids", config_rankings))
     known_query_ids = {query["id"] for query in queries}
     if not completed_query_ids.issubset(known_query_ids):
@@ -385,6 +427,7 @@ def run_matrix_for_queries(
             query_latencies,
             query_errors,
             query_diagnostics,
+            query_traces,
         ) = _run_query_configs(conn, db_path, q, configs, limit)
         config_rankings[query_id] = rankings
         for config_name, latency_ms in query_latencies.items():
@@ -392,6 +435,7 @@ def run_matrix_for_queries(
         errors.extend(query_errors)
         pools[query_id] = pool_for_query
         execution_diagnostics[query_id] = query_diagnostics
+        execution_traces[query_id] = query_traces
 
         completed_query_ids.add(query_id)
         if (
@@ -407,6 +451,7 @@ def run_matrix_for_queries(
                     "latencies_ms": latencies_ms,
                     "errors": errors,
                     "execution_diagnostics": execution_diagnostics,
+                    "traces": execution_traces,
                     "completed_query_ids": sorted(completed_query_ids),
                     "resume_meta": resume_meta,
                 },
@@ -420,6 +465,7 @@ def run_matrix_for_queries(
         "latencies_ms": latencies_ms,
         "errors": errors,
         "execution_diagnostics": execution_diagnostics,
+        "traces": execution_traces,
         "completed_query_ids": sorted(completed_query_ids),
     }
     _validate_matrix_contract(result, queries, configs, limit)
@@ -495,6 +541,8 @@ def main():  # noqa: PLR0915
         config_fingerprint=_fingerprint(configs),
         judge_version_fingerprint=judge_fp,
         machine_fingerprint_value=machine_fp,
+        model_fingerprint=RERANKER_MODEL,
+        rubric_fingerprint=judge_fp,
         artifact_kind="matrix",
     )
     checkpoint_path = Path(args.checkpoint_path or (args.out + ".checkpoint.json"))

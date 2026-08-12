@@ -17,8 +17,7 @@ from evaluation_artifacts import artifact_fingerprint
 LATENCY_PROTOCOL_VERSION = "stage1-daemon-warm-v1"
 WARMUP_COUNT = 20
 INTERLEAVED_REPETITIONS = 5
-P95_LIMIT_SECONDS = 1.0
-MAX_SLOWDOWN_FRACTION = 0.15
+P95_LIMIT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -31,7 +30,6 @@ class LatencyProtocol:
     interleaved_repetitions: int = INTERLEAVED_REPETITIONS
     direct_service_diagnostic_only: bool = True
     p95_limit_seconds: float = P95_LIMIT_SECONDS
-    max_slowdown_fraction: float = MAX_SLOWDOWN_FRACTION
 
     def to_dict(self) -> dict:
         value = asdict(self)

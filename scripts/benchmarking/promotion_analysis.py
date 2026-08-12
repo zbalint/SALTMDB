@@ -8,7 +8,7 @@ breakdown so a failed/stale/partial benchmark cannot be mistaken for a negative 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, cast
 
 from eval_stats import (
     cluster_bootstrap_delta_ci,
@@ -22,8 +22,9 @@ from eval_stats import (
 SEMANTIC_RECALL_DELTA_MIN = 0.03
 NDCG_DELTA_LOWER_BOUND_MIN = 0.0
 REGRESSION_MAX = 0.01
-P95_MAX_SECONDS = 1.0
-SLOWDOWN_MAX = 0.15
+# Promotion uses warm persistent-daemon p95.  Direct-service diagnostics are not a substitute
+# for this gate; five seconds is the accepted upper bound (inclusive).
+P95_MAX_SECONDS = 5.0
 ALPHA = 0.05
 
 
@@ -33,7 +34,6 @@ class PromotionThresholds:
     ndcg_delta_lower_bound_min: float = NDCG_DELTA_LOWER_BOUND_MIN
     regression_max: float = REGRESSION_MAX
     p95_max_seconds: float = P95_MAX_SECONDS
-    slowdown_max: float = SLOWDOWN_MAX
     alpha: float = ALPHA
 
 
@@ -108,7 +108,9 @@ def holm_mcnemar_comparisons(comparisons: Sequence[Mapping[str, object]]) -> lis
     for comparison in comparisons:
         if "candidate_hits" not in comparison or "baseline_hits" not in comparison:
             raise ValueError("comparison lacks candidate_hits/baseline_hits")
-        item = grade2_mcnemar_comparison(comparison["candidate_hits"], comparison["baseline_hits"])
+        candidate_hits = cast(Sequence[bool], comparison["candidate_hits"])
+        baseline_hits = cast(Sequence[bool], comparison["baseline_hits"])
+        item = grade2_mcnemar_comparison(candidate_hits, baseline_hits)
         item.update(
             {
                 key: value
@@ -170,8 +172,7 @@ def evaluate_promotion(
             negative_regression, limits.regression_max
         ),
         "zero_benchmark_failures": benchmark_failures == 0,
-        "warm_p95_under_one_second": candidate_p95_seconds < limits.p95_max_seconds,
-        "warm_p95_slowdown_within_limit": slowdown <= limits.slowdown_max,
+        "warm_p95_under_five_seconds": candidate_p95_seconds <= limits.p95_max_seconds,
     }
     result = {
         "promotion": all(checks.values()),

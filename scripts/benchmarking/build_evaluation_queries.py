@@ -19,7 +19,11 @@ from query_generation import (
     generate_partial_word_nonsense_query,
     perturb_typo,
 )
-from evaluation_artifacts import build_provenance  # noqa: E402
+from evaluation_artifacts import (  # noqa: E402
+    build_provenance,
+    validate_family_disjoint_split,
+    validate_provenance,
+)
 
 
 CANONICAL_SLOT_KEYS = frozenset(
@@ -207,6 +211,19 @@ def validate_queries(
     missing = (required_categories or set()) - categories
     if missing:
         raise ValueError(f"required categories missing: {sorted(missing)}")
+
+
+def validate_split_manifests(dev: object, blind: object) -> dict[str, int]:
+    """Validate duplicate rows and enforce whole-family dev/blind isolation.
+
+    This wrapper keeps split validation next to query-manifest construction while sharing the
+    canonical implementation with matrix/judging consumers.  It accepts either raw query lists
+    or the signed ``{"queries": [...]}`` manifest shape.
+    """
+    return validate_family_disjoint_split(dev, blind)
+
+
+validate_family_disjoint_manifests = validate_split_manifests
 
 
 def _exact_family_subset(families: list[tuple[str, int]], target: int) -> set[str]:
@@ -434,7 +451,7 @@ def load_manifest(
     expected_split: str | None = None,
     expected_corpus_fingerprint: str | None = None,
     expected_slot_fingerprint: str | None = None,
-    require_provenance: bool = False,
+    require_provenance: bool = True,
 ) -> dict:
     """Load and verify a frozen query manifest before matrix or judging execution."""
     value = json.loads(path.read_text())
@@ -454,9 +471,7 @@ def load_manifest(
     ):
         raise ValueError("query manifest slot fingerprint mismatch")
     if require_provenance:
-        provenance = value.get("provenance")
-        if not isinstance(provenance, dict) or provenance.get("stale"):
-            raise ValueError("query manifest provenance is missing or stale")
+        validate_provenance(value, artifact_label="query manifest")
     queries = value["queries"]
     validate_queries(queries)
     if expected_split is not None and any(item.get("split") != expected_split for item in queries):
