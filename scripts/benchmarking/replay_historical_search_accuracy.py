@@ -604,9 +604,24 @@ def aggregate_results(
 
     for config in configs:
         name = config["name"]
-        positive_top1 = []
-        positive_top10 = []
-        negative_pass = []
+        # Build all paired vectors from the same manifest-order query lists used by the control.
+        # Per-condition aggregation below intentionally groups rows by condition and therefore
+        # must not be reused for paired win/loss/tie comparisons.
+        positive_top1 = [
+            bool(
+                rankings[query["id"]][name]
+                and rankings[query["id"]][name][0] == query["expected_entity_id"]
+            )
+            for query in positive_queries
+        ]
+        positive_top10 = [
+            query["expected_entity_id"] in rankings[query["id"]][name][:10]
+            for query in positive_queries
+        ]
+        negative_pass = [
+            query["expected_entity_id"] not in rankings[query["id"]][name][:10]
+            for query in negative_queries
+        ]
         by_condition: dict[str, dict[str, Any]] = {}
         for query_type in QUERY_TYPES:
             selected = [query for query in queries if query["category"] == query_type]
@@ -620,14 +635,7 @@ def aggregate_results(
                     hit_top10 = query["expected_entity_id"] in ranking[:10]
                     top1 += hit_top1
                     top10 += hit_top10
-                    positive_top1.append(hit_top1)
-                    positive_top10.append(hit_top10)
             if query_type == "negative_control":
-                negative_pass.extend(
-                    query["expected_entity_id"]
-                    not in rankings[query["id"]][name][:10]
-                    for query in selected
-                )
                 by_condition[query_type] = {
                     "trials": len(selected),
                     "pass": negative,
