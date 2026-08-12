@@ -355,13 +355,20 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if context_id_filter:
                 where_clauses.append("(context_id = ? OR project_id = ?)")
                 params.extend([context_id_filter, context_id_filter])
-            if is_core_filter:
-                if is_core_filter.lower() in ("true", "1", "yes"):
+            if is_core_filter is not None:
+                normalized_is_core = str(is_core_filter).strip().lower()
+                if normalized_is_core in ("true", "1", "yes"):
+                    is_core_value = 1
+                elif normalized_is_core in ("false", "0", "no"):
+                    is_core_value = 0
+                elif normalized_is_core:
+                    raise ValueError("is_core must be one of true, 1, yes, false, 0, no")
+                else:
+                    is_core_value = None
+
+                if is_core_value is not None:
                     where_clauses.append("is_core = ?")
-                    params.append(1)
-                elif is_core_filter.lower() in ("false", "0", "no"):
-                    where_clauses.append("is_core = ?")
-                    params.append(0)
+                    params.append(is_core_value)
             if tag_filter:
                 where_clauses.append(
                     "id IN (SELECT et.entity_id FROM entity_tags et "

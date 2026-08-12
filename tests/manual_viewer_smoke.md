@@ -4,10 +4,11 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 ## Explorer
 
-1. Open **Memory Explorer**, set a lifecycle and memory-type filter, and advance to a later page if available.
-2. Change one filter and click **Apply filters**. Confirm the result count and rows update and the pager returns to page 1.
-3. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
-4. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
+1. Open **Memory Explorer**, confirm **Core memories** is visibly and programmatically labeled and checked, then click **Apply filters**. Confirm the request includes `is_core=true` and only core memories appear.
+2. Advance to a later page if available. Confirm the pager request retains `is_core=true`.
+3. Uncheck **Core memories**, change one other filter, and click **Apply filters**. Confirm `is_core` is omitted, the result updates, and the pager returns to page 1.
+4. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
+5. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
 
 ## Relationships
 
@@ -33,6 +34,6 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 ## Detail, layout, and accessibility
 
 1. Open a memory detail from a table and close it normally. Focus must return to the title control that opened it.
-2. At 1280px wide, review Explorer and both Quality tables: titles are left aligned; title, compact ID, type/lifecycle, and tags or quality remain easy to scan; the page has no horizontal scrollbar.
-3. At 375px wide, verify form controls stack, only table/graph containers scroll horizontally when needed, the page has no horizontal scrollbar, and focus remains visible.
+2. At 1280px wide, review Explorer and both Quality tables: titles are left aligned; title, compact ID, type/lifecycle, and tags or quality remain easy to scan; the page has no horizontal scrollbar. Open a detail modal and confirm every standard metadata, custom metadata, and validity label is paired with its value.
+3. At 375px wide, verify form controls stack, only table/graph containers scroll horizontally when needed, the page has no horizontal scrollbar, and focus remains visible. Recheck standard, custom, and validity label/value pairing in the detail modal.
 4. Confirm Quality, Tags, Diagnostics, and metadata remain structured views; raw Markdown inspection and **Copy Markdown** still work; no raw JSON dump or speculative refresh banner appears.

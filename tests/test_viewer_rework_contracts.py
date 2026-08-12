@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -259,3 +260,36 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn(".row-button { display: block; width: 100%", stylesheet)
         self.assertIn("text-align: left", stylesheet)
         self.assertIn(".predicate-pill", stylesheet)
+
+    def test_frontend_core_filter_and_fact_pair_contracts(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "src/saltmdb/viewer/static/viewer.js").read_text(encoding="utf-8")
+        stylesheet = (root / "src/saltmdb/viewer/static/viewer.css").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            script,
+            r"const core = checkboxField\('Core memories', state\.explorerPreset\.is_core === 'true'\);",
+        )
+        self.assertIn("element.type = 'checkbox'", script)
+        self.assertIn("element.setAttribute('aria-label', label)", script)
+        self.assertIn("core.wrap", script)
+        self.assertIn("if (core.element.checked) params.set('is_core', 'true');", script)
+        self.assertNotIn("params.set('is_core', 'false')", script)
+        self.assertIn("state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1;", script)
+        self.assertIn("currentParams = new URLSearchParams(params)", script)
+        self.assertIn("Core-memory filtering is available.", script)
+
+        helper = re.search(
+            r"const factPair = \(label, value\) => \{(?P<body>.*?)\n  \};",
+            script,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(helper)
+        self.assertIn("const pair = node('div')", helper.group("body"))
+        self.assertIn("pair.append(node('dt', label), node('dd', value));", helper.group("body"))
+        self.assertEqual(helper.group("body").count("node('dt'"), 1)
+        self.assertEqual(helper.group("body").count("node('dd'"), 1)
+        self.assertIn("metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));", script)
+        self.assertIn("customFacts.append(factPair(key, typeof value === 'string' ? value : JSON.stringify(value)))", script)
+        self.assertIn("facts.append(factPair(label, value))", script)
+        self.assertIn(".checkbox-field input { width: 1rem; min-width: 1rem;", stylesheet)

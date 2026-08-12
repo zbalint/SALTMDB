@@ -229,6 +229,18 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
 
         handler = self._handler()
 
+        # Omitted and blank filters preserve the unfiltered entity list.
+        captured_all = self._capture_json(handler)
+        handler.get_entities({})
+        all_ids = {e["id"] for e in captured_all["data"]["entities"]}
+        self.assertIn(core_id, all_ids)
+        self.assertIn(non_core_id, all_ids)
+
+        captured_blank = self._capture_json(handler)
+        handler.get_entities({"is_core": ["   "]})
+        blank_ids = {e["id"] for e in captured_blank["data"]["entities"]}
+        self.assertEqual(blank_ids, all_ids)
+
         # Filter is_core=true
         captured_true = self._capture_json(handler)
         handler.get_entities({"is_core": ["true"]})
@@ -248,6 +260,70 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         self.assertNotIn(core_id, false_ids)
         for e in entities_false:
             self.assertFalse(e["is_core"])
+
+        # Accepted aliases are equivalent, including case-insensitive input.
+        captured_alias = self._capture_json(handler)
+        handler.get_entities({"is_core": ["YeS"]})
+        alias_ids = {e["id"] for e in captured_alias["data"]["entities"]}
+        self.assertEqual(alias_ids, set(true_ids))
+
+        # A supplied value outside the documented aliases is a client error.
+        captured_invalid = self._capture_json(handler)
+        handler.get_entities({"is_core": ["sometimes"]})
+        self.assertEqual(captured_invalid["status"], 400)
+        self.assertIn("error", captured_invalid["data"])
+
+    def test_get_entities_is_core_combines_with_other_filters_and_pagination(self):
+        def create_entity(title, is_core, memory_type):
+            result = store_memory(
+                content=f"Unique content for {title}",
+                title=title,
+                owner_id="viewer_tester",
+                is_core=is_core,
+                memory_type=memory_type,
+                skip_duplicate_check=True,
+                db_connection=self.conn,
+            )
+            return result.split("ID: ")[1].strip()
+
+        matching_ids = {
+            create_entity("Core Decision One", True, "decision"),
+            create_entity("Core Decision Two", True, "decision"),
+        }
+        create_entity("Non Core Decision", False, "decision")
+        create_entity("Core Fact", True, "fact")
+
+        handler = self._handler()
+        query = {
+            "is_core": ["1"],
+            "status": ["raw"],
+            "memory_type": ["decision"],
+            "limit": ["1"],
+        }
+
+        captured_page_1 = self._capture_json(handler)
+        handler.get_entities({**query, "page": ["1"]})
+        page_1 = captured_page_1["data"]
+        self.assertEqual(captured_page_1["status"], 200)
+        self.assertEqual(page_1["total_count"], 2)
+        self.assertEqual(page_1["total_pages"], 2)
+        self.assertEqual(page_1["pagination"]["total"], 2)
+        self.assertEqual(page_1["pagination"]["total_pages"], 2)
+        self.assertEqual(len(page_1["entities"]), 1)
+        self.assertTrue(page_1["entities"][0]["is_core"])
+        self.assertEqual(page_1["entities"][0]["status"], "raw")
+        self.assertEqual(page_1["entities"][0]["memory_type"], "decision")
+
+        captured_page_2 = self._capture_json(handler)
+        handler.get_entities({**query, "page": ["2"]})
+        page_2 = captured_page_2["data"]
+        self.assertEqual(page_2["total_count"], 2)
+        self.assertEqual(page_2["pagination"]["total"], 2)
+        self.assertEqual(len(page_2["entities"]), 1)
+        self.assertEqual(
+            {page_1["entities"][0]["id"], page_2["entities"][0]["id"]},
+            matching_ids,
+        )
 
     def test_get_search_is_core_filter(self):
         store_memory(

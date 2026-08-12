@@ -84,6 +84,18 @@
     wrap.append(element);
     return { wrap, element };
   };
+  const checkboxField = (label, checked = false) => {
+    const wrap = node('label', undefined, 'field checkbox-field');
+    const element = document.createElement('input');
+    element.type = 'checkbox'; element.checked = checked; element.setAttribute('aria-label', label);
+    wrap.append(element, node('span', label, 'field-label'));
+    return { wrap, element };
+  };
+  const factPair = (label, value) => {
+    const pair = node('div');
+    pair.append(node('dt', label), node('dd', value));
+    return pair;
+  };
   const statusBadge = (value) => node('span', value || 'unknown', `status-pill status-${value || 'unknown'}`);
   const tagList = (tags) => {
     const wrap = node('span', undefined, 'tag-list');
@@ -137,13 +149,13 @@
         ['Updated', data.updated_at || '—'], ['Last accessed', data.last_accessed_at || '—'],
         ['Context ID', data.context_id || data.project_id || '—'], ['Entity ID', data.id],
       ];
-      metadataEntries.forEach(([label, value]) => { metadataGrid.append(node('dt', label), node('dd', value)); });
+      metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
       metadata.append(metadataGrid);
       const topTags = node('div', undefined, 'metadata-tags'); topTags.append(node('strong', 'Tags'), tagList(data.tags)); metadata.append(topTags);
       if (data.metadata && Object.keys(data.metadata).length) {
         const custom = node('div', undefined, 'metadata-custom'); custom.append(node('strong', 'Custom metadata'));
         const customFacts = node('dl', undefined, 'custom-facts');
-        Object.entries(data.metadata).forEach(([key, value]) => customFacts.append(node('dt', key), node('dd', typeof value === 'string' ? value : JSON.stringify(value))));
+        Object.entries(data.metadata).forEach(([key, value]) => customFacts.append(factPair(key, typeof value === 'string' ? value : JSON.stringify(value))));
         custom.append(customFacts); metadata.append(custom);
       }
       detail.append(metadata);
@@ -162,7 +174,7 @@
       const evidence = node('section', undefined, 'evidence'); evidence.append(section('Memory evidence'));
       const facts = node('dl', undefined, 'facts');
       const entries = [['Valid from', data.valid_from || '—'], ['Valid to', data.valid_to || 'Current']];
-      entries.forEach(([label, value]) => { facts.append(node('dt', label), node('dd', value)); });
+      entries.forEach(([label, value]) => facts.append(factPair(label, value)));
       evidence.append(facts);
       const relationSummary = node('p', `${data.relations.outgoing_count} outgoing · ${data.relations.incoming_count} incoming relations`, 'muted');
       evidence.append(relationSummary, button('Explore relationship graph', '', () => {
@@ -195,7 +207,8 @@
     const { element: q } = search; const { element: prefix } = prefixField; const { element: tag } = tagField;
     const lifecycle = select('Lifecycle', [['', 'All statuses'], ['raw', 'Raw'], ['consolidated', 'Consolidated'], ['archived', 'Archived']], state.explorerPreset.status || '');
     const type = select('Memory type', [['', 'All types'], ['decision', 'Decision'], ['fact', 'Fact'], ['procedure', 'Procedure'], ['preference', 'Preference'], ['event', 'Event']], state.explorerPreset.memory_type || '');
-    form.append(search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, button('Apply filters', 'primary', undefined, 'submit'));
+    const core = checkboxField('Core memories', state.explorerPreset.is_core === 'true');
+    form.append(search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, button('Apply filters', 'primary', undefined, 'submit'));
     const result = node('div');
     let currentParams = new URLSearchParams(state.explorerPreset);
     const list = async (params, page = 1) => {
@@ -218,9 +231,10 @@
     form.addEventListener('submit', async event => {
       event.preventDefault(); const params = new URLSearchParams();
       [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['status', lifecycle.element.value], ['memory_type', type.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      if (core.element.checked) params.set('is_core', 'true');
       state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1; await list(params, 1);
     });
-    view.replaceChildren(section('Explore memories', 'Search the durable knowledge graph without losing lifecycle context.'), form, result);
+    view.replaceChildren(section('Explore memories', 'Search the durable knowledge graph without losing lifecycle context. Core-memory filtering is available.'), form, result);
     const initial = new URLSearchParams(state.explorerPreset); await list(initial, state.explorerPage);
   };
 

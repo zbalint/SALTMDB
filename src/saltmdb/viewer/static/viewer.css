@@ -48,7 +48,7 @@ main > header { display: flex; gap: 1rem; justify-content: space-between; align-
 .muted { color: var(--muted); }
 .toolbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin-bottom: 1.2rem; padding: .85rem; border: 1px solid var(--line); border-radius: 12px; background: #101a2d99; }
 .explorer-toolbar input:first-child { flex: 1 1 15rem; }
-.field { display: grid; gap: .23rem; }.field-label { color: var(--muted); font-size: .72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em; }
+.field { display: grid; gap: .23rem; }.field-label { color: var(--muted); font-size: .72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em; }.checkbox-field { display: flex; align-items: center; gap: .4rem; }.checkbox-field input { width: 1rem; min-width: 1rem; height: 1rem; margin: 0; flex: 0 0 1rem; }
 .primary { color: #07101f; border-color: var(--accent-strong); background: var(--accent-strong); font-weight: 700; }.primary:hover { background: #d2ddff; border-color: #d2ddff; }
 .table-wrap { width: 100%; margin-bottom: 1.6rem; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }th, td { padding: .75rem .85rem; text-align: left; vertical-align: top; border-bottom: 1px solid #25334c; }tr:last-child td { border-bottom: 0; }th { color: var(--muted); font-size: .73rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }tbody tr:hover { background: #1f2d472e; }
