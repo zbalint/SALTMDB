@@ -133,9 +133,7 @@ def sign_artifact(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def validate_signed_artifact(
-    artifact: object, *, kind: str | None = None
-) -> dict[str, Any]:
+def validate_signed_artifact(artifact: object, *, kind: str | None = None) -> dict[str, Any]:
     if not isinstance(artifact, dict):
         raise BakeoffContractError("artifact must be an object")
     if artifact.get("schema_version") != SCHEMA_VERSION:
@@ -160,22 +158,27 @@ def _validate_spec_collections(value: Mapping[str, Any]) -> None:
     ):
         raise BakeoffContractError("contenders must be unique non-empty identifiers")
     seeds = value["seeds"]
-    if not isinstance(seeds, dict) or not seeds or any(
-        not isinstance(seed, int) or isinstance(seed, bool) for seed in seeds.values()
+    if (
+        not isinstance(seeds, dict)
+        or not seeds
+        or any(not isinstance(seed, int) or isinstance(seed, bool) for seed in seeds.values())
     ):
         raise BakeoffContractError("seeds must be a non-empty integer mapping")
     grids = value["hyperparameter_grids"]
-    if not isinstance(grids, dict) or not grids or any(
-        not isinstance(grid, list) or not grid for grid in grids.values()
+    if (
+        not isinstance(grids, dict)
+        or not grids
+        or any(not isinstance(grid, list) or not grid for grid in grids.values())
     ):
         raise BakeoffContractError("hyperparameter grids must be finite predeclared lists")
     versions = value["software_versions"]
-    if not isinstance(versions, dict) or not versions or any(
-        not isinstance(name, str)
-        or not name
-        or not isinstance(version, str)
-        or not version
-        for name, version in versions.items()
+    if (
+        not isinstance(versions, dict)
+        or not versions
+        or any(
+            not isinstance(name, str) or not name or not isinstance(version, str) or not version
+            for name, version in versions.items()
+        )
     ):
         raise BakeoffContractError("software versions must be a non-empty string mapping")
 
@@ -227,9 +230,7 @@ def validate_bakeoff_spec(artifact: object) -> dict[str, Any]:
         if set(counts) != MANDATORY_FACETS or sum(counts.values()) != value["split_targets"][split]:
             raise BakeoffContractError(f"{split} facets must be non-overlapping and exhaustive")
     _validate_spec_collections(value)
-    if not isinstance(value["holm_comparison_family"], list) or not value[
-        "holm_comparison_family"
-    ]:
+    if not isinstance(value["holm_comparison_family"], list) or not value["holm_comparison_family"]:
         raise BakeoffContractError("Holm comparison family must be predeclared and non-empty")
     return value
 
@@ -280,7 +281,8 @@ def validate_model_lock(artifact: object) -> dict[str, Any]:
 def validate_corpus_manifest(artifact: object) -> dict[str, Any]:
     value = validate_signed_artifact(artifact, kind="CorpusRepresentationManifest")
     _require_exact_keys(
-        value, ("eligible_ids", "entities", "representation_version", "corpus_root_hash"),
+        value,
+        ("eligible_ids", "entities", "representation_version", "corpus_root_hash"),
         "CorpusRepresentationManifest",
     )
     ids = value["eligible_ids"]
@@ -293,7 +295,8 @@ def validate_corpus_manifest(artifact: object) -> dict[str, Any]:
         if not isinstance(row, dict):
             raise BakeoffContractError("corpus entity row must be an object")
         _require_exact_keys(
-            row, ("entity_id", "title_hash", "body_hash", "source_hash", "chunk_hashes"),
+            row,
+            ("entity_id", "title_hash", "body_hash", "source_hash", "chunk_hashes"),
             "corpus entity",
         )
         for field in ("title_hash", "body_hash", "source_hash"):
@@ -417,9 +420,10 @@ def validate_development_winner(artifact: object, spec: Mapping[str, Any]) -> di
         ),
         "DevelopmentWinner",
     )
-    if value["run_id"] != spec["run_id"] or value["spec_fingerprint"] != spec[
-        "artifact_fingerprint"
-    ]:
+    if (
+        value["run_id"] != spec["run_id"]
+        or value["spec_fingerprint"] != spec["artifact_fingerprint"]
+    ):
         raise BakeoffContractError("development winner is bound to a different experiment")
     validate_metric_vector(value["development_metrics"])
     if not isinstance(value["pipeline"], dict) or not value["pipeline"]:
@@ -444,12 +448,20 @@ def validate_development_winner(artifact: object, spec: Mapping[str, Any]) -> di
 
 
 def build_blind_unlock(
-    spec: Mapping[str, Any], winner: Mapping[str, Any], *, custodian: str = MAIN_CUSTODIAN
+    spec: Mapping[str, Any],
+    winner: Mapping[str, Any],
+    *,
+    user_confirmation: str | None = None,
+    custodian: str = MAIN_CUSTODIAN,
 ) -> dict[str, Any]:
     validate_bakeoff_spec(spec)
     validate_development_winner(winner, spec)
     if custodian != MAIN_CUSTODIAN:
         raise BlindAccessError("only the main custodian may issue a blind unlock")
+    if not isinstance(user_confirmation, str) or not user_confirmation.strip():
+        raise BlindAccessError(
+            "an explicit user confirmation is required immediately before blind unlock"
+        )
     return sign_artifact(
         "BlindUnlock",
         {
@@ -459,6 +471,7 @@ def build_blind_unlock(
             "query_prompt_hash": spec["query_prompt_hash"],
             "blind_slots_hash": spec["query_slots_hash"],
             "custodian": custodian,
+            "user_confirmation": user_confirmation.strip(),
         },
     )
 
@@ -481,6 +494,11 @@ def validate_blind_unlock(
     }
     if any(value.get(key) != expected_value for key, expected_value in expected.items()):
         raise BlindAccessError("blind unlock does not match the frozen experiment winner")
+    if (
+        not isinstance(value.get("user_confirmation"), str)
+        or not value["user_confirmation"].strip()
+    ):
+        raise BlindAccessError("blind unlock lacks the required explicit user confirmation")
     return value
 
 
@@ -543,14 +561,27 @@ def validate_promotion_decision(  # noqa: C901, PLR0912
             "failures",
             "latency",
             "promotion",
+            "evidence_fingerprints",
         ),
         "PromotionDecision",
     )
-    if value["run_id"] != spec["run_id"] or value["spec_fingerprint"] != spec[
-        "artifact_fingerprint"
-    ]:
+    if (
+        value["run_id"] != spec["run_id"]
+        or value["spec_fingerprint"] != spec["artifact_fingerprint"]
+    ):
         raise BakeoffContractError("promotion decision is bound to a different experiment")
     validate_metric_vector(value["blind_metrics"])
+    evidence = value["evidence_fingerprints"]
+    required_evidence = {
+        "development_winner",
+        "blind_evaluation",
+        "blind_unlock",
+        "blind_manifest_receipt",
+    }
+    if not isinstance(evidence, dict) or set(evidence) != required_evidence:
+        raise BakeoffContractError("promotion decision lacks its complete custody evidence binding")
+    for name, digest in evidence.items():
+        _require_hash(digest, f"promotion evidence {name}")
     if not isinstance(value["promotion"], bool):
         raise BakeoffContractError("promotion must be boolean")
     deltas = value["accuracy_deltas"]
@@ -574,31 +605,42 @@ def validate_promotion_decision(  # noqa: C901, PLR0912
     if (
         not isinstance(ndcg_ci, list)
         or len(ndcg_ci) != 2
-        or any(not isinstance(item, (int, float)) or not math.isfinite(float(item)) for item in ndcg_ci)
+        or any(
+            not isinstance(item, (int, float)) or not math.isfinite(float(item)) for item in ndcg_ci
+        )
         or ndcg_ci[0] > ndcg_ci[1]
     ):
         raise BakeoffContractError("NDCG confidence interval is malformed")
     holm = value["holm_results"]
     comparison_name = "winner_vs_baseline_same_specific_fact"
-    comparison = next(
-        (item for item in holm if isinstance(item, dict) and item.get("comparison") == comparison_name),
-        None,
-    ) if isinstance(holm, list) else None
+    comparison = (
+        next(
+            (
+                item
+                for item in holm
+                if isinstance(item, dict) and item.get("comparison") == comparison_name
+            ),
+            None,
+        )
+        if isinstance(holm, list)
+        else None
+    )
     if comparison is None or not isinstance(comparison.get("adjusted_p"), (int, float)):
         raise BakeoffContractError("Holm results lack the same-specific-fact comparison")
     adjusted_p = float(comparison["adjusted_p"])
     if not math.isfinite(adjusted_p) or not 0.0 <= adjusted_p <= 1.0:
         raise BakeoffContractError("Holm adjusted p-value must be finite and within [0, 1]")
     declared_comparisons = set(spec["holm_comparison_family"])
-    observed_comparisons = {
-        item.get("comparison") for item in holm if isinstance(item, dict)
-    }
+    observed_comparisons = {item.get("comparison") for item in holm if isinstance(item, dict)}
     if observed_comparisons != declared_comparisons:
         raise BakeoffContractError("Holm results do not cover the predeclared comparison family")
     safety = value["safety_deltas"]
     if not isinstance(safety, dict) or set(safety) != {"exact", "keyword", "strict_negative"}:
         raise BakeoffContractError("safety deltas are incomplete")
-    if any(not isinstance(item, (int, float)) or not math.isfinite(float(item)) for item in safety.values()):
+    if any(
+        not isinstance(item, (int, float)) or not math.isfinite(float(item))
+        for item in safety.values()
+    ):
         raise BakeoffContractError("safety deltas must be finite")
     failures = value["failures"]
     latency = value["latency"]
@@ -619,6 +661,188 @@ def validate_promotion_decision(  # noqa: C901, PLR0912
     )
     if value["promotion"] is not gates_pass:
         raise BakeoffContractError("promotion boolean contradicts the locked gates")
+    return value
+
+
+def build_promotion_decision(
+    spec: Mapping[str, Any],
+    blind_evaluation: Mapping[str, Any],
+    winner: Mapping[str, Any],
+    unlock: Mapping[str, Any],
+    manifest_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the only terminal decision from fully signed blind evidence."""
+    validate_blind_evaluation(blind_evaluation, spec)
+    validate_development_winner(winner, spec)
+    validate_blind_unlock(unlock, spec, winner)
+    validate_blind_manifest_receipt(manifest_receipt, spec, winner, unlock)
+    decision = sign_artifact(
+        "PromotionDecision",
+        {
+            "run_id": spec["run_id"],
+            "spec_fingerprint": spec["artifact_fingerprint"],
+            "blind_metrics": blind_evaluation["candidate_metrics"],
+            "accuracy_deltas": blind_evaluation["accuracy_deltas"],
+            "confidence_intervals": blind_evaluation["confidence_intervals"],
+            "holm_results": blind_evaluation["holm_results"],
+            "safety_deltas": blind_evaluation["safety_deltas"],
+            "failures": (
+                []
+                if blind_evaluation["candidate_metrics"]["benchmark_failures"] == 0
+                else ["candidate_benchmark_failures"]
+            ),
+            "latency": {
+                "candidate_warm_p95_seconds": blind_evaluation["candidate_metrics"][
+                    "warm_latency_p95_seconds"
+                ]
+            },
+            "promotion": False,
+            "evidence_fingerprints": {
+                "development_winner": winner["artifact_fingerprint"],
+                "blind_evaluation": blind_evaluation["artifact_fingerprint"],
+                "blind_unlock": unlock["artifact_fingerprint"],
+                "blind_manifest_receipt": manifest_receipt["artifact_fingerprint"],
+            },
+        },
+    )
+    # Re-sign with the deterministically derived truth value.  Validation owns every locked gate.
+    ndcg_low = decision["confidence_intervals"]["ndcg_delta_ci95"][0]
+    same = next(
+        item
+        for item in decision["holm_results"]
+        if item["comparison"] == "winner_vs_baseline_same_specific_fact"
+    )["adjusted_p"]
+    promotion = (
+        ndcg_low > 0
+        and decision["accuracy_deltas"]["grade2_recall_at_20"] >= 0.03
+        and decision["accuracy_deltas"]["same_specific_fact_grade2_top1"] > 0
+        and same < 0.05
+        and all(x <= 0.01 for x in decision["safety_deltas"].values())
+        and not decision["failures"]
+        and decision["latency"]["candidate_warm_p95_seconds"] <= 5
+    )
+    decision = sign_artifact("PromotionDecision", {**decision, "promotion": promotion})
+    validate_promotion_decision(decision, spec)
+    return decision
+
+
+def validate_blind_evaluation(  # noqa: C901, PLR0912
+    artifact: object, spec: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the complete, privacy-preserving Gate-D blind evaluation receipt."""
+    value = validate_signed_artifact(artifact, kind="BlindEvaluation")
+    _require_exact_keys(
+        value,
+        (
+            "run_id",
+            "spec_fingerprint",
+            "candidate_contender_id",
+            "baseline_contender_id",
+            "complete_query_count",
+            "blind_query_ids",
+            "candidate_metrics",
+            "baseline_metrics",
+            "accuracy_deltas",
+            "safety_deltas",
+            "confidence_intervals",
+            "holm_results",
+            "configuration_mutated_after_first_result",
+            "fixed_configuration_attestation",
+            "unresolved_disagreements",
+            "evidence_fingerprints",
+        ),
+        "BlindEvaluation",
+    )
+    if (
+        value["run_id"] != spec["run_id"]
+        or value["spec_fingerprint"] != spec["artifact_fingerprint"]
+    ):
+        raise BakeoffContractError("blind evaluation is bound to a different experiment")
+    if (
+        value["candidate_contender_id"] not in spec["contenders"]
+        or value["baseline_contender_id"] != "lexical:bm25"
+    ):
+        raise BakeoffContractError(
+            "blind evaluation must compare the selected contender with lexical:bm25"
+        )
+    ids = value["blind_query_ids"]
+    if (
+        not isinstance(ids, list)
+        or len(ids) != 800
+        or len(set(ids)) != 800
+        or not all(isinstance(x, str) and x for x in ids)
+    ):
+        raise BakeoffContractError("blind evaluation requires exactly 800 unique blind query IDs")
+    if (
+        value["complete_query_count"] != 800
+        or value["configuration_mutated_after_first_result"] is not False
+    ):
+        raise BakeoffContractError("blind evaluation is incomplete or mutated")
+    if value["unresolved_disagreements"] != 0:
+        raise BakeoffContractError("blind evaluation has unresolved adjudications")
+    attestation = value["fixed_configuration_attestation"]
+    if not isinstance(attestation, dict) or attestation.get("frozen") is not True:
+        raise BakeoffContractError("blind evaluation lacks a fixed-configuration attestation")
+    validate_metric_vector(value["candidate_metrics"])
+    validate_metric_vector(value["baseline_metrics"])
+    expected_accuracy = {"ndcg_at_10", "grade2_recall_at_20", "same_specific_fact_grade2_top1"}
+    if (
+        not isinstance(value["accuracy_deltas"], dict)
+        or set(value["accuracy_deltas"]) != expected_accuracy
+    ):
+        raise BakeoffContractError("blind evaluation lacks complete paired accuracy deltas")
+    if not isinstance(value["safety_deltas"], dict) or set(value["safety_deltas"]) != {
+        "exact",
+        "keyword",
+        "strict_negative",
+    }:
+        raise BakeoffContractError("blind evaluation lacks complete safety regressions")
+    for group in (value["accuracy_deltas"], value["safety_deltas"]):
+        if any(
+            not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(float(x))
+            for x in group.values()
+        ):
+            raise BakeoffContractError("blind paired outcomes must be finite")
+    intervals = value["confidence_intervals"]
+    ci = intervals.get("ndcg_delta_ci95") if isinstance(intervals, dict) else None
+    if (
+        not isinstance(ci, list)
+        or len(ci) != 2
+        or any(not isinstance(x, (int, float)) or not math.isfinite(float(x)) for x in ci)
+        or ci[0] > ci[1]
+    ):
+        raise BakeoffContractError("blind NDCG confidence interval is malformed")
+    holm = value["holm_results"]
+    if not isinstance(holm, list) or {
+        item.get("comparison") for item in holm if isinstance(item, dict)
+    } != set(spec["holm_comparison_family"]):
+        raise BakeoffContractError(
+            "blind Holm results do not cover the predeclared comparison family"
+        )
+    for item in holm:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("adjusted_p"), (int, float))
+            or not 0 <= float(item["adjusted_p"]) <= 1
+        ):
+            raise BakeoffContractError("blind Holm result is malformed")
+    required_fingerprints = {
+        "development_winner",
+        "blind_unlock",
+        "blind_manifest_receipt",
+        "judging_matrix",
+        "winner_bundle",
+        "baseline_bundle",
+        "raw_judgments",
+        "merged_labels",
+        "metrics_artifact",
+        "blind_query_ids",
+    }
+    evidence = value["evidence_fingerprints"]
+    if not isinstance(evidence, dict) or set(evidence) != required_fingerprints:
+        raise BakeoffContractError("blind evaluation lacks complete evidence fingerprints")
+    for name, digest in evidence.items():
+        _require_hash(digest, f"blind evidence {name}")
     return value
 
 
@@ -715,9 +939,10 @@ class BakeoffStateMachine:
         spec: Mapping[str, Any],
         evidence: Mapping[str, Mapping[str, Any]],
     ) -> None:
-        if artifact.get("run_id") != spec["run_id"] or artifact.get(
-            "spec_fingerprint"
-        ) != spec["artifact_fingerprint"]:
+        if (
+            artifact.get("run_id") != spec["run_id"]
+            or artifact.get("spec_fingerprint") != spec["artifact_fingerprint"]
+        ):
             raise BakeoffContractError("transition evidence is bound to a different run/spec")
         if target is RunState.DEV_INDEXED:
             if artifact.get("coverage_complete") is not True or artifact.get("failures") != []:
@@ -726,9 +951,10 @@ class BakeoffStateMachine:
             if artifact.get("complete_query_count") != 400 or artifact.get("failures") != []:
                 raise BakeoffContractError("development retrieval bundle is incomplete")
         elif target is RunState.DEV_JUDGED:
-            if artifact.get("judge_artifact_count") != 3 or artifact.get(
-                "unresolved_disagreements"
-            ) != 0:
+            if (
+                artifact.get("judge_artifact_count") != 3
+                or artifact.get("unresolved_disagreements") != 0
+            ):
                 raise BakeoffContractError("development judgments are incomplete")
         elif target is RunState.DEV_WINNER_SIGNED:
             validate_development_winner(artifact, spec)
@@ -738,15 +964,46 @@ class BakeoffStateMachine:
                 None,
             )
             if winner_artifact is None:
-                raise BakeoffContractError("blind unlock transition requires its development winner")
+                raise BakeoffContractError(
+                    "blind unlock transition requires its development winner"
+                )
             validate_blind_unlock(artifact, spec, winner_artifact)
         elif target is RunState.BLIND_COMPLETE:
-            if artifact.get("complete_query_count") != 800 or artifact.get(
-                "configuration_mutated_after_first_result"
-            ) is not False:
-                raise BakeoffContractError("blind evaluation is incomplete or mutated")
+            validate_blind_evaluation(artifact, spec)
         elif target in {RunState.PROMOTED, RunState.RETAINED}:
             validate_promotion_decision(artifact, spec)
+            blind = next(
+                (item for item in evidence.values() if item.get("kind") == "BlindEvaluation"), None
+            )
+            winner = next(
+                (item for item in evidence.values() if item.get("kind") == "DevelopmentWinner"),
+                None,
+            )
+            unlock = next(
+                (item for item in evidence.values() if item.get("kind") == "BlindUnlock"), None
+            )
+            receipt = next(
+                (
+                    item
+                    for item in evidence.values()
+                    if item.get("kind") == "BlindQueryManifestReceipt"
+                ),
+                None,
+            )
+            if any(item is None for item in (blind, winner, unlock, receipt)):
+                raise BakeoffContractError(
+                    "terminal decision requires the complete custody evidence chain"
+                )
+            expected = {
+                "development_winner": winner["artifact_fingerprint"],
+                "blind_evaluation": blind["artifact_fingerprint"],
+                "blind_unlock": unlock["artifact_fingerprint"],
+                "blind_manifest_receipt": receipt["artifact_fingerprint"],
+            }
+            if artifact["evidence_fingerprints"] != expected:
+                raise BakeoffContractError(
+                    "promotion decision evidence does not bind the supplied custody chain"
+                )
 
     def transition(
         self,
@@ -778,7 +1035,9 @@ class BakeoffStateMachine:
             raise BakeoffContractError(
                 f"transition to {target.value} requires {required_kind} evidence"
             )
-        required_artifact = next(item for item in evidence.values() if item["kind"] == required_kind)
+        required_artifact = next(
+            item for item in evidence.values() if item["kind"] == required_kind
+        )
         self._validate_transition_artifact(target, required_artifact, spec, evidence)
         if target in {RunState.PROMOTED, RunState.RETAINED}:
             decision = next(item for item in evidence.values() if item["kind"] == required_kind)
@@ -844,9 +1103,10 @@ class BlindVault:
         validate_blind_unlock(unlock, spec, winner)
         value = json.loads(self.slots_path.read_text(encoding="utf-8"))
         validate_signed_artifact(value, kind="SealedBlindSlots")
-        if value.get("run_id") != spec["run_id"] or fingerprint(value.get("slots")) != spec[
-            "query_slots_hash"
-        ]:
+        if (
+            value.get("run_id") != spec["run_id"]
+            or fingerprint(value.get("slots")) != spec["query_slots_hash"]
+        ):
             raise BlindAccessError("sealed blind slots do not match the experiment")
         return list(value["slots"])
 
