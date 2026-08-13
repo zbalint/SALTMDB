@@ -389,6 +389,31 @@ def _as_single_token_matrix(raw: object, *, field_name: str) -> np.ndarray:
     raise BackendContractError(f"{field_name} backend must return exactly one token matrix")
 
 
+def _l2_normalize_dense_vector(vector: np.ndarray, *, field_name: str) -> np.ndarray:
+    """Rescale a raw backend vector to unit L2 norm before the strict validator sees it.
+
+    Some FastEmbed model classes (confirmed empirically: ``nomic-ai/nomic-embed-text-v1.5`` is
+    registered under FastEmbed's ``PooledEmbedding`` class, which only mean-pools and does not
+    L2-normalize) do not themselves produce unit-norm output even when the model is conventionally
+    used with cosine similarity and this project's ``EmbeddingSpec.normalization`` declares
+    ``"l2"``.  ``retrieval_index_runner.py`` scores with a raw dot product, so an unnormalized
+    vector is not merely a magnitude inconsistency versus other contenders -- it changes the
+    ranking math itself, since dot-product-as-cosine-substitute is only correct on true unit
+    vectors.  This adapter is therefore responsible for *guaranteeing* the declared contract holds
+    for any backend, not merely observing whether it happens to; ``_validate_dense_vector`` below
+    remains a strict, unmodified post-normalization sanity check (defense in depth against
+    non-finite/degenerate output), not the primary correctness mechanism.  Already-normalized
+    backends (BGE, Snowflake Arctic) are unaffected: dividing an already-unit vector by its own
+    (already ~1.0) norm is a numerically safe no-op, not a behavior change.
+    """
+    norm = float(np.linalg.norm(vector))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise BackendContractError(
+            f"{field_name} cannot be l2-normalized: non-finite or non-positive norm {norm:.8g}"
+        )
+    return vector / norm
+
+
 def _validate_dense_vector(vector: np.ndarray, spec: EmbeddingSpec, *, field_name: str) -> np.ndarray:
     if vector.ndim != 1 or vector.shape[0] != spec.dimension:
         raise BackendContractError(
@@ -579,6 +604,14 @@ class DenseEmbeddingAdapter:
         except Exception as exc:
             raise BackendContractError("dense document embedding failed") from exc
         rows = _as_matrix(raw, field_name="document", expected_count=len(rendered))
+        if self.spec.normalization == "l2":
+            rows = np.stack(
+                [
+                    _l2_normalize_dense_vector(row, field_name=f"document[{index}]")
+                    for index, row in enumerate(rows)
+                ],
+                axis=0,
+            )
         validated = [
             _validate_dense_vector(row, self.spec, field_name=f"document[{index}]")
             for index, row in enumerate(rows)
@@ -595,6 +628,8 @@ class DenseEmbeddingAdapter:
         except Exception as exc:
             raise BackendContractError("dense query embedding failed") from exc
         vector = _as_single(raw, field_name="query")
+        if self.spec.normalization == "l2":
+            vector = _l2_normalize_dense_vector(vector, field_name="query")
         return _validate_dense_vector(vector, self.spec, field_name="query")
 
     # FastEmbed terminology aliases make the adapter usable by a small runner without exposing

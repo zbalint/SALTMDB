@@ -246,16 +246,46 @@ def test_dense_adapter_fails_closed_for_colbert_even_when_shape_is_dense(tmp_pat
     [
         ([np.array([1.0, 0.0], dtype=np.float32)], "dimension mismatch"),
         ([np.array([np.nan, 0.0, 0.0], dtype=np.float32)], "non-finite"),
-        ([np.array([2.0, 0.0, 0.0], dtype=np.float32)], "normalization"),
+        ([np.array([0.0, 0.0, 0.0], dtype=np.float32)], "cannot be l2-normalized"),
     ],
 )
-def test_dense_adapter_rejects_dimension_nonfinite_and_normalization_violations(
+def test_dense_adapter_rejects_dimension_nonfinite_and_degenerate_zero_vectors(
     tmp_path: Path, vectors: list[np.ndarray], message: str
 ):
     backend = FakeDense(vectors=vectors)
     adapter, _, _ = _dense_adapter(tmp_path, backend=backend)
     with pytest.raises(BackendContractError, match=message):
         adapter.embed_documents(["document"])
+
+
+def test_dense_adapter_l2_normalizes_raw_backend_output_before_validating(tmp_path: Path):
+    """The declared "l2" contract is now guaranteed by the adapter, not merely observed.
+
+    Reproduces the real nomic-embed-text-v1.5 failure mode: FastEmbed's ``PooledEmbedding`` class
+    (used for that model) does not itself L2-normalize, so a raw backend vector with norm != 1.0
+    must be rescaled here rather than rejected -- as long as it is finite and nonzero.
+    """
+    backend = FakeDense(vectors=[np.array([3.0, 4.0, 0.0], dtype=np.float32)])  # norm == 5.0
+    adapter, _, _ = _dense_adapter(tmp_path, backend=backend)
+    result = adapter.embed_document("document")
+    assert np.allclose(result, [0.6, 0.8, 0.0])
+    assert np.isclose(float(np.linalg.norm(result)), 1.0)
+
+
+def test_dense_adapter_l2_normalizes_query_embedding_too(tmp_path: Path):
+    backend = FakeDense(vectors=[np.array([0.0, 0.0, 19.301439], dtype=np.float32)])
+    adapter, _, _ = _dense_adapter(tmp_path, backend=backend)
+    result = adapter.embed_query("query")
+    assert np.allclose(result, [0.0, 0.0, 1.0])
+
+
+def test_dense_adapter_l2_normalization_is_a_stable_noop_for_already_unit_vectors(tmp_path: Path):
+    """Already-correct backends (BGE, Snowflake Arctic) must be unaffected by this change."""
+    already_unit = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    backend = FakeDense(vectors=[already_unit])
+    adapter, _, _ = _dense_adapter(tmp_path, backend=backend)
+    result = adapter.embed_document("document")
+    assert np.allclose(result, already_unit)
 
 
 def test_dense_adapter_accepts_explicit_none_normalization_without_mutating_vectors(tmp_path: Path):
