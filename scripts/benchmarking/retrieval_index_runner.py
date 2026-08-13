@@ -73,7 +73,11 @@ def _unpack_vector(value: bytes, dimension: int) -> tuple[float, ...]:
 
 
 def _pack_matrix(matrix: Sequence[Sequence[float]], dimension: int) -> tuple[bytes, int]:
-    if not matrix:
+    # In a real ColBERT run ``matrix`` is a numpy 2D array (tokens, dimension); ``if not matrix``
+    # raises "truth value of an array with more than one element is ambiguous" for any matrix
+    # with more than one token row, which is every real document. ``len()`` is unambiguous for
+    # both numpy arrays and plain sequences.
+    if len(matrix) == 0:
         raise IndexRunnerError("late-interaction matrix cannot be empty")
     rows = [_pack_vector(row, dimension) for row in matrix]
     return b"".join(rows), len(rows)

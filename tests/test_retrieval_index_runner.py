@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "benchmarking"))
@@ -128,6 +129,49 @@ def test_late_interaction_is_separate_and_maxsim_ranked(tmp_path):
         assert [hit.entity_id for hit in runner.search("alpha beta")] == ["e1", "e2"]
         with pytest.raises(IndexRunnerError, match="entity documents only"):
             runner.build([document("e1:c", "e1", "chunk", "alpha")])
+
+
+class LateFakeNumpyMatrix:
+    """Returns real numpy 2D arrays, matching retrieval_adapters.LateInteractionEmbeddingAdapter.
+
+    ``LateFake`` above returns plain Python lists of lists, which never reproduces the real
+    ``if not matrix:`` truth-value-ambiguous crash: that only fires for a numpy array with more
+    than one row, which is exactly what the real adapter (via ``_validate_late_matrix``) returns
+    for every genuine multi-token document. This fake closes that gap.
+    """
+
+    dimension = 2
+    compatibility_key = fingerprint("late-fake-numpy-v1")
+
+    def embed_documents(self, texts):
+        return [self.embed_query(text) for text in texts]
+
+    def embed_query(self, text):
+        # Every real document/query has at least one token; two rows is the common case and is
+        # exactly the shape that made ``if not matrix`` ambiguous.
+        return np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    def maxsim(self, query_tokens, document_tokens):
+        return sum(max(sum(a * b for a, b in zip(q, d)) for d in document_tokens) for q in query_tokens)
+
+
+def test_late_interaction_build_accepts_real_numpy_token_matrices(tmp_path):
+    """Regression test: a genuine numpy multi-row matrix must not raise a truth-value error.
+
+    Reproduces the exact failure mode found running the real ColBERT contender in Gate D:
+    ``if not matrix`` on a numpy array with more than one element raises
+    ``ValueError: truth value of an array with more than one element is ambiguous``.
+    """
+    adapter = LateFakeNumpyMatrix()
+    with LateInteractionIndexRunner(
+        tmp_path / "late_numpy.sqlite", adapter, representation_root=fingerprint("r")
+    ) as runner:
+        receipt = runner.build([document("e1", "e1", "entity", "alpha beta")])
+        assert receipt["kind"] == "late_interaction"
+        row = runner.conn.execute(
+            "SELECT token_count FROM token_vectors WHERE item_id = 'e1'"
+        ).fetchone()
+        assert row["token_count"] == 2
 
 
 def test_nonfinite_and_wrong_dimensions_fail_closed(tmp_path):
