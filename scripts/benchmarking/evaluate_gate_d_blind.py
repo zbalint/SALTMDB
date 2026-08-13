@@ -162,24 +162,34 @@ def _mcnemar(
     candidate: Mapping[str, Mapping[str, Any]],
     baseline: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    # Promotion's frozen comparison family names binary top-1 grade-2 outcomes.  Unknown
-    # declared names fail closed rather than inventing a different statistical test.
-    if name != "winner_vs_baseline_same_specific_fact":
+    # Each predeclared accuracy metric supplies a paired binary per-query outcome.  Unknown
+    # names fail closed rather than silently reusing a different statistical comparison.
+    accepted = {
+        "winner_vs_baseline_same_specific_fact",
+        "winner_vs_baseline_ndcg_at_10",
+        "winner_vs_baseline_grade2_recall_at_20",
+    }
+    if name not in accepted:
         raise GateDBlindError(f"unsupported frozen Holm comparison {name!r}")
-    usable = [q for q in queries if q.get("source_entity_ids")]
+    if name == "winner_vs_baseline_same_specific_fact":
+        usable = [q for q in queries if q.get("source_entity_ids")]
+    elif name == "winner_vs_baseline_ndcg_at_10":
+        usable = [q for q in queries if any(grade > 0 for grade in relevance[q["id"]].values())]
+    else:
+        usable = [q for q in queries if any(grade == 2 for grade in relevance[q["id"]].values())]
     if not usable:
-        raise GateDBlindError("same-specific-fact McNemar denominator is empty")
+        raise GateDBlindError(f"{name} McNemar denominator is empty")
     outcomes = []
     for q in usable:
         rel = relevance[q["id"]]
-        c = (
-            bool(candidate[q["id"]]["top20"])
-            and rel.get(candidate[q["id"]]["top20"][0]["entity_id"], 0) == 2
-        )
-        b = (
-            bool(baseline[q["id"]]["top20"])
-            and rel.get(baseline[q["id"]]["top20"][0]["entity_id"], 0) == 2
-        )
+        candidate_ids = [hit["entity_id"] for hit in candidate[q["id"]]["top20"]]
+        baseline_ids = [hit["entity_id"] for hit in baseline[q["id"]]["top20"]]
+        if name in {"winner_vs_baseline_same_specific_fact", "winner_vs_baseline_ndcg_at_10"}:
+            c = bool(candidate_ids) and rel.get(candidate_ids[0], 0) == 2
+            b = bool(baseline_ids) and rel.get(baseline_ids[0], 0) == 2
+        else:
+            c = any(rel.get(entity_id, 0) == 2 for entity_id in candidate_ids)
+            b = any(rel.get(entity_id, 0) == 2 for entity_id in baseline_ids)
         outcomes.append((c, b))
     b_only, base_only = sum(c and not b for c, b in outcomes), sum(b and not c for c, b in outcomes)
     statistic, raw_p = mcnemar_continuity_corrected(b_only, base_only)
