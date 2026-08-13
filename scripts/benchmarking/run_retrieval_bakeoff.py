@@ -15,6 +15,11 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+try:  # POSIX-only hard memory ceiling; see _apply_memory_ceiling below.
+    import resource
+except ImportError:  # pragma: no cover - Windows fallback has no enforced ceiling.
+    resource = None  # type: ignore[assignment]
+
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(_ROOT / "src"))
@@ -171,12 +176,14 @@ def execute_dense_cell(
     sidecar_path: Path,
     channel: str,
     backend_factory: Any = fastembed_dense_factory,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     adapter = DenseEmbeddingAdapter(lock.spec, lock, backend_factory)
+    build_kwargs: dict[str, Any] = {} if batch_size is None else {"batch_size": batch_size}
     with DenseIndexRunner(
         sidecar_path, adapter, representation_root=manifest["corpus_root_hash"]
     ) as index:
-        index_receipt = index.build(documents)
+        index_receipt = index.build(documents, **build_kwargs)
         results = []
         for query in queries:
             hits, latency_ms, error = timed_search(index.search, query["query"], channel, limit=20)
@@ -219,12 +226,14 @@ def execute_late_cell(
     lock: ModelLock,
     sidecar_path: Path,
     backend_factory: Any = fastembed_late_interaction_factory,
+    batch_size: int | None = None,
 ) -> dict[str, Any]:
     adapter = LateInteractionEmbeddingAdapter(lock.spec, lock, backend_factory)
+    build_kwargs: dict[str, Any] = {} if batch_size is None else {"batch_size": batch_size}
     with LateInteractionIndexRunner(
         sidecar_path, adapter, representation_root=manifest["corpus_root_hash"]
     ) as index:
-        index_receipt = index.build(documents)
+        index_receipt = index.build(documents, **build_kwargs)
         results = []
         for query in queries:
             hits, latency_ms, error = timed_search(index.search, query["query"], limit=20)
@@ -313,6 +322,36 @@ def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+# A single-process hard virtual-memory ceiling.  This is a real operational-safety fix, not a
+# tuning knob: a runaway allocation inside this process (e.g. an oversized attention buffer for
+# a long entity document, confirmed to reach ~16.6GB at default batch settings on one contender)
+# must fail with a clean Python/onnxruntime MemoryError inside this process, not be silently
+# accepted by the kernel and then satisfied through swap thrashing that can degrade the entire
+# host.  Empirically verified: a deliberate oversized numpy allocation under a 2GB ceiling raises
+# MemoryError instantly, with zero measurable host memory pressure.  5500MB leaves headroom above
+# this bakeoff's largest known-successful model while staying safely below this host's ~7.7GB
+# total RAM once other resident processes (SALTMDB daemon, MCP servers, etc.) are accounted for.
+DEFAULT_MEMORY_LIMIT_MB = 5500
+
+
+def _apply_memory_ceiling(limit_mb: int | None) -> None:
+    """Set a hard RLIMIT_AS ceiling on this process before any model/index work begins.
+
+    Enforced unconditionally (every ``--kind``, including the lightweight lexical cell) so the
+    protection can never be silently skipped.  ``limit_mb=None`` (Windows, or an explicit opt-out
+    via ``--memory-limit-mb 0``) leaves the process unbounded -- a caller must ask for that
+    explicitly, it is never the default.
+    """
+    if limit_mb is None or limit_mb <= 0:
+        return
+    if resource is None:  # pragma: no cover - non-POSIX platforms have no RLIMIT_AS.
+        return
+    limit_bytes = limit_mb * 1024 * 1024
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    new_hard = limit_bytes if hard in (resource.RLIM_INFINITY, None) else min(hard, limit_bytes)
+    resource.setrlimit(resource.RLIMIT_AS, (min(limit_bytes, new_hard), new_hard))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
@@ -326,7 +365,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sidecar", type=Path)
     parser.add_argument("--db-path", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional execution-time embedding batch size passed through to the index "
+            "runner's build(). Omit to keep today's default (no kwarg passed)."
+        ),
+    )
+    parser.add_argument(
+        "--memory-limit-mb",
+        type=int,
+        default=DEFAULT_MEMORY_LIMIT_MB,
+        help=(
+            "Hard RLIMIT_AS ceiling (megabytes) applied to this process before any model/index "
+            f"work begins; a runaway allocation fails cleanly instead of thrashing the host via "
+            f"swap. Defaults to {DEFAULT_MEMORY_LIMIT_MB}. Pass 0 to run unbounded (not "
+            "recommended)."
+        ),
+    )
     args = parser.parse_args(argv)
+    _apply_memory_ceiling(args.memory_limit_mb)
 
     spec = validate_bakeoff_spec(_load_json(args.spec))
     manifest = validate_corpus_manifest(_load_json(args.corpus_manifest))
@@ -357,6 +417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lock=lock,
                 sidecar_path=args.sidecar,
                 channel=channel,
+                batch_size=args.batch_size,
             )
         else:
             result = execute_late_cell(
@@ -366,6 +427,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 documents=documents,
                 lock=lock,
                 sidecar_path=args.sidecar,
+                batch_size=args.batch_size,
             )
     _atomic_write(args.out, result)
     return 0
