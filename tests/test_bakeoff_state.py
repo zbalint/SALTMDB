@@ -97,31 +97,107 @@ def winner(frozen_spec):
     )
 
 
-def retained_decision(frozen_spec):
+def blind_evaluation(frozen_spec, selected, unlock, receipt, *, passes=True):
+    baseline_metrics = metrics()
+    candidate_metrics = metrics()
+    if passes:
+        candidate_metrics.update(
+            {
+                "macro_positive_ndcg_at_10": 0.8,
+                "grade2_recall_at_20": 0.9,
+                "same_specific_fact_grade2_top1": 0.7,
+                "exact_safety": 0.99,
+                "keyword_safety": 0.98,
+                "strict_negative_safety": 0.97,
+            }
+        )
+    else:
+        candidate_metrics["benchmark_failures"] = 1
+    return sign_artifact(
+        "BlindEvaluation",
+        {
+            "run_id": frozen_spec["run_id"],
+            "spec_fingerprint": frozen_spec["artifact_fingerprint"],
+            "candidate_contender_id": "candidate",
+            "baseline_contender_id": "lexical:bm25",
+            "complete_query_count": 800,
+            "blind_query_ids": [f"blind-{index:03d}" for index in range(800)],
+            "candidate_metrics": candidate_metrics,
+            "baseline_metrics": baseline_metrics,
+            "accuracy_deltas": {
+                "ndcg_at_10": candidate_metrics["macro_positive_ndcg_at_10"] - baseline_metrics["macro_positive_ndcg_at_10"],
+                "grade2_recall_at_20": candidate_metrics["grade2_recall_at_20"] - baseline_metrics["grade2_recall_at_20"],
+                "same_specific_fact_grade2_top1": candidate_metrics["same_specific_fact_grade2_top1"] - baseline_metrics["same_specific_fact_grade2_top1"],
+            },
+            "safety_deltas": {
+                "exact": baseline_metrics["exact_safety"] - candidate_metrics["exact_safety"],
+                "keyword": baseline_metrics["keyword_safety"] - candidate_metrics["keyword_safety"],
+                "strict_negative": baseline_metrics["strict_negative_safety"] - candidate_metrics["strict_negative_safety"],
+            },
+            "confidence_intervals": {"ndcg_delta_ci95": [0.01 if passes else -0.01, 0.2]},
+            "holm_results": [
+                {
+                    "comparison": "winner_vs_baseline_same_specific_fact",
+                    "adjusted_p": 0.01 if passes else 0.5,
+                }
+            ],
+            "configuration_mutated_after_first_result": False,
+            "fixed_configuration_attestation": {
+                "frozen": True,
+                "configuration_hash": frozen_spec["configuration_hash"],
+                "winner_pipeline_fingerprint": fingerprint(selected["pipeline"]),
+                "post_first_result_mutations": [],
+            },
+            "unresolved_disagreements": 0,
+            "evidence_fingerprints": {
+                "development_winner": selected["artifact_fingerprint"],
+                "blind_unlock": unlock["artifact_fingerprint"],
+                "blind_manifest_receipt": receipt["artifact_fingerprint"],
+                "judging_matrix": _hash("judging-matrix"),
+                "winner_bundle": _hash("winner-bundle"),
+                "baseline_bundle": _hash("baseline-bundle"),
+                "raw_judgments": _hash("raw-judgments"),
+                "merged_labels": _hash("merged-labels"),
+                "metrics_artifact": _hash("metrics-artifact"),
+                "blind_query_ids": fingerprint(sorted([f"blind-{index:03d}" for index in range(800)])),
+            },
+        },
+    )
+
+
+def promotion_decision(frozen_spec, selected, unlock, receipt, evaluation, *, promotion):
     return sign_artifact(
         "PromotionDecision",
         {
             "run_id": frozen_spec["run_id"],
             "spec_fingerprint": frozen_spec["artifact_fingerprint"],
-            "blind_metrics": metrics(),
+            "blind_metrics": evaluation["candidate_metrics"],
             "accuracy_deltas": {
-                "ndcg_at_10": 0.0,
-                "grade2_recall_at_20": 0.0,
-                "same_specific_fact_grade2_top1": 0.0,
+                **evaluation["accuracy_deltas"],
             },
-            "confidence_intervals": {"ndcg_delta_ci95": [-0.1, 0.1]},
-            "holm_results": [
-                {
-                    "comparison": "winner_vs_baseline_same_specific_fact",
-                    "adjusted_p": 1.0,
-                }
-            ],
-            "safety_deltas": {"exact": 0.0, "keyword": 0.0, "strict_negative": 0.0},
-            "failures": [],
+            "confidence_intervals": evaluation["confidence_intervals"],
+            "holm_results": evaluation["holm_results"],
+            "safety_deltas": evaluation["safety_deltas"],
+            "failures": [] if evaluation["candidate_metrics"]["benchmark_failures"] == 0 else ["candidate_benchmark_failures"],
             "latency": {"candidate_warm_p95_seconds": 0.5},
-            "promotion": False,
+            "promotion": promotion,
+            "evidence_fingerprints": {
+                "development_winner": selected["artifact_fingerprint"],
+                "blind_evaluation": evaluation["artifact_fingerprint"],
+                "blind_unlock": unlock["artifact_fingerprint"],
+                "blind_manifest_receipt": receipt["artifact_fingerprint"],
+            },
         },
     )
+
+
+def retained_decision(frozen_spec):
+    """Legacy-shaped helper retained for malformed-decision tests only."""
+    selected = winner(frozen_spec)
+    unlock = build_blind_unlock(frozen_spec, selected, user_confirmation="synthetic test confirmation")
+    receipt = build_blind_manifest_receipt(frozen_spec, selected, unlock, _hash("blind-bytes"))
+    evaluation = blind_evaluation(frozen_spec, selected, unlock, receipt, passes=False)
+    return promotion_decision(frozen_spec, selected, unlock, receipt, evaluation, promotion=False)
 
 
 def test_spec_requires_registered_metric_vector_and_nonzero_facets():
@@ -241,20 +317,28 @@ def test_state_machine_is_atomic_sequential_and_terminal(tmp_path):
         },
         RunState.DEV_WINNER_SIGNED: {"evidence": selected},
         RunState.BLIND_UNLOCKED: {
-            "unlock": build_blind_unlock(frozen, selected),
+            "unlock": build_blind_unlock(
+                frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+            ),
             "winner": selected,
         },
-        RunState.BLIND_COMPLETE: {
-            "evidence": sign_artifact(
-                "BlindEvaluation",
-                {
-                    **common,
-                    "complete_query_count": 800,
-                    "configuration_mutated_after_first_result": False,
-                },
-            )
-        },
-        RunState.RETAINED: {"evidence": retained_decision(frozen)},
+    }
+    unlock = evidence_by_state[RunState.BLIND_UNLOCKED]["unlock"]
+    receipt = build_blind_manifest_receipt(frozen, selected, unlock, _hash("blind-bytes"))
+    evaluation = blind_evaluation(frozen, selected, unlock, receipt, passes=False)
+    decision = promotion_decision(frozen, selected, unlock, receipt, evaluation, promotion=False)
+    evidence_by_state[RunState.BLIND_COMPLETE] = {
+        "evidence": evaluation,
+        "winner": selected,
+        "unlock": unlock,
+        "manifest_receipt": receipt,
+    }
+    evidence_by_state[RunState.RETAINED] = {
+        "evidence": decision,
+        "winner": selected,
+        "blind_evaluation": evaluation,
+        "unlock": unlock,
+        "manifest_receipt": receipt,
     }
     for state, state_evidence in evidence_by_state.items():
         machine.transition(
@@ -284,7 +368,9 @@ def test_blind_vault_does_not_read_before_matching_unlock(tmp_path):
             vault.open_slots({}, frozen, selected, custodian="codex")
         read.assert_not_called()
 
-    unlock = build_blind_unlock(frozen, selected)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
     assert vault.open_slots(unlock, frozen, selected, custodian="codex") == slots
     assert (vault.vault_dir.stat().st_mode & 0o777) == 0o700
     assert (vault.slots_path.stat().st_mode & 0o777) == 0o600
@@ -296,7 +382,9 @@ def test_blind_unlock_is_experiment_and_winner_specific(tmp_path):
     selected = winner(frozen)
     vault = BlindVault(tmp_path / "private-vault")
     vault.seal_slots(slots, frozen, custodian="codex")
-    unlock = build_blind_unlock(frozen, selected)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
     other_winner = sign_artifact(
         "DevelopmentWinner", {**selected, "pipeline": {"retrieval": "different"}}
     )
@@ -347,7 +435,9 @@ def test_query_slot_assignments_enforce_400_800_family_isolation_and_facets():
 def test_blind_file_authorization_checks_unlock_before_opening_target(tmp_path):
     frozen = spec()
     selected = winner(frozen)
-    unlock = build_blind_unlock(frozen, selected)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
     vault = tmp_path / "vault"
     vault.mkdir()
     target = vault / "queries_blind.json"
@@ -371,24 +461,154 @@ def test_blind_file_authorization_checks_unlock_before_opening_target(tmp_path):
         unlock_path,
         receipt_path,
     ) == b"blind material"
-    with pytest.raises(BlindAccessError):
-        authorize_blind_file(
-            tmp_path / "public.json",
-            vault,
-            spec_path,
-            winner_path,
-            unlock_path,
-            receipt_path,
-        )
     target.write_text("tampered")
-    with pytest.raises(BlindAccessError, match="bytes"):
-        authorize_blind_file(
-            target,
-            vault,
-            spec_path,
-            winner_path,
-            unlock_path,
-            receipt_path,
+    original_read = target.read_bytes
+    with mock.patch.object(Path, "read_bytes", wraps=original_read) as read_target:
+        with pytest.raises(BlindAccessError, match="bytes"):
+            authorize_blind_file(
+                target,
+                vault,
+                spec_path,
+                winner_path,
+                unlock_path,
+                receipt_path,
+            )
+        assert read_target.call_count == 1
+
+
+@pytest.mark.parametrize("failure", ["custodian", "outside", "malformed", "stale"])
+def test_blind_file_authorization_rejects_controls_before_target_read(tmp_path, failure):
+    frozen = spec()
+    selected = winner(frozen)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    target = vault / "queries_blind.json"
+    target.write_text("synthetic blind bytes")
+    spec_path = tmp_path / "spec.json"
+    winner_path = tmp_path / "winner.json"
+    unlock_path = tmp_path / "unlock.json"
+    receipt_path = tmp_path / "manifest-receipt.json"
+    spec_path.write_text(json.dumps(frozen))
+    winner_path.write_text(json.dumps(selected))
+    unlock_path.write_text(json.dumps(unlock))
+    receipt_path.write_text(
+        json.dumps(build_blind_manifest_receipt(frozen, selected, unlock, _hash("other-bytes")))
+    )
+    target_read = target.read_bytes
+    if failure == "custodian":
+        kwargs = {"custodian": "impostor"}
+    elif failure == "outside":
+        target = tmp_path / "public.json"
+        target.write_text("synthetic outside bytes")
+        kwargs = {}
+    else:
+        if failure == "malformed":
+            unlock_path.write_text("{}")
+        else:
+            stale = dict(unlock)
+            stale["run_id"] = "other-run"
+            unlock_path.write_text(json.dumps(stale))
+        kwargs = {}
+    with mock.patch.object(Path, "read_bytes", wraps=target_read) as read_target:
+        with pytest.raises(BlindAccessError):
+            authorize_blind_file(
+                target,
+                vault,
+                spec_path,
+                winner_path,
+                unlock_path,
+                receipt_path,
+                **kwargs,
+            )
+        assert read_target.call_count == 0
+
+
+@pytest.mark.parametrize("promotion", [True, False])
+def test_blind_complete_reaches_promoted_or_retained_with_complete_custody(tmp_path, promotion):
+    frozen = spec()
+    selected = winner(frozen)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
+    receipt = build_blind_manifest_receipt(frozen, selected, unlock, _hash("blind-bytes"))
+    evaluation = blind_evaluation(frozen, selected, unlock, receipt, passes=promotion)
+    decision = promotion_decision(frozen, selected, unlock, receipt, evaluation, promotion=promotion)
+    machine = BakeoffStateMachine(tmp_path / ("promoted" if promotion else "retained"))
+    machine.initialize(frozen)
+    common = {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]}
+    for state, artifact in (
+        (RunState.DEV_INDEXED, sign_artifact("IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []})),
+        (RunState.DEV_RETRIEVED, sign_artifact("RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []})),
+        (RunState.DEV_JUDGED, sign_artifact("DevelopmentJudgments", {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0})),
+        (RunState.DEV_WINNER_SIGNED, selected),
+        (RunState.BLIND_UNLOCKED, unlock),
+        (RunState.BLIND_COMPLETE, evaluation),
+    ):
+        evidence = {"evidence": artifact}
+        if state is RunState.BLIND_UNLOCKED:
+            evidence["winner"] = selected
+        elif state is RunState.BLIND_COMPLETE:
+            evidence.update({"winner": selected, "unlock": unlock, "manifest_receipt": receipt})
+        machine.transition(state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"])
+    terminal = RunState.PROMOTED if promotion else RunState.RETAINED
+    machine.transition(
+        terminal,
+        {
+            "evidence": decision,
+            "winner": selected,
+            "blind_evaluation": evaluation,
+            "unlock": unlock,
+            "manifest_receipt": receipt,
+        },
+        expected_spec_fingerprint=frozen["artifact_fingerprint"],
+    )
+
+
+def test_terminal_transition_rejects_missing_or_mismatched_custody_evidence(tmp_path):
+    frozen = spec()
+    selected = winner(frozen)
+    unlock = build_blind_unlock(
+        frozen, selected, user_confirmation="synthetic Gate D test confirmation"
+    )
+    receipt = build_blind_manifest_receipt(frozen, selected, unlock, _hash("blind-bytes"))
+    evaluation = blind_evaluation(frozen, selected, unlock, receipt, passes=False)
+    decision = promotion_decision(frozen, selected, unlock, receipt, evaluation, promotion=False)
+    machine = BakeoffStateMachine(tmp_path / "run")
+    machine.initialize(frozen)
+    # Move the machine to BLIND_COMPLETE with valid evidence, then exercise terminal binding.
+    common = {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]}
+    for state, artifact in (
+        (RunState.DEV_INDEXED, sign_artifact("IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []})),
+        (RunState.DEV_RETRIEVED, sign_artifact("RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []})),
+        (RunState.DEV_JUDGED, sign_artifact("DevelopmentJudgments", {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0})),
+        (RunState.DEV_WINNER_SIGNED, selected),
+        (RunState.BLIND_UNLOCKED, unlock),
+        (RunState.BLIND_COMPLETE, evaluation),
+    ):
+        evidence = {"evidence": artifact}
+        if state is RunState.BLIND_UNLOCKED:
+            evidence["winner"] = selected
+        elif state is RunState.BLIND_COMPLETE:
+            evidence.update({"winner": selected, "unlock": unlock, "manifest_receipt": receipt})
+        machine.transition(state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"])
+    with pytest.raises(BakeoffContractError, match="complete custody evidence"):
+        machine.transition(
+            RunState.RETAINED,
+            {"evidence": decision, "winner": selected, "blind_evaluation": evaluation},
+            expected_spec_fingerprint=frozen["artifact_fingerprint"],
+        )
+    mismatched = sign_artifact(
+        "PromotionDecision",
+        {**decision, "evidence_fingerprints": {**decision["evidence_fingerprints"], "blind_unlock": _hash("wrong-unlock")}},
+    )
+    with pytest.raises(BakeoffContractError, match="does not bind"):
+        machine.transition(
+            RunState.RETAINED,
+            {"evidence": mismatched, "winner": selected, "blind_evaluation": evaluation, "unlock": unlock, "manifest_receipt": receipt},
+            expected_spec_fingerprint=frozen["artifact_fingerprint"],
         )
 
 
