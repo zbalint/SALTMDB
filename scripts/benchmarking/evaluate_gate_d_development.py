@@ -144,7 +144,8 @@ def validate_bundle_rankings(
     expected_ids = {query["id"] for query in queries}
     rows_by_contender: dict[str, dict[str, dict[str, Any]]] = {}
     for contender, bundle in bundles.items():
-        if bundle.get("run_id") is None or bundle.get("complete_query_count") != 400:
+        expected_query_count = len(queries)
+        if bundle.get("run_id") is None or bundle.get("complete_query_count") != expected_query_count:
             raise GateDDevelopmentError(f"{contender}: incomplete RetrievalRunBundle")
         if bundle.get("failures") != []:
             raise GateDDevelopmentError(f"{contender}: bundle has failures")
@@ -173,7 +174,9 @@ def validate_bundle_rankings(
                 raise GateDDevelopmentError(f"{contender}: successful row has invalid latency")
             by_id[query_id] = row
         if set(by_id) != expected_ids:
-            raise GateDDevelopmentError(f"{contender}: results do not cover exactly 400 development queries")
+            raise GateDDevelopmentError(
+                f"{contender}: results do not cover exactly {expected_query_count} queries"
+            )
         rows_by_contender[contender] = by_id
 
     # Reconstruct the declared contender-union pool.  This catches a matrix produced from a
