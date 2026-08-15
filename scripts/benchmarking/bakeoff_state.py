@@ -726,7 +726,7 @@ def build_promotion_decision(
     return decision
 
 
-def validate_blind_evaluation(  # noqa: C901, PLR0912
+def validate_blind_evaluation(  # noqa: C901, PLR0912, PLR0915
     artifact: object, spec: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Validate the complete, privacy-preserving Gate-D blind evaluation receipt."""
@@ -783,6 +783,14 @@ def validate_blind_evaluation(  # noqa: C901, PLR0912
     attestation = value["fixed_configuration_attestation"]
     if not isinstance(attestation, dict) or attestation.get("frozen") is not True:
         raise BakeoffContractError("blind evaluation lacks a fixed-configuration attestation")
+    if attestation.get("configuration_hash") != spec["configuration_hash"]:
+        raise BakeoffContractError("blind configuration attestation does not match the frozen configuration")
+    _require_hash(
+        attestation.get("winner_pipeline_fingerprint"),
+        "winner pipeline fingerprint",
+    )
+    if attestation.get("post_first_result_mutations") != []:
+        raise BakeoffContractError("blind configuration attestation records a mutation")
     validate_metric_vector(value["candidate_metrics"])
     validate_metric_vector(value["baseline_metrics"])
     expected_accuracy = {"ndcg_at_10", "grade2_recall_at_20", "same_specific_fact_grade2_top1"}
@@ -803,6 +811,32 @@ def validate_blind_evaluation(  # noqa: C901, PLR0912
             for x in group.values()
         ):
             raise BakeoffContractError("blind paired outcomes must be finite")
+    expected_accuracy = {
+        "ndcg_at_10": value["candidate_metrics"]["macro_positive_ndcg_at_10"]
+        - value["baseline_metrics"]["macro_positive_ndcg_at_10"],
+        "grade2_recall_at_20": value["candidate_metrics"]["grade2_recall_at_20"]
+        - value["baseline_metrics"]["grade2_recall_at_20"],
+        "same_specific_fact_grade2_top1": value["candidate_metrics"][
+            "same_specific_fact_grade2_top1"
+        ]
+        - value["baseline_metrics"]["same_specific_fact_grade2_top1"],
+    }
+    if value["accuracy_deltas"] != expected_accuracy:
+        raise BakeoffContractError(
+            "blind accuracy deltas must equal candidate-minus-baseline metrics"
+        )
+    expected_safety = {
+        "exact": value["baseline_metrics"]["exact_safety"]
+        - value["candidate_metrics"]["exact_safety"],
+        "keyword": value["baseline_metrics"]["keyword_safety"]
+        - value["candidate_metrics"]["keyword_safety"],
+        "strict_negative": value["baseline_metrics"]["strict_negative_safety"]
+        - value["candidate_metrics"]["strict_negative_safety"],
+    }
+    if value["safety_deltas"] != expected_safety:
+        raise BakeoffContractError(
+            "blind safety deltas must equal baseline-minus-candidate metrics"
+        )
     intervals = value["confidence_intervals"]
     ci = intervals.get("ndcg_delta_ci95") if isinstance(intervals, dict) else None
     if (
@@ -843,6 +877,11 @@ def validate_blind_evaluation(  # noqa: C901, PLR0912
         raise BakeoffContractError("blind evaluation lacks complete evidence fingerprints")
     for name, digest in evidence.items():
         _require_hash(digest, f"blind evidence {name}")
+    expected_query_ids_fingerprint = fingerprint(sorted(ids))
+    if evidence["blind_query_ids"] != expected_query_ids_fingerprint:
+        raise BakeoffContractError(
+            "blind query evidence fingerprint does not match sorted blind query IDs"
+        )
     return value
 
 
@@ -994,6 +1033,10 @@ class BakeoffStateMachine:
                 raise BakeoffContractError(
                     "terminal decision requires the complete custody evidence chain"
                 )
+            validate_blind_evaluation(blind, spec)
+            validate_development_winner(winner, spec)
+            validate_blind_unlock(unlock, spec, winner)
+            validate_blind_manifest_receipt(receipt, spec, winner, unlock)
             expected = {
                 "development_winner": winner["artifact_fingerprint"],
                 "blind_evaluation": blind["artifact_fingerprint"],
@@ -1003,6 +1046,36 @@ class BakeoffStateMachine:
             if artifact["evidence_fingerprints"] != expected:
                 raise BakeoffContractError(
                     "promotion decision evidence does not bind the supplied custody chain"
+                )
+            expected_decision_fields = {
+                "blind_metrics": blind["candidate_metrics"],
+                "accuracy_deltas": blind["accuracy_deltas"],
+                "confidence_intervals": blind["confidence_intervals"],
+                "holm_results": blind["holm_results"],
+                "safety_deltas": blind["safety_deltas"],
+                "failures": (
+                    []
+                    if blind["candidate_metrics"]["benchmark_failures"] == 0
+                    else ["candidate_benchmark_failures"]
+                ),
+                "latency": {
+                    "candidate_warm_p95_seconds": blind["candidate_metrics"][
+                        "warm_latency_p95_seconds"
+                    ]
+                },
+            }
+            for field, expected_value in expected_decision_fields.items():
+                if artifact[field] != expected_value:
+                    raise BakeoffContractError(
+                        f"promotion decision {field} does not match the supplied blind evaluation"
+                    )
+            expected_pipeline_fingerprint = fingerprint(winner["pipeline"])
+            if (
+                blind["fixed_configuration_attestation"]["winner_pipeline_fingerprint"]
+                != expected_pipeline_fingerprint
+            ):
+                raise BakeoffContractError(
+                    "blind configuration attestation does not match the supplied development winner"
                 )
 
     def transition(
