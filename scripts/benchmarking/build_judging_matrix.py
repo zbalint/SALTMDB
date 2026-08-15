@@ -65,6 +65,7 @@ from bakeoff_state import (  # noqa: E402
     sign_artifact,
     validate_bakeoff_spec,
     validate_corpus_manifest,
+    validate_development_winner,
     validate_signed_artifact,
 )
 from build_evaluation_queries import load_manifest  # noqa: E402
@@ -72,6 +73,10 @@ from build_evaluation_queries import load_manifest  # noqa: E402
 
 class JudgingMatrixBuildError(ValueError):
     """The Gate-D JudgingMatrix cannot be assembled from the supplied frozen inputs."""
+
+
+BLIND_WINNER_ID = "late_interaction:answerdotai/answerai-colbert-small-v1:entity"
+BLIND_BASELINE_ID = "lexical:bm25"
 
 
 def _text_hash(value: str) -> str:
@@ -346,18 +351,17 @@ def build_blind_judging_matrix(
     artifact (the matrix is keyed exclusively by opaque query IDs).
     """
     spec = validate_bakeoff_spec(json.loads(spec_path.read_text(encoding="utf-8")))
-    winner = validate_signed_artifact(
-        json.loads(winner_path.read_text(encoding="utf-8")), kind="DevelopmentWinner"
+    winner = validate_development_winner(
+        json.loads(winner_path.read_text(encoding="utf-8")), spec
     )
     winner_id = winner.get("pipeline", {}).get("contender_id")
-    expected = {winner_id, "lexical:bm25"}
+    expected = {BLIND_WINNER_ID, BLIND_BASELINE_ID}
     if (
-        not isinstance(winner_id, str)
-        or winner_id == "lexical:bm25"
+        winner_id != BLIND_WINNER_ID
         or not expected.issubset(set(spec["contenders"]))
     ):
         raise JudgingMatrixBuildError(
-            "blind matrix requires one non-lexical signed winner and lexical:bm25"
+            "blind matrix requires the fixed ColBERT winner and lexical:bm25"
         )
     # authorize_blind_file validates all control artifacts before opening this path.
     from bakeoff_state import authorize_blind_file

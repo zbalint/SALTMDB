@@ -43,6 +43,8 @@ try:  # Sibling-script execution and direct import from the test suite.
         RunState,
         sign_artifact,
         validate_bakeoff_spec,
+        validate_blind_evaluation,
+        validate_blind_manifest_receipt,
         validate_blind_unlock,
         validate_corpus_manifest,
         validate_development_winner,
@@ -60,6 +62,8 @@ except ModuleNotFoundError:  # pragma: no cover - package-style fallback
         RunState,
         sign_artifact,
         validate_bakeoff_spec,
+        validate_blind_evaluation,
+        validate_blind_manifest_receipt,
         validate_blind_unlock,
         validate_corpus_manifest,
         validate_development_winner,
@@ -477,7 +481,7 @@ class BakeoffOrchestrator:
                 "checkpoint_fingerprint": checkpoint["artifact_fingerprint"],
             }
 
-    def advance(  # noqa: C901, PLR0912
+    def advance(  # noqa: C901, PLR0912, PLR0915
         self,
         target: RunState | str,
         evidence: Mapping[str, Mapping[str, Any]] | Mapping[str, Any],
@@ -517,23 +521,59 @@ class BakeoffOrchestrator:
             if state is RunState.BLIND_UNLOCKED and winner is not None:
                 evidence_map["development_winner"] = winner
             validated: dict[str, Mapping[str, Any]] = {}
-            for name, artifact in evidence_map.items():
-                if not isinstance(artifact, Mapping):
+            if state in {RunState.PROMOTED, RunState.RETAINED}:
+                required_kinds = {
+                    "PromotionDecision",
+                    "DevelopmentWinner",
+                    "BlindEvaluation",
+                    "BlindUnlock",
+                    "BlindQueryManifestReceipt",
+                }
+                if any(not isinstance(artifact, Mapping) for artifact in evidence_map.values()):
                     raise OrchestrationError("evidence entries must be signed artifact objects")
-                if state is RunState.BLIND_UNLOCKED and artifact.get("kind") == "DevelopmentWinner":
-                    validated[str(name)] = validate_development_winner(artifact, spec)
-                else:
-                    validated[str(name)] = _validate_transition_artifact(
-                        state, artifact, spec, winner
+                by_kind = {str(artifact.get("kind")): artifact for artifact in evidence_map.values()}
+                if len(by_kind) != len(evidence_map) or set(by_kind) != required_kinds:
+                    raise OrchestrationError(
+                        "terminal transition requires the complete custody evidence chain"
                     )
+                terminal_winner = validate_development_winner(
+                    by_kind["DevelopmentWinner"], spec
+                )
+                terminal_unlock = validate_blind_unlock(
+                    by_kind["BlindUnlock"], spec, terminal_winner
+                )
+                validate_blind_manifest_receipt(
+                    by_kind["BlindQueryManifestReceipt"], spec, terminal_winner, terminal_unlock
+                )
+                validate_blind_evaluation(by_kind["BlindEvaluation"], spec)
+                for name, artifact in evidence_map.items():
+                    if artifact.get("kind") == "PromotionDecision":
+                        validated[str(name)] = _validate_transition_artifact(
+                            state, artifact, spec, terminal_winner
+                        )
+                    else:
+                        validated[str(name)] = validate_signed_artifact(artifact)
+            else:
+                for name, artifact in evidence_map.items():
+                    if not isinstance(artifact, Mapping):
+                        raise OrchestrationError("evidence entries must be signed artifact objects")
+                    if state is RunState.BLIND_UNLOCKED and artifact.get("kind") == "DevelopmentWinner":
+                        validated[str(name)] = validate_development_winner(artifact, spec)
+                    else:
+                        validated[str(name)] = _validate_transition_artifact(
+                            state, artifact, spec, winner
+                        )
             expected_current_fingerprint = current["artifact_fingerprint"]
             if self.machine.load()["artifact_fingerprint"] != expected_current_fingerprint:
                 raise OrchestrationError("checkpoint changed before compare-and-swap")
-            checkpoint = self.machine.transition(
-                state,
-                validated,
-                expected_spec_fingerprint=spec["artifact_fingerprint"],
-            )
+            try:
+                checkpoint = self.machine.transition(
+                    state,
+                    validated,
+                    expected_spec_fingerprint=spec["artifact_fingerprint"],
+                )
+            except BakeoffContractError as exc:
+                raise OrchestrationError(str(exc)) from exc
             if checkpoint.get("previous_checkpoint_fingerprint") != expected_current_fingerprint:
                 raise OrchestrationError("checkpoint compare-and-swap failed")
             self._record_checkpoint(checkpoint)
