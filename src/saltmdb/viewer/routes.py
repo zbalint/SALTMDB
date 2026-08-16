@@ -6,11 +6,11 @@ import mimetypes
 import urllib.parse
 import logging
 from pathlib import Path
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from saltmdb.config import get_db_path
 from saltmdb.db.vector_schema import try_load_vector_extension
-from saltmdb.domain.services import relation_service
+from saltmdb.domain.services import memory_service, relation_service
 
 logger = logging.getLogger(__name__)
 from saltmdb.viewer.templates import get_frontend_html  # noqa: E402
@@ -39,6 +39,25 @@ def _bounded_query_int(query, name, default, minimum, maximum):
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+_ENTITY_SORTS = {
+    "updated_desc": ("updated_at", "DESC"),
+    "updated_asc": ("updated_at", "ASC"),
+    "created_desc": ("created_at", "DESC"),
+    "created_asc": ("created_at", "ASC"),
+}
+
+
+def _utc_day_bound(raw: str, *, end_exclusive: bool) -> str:
+    """Return a UTC ISO timestamp for a calendar-date query bound."""
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("date bounds must use YYYY-MM-DD") from exc
+    if end_exclusive:
+        parsed += timedelta(days=1)
+    return parsed.isoformat()
 
 
 def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
@@ -343,6 +362,19 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             memory_type_filter = query.get("memory_type", [None])[0]
             embedding_filter = query.get("embedding_status", [None])[0]
             quality_filter = query.get("quality_status", [None])[0]
+            sort = query.get("sort", ["updated_desc"])[0] or "updated_desc"
+            date_field = query.get("date_field", [None])[0]
+            date_from = query.get("date_from", [None])[0]
+            date_to = query.get("date_to", [None])[0]
+
+            if sort not in _ENTITY_SORTS:
+                raise ValueError("sort must be updated_desc, updated_asc, created_desc, or created_asc")
+            if date_field and date_field not in ("created", "updated"):
+                raise ValueError("date_field must be created or updated")
+            if (date_from or date_to) and not date_field:
+                raise ValueError("date_field is required when a date bound is supplied")
+            if date_from and date_to and date_from > date_to:
+                raise ValueError("date_from must not be after date_to")
 
             where_clauses = []
             params = []
@@ -390,8 +422,15 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             if quality_filter:
                 where_clauses.append("quality_status = ?")
                 params.append(quality_filter)
+            if date_from:
+                where_clauses.append(f"{date_field}_at >= ?")
+                params.append(_utc_day_bound(date_from, end_exclusive=False))
+            if date_to:
+                where_clauses.append(f"{date_field}_at < ?")
+                params.append(_utc_day_bound(date_to, end_exclusive=True))
 
             where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            order_field, order_direction = _ENTITY_SORTS[sort]
 
             conn = self.get_db_connection()
             cursor = conn.execute(
@@ -399,7 +438,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status, memory_type, quality_score, quality_status
                 FROM entities
                 {where_sql}
-                ORDER BY updated_at DESC
+                ORDER BY {order_field} {order_direction}, id ASC
                 LIMIT ? OFFSET ?
             """,
                 params + [limit, offset],
@@ -460,6 +499,10 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "limit": limit,
                     "total_count": total_count,
                     "total_pages": total_pages,
+                    "sort": sort,
+                    "date_field": date_field,
+                    "date_from": date_from,
+                    "date_to": date_to,
                     "pagination": {
                         "page": page,
                         "per_page": limit,
@@ -1083,50 +1126,36 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
 
     def get_search(self, query):
-        conn = None
         try:
             q = query.get("q", [""])[0].strip()
             if not q:
-                self.send_json({"results": []})
+                self.send_json({"query": "", "mode": "broad", "results": []})
                 return
+            db_path = getattr(getattr(self.server, "viewer_gateway", None), "db_path", None)
+            search_kwargs = {
+                "query_keywords": q,
+                "limit": 50,
+                "include_related": False,
+                "mode": "broad",
+                "db_path": db_path or get_db_path(),
+            }
             is_core_raw = query.get("is_core", [None])[0]
-            is_core = None
             if is_core_raw:
-                if is_core_raw.lower() in ("true", "1", "yes"):
-                    is_core = True
-                elif is_core_raw.lower() in ("false", "0", "no"):
-                    is_core = False
-
-            conn = self.get_db_connection()
-            where: list[str] = ["(title LIKE ? OR full_content LIKE ?)", "status != 'archived'"]
-            params: list[Any] = [f"%{q}%", f"%{q}%"]
-            if is_core is not None:
-                where.append("is_core = ?")
-                params.append(int(is_core))
-            rows = conn.execute(
-                f"""SELECT id, title, owner_id, is_core, status, memory_type
-                   FROM entities WHERE {" AND ".join(where)}
-                   ORDER BY updated_at DESC LIMIT 20""",
-                params,
-            ).fetchall()
-            results = [
-                {
-                    "id": row[0],
-                    "title": row[1],
-                    "owner_id": row[2],
-                    "is_core": bool(row[3]),
-                    "status": row[4],
-                    "memory_type": row[5] or "fact",
-                }
-                for row in rows
-            ]
-            self.send_json({"query": q, "results": results})
+                normalized_is_core = is_core_raw.strip().lower()
+                if normalized_is_core in ("true", "1", "yes"):
+                    search_kwargs["is_core"] = True
+                elif normalized_is_core in ("false", "0", "no"):
+                    search_kwargs["is_core"] = False
+                else:
+                    raise ValueError("is_core must be one of true, 1, yes, false, 0, no")
+            results = memory_service.search_memory(**search_kwargs)
+            if not isinstance(results, list):
+                message = results.get("error", "Hybrid search unavailable") if isinstance(results, dict) else str(results)
+                raise RuntimeError(message or "Hybrid search unavailable")
+            self.send_json({"query": q, "mode": "broad", "results": results})
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
-        finally:
-            if conn:
-                conn.close()
+            self.send_json({"error": str(e) or "Hybrid search unavailable"}, 503)
 
     def get_embeddings_stats(self):
         conn = None

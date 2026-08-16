@@ -4,11 +4,19 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 ## Explorer
 
-1. Open **Memory Explorer**, confirm **Core memories** is visibly and programmatically labeled and checked, then click **Apply filters**. Confirm the request includes `is_core=true` and only core memories appear.
-2. Advance to a later page if available. Confirm the pager request retains `is_core=true`.
-3. Uncheck **Core memories**, change one other filter, and click **Apply filters**. Confirm `is_core` is omitted, the result updates, and the pager returns to page 1.
-4. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
-5. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
+1. Open **Memory Explorer** in **Browse / audit list** mode. Confirm the keyword field is labelled **Keyword match in title and memory text**, rather than semantic search.
+2. Select each of the four sort options and confirm the table order changes consistently. Select **Created date**, set an identical From/To UTC date, and confirm records created anywhere in that calendar day remain visible. Confirm a reversed range produces an actionable error.
+3. Advance to a later page if available. Confirm sort, date range, and the other filters remain in the request and the result summary.
+4. Switch to **Hybrid search**, enter a non-empty query, and confirm the ranked results state that broad hybrid retrieval is used. Open a result detail. Confirm an empty query requests no search and a no-result response is clearly explained. Switch back to Browse and confirm its filter state is retained.
+5. Confirm **Core memories** is visibly and programmatically labeled and checked, then click **Apply filters**. Confirm the request includes `is_core=true` and only core memories appear.
+6. Uncheck **Core memories**, change one other filter, and click **Apply filters**. Confirm `is_core` is omitted, the result updates, and the pager returns to page 1.
+7. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
+8. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
+
+## Activity
+
+1. Open **Activity** and activate **View details** on an event. Confirm timestamp, type, agent, event/session/context IDs, error code, and content appear in a read-only dialog, and focus returns to the button on close.
+2. For an event with a context ID, activate **Browse this context**. Confirm Memory Explorer opens in Browse mode with that context filter and page 1 selected. For an event without context, confirm no misleading memory-navigation control is offered.
 
 ## Relationships
 
@@ -35,5 +43,5 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 1. Open a memory detail from a table and close it normally. Focus must return to the title control that opened it.
 2. At 1280px wide, review Explorer and both Quality tables: titles are left aligned; title, compact ID, type/lifecycle, and tags or quality remain easy to scan; the page has no horizontal scrollbar. Open a detail modal and confirm every standard metadata, custom metadata, and validity label is paired with its value.
-3. At 375px wide, verify form controls stack, only table/graph containers scroll horizontally when needed, the page has no horizontal scrollbar, and focus remains visible. Recheck standard, custom, and validity label/value pairing in the detail modal.
+3. At 375px wide, verify form controls stack, only table/graph containers scroll horizontally when needed, the page has no horizontal scrollbar, and focus remains visible. Open both detail dialogs: they should use nearly the full viewport with modest gutters, remain at or below 95dvh, scroll internally, retain a visible close control, and preserve focus restoration. Recheck standard, custom, and validity label/value pairing in the memory detail modal.
 4. Confirm Quality, Tags, Diagnostics, and metadata remain structured views; raw Markdown inspection and **Copy Markdown** still work; no raw JSON dump or speculative refresh banner appears.

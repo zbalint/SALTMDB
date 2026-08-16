@@ -20,4 +20,5 @@ def get_frontend_html(db_path: str = None) -> str:
 <div class="connection"><span id="live-status" role="status">Loading</span><button id="refresh" type="button">Refresh</button></div></header>
 <div id="notice" class="notice" role="status" aria-live="polite" hidden></div><section id="view" aria-live="polite"></section></main></div>
 <dialog id="memory-detail" aria-labelledby="detail-title"><article><header><h2 id="detail-title">Memory</h2><button id="close-detail" aria-label="Close memory detail">Close</button></header><div id="detail-content"></div></article></dialog>
+<dialog id="event-detail" aria-labelledby="event-detail-title"><article><header><h2 id="event-detail-title">Activity event</h2><button id="close-event-detail" aria-label="Close activity event detail">Close</button></header><div id="event-detail-content"></div></article></dialog>
 <script src="/static/vendor/marked-18.0.7.umd.js"></script><script src="/static/vendor/dompurify-3.4.10.min.js"></script><script src="/static/viewer.js"></script></body></html>"""

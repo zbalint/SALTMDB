@@ -3,6 +3,7 @@ import tempfile
 import os
 import shutil
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import numpy as np
 
@@ -61,6 +62,88 @@ class TestViewerRoutes(unittest.TestCase):
         # Should catch ConnectionAbortedError silently without throwing
         handler.send_json({"test": "data"})
         handler.send_html("<html></html>")
+
+
+class TestViewerBrowseAndHybridSearch(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "viewer-browse.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+
+    def tearDown(self):
+        self.conn.close()
+        os.environ.pop("SALTMDB_DB_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _handler(self):
+        return SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), DummyServer())
+
+    @staticmethod
+    def _capture(handler):
+        captured = {}
+        handler.send_json = lambda data, status=200: captured.update(data=data, status=status)
+        return captured
+
+    def _insert_entity(self, entity_id, created_at, updated_at):
+        self.conn.execute(
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, full_content)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (entity_id, created_at, updated_at, updated_at, entity_id, f"content {entity_id}"),
+        )
+        self.conn.commit()
+
+    def test_entities_sort_and_inclusive_utc_date_range_share_count_and_pages(self):
+        self._insert_entity("early", "2026-08-10T23:00:00+00:00", "2026-08-11T01:00:00+00:00")
+        self._insert_entity("middle", "2026-08-11T12:00:00+00:00", "2026-08-12T01:00:00+00:00")
+        self._insert_entity("late", "2026-08-12T01:00:00+00:00", "2026-08-13T01:00:00+00:00")
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_entities(
+            {
+                "sort": ["created_desc"],
+                "date_field": ["created"],
+                "date_from": ["2026-08-11"],
+                "date_to": ["2026-08-11"],
+                "limit": ["1"],
+            }
+        )
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["data"]["total_count"], 1)
+        self.assertEqual(captured["data"]["total_pages"], 1)
+        self.assertEqual(captured["data"]["entities"][0]["id"], "middle")
+        self.assertEqual(captured["data"]["sort"], "created_desc")
+
+    def test_entities_reject_invalid_temporal_query(self):
+        handler = self._handler()
+        missing_field = self._capture(handler)
+        handler.get_entities({"date_from": ["2026-08-11"]})
+        self.assertEqual(missing_field["status"], 400)
+        invalid_sort = self._capture(handler)
+        handler.get_entities({"sort": ["relevance"]})
+        self.assertEqual(invalid_sort["status"], 400)
+        reversed_range = self._capture(handler)
+        handler.get_entities(
+            {"date_field": ["updated"], "date_from": ["2026-08-12"], "date_to": ["2026-08-11"]}
+        )
+        self.assertEqual(reversed_range["status"], 400)
+
+    @patch("saltmdb.viewer.routes.memory_service.search_memory")
+    def test_search_delegates_to_broad_hybrid_service(self, search_memory_mock):
+        search_memory_mock.return_value = [{"id": "hybrid-hit", "title": "Hybrid hit", "score": 0.42}]
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_search({"q": ["meaningful query"]})
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["data"]["mode"], "broad")
+        self.assertEqual(captured["data"]["results"][0]["id"], "hybrid-hit")
+        search_memory_mock.assert_called_once_with(
+            query_keywords="meaningful query",
+            limit=50,
+            include_related=False,
+            mode="broad",
+            db_path=self.db_path,
+        )
 
 
 class TestViewerRoutesLineageAndParentIds(unittest.TestCase):

@@ -3,7 +3,7 @@
 
   const state = {
     view: 'overview', renderController: null, detailController: null, poller: null,
-    explorerPreset: {}, explorerPage: 1, relationRoot: '', modalInvoker: null,
+    explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
   };
   const view = document.querySelector('#view');
@@ -13,6 +13,8 @@
   const indicator = document.querySelector('#connection-indicator');
   const dialog = document.querySelector('#memory-detail');
   const detail = document.querySelector('#detail-content');
+  const eventDialog = document.querySelector('#event-detail');
+  const eventDetail = document.querySelector('#event-detail-content');
   const names = {
     overview: 'Overview', explorer: 'Memory Explorer', activity: 'Activity',
     relationships: 'Relationships', quality: 'Quality & Lifecycle', operations: 'Operations',
@@ -200,16 +202,44 @@
   };
 
   const explorer = async () => {
+    const mode = select('Explorer mode', [['browse', 'Browse / audit list'], ['hybrid', 'Hybrid search']], state.explorerMode);
+    mode.element.addEventListener('change', () => { state.explorerMode = mode.element.value; render(); });
+    const result = node('div');
+    if (state.explorerMode === 'hybrid') {
+      const form = node('form', undefined, 'toolbar explorer-toolbar');
+      const query = inputField('Hybrid retrieval query', 'Search the memory graph', state.hybridQuery);
+      form.append(mode.wrap, query.wrap, button('Search memories', 'primary', undefined, 'submit'));
+      form.addEventListener('submit', async event => {
+        event.preventDefault(); state.hybridQuery = query.element.value.trim();
+        if (!state.hybridQuery) { result.replaceChildren(node('p', 'Enter a query to run hybrid retrieval.', 'muted')); return; }
+        setBusy(result, true);
+        try {
+          const data = await api(`/api/search?q=${encodeURIComponent(state.hybridQuery)}`);
+          const rows = data.results.map(item => {
+            const row = node('tr'); const score = Number.isFinite(item.score) ? item.score.toFixed(4) : '—';
+            const typeCell = node('td'); typeCell.append(statusBadge(item.memory_type || 'fact'));
+            row.append(memoryCell(item), node('td', score), typeCell, node('td', item.owner_id || '—')); return row;
+          });
+          result.replaceChildren(section(`${data.results.length} ranked matches`, 'Broad hybrid retrieval combines the established lexical and semantic backend signals.'), renderTable(['Memory', 'Score', 'Type', 'Owner'], rows, 'No matching active memories.'));
+        } finally { setBusy(result, false); }
+      });
+      view.replaceChildren(section('Explore memories', 'Hybrid Search returns ranked backend retrieval results. Browse / audit list remains the pageable metadata workspace.'), form, result);
+      if (state.hybridQuery) form.requestSubmit();
+      return;
+    }
     const form = node('form', undefined, 'toolbar explorer-toolbar');
-    const search = inputField('Search', 'Search title or content', state.explorerPreset.q || '');
+    const search = inputField('Keyword match in title and memory text', 'Literal title or content text', state.explorerPreset.q || '');
     const prefixField = inputField('ID prefix', 'ID prefix', state.explorerPreset.id_prefix || '');
     const tagField = inputField('Tag', 'Tag', state.explorerPreset.tag || '');
     const { element: q } = search; const { element: prefix } = prefixField; const { element: tag } = tagField;
     const lifecycle = select('Lifecycle', [['', 'All statuses'], ['raw', 'Raw'], ['consolidated', 'Consolidated'], ['archived', 'Archived']], state.explorerPreset.status || '');
     const type = select('Memory type', [['', 'All types'], ['decision', 'Decision'], ['fact', 'Fact'], ['procedure', 'Procedure'], ['preference', 'Preference'], ['event', 'Event']], state.explorerPreset.memory_type || '');
     const core = checkboxField('Core memories', state.explorerPreset.is_core === 'true');
-    form.append(search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, button('Apply filters', 'primary', undefined, 'submit'));
-    const result = node('div');
+    const sort = select('Sort', [['updated_desc', 'Updated: newest first'], ['updated_asc', 'Updated: oldest first'], ['created_desc', 'Created: newest first'], ['created_asc', 'Created: oldest first']], state.explorerPreset.sort || 'updated_desc');
+    const dateField = select('Date field', [['updated', 'Updated date'], ['created', 'Created date']], state.explorerPreset.date_field || 'updated');
+    const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_from || ''); dateFrom.element.type = 'date';
+    const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_to || ''); dateTo.element.type = 'date';
+    form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'));
     let currentParams = new URLSearchParams(state.explorerPreset);
     const list = async (params, page = 1) => {
       currentParams = new URLSearchParams(params); const requestParams = new URLSearchParams(params); requestParams.set('page', String(page)); requestParams.set('limit', '50');
@@ -224,24 +254,42 @@
       const previous = button('Previous', '', () => list(currentParams, page - 1)); previous.disabled = page <= 1;
       const next = button('Next', '', () => list(currentParams, page + 1)); next.disabled = page >= data.total_pages;
       pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} memories`, 'muted'), next);
-      result.replaceChildren(section(`${data.total_count} memories`, 'Filter by lifecycle, type, title, content, ID, or tag.'), renderTable(['Memory', 'Type', 'Lifecycle', 'Tags'], rows), pager);
+      const dateSummary = data.date_from || data.date_to ? ` · ${data.date_field} dates ${data.date_from || '…'} to ${data.date_to || '…'} (inclusive UTC)` : '';
+      result.replaceChildren(section(`${data.total_count} memories`, `${data.sort.replace('_', ' ')}${dateSummary}. Browse filters are applied before paging.`), renderTable(['Memory', 'Type', 'Lifecycle', 'Tags'], rows), pager);
       state.explorerPage = page;
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', async event => {
       event.preventDefault(); const params = new URLSearchParams();
-      [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['status', lifecycle.element.value], ['memory_type', type.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['status', lifecycle.element.value], ['memory_type', type.element.value], ['sort', sort.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
       if (core.element.checked) params.set('is_core', 'true');
+      if (dateFrom.element.value || dateTo.element.value) {
+        params.set('date_field', dateField.element.value);
+        if (dateFrom.element.value) params.set('date_from', dateFrom.element.value);
+        if (dateTo.element.value) params.set('date_to', dateTo.element.value);
+      }
       state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1; await list(params, 1);
     });
-    view.replaceChildren(section('Explore memories', 'Search the durable knowledge graph without losing lifecycle context. Core-memory filtering is available.'), form, result);
+    view.replaceChildren(section('Explore memories', 'Browse a pageable audit list with explicit metadata filters. Core-memory filtering is available. Use Hybrid Search for ranked semantic-plus-lexical retrieval.'), form, result);
     const initial = new URLSearchParams(state.explorerPreset); await list(initial, state.explorerPage);
+  };
+
+  const openEventDetail = (event, invoker = document.activeElement) => {
+    eventDetail.replaceChildren();
+    const facts = node('dl', undefined, 'metadata-grid');
+    [['Event ID', event.id], ['Timestamp', event.timestamp], ['Type', event.type], ['Agent', event.agent_id || '—'], ['Session ID', event.session_id || '—'], ['Context ID', event.context_id || '—'], ['Error code', event.error_code || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
+    eventDetail.append(section('Event evidence', 'This is a read-only record. Events do not imply a linked memory unless a context is supplied.'), facts);
+    const content = node('pre', event.content || '—', 'raw-markdown'); eventDetail.append(section('Event content'), content);
+    const actions = node('div', undefined, 'detail-actions');
+    actions.append(button('Copy event ID', '', () => copyText(event.id, 'Event ID')));
+    if (event.context_id) actions.append(button('Browse this context', '', () => { state.explorerMode = 'browse'; state.explorerPreset = { context_id: event.context_id }; state.explorerPage = 1; state.view = 'explorer'; eventDialog.close(); render(); }));
+    eventDetail.append(actions); eventDialog._invoker = invoker; eventDialog.showModal();
   };
 
   const activity = async () => {
     const data = await api('/api/events?limit=20'); const rows = data.events.map(event => {
-      const row = node('tr'); row.append(node('td', event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content)); return row;
-    }); view.replaceChildren(section('Recent activity', 'The latest durable operational events.'), renderTable(['Time', 'Type', 'Agent', 'Event'], rows));
+      const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(node('td', event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
+    }); view.replaceChildren(section('Recent activity', 'Read-only operational evidence. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows));
   };
 
   const normalizeGraph = (data) => {
@@ -362,9 +410,14 @@
   document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
   document.querySelector('#refresh').addEventListener('click', render);
   document.querySelector('#close-detail').addEventListener('click', () => dialog.close());
+  document.querySelector('#close-event-detail').addEventListener('click', () => eventDialog.close());
   dialog.addEventListener('close', () => {
     const invoker = state.modalInvoker; state.modalInvoker = null;
     if (state.skipModalFocusRestore) { state.skipModalFocusRestore = false; return; }
+    if (invoker?.isConnected) invoker.focus();
+  });
+  eventDialog.addEventListener('close', () => {
+    const invoker = eventDialog._invoker; eventDialog._invoker = null;
     if (invoker?.isConnected) invoker.focus();
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render(); });

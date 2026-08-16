@@ -101,6 +101,7 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("/static/vendor/dompurify-3.4.10.min.js", shell)
         self.assertIn("/static/vendor/marked-18.0.7.umd.js", shell)
         self.assertNotIn("onclick=", shell)
+        self.assertIn('id="event-detail"', shell)
 
     def test_neighborhood_validates_time_and_reports_real_truncation(self):
         self._insert_entity("root")
@@ -218,48 +219,35 @@ class TestViewerReworkContracts(unittest.TestCase):
         stylesheet = (root / "src/saltmdb/viewer/static/viewer.css").read_text(encoding="utf-8")
         shell = get_frontend_html()
         self.assertIn('id="connection-indicator"', shell)
-        self.assertIn("All statuses", script)
-        self.assertIn("All types", script)
-        self.assertIn("Page ${data.page} of ${data.total_pages", script)
-        self.assertIn("renderGraph", script)
-        self.assertIn("normalizeGraph", script)
-        self.assertIn("edge.source", script)
-        self.assertIn("edge.target", script)
+        for expected in (
+            "All statuses", "All types", "Page ${data.page} of ${data.total_pages", "renderGraph",
+            "normalizeGraph", "edge.source", "edge.target", "malformed relations could not be rendered",
+            "No active relations for this memory", "source?.title || edge.source",
+            "button('Apply filters', 'primary', undefined, 'submit')",
+            "button('Explore graph', 'primary', undefined, 'submit')", "type = 'button'",
+            "focusRelationshipInput", "modalInvoker", "aria-busy", "Copy ID", "Browse / audit list",
+            "Hybrid retrieval query", "/api/search?q=", "Keyword match in title and memory text",
+            "date_field", "date_from", "date_to", "View details", "Browse this context",
+            "memoryCell", "metadata-panel", "['Pending', embeddingData.pending, 'pending']",
+            "['Failed', embeddingData.failed, 'failed']",
+        ):
+            self.assertIn(expected, script)
         self.assertNotIn("source_id", script)
         self.assertNotIn("target_id", script)
-        self.assertIn("malformed relations could not be rendered", script)
-        self.assertIn("No active relations for this memory", script)
         self.assertIn(
             "Showing ${data.returned_edges} of ${data.total_matching_edges} relations; ${data.omitted_edge_count} omitted by limit.",
             script,
         )
-        self.assertIn("source?.title || edge.source", script)
-        self.assertIn("button('Apply filters', 'primary', undefined, 'submit')", script)
-        self.assertIn("button('Explore graph', 'primary', undefined, 'submit')", script)
-        self.assertIn("type = 'button'", script)
-        self.assertIn("focusRelationshipInput", script)
-        self.assertIn("modalInvoker", script)
-        self.assertIn("aria-busy", script)
-        self.assertIn("Copy ID", script)
-        self.assertIn("memoryCell", script)
-        self.assertIn("metadata-panel", script)
         self.assertNotIn("New data may be available", script)
-        self.assertIn("--lifecycle-raw", stylesheet)
-        self.assertIn("--lifecycle-consolidated", stylesheet)
-        self.assertIn("--lifecycle-archived", stylesheet)
-        self.assertIn("--state-ready", stylesheet)
-        self.assertIn("--state-pending", stylesheet)
-        self.assertIn("--state-failed", stylesheet)
-        self.assertIn("--state-warning", stylesheet)
-        self.assertIn("['Pending', embeddingData.pending, 'pending']", script)
-        self.assertIn("['Failed', embeddingData.failed, 'failed']", script)
-        self.assertIn(
-            ".metric-card.pending { border-top-color: var(--state-pending); }", stylesheet
-        )
-        self.assertIn(".metric-card.failed { border-top-color: var(--state-failed); }", stylesheet)
-        self.assertIn(".row-button { display: block; width: 100%", stylesheet)
-        self.assertIn("text-align: left", stylesheet)
-        self.assertIn(".predicate-pill", stylesheet)
+        for expected in (
+            "--lifecycle-raw", "--lifecycle-consolidated", "--lifecycle-archived", "--state-ready",
+            "--state-pending", "--state-failed", "--state-warning",
+            ".metric-card.pending { border-top-color: var(--state-pending); }",
+            ".metric-card.failed { border-top-color: var(--state-failed); }",
+            ".row-button { display: block; width: 100%", "max-height: 95dvh", "text-align: left",
+            ".predicate-pill",
+        ):
+            self.assertIn(expected, stylesheet)
 
     def test_frontend_core_filter_and_fact_pair_contracts(self):
         root = Path(__file__).resolve().parents[1]
