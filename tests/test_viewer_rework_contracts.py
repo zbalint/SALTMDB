@@ -224,6 +224,8 @@ class TestViewerReworkContracts(unittest.TestCase):
             "normalizeGraph", "edge.source", "edge.target", "malformed relations could not be rendered",
             "No active relations for this memory", "source?.title || edge.source",
             "button('Apply filters', 'primary', undefined, 'submit')",
+            "const resetFilters = button('Reset filters'",
+            "state.explorerPreset = {}; state.explorerPage = 1; render();",
             "button('Explore graph', 'primary', undefined, 'submit')", "type = 'button'",
             "focusRelationshipInput", "modalInvoker", "aria-busy", "Copy ID", "Browse / audit list",
             "Hybrid retrieval query", "/api/search?q=", "Keyword match in title and memory text",

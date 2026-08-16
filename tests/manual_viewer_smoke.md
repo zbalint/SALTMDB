@@ -7,11 +7,12 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 1. Open **Memory Explorer** in **Browse / audit list** mode. Confirm the keyword field is labelled **Keyword match in title and memory text**, rather than semantic search.
 2. Select each of the four sort options and confirm the table order changes consistently. Select **Created date**, set an identical From/To UTC date, and confirm records created anywhere in that calendar day remain visible. Confirm a reversed range produces an actionable error.
 3. Advance to a later page if available. Confirm sort, date range, and the other filters remain in the request and the result summary.
-4. Switch to **Hybrid search**, enter a non-empty query, and confirm the ranked results state that broad hybrid retrieval is used. Open a result detail. Confirm an empty query requests no search and a no-result response is clearly explained. Switch back to Browse and confirm its filter state is retained.
-5. Confirm **Core memories** is visibly and programmatically labeled and checked, then click **Apply filters**. Confirm the request includes `is_core=true` and only core memories appear.
-6. Uncheck **Core memories**, change one other filter, and click **Apply filters**. Confirm `is_core` is omitted, the result updates, and the pager returns to page 1.
-7. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
-8. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
+4. Click **Reset filters**. Confirm keyword, ID-prefix, tag, lifecycle, type, core, date controls, and date field clear; sort returns to Updated: newest first; results reload at page 1; and Hybrid Search’s query remains untouched.
+5. Switch to **Hybrid search**, enter a non-empty query, and confirm the ranked results state that broad hybrid retrieval is used. Open a result detail. Confirm an empty query requests no search and a no-result response is clearly explained. Switch back to Browse and confirm its filter state is retained.
+6. Confirm **Core memories** is visibly and programmatically labeled and checked, then click **Apply filters**. Confirm the request includes `is_core=true` and only core memories appear.
+7. Uncheck **Core memories**, change one other filter, and click **Apply filters**. Confirm `is_core` is omitted, the result updates, and the pager returns to page 1.
+8. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
+9. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
 
 ## Activity
 

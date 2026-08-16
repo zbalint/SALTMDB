@@ -239,7 +239,10 @@
     const dateField = select('Date field', [['updated', 'Updated date'], ['created', 'Created date']], state.explorerPreset.date_field || 'updated');
     const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_from || ''); dateFrom.element.type = 'date';
     const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_to || ''); dateTo.element.type = 'date';
-    form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'));
+    const resetFilters = button('Reset filters', '', () => {
+      state.explorerPreset = {}; state.explorerPage = 1; render();
+    });
+    form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'), resetFilters);
     let currentParams = new URLSearchParams(state.explorerPreset);
     const list = async (params, page = 1) => {
       currentParams = new URLSearchParams(params); const requestParams = new URLSearchParams(params); requestParams.set('page', String(page)); requestParams.set('limit', '50');
