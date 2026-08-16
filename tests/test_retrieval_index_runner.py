@@ -48,15 +48,21 @@ class LateFake:
         return result or [[0.0, 0.0]]
 
     def maxsim(self, query_tokens, document_tokens):
-        return sum(max(sum(a * b for a, b in zip(q, d)) for d in document_tokens) for q in query_tokens)
+        return sum(
+            max(sum(a * b for a, b in zip(q, d)) for d in document_tokens) for q in query_tokens
+        )
 
 
 def document(item_id, entity_id, channel, text):
-    return IndexDocument(item_id, entity_id, channel, text, fingerprint(entity_id), fingerprint(text))
+    return IndexDocument(
+        item_id, entity_id, channel, text, fingerprint(entity_id), fingerprint(text)
+    )
 
 
 def test_authoritative_documents_include_title_only_chunk():
-    rows = authoritative_documents("e1", "  Useful  Title ", "", [], fingerprint("s"), fingerprint("r"))
+    rows = authoritative_documents(
+        "e1", "  Useful  Title ", "", [], fingerprint("s"), fingerprint("r")
+    )
     assert [(row.channel, row.text) for row in rows] == [
         ("entity", "Useful Title"),
         ("chunk", "Useful Title"),
@@ -107,7 +113,9 @@ def test_dense_sidecar_refuses_cross_model_or_representation_resume(tmp_path):
 
 def test_dense_search_rejects_corrupted_vector(tmp_path):
     adapter = DenseFake()
-    with DenseIndexRunner(tmp_path / "dense.sqlite", adapter, representation_root=fingerprint("r")) as runner:
+    with DenseIndexRunner(
+        tmp_path / "dense.sqlite", adapter, representation_root=fingerprint("r")
+    ) as runner:
         runner.build([document("e1", "e1", "entity", "alpha")])
         runner.conn.execute("UPDATE dense_vectors SET vector = ? WHERE item_id = 'e1'", (b"bad",))
         runner.conn.commit()
@@ -126,7 +134,19 @@ def test_late_interaction_is_separate_and_maxsim_ranked(tmp_path):
     ) as runner:
         receipt = runner.build(rows)
         assert receipt["kind"] == "late_interaction"
-        assert [hit.entity_id for hit in runner.search("alpha beta")] == ["e1", "e2"]
+        hits = runner.search("alpha beta")
+        assert [hit.entity_id for hit in hits] == ["e1", "e2"]
+        expected = [
+            adapter.maxsim(adapter.embed_query("alpha beta"), adapter.embed_query("alpha beta")),
+            adapter.maxsim(adapter.embed_query("alpha beta"), adapter.embed_query("alpha")),
+        ]
+        assert [hit.score for hit in hits] == pytest.approx(expected)
+        assert [hit.entity_id for hit in runner.search_subset("alpha beta", ["e2", "e1"])] == [
+            "e1",
+            "e2",
+        ]
+        with pytest.raises(IndexRunnerError, match="must not be empty"):
+            runner.search_subset("alpha", [])
         with pytest.raises(IndexRunnerError, match="entity documents only"):
             runner.build([document("e1:c", "e1", "chunk", "alpha")])
 
@@ -152,7 +172,9 @@ class LateFakeNumpyMatrix:
         return np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
 
     def maxsim(self, query_tokens, document_tokens):
-        return sum(max(sum(a * b for a, b in zip(q, d)) for d in document_tokens) for q in query_tokens)
+        return sum(
+            max(sum(a * b for a, b in zip(q, d)) for d in document_tokens) for q in query_tokens
+        )
 
 
 def test_late_interaction_build_accepts_real_numpy_token_matrices(tmp_path):
@@ -177,7 +199,9 @@ def test_late_interaction_build_accepts_real_numpy_token_matrices(tmp_path):
 def test_nonfinite_and_wrong_dimensions_fail_closed(tmp_path):
     adapter = DenseFake()
     adapter.embed_documents = lambda _texts: [[float("nan"), 0.0]]
-    with DenseIndexRunner(tmp_path / "bad.sqlite", adapter, representation_root=fingerprint("r")) as runner:
+    with DenseIndexRunner(
+        tmp_path / "bad.sqlite", adapter, representation_root=fingerprint("r")
+    ) as runner:
         with pytest.raises(IndexRunnerError, match="non-finite"):
             runner.build([document("e", "e", "entity", "alpha")])
 

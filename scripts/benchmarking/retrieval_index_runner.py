@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+import numpy as np
+
 
 SCHEMA_VERSION = 1
 CHANNELS = frozenset({"entity", "chunk", "retrieval_text"})
@@ -225,9 +227,16 @@ class _Sidecar:
             )
             self.conn.commit()
             return
-        observed = tuple(row[name] for name in (
-            "schema_version", "kind", "compatibility_key", "representation_root", "dimension"
-        ))
+        observed = tuple(
+            row[name]
+            for name in (
+                "schema_version",
+                "kind",
+                "compatibility_key",
+                "representation_root",
+                "dimension",
+            )
+        )
         if observed != identity:
             raise IndexRunnerError("sidecar identity mismatch; cross-model resume refused")
 
@@ -294,7 +303,9 @@ class DenseIndexRunner(_Sidecar):
         if len({item.item_id for item in ordered}) != len(ordered):
             raise IndexRunnerError("index documents contain duplicate item IDs")
         for offset in range(0, len(ordered), batch_size):
-            batch = [item for item in ordered[offset : offset + batch_size] if not self._is_fresh(item)]
+            batch = [
+                item for item in ordered[offset : offset + batch_size] if not self._is_fresh(item)
+            ]
             if not batch:
                 continue
             vectors = self.adapter.embed_documents([item.text for item in batch])
@@ -396,7 +407,9 @@ class LateInteractionIndexRunner(_Sidecar):
         if len({item.item_id for item in ordered}) != len(ordered):
             raise IndexRunnerError("index documents contain duplicate item IDs")
         for offset in range(0, len(ordered), batch_size):
-            batch = [item for item in ordered[offset : offset + batch_size] if not self._is_fresh(item)]
+            batch = [
+                item for item in ordered[offset : offset + batch_size] if not self._is_fresh(item)
+            ]
             if not batch:
                 continue
             matrices = self.adapter.embed_documents([item.text for item in batch])
@@ -441,15 +454,56 @@ class LateInteractionIndexRunner(_Sidecar):
             raise IndexRunnerError("search limit must be positive")
         query_tokens = self.adapter.embed_query(query)
         _pack_matrix(query_tokens, self.dimension)
+        cursor = self.conn.execute("SELECT * FROM token_vectors ORDER BY item_id")
+        return self._rank_rows(query_tokens, cursor, limit=limit)
+
+    def search_subset(
+        self, query: str, item_ids: Sequence[str], *, limit: int = 20
+    ) -> list[SearchHit]:
+        """Exact MaxSim-rerank a deterministic, caller-selected entity candidate set."""
+        if limit <= 0:
+            raise IndexRunnerError("search limit must be positive")
+        ordered = sorted(set(item_ids))
+        if not ordered:
+            raise IndexRunnerError("late-interaction candidate set must not be empty")
+        if len(ordered) > 999:
+            raise IndexRunnerError("late-interaction candidate set exceeds SQLite bind limit")
+        query_tokens = self.adapter.embed_query(query)
+        _pack_matrix(query_tokens, self.dimension)
+        placeholders = ", ".join("?" for _ in ordered)
+        cursor = self.conn.execute(
+            f"SELECT * FROM token_vectors WHERE item_id IN ({placeholders}) ORDER BY item_id",
+            ordered,
+        )
+        return self._rank_rows(query_tokens, cursor, limit=limit)
+
+    def _rank_rows(
+        self, query_tokens: object, cursor: sqlite3.Cursor, *, limit: int
+    ) -> list[SearchHit]:
+        query_matrix = np.asarray(query_tokens, dtype=np.float64)
         scored = []
-        for row in self.conn.execute("SELECT * FROM token_vectors ORDER BY item_id"):
-            if row["vectors_sha256"] != hashlib.sha256(row["vectors"]).hexdigest():
-                raise IndexRunnerError("stored token matrix checksum mismatch")
-            document_tokens = _unpack_matrix(row["vectors"], row["token_count"], self.dimension)
-            score = float(self.adapter.maxsim(query_tokens, document_tokens))
-            if not math.isfinite(score):
+        while rows := cursor.fetchmany(128):
+            maximum_tokens = max(row["token_count"] for row in rows)
+            matrices = np.zeros((len(rows), maximum_tokens, self.dimension), dtype=np.float64)
+            token_counts = np.empty(len(rows), dtype=np.intp)
+            for index, row in enumerate(rows):
+                if row["vectors_sha256"] != hashlib.sha256(row["vectors"]).hexdigest():
+                    raise IndexRunnerError("stored token matrix checksum mismatch")
+                token_count = row["token_count"]
+                token_counts[index] = token_count
+                matrices[index, :token_count] = _unpack_matrix(
+                    row["vectors"], token_count, self.dimension
+                )
+            similarities = np.matmul(query_matrix[None, :, :], matrices.transpose(0, 2, 1))
+            padding = np.arange(maximum_tokens)[None, None, :] >= token_counts[:, None, None]
+            similarities = np.where(padding, -np.inf, similarities)
+            maxima = np.max(similarities, axis=2)
+            scores = np.sum(maxima, axis=1)
+            if not np.isfinite(scores).all():
                 raise IndexRunnerError("late-interaction score is non-finite")
-            scored.append((score, row["entity_id"], row["item_id"]))
+            scored.extend(
+                (float(score), row["entity_id"], row["item_id"]) for score, row in zip(scores, rows)
+            )
         ranked = sorted(scored, key=lambda item: (-item[0], item[1], item[2]))[:limit]
         return [
             SearchHit(entity_id, item_id, score, rank)
