@@ -19,6 +19,10 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 1. Open **Activity** and activate **View details** on an event. Confirm timestamp, type, agent, event/session/context IDs, error code, and content appear in a read-only dialog, and focus returns to the button on close.
 2. For an event with a context ID, activate **Browse this context**. Confirm Memory Explorer opens in Browse mode with that context filter and page 1 selected. For an event without context, confirm no misleading memory-navigation control is offered.
 
+## Operations
+
+1. Open **Operations** and confirm Database size uses a readable binary unit appropriate to its magnitude (B, KB, MB, GB, or TB), rather than always appending raw bytes.
+
 ## Relationships
 
 1. Enter a known memory ID and activate **Explore graph** by clicking it. Repeat with Enter in the root-ID field; both paths must use the trimmed ID and return the same neighborhood.

@@ -109,6 +109,15 @@
     box.append(node('p', label, 'muted'), node('strong', String(value ?? '—'), 'metric'));
     return box;
   };
+  const formatBytes = (value) => {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return '—';
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    const scaled = bytes / (1024 ** index);
+    return `${scaled.toFixed(scaled >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
+  };
   const section = (heading, description) => {
     const header = node('div', undefined, 'section-heading');
     header.append(node('h3', heading));
@@ -372,7 +381,7 @@
 
   const operations = async () => {
     const data = await api('/api/operations'); const grid = node('div', undefined, 'grid');
-    [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches], ['Database size', `${data.database.files.db_bytes} B`], ['Schema version', data.database.schema_version]].forEach(item => grid.append(metric(...item)));
+    [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches], ['Database size', formatBytes(data.database.files.db_bytes)], ['Schema version', data.database.schema_version]].forEach(item => grid.append(metric(...item)));
     view.replaceChildren(section('Operations', 'Point-in-time daemon and database health supplied by the daemon.'), grid);
   };
 

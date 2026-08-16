@@ -231,7 +231,8 @@ class TestViewerReworkContracts(unittest.TestCase):
             "Hybrid retrieval query", "/api/search?q=", "Keyword match in title and memory text",
             "date_field", "date_from", "date_to", "View details", "Browse this context",
             "memoryCell", "metadata-panel", "['Pending', embeddingData.pending, 'pending']",
-            "['Failed', embeddingData.failed, 'failed']",
+            "['Failed', embeddingData.failed, 'failed']", "const formatBytes = (value) =>",
+            "formatBytes(data.database.files.db_bytes)", "const units = ['B', 'KB', 'MB', 'GB', 'TB']",
         ):
             self.assertIn(expected, script)
         self.assertNotIn("source_id", script)
