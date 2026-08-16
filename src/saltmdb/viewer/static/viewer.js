@@ -118,6 +118,14 @@
     const scaled = bytes / (1024 ** index);
     return `${scaled.toFixed(scaled >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
   };
+  const formatTimestamp = (value, fallback = '—') => {
+    if (!value) return fallback;
+    const timestamp = new Date(value);
+    if (Number.isNaN(timestamp.getTime())) return String(value);
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+    }).format(timestamp);
+  };
   const section = (heading, description) => {
     const header = node('div', undefined, 'section-heading');
     header.append(node('h3', heading));
@@ -156,8 +164,8 @@
         ['Lifecycle', data.status || '—'], ['Memory type', data.memory_type || 'fact'],
         ['Embedding', data.embedding_status || 'pending'], ['Quality', data.quality_status || 'Not evaluated'],
         ['Owner', data.owner_id || 'system'], ['Scope', data.scope || '—'], ['Weight', data.weight ?? '—'],
-        ['Core memory', data.is_core ? 'Yes (#core)' : 'No'], ['Created', data.created_at || '—'],
-        ['Updated', data.updated_at || '—'], ['Last accessed', data.last_accessed_at || '—'],
+        ['Core memory', data.is_core ? 'Yes (#core)' : 'No'], ['Created', formatTimestamp(data.created_at)],
+        ['Updated', formatTimestamp(data.updated_at)], ['Last accessed', formatTimestamp(data.last_accessed_at)],
         ['Context ID', data.context_id || data.project_id || '—'], ['Entity ID', data.id],
       ];
       metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
@@ -184,7 +192,7 @@
       detail.append(markdown, raw);
       const evidence = node('section', undefined, 'evidence'); evidence.append(section('Memory evidence'));
       const facts = node('dl', undefined, 'facts');
-      const entries = [['Valid from', data.valid_from || '—'], ['Valid to', data.valid_to || 'Current']];
+      const entries = [['Valid from', formatTimestamp(data.valid_from)], ['Valid to', formatTimestamp(data.valid_to, 'Current')]];
       entries.forEach(([label, value]) => facts.append(factPair(label, value)));
       evidence.append(facts);
       const relationSummary = node('p', `${data.relations.outgoing_count} outgoing · ${data.relations.incoming_count} incoming relations`, 'muted');

@@ -233,6 +233,9 @@ class TestViewerReworkContracts(unittest.TestCase):
             "memoryCell", "metadata-panel", "['Pending', embeddingData.pending, 'pending']",
             "['Failed', embeddingData.failed, 'failed']", "const formatBytes = (value) =>",
             "formatBytes(data.database.files.db_bytes)", "const units = ['B', 'KB', 'MB', 'GB', 'TB']",
+            "const formatTimestamp = (value, fallback = '—') =>", "timeZoneName: 'short'",
+            "formatTimestamp(data.created_at)", "formatTimestamp(data.updated_at)",
+            "formatTimestamp(data.last_accessed_at)", "formatTimestamp(data.valid_from)",
         ):
             self.assertIn(expected, script)
         self.assertNotIn("source_id", script)
