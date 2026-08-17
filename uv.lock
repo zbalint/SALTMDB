@@ -2365,7 +2365,7 @@ wheels = [
 
 [[package]]
 name = "saltmdb"
-version = "0.1.0a72"
+version = "0.1.0a73"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },

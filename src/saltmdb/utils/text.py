@@ -49,6 +49,53 @@ def resolve_entity_id(conn, input_val: str) -> str | None:
     return input_val
 
 
+_HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
+
+
+def resolve_id_prefix(conn, prefix: str) -> tuple[str | None, list[dict], bool]:
+    """Resolve a short hex ID prefix (8..31 significant hex digits, dashes allowed) against
+    entities.id. Matches active AND archived entities (mirrors fetch_memory_chunk's own lack
+    of status filtering on exact-ID lookups -- no new visibility narrowing/widening).
+
+    Returns (resolved_id, candidates, truncated):
+      - exactly one match -> (full_id, [], False)
+      - zero matches / input isn't a valid short-prefix shape -> (None, [], False)
+      - 2+ matches -> (None, [{"id","title","status"} ...] capped at 20, truncated)
+
+    Deliberately a no-op for inputs with >=32 significant hex digits (full-length UUIDs) --
+    those are already handled exactly by resolve_entity_id/the caller's initial lookup, so
+    scanning for them here would just re-scan the whole table for a row already ruled absent.
+
+    This is an unindexed full-table scan (SQLite's default case-insensitive LIKE semantics
+    prevent the prefix-range index optimization on entities.id), accepted given SALTMDB's
+    memory-graph scale and that the full-length-UUID exclusion above keeps it off the most
+    common "not found" path.
+    """
+    if not prefix or not isinstance(prefix, str):
+        return None, [], False
+    p = prefix.strip()
+    hex_only = p.replace("-", "")
+    if not (8 <= len(hex_only) < 32) or not _HEX_PREFIX_RE.match(p):
+        return None, [], False
+    p_lower = p.lower()
+    try:
+        cursor = conn.execute(
+            "SELECT id, title, status, updated_at FROM entities WHERE id LIKE ? LIMIT 21",
+            (f"{p_lower}%",),
+        )
+        rows = cursor.fetchall()
+    except sqlite3.Error as exc:
+        logger.debug("Prefix-id lookup unavailable: %s", exc)
+        return None, [], False
+    if len(rows) == 1:
+        return rows[0][0], [], False
+    if len(rows) > 1:
+        truncated = len(rows) > 20
+        top = sorted(rows, key=lambda r: r[3] or "", reverse=True)[:20]
+        return None, [{"id": r[0], "title": r[1], "status": r[2]} for r in top], truncated
+    return None, [], False
+
+
 def extract_title_and_snippet(markdown_text: str):
     """Heuristic helper to extract a clean title and snippet from markdown text."""
     if not markdown_text:

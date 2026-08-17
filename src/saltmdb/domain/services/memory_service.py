@@ -36,6 +36,7 @@ from saltmdb.db.connection import (
 )
 from saltmdb.utils.text import (
     resolve_entity_id,
+    resolve_id_prefix,
     extract_title_and_snippet,
     sanitize_fts_query,
     compute_content_hash,
@@ -3020,7 +3021,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             close_connection(conn)
 
 
-def fetch_memory_chunk(
+def fetch_memory_chunk(  # noqa: C901, PLR0911
     entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True
 ) -> str:
     """Returns full markdown text of a memory."""
@@ -3033,28 +3034,47 @@ def fetch_memory_chunk(
         conn = get_connection(db_path)
         should_close = True
 
-    try:
-        resolved_id = resolve_entity_id(conn, entity_id)
-        if not resolved_id:
-            return f"Error: Could not resolve memory entity for input '{entity_id}'."
-
+    def _load_and_touch(id_val):
         cursor = conn.execute(
             """
             SELECT id, title, full_content, status, created_at, updated_at, owner_id, scope, metadata
             FROM entities WHERE id = ?
         """,
-            (resolved_id,),
+            (id_val,),
         )
         row = cursor.fetchone()
-        if row:
-            if touch:
-                now = datetime.now(UTC).isoformat()
-                conn.execute(
-                    "UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, resolved_id)
-                )
-                if not is_coordinator_connection(conn):
-                    conn.commit()
-            return row[2]
+        if not row:
+            return None
+        if touch:
+            now = datetime.now(UTC).isoformat()
+            conn.execute("UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, id_val))
+            if not is_coordinator_connection(conn):
+                conn.commit()
+        return row[2]
+
+    try:
+        resolved_id = resolve_entity_id(conn, entity_id)
+        if not resolved_id:
+            return f"Error: Could not resolve memory entity for input '{entity_id}'."
+
+        content = _load_and_touch(resolved_id)
+        if content is not None:
+            return content
+
+        # Fallback: short hex-prefix resolution (e.g. "77aef47e" -> full UUID). Only reached
+        # when the exact/UUID/title resolution above already missed -- precedence unchanged.
+        prefix_id, candidates, truncated = resolve_id_prefix(conn, entity_id)
+        if candidates:
+            lines = [f"  {c['id']} — {c['title']!r} [{c['status']}]" for c in candidates]
+            return (
+                f"Error: Ambiguous ID prefix '{entity_id}' matches "
+                f"{len(candidates)}{'+' if truncated else ''} memories:\n" + "\n".join(lines)
+            )
+        if prefix_id:
+            content = _load_and_touch(prefix_id)
+            if content is not None:
+                return content
+
         return f"Memory not found for ID: {resolved_id}"
     except Exception as e:
         logger.error("Error fetching memory chunk: %s", e)
@@ -3067,10 +3087,19 @@ def fetch_memory_chunk(
 def touch_memory_access(entity_id: str, db_connection) -> None:
     """Writer-side half of a fetch access-time touch."""
     resolved_id = resolve_entity_id(db_connection, entity_id)
+    target_id = resolved_id
     if resolved_id:
+        cursor = db_connection.execute("SELECT 1 FROM entities WHERE id = ?", (resolved_id,))
+        if not cursor.fetchone():
+            # Exact/UUID/title resolution didn't land on a real row -- try short-prefix
+            # resolution. An ambiguous prefix (or no match) resolves to None here, which
+            # is a deliberate silent no-op below: never raises, never guesses a candidate.
+            prefix_id, _candidates, _truncated = resolve_id_prefix(db_connection, entity_id)
+            target_id = prefix_id
+    if target_id:
         db_connection.execute(
             "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
-            (datetime.now(UTC).isoformat(), resolved_id),
+            (datetime.now(UTC).isoformat(), target_id),
         )
 
 

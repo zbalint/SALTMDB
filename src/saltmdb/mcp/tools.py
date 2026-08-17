@@ -330,6 +330,10 @@ def store_memory(
     description="""Performs full-text keyword & dense vector hybrid search in long-term memory.
 
     If entity_id or fetch_full is specified, retrieves full Markdown text chunk directly.
+    entity_id also accepts a short hex prefix (>=8 chars) of a full UUID; a prefix matching
+    exactly one entity resolves transparently, a prefix matching 2+ entities returns an
+    "Error: Ambiguous ID prefix ..." listing of candidates (id/title/status only) instead of
+    content -- so a fetch_full=True call is not guaranteed to return the memory's content.
 
     memory_type_filter optionally restricts results to one of the five fixed memory_type
     values ('fact', 'event', 'procedure', 'decision', 'preference'); every result item also
@@ -847,7 +851,9 @@ def export_corpus_snapshot(
     page_size_ = _resolve(page_size, kw, kwargs, "page_size", "limit")
     cursor_ = _resolve(cursor, kw, kwargs, "cursor", "after_id")
     snapshot_hash_ = _resolve(snapshot_hash, kw, kwargs, "snapshot_hash", "snapshot_id")
-    include_archived_ = _resolve(include_archived, kw, kwargs, "include_archived", "include_archived_entities")
+    include_archived_ = _resolve(
+        include_archived, kw, kwargs, "include_archived", "include_archived_entities"
+    )
     include_archived_ = include_archived_ if include_archived_ is not None else False
     return _backend_or_raise().call(
         "export_corpus_snapshot",
