@@ -52,7 +52,7 @@ _search_diagnostics = threading.local()
 
 
 TITLE_MIN_LENGTH = 5
-TITLE_MAX_LENGTH = 120
+TITLE_MAX_LENGTH = 150
 RETRIEVAL_TEXT_UNSET = object()
 
 
