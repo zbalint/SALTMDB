@@ -86,7 +86,7 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         entity_id = res.split("ID: ")[1].split()[0]
 
         with patch(
-            "saltmdb.domain.services.memory_service.semantic_search",
+            "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
             return_value=[(entity_id, 0.05)],
         ):
             results = search_memory(

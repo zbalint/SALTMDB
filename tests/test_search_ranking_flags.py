@@ -181,11 +181,11 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
         ):
@@ -227,11 +227,11 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
         ):
@@ -308,11 +308,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
@@ -333,11 +333,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             # a_entity naturally ranks first via RRF; scores reverse that.
@@ -375,11 +375,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
@@ -411,11 +411,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
@@ -446,11 +446,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
@@ -472,18 +472,18 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             # topic rerank would put decision_entity first via a low RERANK_SAME_TOPIC_THRESHOLD
             # comparison -- irrelevant here since it's not mocked to reorder; what matters is
             # cross-encoder's own explicit reorder wins as the FINAL order regardless.
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={
                     "event_entity": {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
                     "decision_entity": {

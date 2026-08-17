@@ -69,19 +69,19 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={},
             ),
             patch(
-                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                "saltmdb.domain.services.memory_service.search_primitives._batch_semantic_similarities",
                 return_value={},
             ),
         ):
@@ -139,11 +139,11 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
         ):
@@ -207,18 +207,19 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
+                return_value=([], False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 side_effect=_semantic_search,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 side_effect=_topic_scores,
             ),
             patch(
-                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                "saltmdb.domain.services.memory_service.search_primitives._batch_semantic_similarities",
                 return_value={},
             ),
         ):
@@ -251,10 +252,11 @@ class TestStrictModePaginationContinuity(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
+                return_value=([], False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 side_effect=_semantic_search,
             ),
         ):

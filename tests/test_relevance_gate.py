@@ -481,11 +481,11 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         semantic_rows = [("b", 0.1)]
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
         ):
@@ -504,19 +504,19 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={},
             ),
             patch(
-                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                "saltmdb.domain.services.memory_service.search_primitives._batch_semantic_similarities",
                 return_value={},
             ),
         ):
@@ -540,15 +540,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={
                     "semantic_only_grounded": {
                         "topic_score": 0.9,
@@ -570,18 +570,19 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search", return_value=([], False)
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
+                return_value=([], False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={},
             ),
             patch(
-                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                "saltmdb.domain.services.memory_service.search_primitives._batch_semantic_similarities",
                 return_value={},
             ),
         ):
@@ -604,11 +605,11 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
         ):
@@ -639,10 +640,13 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
         fts_rows = [self._fts_row("a")]
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
-            patch("saltmdb.domain.services.memory_service.semantic_search", return_value=[]),
+            patch(
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
+                return_value=[],
+            ),
         ):
             results = search_memory(
                 query_keywords="q", db_path=self.db_path, include_related=False, mode="bogus"
@@ -660,19 +664,19 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={},
             ),
             patch(
-                "saltmdb.domain.services.memory_service._batch_semantic_similarities",
+                "saltmdb.domain.services.memory_service.search_primitives._batch_semantic_similarities",
                 return_value={},
             ),
         ):
@@ -687,15 +691,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={
                     "or_fallback_grounded": {
                         "topic_score": 0.9,
@@ -719,15 +723,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={
                     "or_fallback_plus_semantic": {
                         "topic_score": 0.4,
@@ -754,11 +758,11 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
         ):
@@ -773,11 +777,11 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
         ):
@@ -803,15 +807,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={
                     "predecessor": {
                         "topic_score": 0.9,
@@ -841,15 +845,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, True),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={
                     "predecessor": {
                         "topic_score": 0.3,
@@ -883,15 +887,15 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[],
             ),
             patch(
-                "saltmdb.domain.services.memory_service._score_topics_with_fallback",
+                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
                 return_value={},
             ) as mock_score_topics,
         ):

@@ -275,7 +275,10 @@ class RetrievalTextTests(unittest.TestCase):
         snapshot = _claim_retrieval_embedding_job(self.conn)
         _persist_retrieval_embedding_if_current(self.conn, snapshot, [1.0] + [0.0] * 383)
         with (
-            patch("saltmdb.domain.services.memory_service.semantic_search", return_value=[]),
+            patch(
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
+                return_value=[],
+            ),
             patch.object(embedding_service, "embed_text", return_value=[1.0] + [0.0] * 383),
         ):
             result = search_memory(

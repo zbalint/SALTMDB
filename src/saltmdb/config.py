@@ -52,7 +52,7 @@ CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 200
 
 # Cross-chunk topic reranking (search_memory's rerank_by_topic, see
-# src/saltmdb/domain/services/memory_service.py:rerank_candidates_by_topic). Separate RERANK_*
+# src/saltmdb/domain/services/memory_service/search_primitives.py:rerank_candidates_by_topic). Separate RERANK_*
 # prefix from DEDUP_* above -- different subsystem/phase, independently tunable. Threshold values
 # locked from scripts/benchmarking/benchmark_rerank_thresholds.py's real bge-small-en-v1.5
 # Mean(Max(cosine_similarity)) measurements over hand-labeled same-topic/related-theme/unrelated
@@ -84,7 +84,7 @@ RETRIEVAL_TEXT_DEFAULT_FTS_WEIGHT = 1.0
 RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT = 1.0
 
 # Confidence gate on rerank_by_topic itself (search_memory's _rrf_gap_confident, see
-# memory_service.py). A structurally different axis from the two RERANK_* thresholds above: those
+# memory_service/ranking.py). A structurally different axis from the two RERANK_* thresholds above: those
 # score topic *purity* via raw cosine similarity, this scores hybrid-search *confidence* via
 # fused RRF rank-position scores (see reciprocal_rank_fusion, k=60) -- do not alias to either.
 # Locked from scripts/benchmarking/benchmark_rerank_gap_gate.py's real live-corpus run (SALTMDB
@@ -107,7 +107,7 @@ RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT = 1.0
 # -- do not re-tune without new benchmark evidence.
 RERANK_GAP_SKIP_RATIO = 1.9  # rrf_top1/rrf_top2 >= this (AND top1 dual-channel) -> skip rerank
 
-# BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
+# BM25 hybrid re-ranking weights (src/saltmdb/domain/services/memory_service/search_primitives.py:_run_fts_search)
 BM25_TITLE_WEIGHT = 10.0
 BM25_CONTENT_WEIGHT = 1.0
 BM25_ALIAS_WEIGHT = 5.0
@@ -115,7 +115,7 @@ BM25_ALIAS_WEIGHT = 5.0
 # subtracted from the weighted BM25 value in _run_fts_search.
 RELATION_COUNT_BOOST = 0.1
 
-# FTS5 query-centered snippet generation (src/saltmdb/domain/services/memory_service.py:_run_fts_search)
+# FTS5 query-centered snippet generation (src/saltmdb/domain/services/memory_service/search_primitives.py:_run_fts_search)
 # max_tokens must be in FTS5's valid range 1-64. Comparable to the retired top-of-doc
 # heuristic's ~150 chars / ~25-30 words, a bit more generous since a centered excerpt is
 # denser signal per token than an arbitrary opening line.
@@ -212,7 +212,7 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
 # candidate unsubstituted) rather than being treated as trustworthy.
 SUPERSESSION_CHAIN_MAX_DEPTH = 10
 
-# NOTE: accept_or_abstain's (memory_service.py) DIRECT semantic-only acceptance rule
+# NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone
 # RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE-style raw-cosine-distance constant. An earlier version of
 # this gate had one (0.4086, calibrated the same worst-negative+margin way as every threshold
@@ -231,7 +231,7 @@ SUPERSESSION_CHAIN_MAX_DEPTH = 10
 # broadly-paraphrased semantic-only matches -- see run_relevance_gate_holdout.py's docstring and
 # output for the measurements.
 
-# Hard cap on mode="strict"'s pagination overfetch loop (memory_service.py:search_memory, Part
+# Hard cap on mode="strict"'s pagination overfetch loop (memory_service/orchestrator.py:search_memory, Part
 # C2): resolution/dedup/the relevance gate can all shrink the raw FTS+semantic candidate_window
 # down to fewer than `limit` survivors, so strict mode retries with a doubled candidate_window
 # until either enough survivors are found or the underlying corpus is exhausted (both channels

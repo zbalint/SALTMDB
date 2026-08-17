@@ -303,15 +303,15 @@ class TestCrossEncoderControls(_DbFixture):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=([fts_row("winner")], False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=[("winner", 0.1), ("loser", 0.5)],
             ),
             patch(
-                "saltmdb.domain.services.memory_service._build_cross_encoder_candidate_texts",
+                "saltmdb.domain.services.memory_service.ranking._build_cross_encoder_candidate_texts",
                 return_value={"winner": "winner", "loser": "loser"},
             ),
             patch(

@@ -345,7 +345,7 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
         time.sleep(0.5)
 
         with patch(
-            "saltmdb.domain.services.memory_service.semantic_search",
+            "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
             side_effect=RuntimeError("simulated embedding outage"),
         ):
             results = search_memory(
@@ -466,15 +466,15 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic"
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic"
             ) as mock_rerank,
         ):
             results = search_memory(
@@ -498,15 +498,15 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
 
         with (
             patch(
-                "saltmdb.domain.services.memory_service._run_fts_search",
+                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
                 return_value=(fts_rows, False),
             ),
             patch(
-                "saltmdb.domain.services.memory_service.semantic_search",
+                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
                 return_value=semantic_rows,
             ),
             patch(
-                "saltmdb.domain.services.memory_service.rerank_candidates_by_topic",
+                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
                 return_value={
                     entity_a: {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
                     entity_b: {"topic_score": 0.1, "semantic_verdict": "DIFFERENT_TOPICS"},
