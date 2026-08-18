@@ -578,16 +578,62 @@ def analyze_dependencies(
             close_connection(conn)
 
 
-def analyze_lineage(
-    entity_id: str = None, point_in_time: str = None, db_connection=None, db_path: str = None
-) -> dict:
-    """Traverses full multi-generation consolidation and derivation ancestry.
+_LINEAGE_PREDICATES = ("revises", "supersedes", "consolidated_from")
 
-    Note: `parent_ids` on entities is now derived/display-only -- the `relations` table's
-    `consolidated_from` edges are the authoritative lineage source used for traversal here.
+
+def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
+    """Return the stable, non-content fields shared by graph responses."""
+    row = conn.execute(
+        "SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?",
+        (entity_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "id": entity_id,
+            "title": "Unknown",
+            "status": "unknown",
+            "owner_id": None,
+            "updated_at": None,
+            "depth": depth,
+            "generation_depth": depth,
+        }
+    return {
+        "id": row[0],
+        "title": row[1],
+        "status": row[2],
+        "owner_id": row[3],
+        "updated_at": row[4],
+        # Keep both names: depth is the graph contract, while generation_depth is
+        # consumed by the existing viewer until its Phase 3 adapter is updated.
+        "depth": depth,
+        "generation_depth": depth,
+    }
+
+
+def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    entity_id: str = None,
+    direction: Literal["ancestors", "descendants"] = "ancestors",
+    max_depth: int = 10,
+    point_in_time: str = None,
+    db_connection=None,
+    db_path: str = None,
+) -> dict:
+    """Traverse lifecycle lineage in either direction.
+
+    Lifecycle edges point from a replacement to the version it replaces, i.e.
+    ``new --revises/supersedes/consolidated_from--> old``.  Ancestor traversal follows
+    ``source -> target``; descendant traversal follows the inverse relation direction.
+    The bitemporal predicates are applied to every hop, and the path column prevents a
+    malformed cyclic graph from causing unbounded recursion.  Archived entities are
+    deliberately returned with their current status: explicit graph traversal is the
+    sanctioned way to inspect historical material.
     """
     if not entity_id:
         return {"error": "entity_id is mandatory"}
+    if direction not in ("ancestors", "descendants"):
+        return {"error": "direction must be 'ancestors' or 'descendants'"}
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
+        return {"error": "max_depth must be a non-negative integer"}
 
     should_close = False
     conn = db_connection
@@ -605,86 +651,184 @@ def analyze_lineage(
     pit = point_in_time or datetime.now(UTC).isoformat()
 
     try:
-        cursor = conn.execute(
-            "SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?",
-            (target_id,),
-        )
-        root_row = cursor.fetchone()
-        root_info = (
-            {
-                "id": root_row[0],
-                "title": root_row[1],
-                "status": root_row[2],
-                "owner_id": root_row[3],
-                "updated_at": root_row[4],
-                "generation_depth": 0,
+        root_info = _lineage_node(conn, target_id)
+        if max_depth == 0:
+            return {
+                "entity_id": target_id,
+                "direction": direction,
+                "root": root_info,
+                "nodes": [root_info],
+                "edges": [],
+                "total": 0,
+                "total_nodes": 1,
+                "graph_exhausted": True,
+                "point_in_time": pit,
+                "max_depth": max_depth,
             }
-            if root_row
-            else {
-                "id": target_id,
-                "title": "Root",
-                "status": "raw",
-                "owner_id": None,
-                "updated_at": None,
-                "generation_depth": 0,
-            }
-        )
-
-        query = """
-        WITH RECURSIVE lineage(id, source_id, target_id, depth, path) AS (
-            SELECT r.id, r.source_id, r.target_id, 1, r.source_id || '->' || r.target_id
-            FROM relations r
-            WHERE r.source_id = ? AND r.predicate = 'consolidated_from'
-              AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
-              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
-              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-            UNION ALL
-            SELECT r.id, r.source_id, r.target_id, l.depth + 1, l.path || '->' || r.target_id
-            FROM relations r
-            JOIN lineage l ON r.source_id = l.target_id
-            WHERE r.predicate = 'consolidated_from' AND l.depth < 10
-              AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
-              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
-              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-              AND l.path NOT LIKE '%' || r.target_id || '%'
-        )
-        SELECT l.target_id, e.title, e.status, e.owner_id, e.updated_at, l.depth
-        FROM lineage l JOIN entities e ON l.target_id = e.id
-        ORDER BY l.depth ASC;
+        predicate_placeholders = ",".join("?" for _ in _LINEAGE_PREDICATES)
+        validity = """
+            AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+            AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+            AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+            AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
         """
-        cursor = conn.execute(query, (target_id, pit, pit, pit, pit, pit, pit))
-        rows = cursor.fetchall()
+        if direction == "ancestors":
+            seed_join = "r.source_id = ?"
+            next_join = "r.source_id = l.next_id"
+            next_expression = "r.target_id"
+        else:
+            seed_join = "r.target_id = ?"
+            next_join = "r.target_id = l.next_id"
+            next_expression = "r.source_id"
 
-        ancestry = [root_info]
-        seen_nodes = {target_id}
-        for r in rows:
-            aid = r[0]
-            if aid in seen_nodes:
+        # The path is delimited so IDs cannot match as a substring of another ID.
+        # Predicate names are constants from _LINEAGE_PREDICATES, never caller input.
+        query = f"""
+            WITH RECURSIVE lineage(
+                relation_id, source_id, target_id, predicate, depth, next_id, path
+            ) AS (
+                SELECT r.id, r.source_id, r.target_id, r.predicate, 1,
+                       {next_expression}, '|' || ? || '|' || {next_expression} || '|'
+                FROM relations r
+                WHERE {seed_join} AND r.predicate IN ({predicate_placeholders})
+                  {validity}
+                UNION ALL
+                SELECT r.id, r.source_id, r.target_id, r.predicate, l.depth + 1,
+                       {next_expression}, l.path || {next_expression} || '|'
+                FROM relations r JOIN lineage l ON {next_join}
+                WHERE l.depth < ? AND r.predicate IN ({predicate_placeholders})
+                  {validity}
+                  AND instr(l.path, '|' || {next_expression} || '|') = 0
+            )
+            SELECT relation_id, source_id, target_id, predicate, depth, next_id
+            FROM lineage ORDER BY depth ASC, relation_id ASC
+        """
+        # Root is repeated in the path seed. Each validity predicate receives pit in
+        # SQL order; keep the parameter construction explicit to avoid binding drift.
+        params: list[Any] = [target_id, target_id, *_LINEAGE_PREDICATES, pit, pit, pit, pit]
+        params.extend([max_depth, *_LINEAGE_PREDICATES, pit, pit, pit, pit])
+        rows = conn.execute(query, params).fetchall()
+
+        edges: list[dict[str, Any]] = []
+        seen_edges: set[str] = set()
+        nodes_by_id: dict[str, dict] = {target_id: root_info}
+        for relation_id, source_id, target_id_row, predicate, depth, next_id in rows:
+            if relation_id in seen_edges:
                 continue
-            seen_nodes.add(aid)
-            ancestry.append(
+            seen_edges.add(relation_id)
+            source_node = _lineage_node(conn, source_id, depth if source_id == next_id else 0)
+            target_node = _lineage_node(
+                conn, target_id_row, depth if target_id_row == next_id else 0
+            )
+            nodes_by_id.setdefault(source_id, source_node)
+            nodes_by_id.setdefault(target_id_row, target_node)
+            # The first path is ordered shallowest; preserve that depth when a diamond
+            # reaches a node through a second, longer path.
+            existing = nodes_by_id.get(next_id)
+            if existing is None or depth < existing["depth"]:
+                nodes_by_id[next_id] = _lineage_node(conn, next_id, depth)
+            edges.append(
                 {
-                    "id": aid,
-                    "title": r[1],
-                    "status": r[2],
-                    "owner_id": r[3],
-                    "updated_at": r[4],
-                    "generation_depth": r[5],
+                    "relation_id": relation_id,
+                    "source_id": source_id,
+                    "target_id": target_id_row,
+                    "predicate": predicate,
+                    "depth": depth,
+                    "source_title": source_node["title"],
+                    "source_status": source_node["status"],
+                    "target_title": target_node["title"],
+                    "target_status": target_node["status"],
                 }
             )
 
-        return {
+        nodes = sorted(nodes_by_id.values(), key=lambda n: (n["depth"], n["id"]))
+        result = {
             "entity_id": target_id,
-            "total_ancestors": max(len(ancestry) - 1, 0),
-            "ancestors": ancestry,
+            "direction": direction,
+            "root": root_info,
+            "nodes": nodes,
+            "edges": edges,
+            "total": len(edges),
+            "total_nodes": len(nodes),
+            "graph_exhausted": not edges or max(e["depth"] for e in edges) < max_depth,
             "point_in_time": pit,
+            "max_depth": max_depth,
         }
+        return result
     except Exception as e:
         logger.error("Error analyzing lineage: %s", e)
         return {"error": str(e)}
     finally:
         if should_close:
             close_connection(conn)
+
+
+def analyze_lineage(
+    entity_id: str = None, point_in_time: str = None, db_connection=None, db_path: str = None
+) -> dict:
+    """Backward-compatible ancestor projection of :func:`get_lineage`.
+
+    The viewer and older internal callers still consume ``ancestors`` and
+    ``generation_depth``.  Keeping this thin projection lets the new graph contract land
+    independently while those callers migrate to ``get_lineage``.
+    """
+    result = get_lineage(
+        entity_id=entity_id,
+        direction="ancestors",
+        max_depth=10,
+        point_in_time=point_in_time,
+        db_connection=db_connection,
+        db_path=db_path,
+    )
+    if "error" in result:
+        return result
+    ancestors = []
+    for node in result["nodes"]:
+        # Existing consumers expect the root in this list and no edge metadata.
+        ancestors.append(
+            {
+                "id": node["id"],
+                "title": node["title"],
+                "status": node["status"],
+                "owner_id": node["owner_id"],
+                "updated_at": node["updated_at"],
+                "generation_depth": node["depth"],
+            }
+        )
+    return {
+        "entity_id": result["entity_id"],
+        "total_ancestors": max(len(ancestors) - 1, 0),
+        "ancestors": ancestors,
+        "point_in_time": result["point_in_time"],
+    }
+
+
+def get_related_memories(
+    entity_id: str = None,
+    max_depth: int = 5,
+    point_in_time: str = None,
+    db_connection=None,
+    db_path: str = None,
+) -> dict:
+    """Named graph API for semantic neighbours, backed by ``analyze_dependencies``."""
+    result = analyze_dependencies(
+        root_entity_id=entity_id,
+        max_depth=max_depth,
+        point_in_time=point_in_time,
+        db_connection=db_connection,
+        db_path=db_path,
+    )
+    if "error" in result:
+        return result
+    # Keep the historical keys while exposing the terminology of the new tool. This is
+    # useful to in-process callers during the MCP/daemon registration migration.
+    return {
+        **result,
+        "entity_id": result["root"]["id"],
+        "related_memories": result["dependencies"],
+        "total_related_found": result["total_dependencies_found"],
+        "max_depth": max_depth,
+    }
 
 
 def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:

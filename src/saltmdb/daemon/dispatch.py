@@ -168,11 +168,6 @@ def _dispatch_store_memory(**kw):
 
 
 def _dispatch_search_memory(**kw):
-    # Round-4 precision fix: only entity_id presence routes to fetch_memory_chunk. fetch_full=True
-    # with no entity_id falls through to the normal search_memory call, unchanged.
-    entity_id = kw.get("entity_id")
-    if entity_id:
-        return memory_service.fetch_memory_chunk(entity_id=entity_id)
     return memory_service.search_memory(
         owner_id=kw.get("owner_id"),
         query_keywords=kw.get("query_keywords"),
@@ -205,6 +200,21 @@ def _dispatch_search_memory(**kw):
         retrieval_fts_weight=_optional_float_or_none(kw, "retrieval_fts_weight"),
         retrieval_vector_weight=_optional_float_or_none(kw, "retrieval_vector_weight"),
     )
+
+
+def _dispatch_get_memory(**kw):
+    """Fetch one entity through the explicit-ID service contract.
+
+    ``get_memory`` is introduced by Phase 3.  Keep a narrow fallback to the existing fetch
+    primitive while the domain service is migrated, so the adapter/daemon surface can land
+    independently of the service implementation.  The fallback is deliberately not a redirect:
+    ``fetch_memory_chunk`` addresses exactly the supplied entity and includes archived rows.
+    """
+    entity_id = _required_str(kw, "entity_id")
+    fetch = getattr(memory_service, "get_memory", None)
+    if fetch is not None:
+        return fetch(entity_id=entity_id)
+    return memory_service.fetch_memory_chunk(entity_id=entity_id)
 
 
 def _dispatch_archive_memory(**kw):
@@ -296,20 +306,31 @@ def _dispatch_get_core_bootstrap_digest(**kw):
     return core_governance_service.render_bootstrap_response(conn)
 
 
-def _dispatch_inspect_graph(**kw):
-    mode = kw.get("mode") or "dependencies"
-    if mode == "lineage":
-        return relation_service.analyze_lineage(
-            entity_id=kw.get("entity_id"), point_in_time=kw.get("point_in_time")
-        )
-    elif mode == "orphans":
-        return memory_service.detect_orphaned_memories(owner_id=kw.get("owner_id"))
-    else:
-        return relation_service.analyze_dependencies(
-            root_entity_id=kw.get("entity_id"),
-            max_depth=kw.get("max_depth") or 5,
-            point_in_time=kw.get("point_in_time"),
-        )
+def _dispatch_get_lineage(**kw):
+    entity_id = _required_str(kw, "entity_id")
+    direction = kw.get("direction") or "ancestors"
+    if direction not in {"ancestors", "descendants"}:
+        raise ValueError("direction must be 'ancestors' or 'descendants'")
+    max_depth = _optional_int(kw, "max_depth", 5)
+
+    # The Phase-3 service entry point supports both directions and all lifecycle predicates.  The
+    # fallback preserves ancestor behaviour against the pre-Phase-3 service while development is
+    # split across the daemon and domain layers.
+    get_lineage = getattr(relation_service, "get_lineage", None)
+    if get_lineage is not None:
+        return get_lineage(entity_id=entity_id, direction=direction, max_depth=max_depth)
+    if direction == "descendants":
+        raise RuntimeError("descendant lineage is unavailable until the lineage service is updated")
+    return relation_service.analyze_lineage(entity_id=entity_id)
+
+
+def _dispatch_get_related_memories(**kw):
+    entity_id = _required_str(kw, "entity_id")
+    max_depth = _optional_int(kw, "max_depth", 5)
+    get_related = getattr(relation_service, "get_related_memories", None)
+    if get_related is not None:
+        return get_related(entity_id=entity_id, max_depth=max_depth)
+    return relation_service.analyze_dependencies(root_entity_id=entity_id, max_depth=max_depth)
 
 
 def _dispatch_get_events(**kw):
@@ -359,10 +380,12 @@ DISPATCH_TABLE = {
     # Multi-branch
     "store_memory": _dispatch_store_memory,
     "search_memory": _dispatch_search_memory,
+    "get_memory": _dispatch_get_memory,
     "archive_memory": _dispatch_archive_memory,
     "manage_relation": _dispatch_manage_relation,
     "commit_consolidation": _dispatch_commit_consolidation,
-    "inspect_graph": _dispatch_inspect_graph,
+    "get_lineage": _dispatch_get_lineage,
+    "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
     "export_corpus_snapshot": _dispatch_export_corpus_snapshot,
     "review_core_memory": _dispatch_review_core_memory,
@@ -392,14 +415,6 @@ def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
         if tool in {"store_memory", "log_event"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
-    if tool == "search_memory" and kwargs.get("entity_id"):
-        content = memory_service.fetch_memory_chunk(entity_id=kwargs["entity_id"], touch=False)
-        coordinator.submit(
-            "touch_memory_access",
-            lambda conn: memory_service.touch_memory_access(kwargs["entity_id"], conn),
-            priority="foreground",
-        )
-        return content
     return fn(**kwargs)
 
 

@@ -236,7 +236,7 @@ class TestEntityIdPrefixResolutionViaDispatch(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_dispatch_tool_resolves_prefix_and_touches_last_accessed(self):
-        """search_memory(entity_id=<prefix>) through dispatch_tool returns content and touches it."""
+        """get_memory(entity_id=<prefix>) returns structured content and touches it."""
         entity_id = self.coordinator.submit(
             "store", lambda conn: _store(conn, "Dispatch Prefix Target")
         )
@@ -249,8 +249,9 @@ class TestEntityIdPrefixResolutionViaDispatch(unittest.TestCase):
         )
         prefix = entity_id[:8]
 
-        content = dispatch_tool("search_memory", {"entity_id": prefix}, self.coordinator)
-        self.assertIn("Dispatch Prefix Target", content)
+        result = dispatch_tool("get_memory", {"entity_id": prefix}, self.coordinator)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Dispatch Prefix Target", result["data"]["content"])
 
         last_accessed_at = self.coordinator.submit(
             "check",

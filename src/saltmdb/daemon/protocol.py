@@ -36,7 +36,9 @@ READ_TOOLS = frozenset(
         "search_memory",
         "get_canonical_tags",
         "get_canonical_predicates",
-        "inspect_graph",
+        "get_memory",
+        "get_lineage",
+        "get_related_memories",
         "get_events",
         "export_corpus_snapshot",
         # Internal-only (no public MCP tool): returns the already-rendered core-memory bootstrap

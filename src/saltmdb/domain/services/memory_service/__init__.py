@@ -77,6 +77,7 @@ from .ranking import (
 )
 from .orchestrator import search_memory
 from .lifecycle import (
+    get_memory,
     fetch_memory_chunk,
     touch_memory_access,
     archive_memory,
@@ -132,6 +133,7 @@ __all__ = [
     "_build_candidate_evidence",
     "search_memory",
     "fetch_memory_chunk",
+    "get_memory",
     "touch_memory_access",
     "archive_memory",
     "detect_orphaned_memories",

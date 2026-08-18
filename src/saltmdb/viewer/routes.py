@@ -368,7 +368,9 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             date_to = query.get("date_to", [None])[0]
 
             if sort not in _ENTITY_SORTS:
-                raise ValueError("sort must be updated_desc, updated_asc, created_desc, or created_asc")
+                raise ValueError(
+                    "sort must be updated_desc, updated_asc, created_desc, or created_asc"
+                )
             if date_field and date_field not in ("created", "updated"):
                 raise ValueError("date_field must be created or updated")
             if (date_from or date_to) and not date_field:
@@ -1150,7 +1152,11 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("is_core must be one of true, 1, yes, false, 0, no")
             results = memory_service.search_memory(**search_kwargs)
             if not isinstance(results, list):
-                message = results.get("error", "Hybrid search unavailable") if isinstance(results, dict) else str(results)
+                message = (
+                    results.get("error", "Hybrid search unavailable")
+                    if isinstance(results, dict)
+                    else str(results)
+                )
                 raise RuntimeError(message or "Hybrid search unavailable")
             self.send_json({"query": q, "mode": "broad", "results": results})
         except Exception as e:
@@ -1204,24 +1210,54 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                 return
             entity_id, root_title, root_status = row[0], row[1], row[2]
 
-            lineage_result = relation_service.analyze_lineage(
-                entity_id=entity_id, db_connection=conn
-            )
-            if lineage_result.get("error"):
-                self.send_json({"error": lineage_result["error"]}, 404)
-                return
-            nodes = [
-                {
-                    "id": a["id"],
-                    "depth": a["generation_depth"],
-                    "generation_depth": a["generation_depth"],
-                    "title": a["title"],
-                    "status": a["status"],
-                    "owner_id": a.get("owner_id"),
-                    "updated_at": a.get("updated_at"),
-                }
-                for a in lineage_result.get("ancestors", [])
-            ]
+            # Phase 3 exposes a direction-specific graph operation.  Keep the
+            # legacy call as a compatibility fallback for an in-process viewer
+            # during rolling upgrades; both shapes are normalized for the panel.
+            get_lineage = getattr(relation_service, "get_lineage", None)
+            if get_lineage is not None:
+                ancestor_result = get_lineage(
+                    entity_id=entity_id,
+                    direction="ancestors",
+                    max_depth=10,
+                    db_connection=conn,
+                )
+                if isinstance(ancestor_result, dict) and ancestor_result.get("error"):
+                    self.send_json({"error": ancestor_result["error"]}, 404)
+                    return
+                raw_nodes: list[tuple[dict, str]] = []
+                direction_nodes = ancestor_result.get("nodes", [])
+                raw_nodes.extend(
+                    (node, "ancestors") for node in direction_nodes if isinstance(node, dict)
+                )
+            else:
+                lineage_result = relation_service.analyze_lineage(
+                    entity_id=entity_id, db_connection=conn
+                )
+                if lineage_result.get("error"):
+                    self.send_json({"error": lineage_result["error"]}, 404)
+                    return
+                raw_nodes = [(node, "ancestors") for node in lineage_result.get("ancestors", [])]
+
+            nodes = []
+            seen = set()
+            for node, direction in raw_nodes:
+                node_id = node.get("id")
+                if not node_id or node_id in seen:
+                    continue
+                seen.add(node_id)
+                depth = node.get("depth", node.get("generation_depth", 0))
+                nodes.append(
+                    {
+                        "id": node_id,
+                        "depth": depth,
+                        "generation_depth": node.get("generation_depth", depth),
+                        "title": node.get("title"),
+                        "status": node.get("status"),
+                        "owner_id": node.get("owner_id"),
+                        "updated_at": node.get("updated_at"),
+                        "direction": node.get("direction", direction),
+                    }
+                )
             self.send_json(
                 {
                     "root_id": entity_id,

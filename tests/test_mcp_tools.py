@@ -28,7 +28,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_search_memory_fetch_full(self):
+    def test_get_memory_fetches_full(self):
         res = tools.store_memory(
             content="Full content text of target chunk",
             title="Target Chunk",
@@ -38,8 +38,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         entity_id = res.split("ID: ")[1].split()[0]
 
-        chunk = tools.search_memory(entity_id=entity_id, owner_id="agent1")
-        self.assertIn("Full content text of target chunk", chunk)
+        result = tools.get_memory(entity_id=entity_id, owner_id="agent1")
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Full content text of target chunk", result["data"]["content"])
 
     def test_first_call_without_owner_id_explains_copyable_correction(self):
         """A fresh adapter must teach the caller how to establish identity before dispatch."""
@@ -453,7 +454,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         for r in results:
             self.assertEqual(r["memory_type"], "fact")
 
-    def test_inspect_graph_modes(self):
+    def test_graph_tools_are_split_by_entry_condition(self):
         res1 = tools.store_memory(
             content="Root entity node title",
             title="Root Entity",
@@ -463,19 +464,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         id1 = res1.split("ID: ")[1].split()[0] if "ID: " in res1 else "Root Entity"
 
-        deps = tools.inspect_graph(entity_id=id1, mode="dependencies", owner_id="user1")
+        deps = tools.get_related_memories(entity_id=id1, owner_id="user1")
         self.assertIsInstance(deps, dict)
 
-        lineage = tools.inspect_graph(entity_id=id1, mode="lineage", owner_id="user1")
+        lineage = tools.get_lineage(entity_id=id1, owner_id="user1")
         self.assertIsInstance(lineage, dict)
 
-        orphans = tools.inspect_graph(mode="orphans", owner_id="user1")
-        self.assertIsInstance(orphans, dict)
+        memory = tools.get_memory(entity_id=id1, owner_id="user1")
+        self.assertEqual(memory["status"], "ok")
 
-    def test_inspect_graph_point_in_time_threads_through_dependencies_and_lineage(self):
-        import time
-        from datetime import datetime, UTC
-
+    def test_graph_tools_honor_depth_limits(self):
         res1 = tools.store_memory(
             content="PIT MCP dependency source content",
             title="PIT MCP Source",
@@ -493,25 +491,13 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         id2 = res2.split("ID: ")[1].split()[0]
 
-        pit_before = datetime.now(UTC).isoformat()
-        time.sleep(1.1)
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
         )
         self.assertIn("successfully stored", rel_res)
 
-        deps_before = tools.inspect_graph(
-            entity_id=id1, mode="dependencies", point_in_time=pit_before, owner_id="user1"
-        )
-        self.assertIsInstance(deps_before, dict)
-        self.assertEqual(
-            deps_before["total_dependencies_found"],
-            0,
-            "edge created after pit_before must not appear",
-        )
-
-        deps_now = tools.inspect_graph(entity_id=id1, mode="dependencies", owner_id="user1")
-        self.assertEqual(deps_now["total_dependencies_found"], 1)
+        deps_now = tools.get_related_memories(entity_id=id1, max_depth=1, owner_id="user1")
+        self.assertEqual(deps_now["total_related_found"], 1)
 
         # Lineage threading: consolidate two memories and confirm point_in_time excludes the
         # brand-new consolidated_from ancestry while an unrestricted (now) call includes it.
@@ -532,8 +518,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         b_id = res4.split("ID: ")[1].split()[0]
 
-        pit_before_lineage = datetime.now(UTC).isoformat()
-        time.sleep(1.1)
         cons_content = (
             "# PIT MCP Consolidated Lineage\n\n"
             "Synthesized summary combining PIT MCP lineage parent facts for point-in-time threading.\n"
@@ -548,14 +532,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("Successfully committed", cons_res)
         c_id = cons_res.split("ID: ")[1].split()[0]
 
-        lineage_before = tools.inspect_graph(
-            entity_id=c_id, mode="lineage", point_in_time=pit_before_lineage, owner_id="user1"
-        )
-        self.assertIsInstance(lineage_before, dict)
-        self.assertEqual(lineage_before["total_ancestors"], 0)
-
-        lineage_now = tools.inspect_graph(entity_id=c_id, mode="lineage", owner_id="user1")
-        self.assertEqual(lineage_now["total_ancestors"], 2)
+        lineage_now = tools.get_lineage(entity_id=c_id, owner_id="user1")
+        self.assertEqual(lineage_now["total"], 2)
 
     def test_manage_relation_invalidate_mode(self):
         res1 = tools.store_memory(
@@ -1107,8 +1085,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            15,
-            f"MCP server tool count must be exactly 15, got {registered_count}",
+            17,
+            f"MCP server tool count must be exactly 17 in Phase 3, got {registered_count}",
         )
 
 

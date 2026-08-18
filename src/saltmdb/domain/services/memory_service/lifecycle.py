@@ -14,8 +14,181 @@ from saltmdb.db.connection import (
     close_connection,
 )
 from saltmdb.utils.text import resolve_entity_id, resolve_id_prefix
+from saltmdb.utils.text import resolve_entity_ref
+from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
 
 from ._shared import logger
+
+
+def _lineage_nodes(result, direction: str) -> list[dict]:
+    """Extract the node list from either graph-service lineage shape.
+
+    Phase 3 changes the graph API from ``analyze_lineage()['ancestors']`` to the
+    direction-specific ``get_lineage`` result.  Keeping this small adapter here lets
+    explicit-memory reads remain compatible while the daemon/viewer callers migrate.
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return []
+    candidates = result.get("nodes")
+    if candidates is None:
+        candidates = result.get(direction)
+    if candidates is None:
+        candidates = result.get("ancestors" if direction == "ancestors" else "descendants")
+    if not isinstance(candidates, list):
+        return []
+    return [node for node in candidates if isinstance(node, dict)]
+
+
+def _memory_lineage(entity_id: str, conn, max_depth: int = 10) -> dict[str, list[dict]]:
+    """Read both lifecycle directions without ever substituting a successor.
+
+    ``get_lineage`` is the Phase 3 relation-service entry point.  The fallback is
+    intentionally limited to the pre-Phase-3 ancestor API so old in-process callers
+    keep working during a rolling upgrade; it does not redirect the requested entity.
+    """
+    from saltmdb.domain.services import relation_service
+
+    get_lineage = getattr(relation_service, "get_lineage", None)
+    if get_lineage is not None:
+        ancestors = get_lineage(
+            entity_id=entity_id,
+            direction="ancestors",
+            max_depth=max_depth,
+            db_connection=conn,
+        )
+        descendants = get_lineage(
+            entity_id=entity_id,
+            direction="descendants",
+            max_depth=max_depth,
+            db_connection=conn,
+        )
+    else:
+        ancestors = relation_service.analyze_lineage(entity_id=entity_id, db_connection=conn)
+        descendants = {}
+    return {
+        # The legacy ancestor response includes the addressed root at depth zero;
+        # explicit-memory lineage describes neighbours, so omit that duplicate.
+        "ancestors": [
+            node for node in _lineage_nodes(ancestors, "ancestors") if node.get("id") != entity_id
+        ],
+        "descendants": [
+            node
+            for node in _lineage_nodes(descendants, "descendants")
+            if node.get("id") != entity_id
+        ],
+    }
+
+
+def get_memory(
+    entity_id: str = None,
+    db_connection=None,
+    db_path: str = None,
+    *,
+    max_depth: int = 10,
+) -> dict:
+    """Return one explicitly addressed memory, including archived history.
+
+    Unlike search and the old ``fetch_memory_chunk`` path, this operation always
+    returns a structured envelope and never follows a successor.  Prefix resolution
+    is delegated to :func:`resolve_entity_ref`, so ambiguous IDs are actionable and
+    do not accidentally disclose one of several matching memories.
+    """
+    if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
+        return rejected(
+            [envelope_error("MISSING_ENTITY_ID", "entity_id is mandatory.", "entity_id")]
+        )
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        conn = get_connection(db_path or get_db_path())
+        should_close = True
+
+    try:
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        if candidates:
+            item = envelope_error(
+                "AMBIGUOUS_ID_PREFIX",
+                f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
+                "entity_id",
+            )
+            item["candidates"] = candidates
+            if truncated:
+                item["candidates_truncated"] = True
+            return rejected([item])
+        if not resolved_id:
+            return rejected(
+                [
+                    envelope_error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{entity_id}'.",
+                        "entity_id",
+                    )
+                ]
+            )
+
+        row = conn.execute(
+            """
+            SELECT id, title, full_content, status, created_at, updated_at,
+                   last_accessed_at, owner_id, scope, is_core, parent_ids,
+                   valid_from, valid_to, metadata, context_id, memory_type,
+                   quality_score, quality_status, quality_flags
+            FROM entities WHERE id = ?
+            """,
+            (resolved_id,),
+        ).fetchone()
+        if not row:
+            return rejected(
+                [
+                    envelope_error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{entity_id}'.",
+                        "entity_id",
+                    )
+                ]
+            )
+
+        # Explicit retrieval is still a memory access. Preserve the old
+        # search_memory(entity_id=...) contract's access-time bookkeeping while
+        # moving the read to its dedicated Phase 3 tool.
+        accessed_at = datetime.now(UTC).isoformat()
+        conn.execute(
+            "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+            (accessed_at, resolved_id),
+        )
+        if not is_coordinator_connection(conn):
+            conn.commit()
+
+        lineage = _memory_lineage(resolved_id, conn, max_depth=max_depth)
+        data = {
+            "id": row[0],
+            "title": row[1],
+            "content": row[2],
+            "status": row[3],
+            "created_at": row[4],
+            "updated_at": row[5],
+            "last_accessed_at": accessed_at,
+            "owner_id": row[7],
+            "scope": row[8],
+            "is_core": bool(row[9]),
+            "parent_ids": row[10],
+            "valid_from": row[11],
+            "valid_to": row[12],
+            "metadata": row[13],
+            "context_id": row[14],
+            "memory_type": row[15],
+            "quality_score": row[16],
+            "quality_status": row[17],
+            "quality_flags": row[18],
+            "lineage": lineage,
+        }
+        return envelope_ok(data)
+    except Exception as exc:
+        logger.error("Error getting memory: %s", exc)
+        return rejected([envelope_error("MEMORY_READ_FAILED", str(exc))])
+    finally:
+        if should_close:
+            close_connection(conn)
 
 
 def fetch_memory_chunk(  # noqa: C901, PLR0911

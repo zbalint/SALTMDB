@@ -21,6 +21,8 @@ from saltmdb.domain.services.relation_service import (
     bulk_store_relations,
     analyze_dependencies,
     analyze_lineage,
+    get_lineage,
+    get_related_memories,
     commit_consolidation,
     bulk_commit_consolidation,
 )
@@ -1156,6 +1158,124 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             1,
             "diamond ancestry must dedupe to the SHALLOWEST depth",
         )
+
+
+class TestPhase3LineageGraph(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk(self, title):
+        result = store_memory(
+            content=f"Graph lineage content for {title}",
+            title=title,
+            owner_id="phase3_graph",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        return result.split("ID: ")[1].strip()
+
+    def _edge(self, source_id, target_id, predicate, *, valid_from=None, valid_at=None):
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations "
+            "(id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                source_id,
+                target_id,
+                predicate,
+                now,
+                valid_from or now,
+                valid_at,
+            ),
+        )
+
+    def test_descendants_from_archived_parent_find_active_absorbing_node(self):
+        archived_parent = self._mk("Archived parent")
+        absorbing = self._mk("Active successor")
+        self._edge(absorbing, archived_parent, "supersedes")
+        self.conn.execute(
+            "UPDATE entities SET status='archived', valid_to=? WHERE id=?",
+            (datetime.now(UTC).isoformat(), archived_parent),
+        )
+
+        result = get_lineage(
+            entity_id=archived_parent,
+            direction="descendants",
+            db_connection=self.conn,
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["direction"], "descendants")
+        successor = next(node for node in result["nodes"] if node["id"] == absorbing)
+        self.assertEqual(successor["status"], "raw")
+        self.assertEqual(successor["depth"], 1)
+        self.assertEqual(result["edges"][0]["predicate"], "supersedes")
+
+    def test_lineage_walks_all_lifecycle_predicates_and_preserves_status(self):
+        newest = self._mk("Newest")
+        revised = self._mk("Revised")
+        superseded = self._mk("Superseded")
+        consolidated = self._mk("Consolidated")
+        self._edge(newest, revised, "revises")
+        self._edge(revised, superseded, "supersedes")
+        self._edge(superseded, consolidated, "consolidated_from")
+        self.conn.execute(
+            "UPDATE entities SET status='archived' WHERE id IN (?, ?, ?)",
+            (revised, superseded, consolidated),
+        )
+
+        result = get_lineage(entity_id=newest, direction="ancestors", db_connection=self.conn)
+
+        self.assertEqual(
+            [edge["predicate"] for edge in result["edges"]],
+            ["revises", "supersedes", "consolidated_from"],
+        )
+        by_id = {node["id"]: node for node in result["nodes"]}
+        self.assertEqual(by_id[revised]["status"], "archived")
+        self.assertEqual(by_id[consolidated]["depth"], 3)
+
+    def test_lineage_honors_max_depth_and_bitemporal_valid_at(self):
+        root = self._mk("PIT root")
+        hidden = self._mk("Future successor")
+        old = self._mk("Old successor")
+        future = "2099-01-01T00:00:00+00:00"
+        self._edge(hidden, root, "revises", valid_at=future)
+        self._edge(old, root, "supersedes", valid_from="2019-01-01T00:00:00+00:00")
+
+        result = get_lineage(
+            entity_id=root,
+            direction="descendants",
+            max_depth=1,
+            point_in_time="2020-01-01T00:00:00+00:00",
+            db_connection=self.conn,
+        )
+
+        ids = {node["id"] for node in result["nodes"]}
+        self.assertIn(old, ids)
+        self.assertNotIn(hidden, ids)
+        self.assertEqual(result["total"], 1)
+
+    def test_lineage_cycle_is_bounded_and_related_graph_has_named_contract(self):
+        a = self._mk("Cycle A")
+        b = self._mk("Cycle B")
+        self._edge(b, a, "revises")
+        self._edge(a, b, "supersedes")
+
+        result = get_lineage(
+            entity_id=a, direction="descendants", max_depth=20, db_connection=self.conn
+        )
+        self.assertLessEqual(len(result["edges"]), 2)
+        related = get_related_memories(entity_id=a, db_connection=self.conn)
+        self.assertIn("related_memories", related)
+        self.assertIn("dependencies", related)
 
 
 class TestRelationPointInTime(unittest.TestCase):

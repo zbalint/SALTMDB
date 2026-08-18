@@ -361,8 +361,7 @@ def store_memory(
     superseded matches and applies relevance abstention; `mode="history"` keeps matched history
     visible and labels superseded results; `mode="broad"` preserves ordinary retrieval.
 
-    During Phase 2, entity_id/fetch_full remain the explicit-ID compatibility path. They move to
-    the dedicated get_memory tool in Phase 3. Experimental ranking and benchmark controls remain
+    Explicit-ID retrieval is provided by the dedicated get_memory tool. Experimental ranking and benchmark controls remain
     available through internal services/evaluation tooling, but are intentionally absent here.
     """
 )
@@ -378,8 +377,6 @@ def search_memory(
     include_related: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
     owner_id: str | None = None,
-    entity_id: str | None = None,
-    fetch_full: bool = False,
 ) -> list | dict | str:
     owner_id_ = _effective_owner(owner_id, tool_func=search_memory, submitted=locals())
     tags_filter_ = _normalize_list_or_str(tags_filter) if tags_filter else None
@@ -387,8 +384,6 @@ def search_memory(
     return _backend_or_raise().call(
         "search_memory",
         {
-            "entity_id": entity_id,
-            "fetch_full": fetch_full,
             "owner_id": owner_id_,
             "query_keywords": query_keywords,
             "tags_filter": tags_filter_,
@@ -566,30 +561,47 @@ def commit_consolidation(
 
 
 @mcp.tool()
-def inspect_graph(
-    entity_id: str | None = None,
-    mode: Literal["dependencies", "lineage", "orphans"] = "dependencies",
-    max_depth: int | None = None,
-    owner_id: str | None = None,
-    point_in_time: str | None = None,
-) -> dict:
-    """Inspects memory graph structure (dependencies, consolidation lineage, or orphaned nodes).
+def get_memory(entity_id: str, owner_id: str | None = None) -> dict:
+    """Retrieves one memory by full ID or an unambiguous ID prefix.
 
-    entity_id is optional when mode='orphans'.
-    point_in_time (aliases: as_of, at) restricts 'dependencies'/'lineage' traversal to relation
-    edges valid as of that ISO timestamp (defaults to now). Ignored for mode='orphans'.
+    Explicit retrieval includes archived memories and returns the memory's status and lineage;
+    an archived ID is never silently redirected to a successor.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=inspect_graph, submitted=locals())
+    owner_id_ = _effective_owner(owner_id, tool_func=get_memory, submitted=locals())
+    return _backend_or_raise().call("get_memory", {"entity_id": entity_id, "owner_id": owner_id_})
 
+
+@mcp.tool()
+def get_lineage(
+    entity_id: str,
+    direction: Literal["ancestors", "descendants"] = "ancestors",
+    max_depth: int = 5,
+    owner_id: str | None = None,
+) -> dict:
+    """Traverses memory lineage in either direction.
+
+    ``ancestors`` shows where an entity came from; ``descendants`` shows what it became.
+    Archived nodes remain visible so historical provenance is never hidden.
+    """
+    owner_id_ = _effective_owner(owner_id, tool_func=get_lineage, submitted=locals())
     return _backend_or_raise().call(
-        "inspect_graph",
+        "get_lineage",
         {
             "entity_id": entity_id,
-            "mode": mode,
-            "owner_id": owner_id_,
-            "point_in_time": point_in_time,
+            "direction": direction,
             "max_depth": max_depth,
+            "owner_id": owner_id_,
         },
+    )
+
+
+@mcp.tool()
+def get_related_memories(entity_id: str, max_depth: int = 5, owner_id: str | None = None) -> dict:
+    """Traverses semantic relations from one memory for up to ``max_depth`` hops."""
+    owner_id_ = _effective_owner(owner_id, tool_func=get_related_memories, submitted=locals())
+    return _backend_or_raise().call(
+        "get_related_memories",
+        {"entity_id": entity_id, "max_depth": max_depth, "owner_id": owner_id_},
     )
 
 
