@@ -4,6 +4,8 @@ Status: Approved brainstorming specification; implementation has not started.
 
 Intended reviewer: Claude. Review this plan against the current source before any implementation begins.
 
+Claude source review completed on 2026-08-18. Its six must-resolve findings are incorporated below; the review artifact is `plans/core_memory_bootstrap_governance_review.md`. The accepted resolutions are: prohibit Track A `elaborate` against core targets, make `core_detail_memory_ids` the sole governed detail declaration, perform consolidation revalidation inside its write transaction, use an ownership-neutral internal archive path for core review, redact/normalize lifecycle free text before validation, and reject ambiguous `is_core` values.
+
 ## 1. Goal and rationale
 
 Redefine `is_core=True` as a scarce, temporary bootstrap-delivery mechanism for information an agent must know before it could reasonably know to search for it. Core memory is not a general “important knowledge” tier. Stable coding rules, user preferences, and agent behavior normally belong in `AGENTS.md`, `CLAUDE.md`, skills, or equivalent instruction files; durable project facts remain searchable normal memories. Appropriate core candidates are urgent cross-session hazards, temporary overrides, active bugs, migrations, or environment failures that could materially harm work before an agent naturally searches for them.
@@ -51,7 +53,7 @@ These are independent hard limits. The maximum theoretical stored content is the
 10. Maximum exact rendered bootstrap digest: 15,000 Unicode code points.
 11. A character means one Python Unicode code point measured with `len(text)`, not bytes, graphemes, or tokens.
 12. Core content is counted after secret redaction, Markdown auto-formatting, LF line-ending normalization, and all other transformations applied before persistence.
-13. The rendered limit includes outer XML, per-memory XML/YAML wrappers, title, lifecycle fields, separators, whitespace, and content.
+13. The rendered limit includes outer XML, per-memory XML/YAML wrappers, title, lifecycle fields, separators, whitespace, and content. Free-text lifecycle fields are secret-redacted and LF-normalized before validation, measurement, and persistence.
 14. The 2,500-character per-memory limit excludes title and lifecycle columns but includes Markdown syntax and whitespace inside `full_content`.
 15. Markdown headers and formatting consume the budget; documentation must encourage concise, actionable formatting.
 16. Capacity failure is a hard, side-effect-free failure: no proposed memory, fallback normal memory, relation, event, review token, automatic demotion, or other state is created.
@@ -86,37 +88,39 @@ These are independent hard limits. The maximum theoretical stored content is the
 39. Repeating that relation manually through `manage_relation` remains an idempotent no-op.
 40. Archiving or consolidating a detail memory does not invalidate its textual ID because exact ID lookup returns archived memories.
 41. Detail references are not automatically rewritten to successors; graph lineage records subsequent evolution.
+42. `core_detail_memory_ids` is the sole authority for governed core-detail membership and the three-detail cap. Incidental graph edges are not silently adopted into that declaration, and no other write path may create an `elaborates_on` edge targeting a core.
 
 ### Bootstrap behavior
 
-42. Bootstrap injects core memories only.
-43. Remove project-memory injection, event injection, pending-request material, and the associated CLI options and machinery.
-44. Remove the arbitrary `--core-limit 20`.
-45. Every entity with `is_core=True` and `status != "archived"` counts and is injected.
-46. Archived entities and historical versions do not count. Superseded but non-archived cores still count until demoted or archived.
-47. Ordering is: overdue reviews first, earliest upcoming review, creation time, UUID tie-breaker.
-48. Bootstrap fails closed if any active-core invariant is malformed or capacity is exceeded.
-49. Failure injects one bounded `<core-bootstrap-error>` report, never an arbitrary subset, truncated digest, or oversized digest.
-50. An overdue but otherwise valid core is not a bootstrap invariant failure.
+43. Bootstrap injects core memories only.
+44. Remove existing project-memory injection and its CLI options/machinery. The current source has no event or pending-request bootstrap path to remove; preserving that absence is a regression requirement, not an implementation deletion.
+45. Remove the arbitrary `--core-limit 20`.
+46. Every entity with `is_core=True` and `status != "archived"` counts and is injected.
+47. Archived entities and historical versions do not count. Superseded but non-archived cores still count until demoted or archived.
+48. Ordering is: overdue reviews first, earliest upcoming review, creation time, UUID tie-breaker.
+49. Bootstrap fails closed if any active-core invariant is malformed or capacity is exceeded.
+50. Failure injects one bounded `<core-bootstrap-error>` report, never an arbitrary subset, truncated digest, or oversized digest.
+51. An overdue but otherwise valid core is not a bootstrap invariant failure.
 
 ### Consolidation and review
 
-51. Consolidation must never silently inherit core status.
-52. If any parent is core and `is_core` is omitted, reject with an actionable error.
-53. A consolidated core requires explicit `is_core=True` plus every required lifecycle field.
-54. Explicit `is_core=False` may consolidate/archive core parents into a normal result.
-55. Keep Track A’s ordinary `consolidate` restriction against core candidates; deliberate core consolidation uses `commit_consolidation` directly.
-56. Add a synchronous `review_core_memory` tool with `retain`, `demote`, and `archive` outcomes.
-57. Review is a direct operation, not a request, queue, event-driven workflow, or background task.
-58. Meaningful content revision remains a `store_memory` update. The review tool changes lifecycle state only.
-59. The confusing current overwrite mechanism—same title or explicit ID—must be revisited later for weaker models, but a general update API is out of scope here.
+52. Consolidation must never silently inherit core status.
+53. If any parent is core and `is_core` is omitted, reject with an actionable error.
+54. A consolidated core requires explicit `is_core=True` plus every required lifecycle field.
+55. Explicit `is_core=False` may consolidate/archive core parents into a normal result.
+56. Keep Track A’s ordinary `consolidate` restriction against core candidates; deliberate core consolidation uses `commit_consolidation` directly.
+57. Remove `elaborate` from `_CORE_SAFE_DISPOSITIONS`. Track A may offer only `distinct` and `supersede` for a core candidate; deliberate detail linking occurs only by updating the core's declared `detail_memory_ids`.
+58. Add a synchronous `review_core_memory` tool with `retain`, `demote`, and `archive` outcomes.
+59. Review is a direct operation, not a request, queue, event-driven workflow, or background task.
+60. Meaningful content revision remains a `store_memory` update. The review tool changes lifecycle state only.
+61. The confusing current overwrite mechanism—same title or explicit ID—must be revisited later for weaker models, but a general update API is out of scope here.
 
 ### Documentation and model usability
 
-60. Rules may not exist only in constants, comments, or tests.
-61. Document them in MCP schemas/descriptions, README, AGENT_GUIDE, hook documentation, and SALTMDB skills/global integration guidance.
-62. Replace old guidance that treats core as permanent behavioral law or permits private subagent cores.
-63. Luna usability testing is required for the public schemas and instructions. It must clarify that review timestamps are absolute, reviewer `owner_id` is identity rather than an ownership permission, core-only fields are rejected rather than ignored, blocking boundaries are explicit, and detail relation direction/atomicity is explicit.
+62. Rules may not exist only in constants, comments, or tests.
+63. Document them in MCP schemas/descriptions, README, AGENT_GUIDE, hook documentation, and SALTMDB skills/global integration guidance.
+64. Replace old guidance that treats core as permanent behavioral law or permits private subagent cores.
+65. Luna usability testing is required for the public schemas and instructions. It must clarify that review timestamps are absolute, reviewer `owner_id` is identity rather than an ownership permission, core-only fields are rejected rather than ignored, blocking boundaries are explicit, and detail relation direction/atomicity is explicit.
 
 ## 3. Data model and canonical governance service
 
@@ -134,9 +138,11 @@ core_detail_memory_ids TEXT
 
 `core_detail_memory_ids` stores a JSON array of full UUIDs. Relations remain the semantic graph; the JSON declaration preserves intended references if archival expires an edge. Add a partial index on review time/creation for `is_core=1 AND status != 'archived'`.
 
-Update every entity-copy/write surface: raw insert/update, archived SCD history copy, single consolidation, bulk consolidation, fixture schemas, and test DDL. Demoted normal memories may retain historical lifecycle data, but enforcement and rendering ignore it while `is_core=False`.
+Update every entity-copy/write surface: raw insert/update, archived SCD history copy, single consolidation, and bulk consolidation. Tests already use `schema.init_db()` and contain no duplicate entity DDL, so nullable-column propagation requires no separate fixture-schema migration. Demoted normal memories may retain historical lifecycle data, but enforcement and rendering ignore it while `is_core=False`.
 
 Create one focused core-governance service used by bootstrap and every mutation path. It owns constants, normalization and validation, active-core loading, overdue detection, exact rendering, per-memory contribution sizing, prospective-state admission, balanced rejection responses, fail-closed error rendering, detail validation, and review operations. Do not duplicate these rules in CLI, memory, and consolidation services.
+
+The service must strictly parse tri-state `is_core`: accept only an omitted/null value or actual booleans at typed API boundaries (and only explicitly documented wire representations if daemon transport requires them). Reject values such as `"yes"`, arbitrary integers, and other unrecognized inputs with an actionable validation error; never coerce an ambiguous value to false.
 
 Canonical constants:
 
@@ -156,6 +162,8 @@ CORE_MAX_REVIEW_DAYS = 30
 ```
 
 The canonical renderer must deterministically and safely encode title, type, `is_core`, reason, exit condition, review timestamp, due flag, and `full_content`; normalize line endings; escape literal closing memory tags; size the exact final digest; and use stable ordering. Prospective sizing should render the longer due-flag representation if representation lengths differ so becoming overdue cannot increase the payload beyond admission.
+
+Before their length checks or persistence, `core_reason`, `core_exit_condition`, and `core_review_rationale` must pass through the same secret-redaction semantics as content and must normalize CRLF/CR to LF. Tests must prove both ordering and that secrets never survive in these columns.
 
 ## 4. Public APIs and mutation semantics
 
@@ -187,6 +195,8 @@ The daemon’s single-writer coordinator is useful but is not the correctness bo
 
 Capacity errors use `status=REJECTED`, `error_code=CORE_CAPACITY_EXCEEDED`, violated dimensions, limits, current/proposed totals, required reductions, and the balanced inventory. The message explicitly confirms that no state was written.
 
+Agent-facing schemas must enumerate every possible `store_memory` top-level status and distinguish terminal `REJECTED` capacity/validation failures from token-bearing `REVIEW_REQUIRED` and retryable `REVIEW_STALE` responses. Do not reuse the internal quality-gate `REJECT` spelling as a public core-capacity status.
+
 While any core is overdue, allow normal writes, review, demotion/archive, and non-expanding or reducing core edits. Block creation, promotion, rendered-size increase, core-producing consolidation, and changing the next-review timestamp except through valid `retain` review.
 
 ### `review_core_memory`
@@ -205,7 +215,7 @@ review_core_memory(
 
 - `retain` updates last-review time/by/rationale and next review without changing content, owner, status, or relations.
 - `demote` sets `is_core=False`, removes derived `#core`, clears next review, preserves provenance/reason/exit/detail IDs, and leaves the memory active/searchable.
-- `archive` uses existing archival semantics and relation expiry while preserving exact-ID retrievability and historical fields.
+- `archive` uses existing archival mutation semantics and relation expiry while preserving exact-ID retrievability and historical fields, but must not call the public owner-guarded `archive_memory` path with the reviewer identity. Implement/reuse a small internal transactional archive helper (or equivalently invoke the internal archive body without its ownership gate) so reviewer authority is honored without weakening the public `archive_memory` ownership contract.
 - Repeated demote/archive returns a structured no-op; retain against non-core/archived state rejects.
 - Review metadata changes directly, without a new full SCD content version, event, or request.
 
@@ -215,9 +225,11 @@ Register the tool in MCP, daemon dispatch, mutating-tool classification, protoco
 
 Extend single and bulk consolidation with explicit core/lifecycle/detail parameters. If any resolved parent is active core and `is_core` is omitted, reject. Explicit core output requires complete validation; explicit normal output may archive core parents. Prospective sizing removes parents archived by the same transaction and adds the result. Bulk evaluation is sequential within one transaction and all-or-nothing. Track A cannot bypass core checks through internal `commit_consolidation`. A `supersedes` edge alone never frees capacity while the old core remains active.
 
+Close the existing consolidation TOCTOU shape explicitly: parent core status, parent observed state, lifecycle/detail validity, overdue state, and prospective capacity must be re-read and revalidated inside `_do_commit`'s write transaction before destructive writes, using/extending the same observed-state mechanism as the existing content-hash/status cohesion revalidation. A pre-transaction check is advisory only. Bulk consolidation must recompute from the transaction connection after each item so SQLite's own uncommitted writes are included.
+
 ### Detail relations
 
-For each full UUID, require an existing shared non-core memory, active or archived; require its canonical title and UUID in content; create `detail --elaborates_on--> core` through the existing relation service inside the memory transaction. Relation quality rules remain active. Any failure rolls back memory and all edges; exact duplicates remain no-ops.
+For each full UUID declared in `core_detail_memory_ids`, require an existing shared non-core memory, active or archived; require its canonical title and UUID in content; create `detail --elaborates_on--> core` through the existing relation service inside the memory transaction. Relation quality rules remain active. Any failure rolls back memory and all edges; exact duplicates remain no-ops. The JSON declaration—not arbitrary incoming graph edges—is the sole governed membership list. `manage_relation` must reject any new `elaborates_on` edge whose target is core unless it is the governance service's internal atomic reconciliation path.
 
 ## 5. Bootstrap and hook redesign
 
@@ -251,13 +263,15 @@ After schemas/descriptions exist, run a cold Luna evaluation on: urgent crash ha
 
 Tests must cover:
 
-- schema migration, partial index, persistence across raw updates, SCD archive copies, demotion, single/bulk consolidation, fixtures, and derived `#core` synchronization;
+- schema migration, partial index, persistence across raw updates, SCD archive copies, demotion, single/bulk consolidation, `schema.init_db()`-created test databases, and derived `#core` synchronization;
 - exact boundaries: 2,500/2,501 content, 20/500 reason/exit, 20/1,000 rationale, 3/4 details, 5/6 cores, 15,000/15,001 rendered characters;
-- Unicode code-point counting, emoji, CRLF/CR normalization, private-core rejection, malformed placeholders, rejected core-only fields on normal memories, and preservation of omitted update fields;
+- Unicode code-point counting, emoji, CRLF/CR normalization and secret redaction across content/reason/exit/rationale, private-core rejection, malformed placeholders, strict `is_core` parsing, rejected core-only fields on normal memories, and preservation of omitted update fields;
 - capacity rejection precedence, zero side effects, complete inventory, bypass resistance for ID/title/skip paths and consolidation, and concurrent admissions;
 - 14-day default, 30-day maximum, canonical timestamps, equality-at-due boundary, ordering, overdue write boundaries, retain/demote/archive, reviewer identity independence, repeat no-ops, invalid retain rejection, and non-injection of rationale;
-- active and archived detail memories, missing/short/private/core details, textual-reference validation, atomic multi-edge rollback, duplicate relation no-op, replacement/clearing, and archived exact-ID retrieval;
-- consolidation explicitness, prospective parent removal, bulk rollback, Track A bypass prevention, and supersession not freeing capacity;
+- active and archived detail memories, missing/short/private/core details, textual-reference validation, sole-authority declaration behavior, Track A/manual-relation back-door rejection, atomic multi-edge rollback, duplicate relation no-op, replacement/clearing, and archived exact-ID retrieval;
+- consolidation explicitness, in-transaction parent/core TOCTOU revalidation, prospective parent removal, transaction-visible bulk recomputation, bulk rollback, Track A bypass prevention, and supersession not freeing capacity;
+- reviewer/target owner mismatch on core-review archive, preservation of the public archive ownership guard, and ownership-neutral internal archival semantics;
+- the documented enumeration and distinction of `REJECTED`, `REVIEW_REQUIRED`, and `REVIEW_STALE` public results;
 - core-only bootstrap, absence of project/events/requests, raw and consolidated active cores, archived exclusion, no pagination limit, canonical ordering, admission/render-size identity, bounded fail-closed output, no partial leakage, empty digest, and simplified hooks.
 
 Run the full repository gates:
@@ -279,7 +293,7 @@ Manually inspect a representative five-core digest and record characters, UTF-8 
 
 1. Have Claude review this plan against current source.
 2. Specifically review transaction boundaries, migration compatibility, every write bypass, Track A, relation atomicity, daemon protocol registration, hook behavior, and coverage.
-3. Incorporate review findings into the plan.
+3. Incorporate review findings into the plan. This step was completed for `plans/core_memory_bootstrap_governance_review.md` on 2026-08-18; any later review findings follow the same process.
 4. Do not implement until explicitly authorized by the user.
 
 ### Live-data transition
