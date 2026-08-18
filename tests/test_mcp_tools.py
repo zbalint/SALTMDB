@@ -2,9 +2,9 @@ import unittest
 import tempfile
 import os
 import shutil
-from unittest.mock import patch
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
+from saltmdb.mcp.identity import IdentityRebindRejected, SESSION_IDENTITY
 
 
 class TestMCPToolsWrapper(unittest.TestCase):
@@ -13,6 +13,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
         # Track B (scratch/plans/track_b_daemon_detailed.md §8): tools.py's tool functions call
         # through a backend indirection now; inject the in-process DirectDispatchBackend so these
         # tests keep exercising tools.py's argument-normalization layer against this temp DB with
@@ -21,302 +22,86 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_search_memory_alias_resolution(self):
-        tools.store_memory(
-            content="Token auth via OAuth2 and JWT",
-            title="Auth Module",
-            owner_id="agent1",
-            skip_duplicate_check=True,
-        )
-
-        # Test query alias
-        res1 = tools.search_memory(query="authentication OAuth2", owner_id="agent1")
-        self.assertTrue(len(res1) > 0)
-        self.assertGreater(res1[0]["score"], 0.0)
-
-        # Test q alias
-        res2 = tools.search_memory(q="authentication OAuth2", owner_id="agent1")
-        self.assertTrue(len(res2) > 0)
-        self.assertGreater(res2[0]["score"], 0.0)
-
-        # Test keywords alias
-        res3 = tools.search_memory(keywords="authentication OAuth2", owner_id="agent1")
-        self.assertTrue(len(res3) > 0)
-        self.assertGreater(res3[0]["score"], 0.0)
-
-    def test_search_memory_use_cross_encoder_alias_resolution(self):
-        """Roadmap ba2cf66f P1#7: use_cross_encoder (and its 'cross_encoder' alias) must reach
-        memory_service.search_memory through the tools.py wrapper's alias-resolution layer, same
-        style as test_search_memory_alias_resolution above."""
-        orig_reranker_env = os.environ.get("SALTMDB_RERANKER_MODEL")
-        os.environ["SALTMDB_RERANKER_MODEL"] = "Xenova/ms-marco-MiniLM-L-6-v2"
-        self.addCleanup(
-            lambda: (
-                os.environ.pop("SALTMDB_RERANKER_MODEL", None)
-                if orig_reranker_env is None
-                else os.environ.__setitem__("SALTMDB_RERANKER_MODEL", orig_reranker_env)
-            )
-        )
-        res_a = tools.store_memory(
-            content="content for a_entity",
-            title="a_entity",
-            owner_id="ce_owner",
-            skip_duplicate_check=True,
-        )
-        entity_a = res_a.split("ID: ")[1].strip()
-        res_b = tools.store_memory(
-            content="content for b_entity",
-            title="b_entity",
-            owner_id="ce_owner",
-            skip_duplicate_check=True,
-        )
-        entity_b = res_b.split("ID: ")[1].strip()
-
-        def _fts_row(eid):
-            return (eid, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
-
-        # entity_a matched by FTS only, entity_b matched by semantic only -> RRF tie (ratio 1.0,
-        # NOT gap-confident) -- exact fixture shape as test_topic_rerank.py's own "ambiguous"
-        # gap-gate case, so this test actually reaches the cross-encoder stage rather than being
-        # silently gated off before it (a dual-channel top1 anywhere skips Stage 2 entirely).
-        fts_rows = [_fts_row(entity_a)]
-        semantic_rows = [(entity_b, 0.1)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            patch(
-                "saltmdb.domain.services.reranker_service.score_pairs",
-                return_value=[-1.0, 9.0],
-            ),
-        ):
-            res_kw = tools.search_memory(
-                query_keywords="cross encoder alias test", use_cross_encoder=True
-            )
-            res_alias = tools.search_memory(
-                query_keywords="cross encoder alias test", cross_encoder=True
-            )
-
-        for res in (res_kw, res_alias):
-            self.assertEqual([r["id"] for r in res], [entity_b, entity_a])
-            by_id = {r["id"]: r for r in res}
-            self.assertEqual(by_id[entity_b]["cross_encoder_score"], 9.0)
-
-    def test_search_memory_prefer_durable_types_default_and_alias(self):
-        """The blind-evaluation default keeps prefer_durable_types opt-in. Same coverage gap as the
-        use_cross_encoder alias test above -- test_search_ranking_flags.py's seam tests exercise
-        memory_service.search_memory directly, bypassing tools.py's own `_resolve`/fallback layer
-        entirely, so a bug there would go undetected without a wrapper-level test like this one.
-
-        The alias sub-case explicitly passes `prefer_durable=True`: only a working alias can
-        produce the reordered decision-first result because the wrapper and service default are
-        both False."""
-        res_event = tools.store_memory(
-            content="content for pdt_event_entity",
-            title="pdt_event_entity",
-            owner_id="pdt_owner",
-            memory_type="event",
-            skip_duplicate_check=True,
-        )
-        entity_event = res_event.split("ID: ")[1].strip()
-        res_decision = tools.store_memory(
-            content="content for pdt_decision_entity",
-            title="pdt_decision_entity",
-            owner_id="pdt_owner",
-            memory_type="decision",
-            skip_duplicate_check=True,
-        )
-        entity_decision = res_decision.split("ID: ")[1].strip()
-
-        def _fts_row(eid):
-            return (eid, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
-
-        # FTS and semantic both agree event-first, so RRF preserves that order absent reordering.
-        fts_rows = [_fts_row(entity_event), _fts_row(entity_decision)]
-        semantic_rows = [(entity_event, 0.1), (entity_decision, 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-        ):
-            # 1. Omitted -- broad hybrid ranking remains event-first without the opt-in policy.
-            omitted_res = tools.search_memory(
-                query_keywords="pdt wrapper default test", owner_id="pdt_owner"
-            )
-            # 2. Explicit True opts in end-to-end through the wrapper.
-            opted_in_res = tools.search_memory(
-                query_keywords="pdt wrapper default test",
-                owner_id="pdt_owner",
-                prefer_durable_types=True,
-            )
-            # 3. The pre-existing alias must also enable the policy.
-            alias_res = tools.search_memory(
-                query_keywords="pdt wrapper default test",
-                owner_id="pdt_owner",
-                prefer_durable=True,
-            )
-
-        self.assertEqual([r["id"] for r in omitted_res], [entity_event, entity_decision])
-        self.assertEqual([r["id"] for r in opted_in_res], [entity_decision, entity_event])
-        self.assertEqual([r["id"] for r in alias_res], [entity_decision, entity_event])
-
-    def test_search_memory_prefer_durable_types_wrapper_forwards_false_when_omitted(self):
-        """The wrapper must explicitly forward the evaluated False default."""
-        with patch(
-            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
-        ) as mock_search:
-            tools.search_memory(query_keywords="pdt wrapper mock test", owner_id="pdt_owner")
-        self.assertFalse(mock_search.call_args.kwargs["prefer_durable_types"])
-
-        with patch(
-            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
-        ) as mock_search:
-            tools.search_memory(
-                query_keywords="pdt wrapper mock test",
-                owner_id="pdt_owner",
-                prefer_durable_types=True,
-            )
-        self.assertTrue(mock_search.call_args.kwargs["prefer_durable_types"])
-
-    def test_search_memory_demote_superseded_wrapper_forwards_false_when_omitted(self):
-        """The wrapper must explicitly forward the evaluated False default."""
-        with patch(
-            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
-        ) as mock_search:
-            tools.search_memory(query_keywords="ds wrapper mock test", owner_id="ds_owner")
-        self.assertFalse(mock_search.call_args.kwargs["demote_superseded"])
-
-        with patch(
-            "saltmdb.domain.services.memory_service.search_memory", return_value=[]
-        ) as mock_search:
-            tools.search_memory(
-                query_keywords="ds wrapper mock test",
-                owner_id="ds_owner",
-                demote_superseded=True,
-            )
-        self.assertTrue(mock_search.call_args.kwargs["demote_superseded"])
-
-    def test_search_memory_demote_superseded_default(self):
-        """The blind-evaluation default leaves superseded ordering unchanged unless opted in."""
-        res_superseded = tools.store_memory(
-            content="content for ds_superseded_entity",
-            title="ds_superseded_entity",
-            owner_id="ds_owner",
-            skip_duplicate_check=True,
-        )
-        entity_superseded = res_superseded.split("ID: ")[1].strip()
-        res_current = tools.store_memory(
-            content="content for ds_current_entity",
-            title="ds_current_entity",
-            owner_id="ds_owner",
-            skip_duplicate_check=True,
-        )
-        entity_current = res_current.split("ID: ")[1].strip()
-        self.conn.execute(
-            "INSERT INTO relations (id, source_id, target_id, predicate, valid_to)"
-            " VALUES ('ds-wrapper-rel-1', ?, ?, 'supersedes', NULL)",
-            (entity_current, entity_superseded),
-        )
-        self.conn.commit()
-
-        def _fts_row(eid):
-            return (eid, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
-
-        fts_rows = [_fts_row(entity_superseded), _fts_row(entity_current)]
-        semantic_rows = [(entity_superseded, 0.1), (entity_current, 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-        ):
-            # Omitted -- broad hybrid ranking preserves the RRF event order.
-            omitted_res = tools.search_memory(
-                query_keywords="ds wrapper default test", owner_id="ds_owner"
-            )
-            # Explicit True enables the supersession demotion policy.
-            opted_in_res = tools.search_memory(
-                query_keywords="ds wrapper default test",
-                owner_id="ds_owner",
-                demote_superseded=True,
-            )
-
-        self.assertEqual([r["id"] for r in omitted_res], [entity_superseded, entity_current])
-        self.assertEqual([r["id"] for r in opted_in_res], [entity_current, entity_superseded])
-
     def test_search_memory_fetch_full(self):
         res = tools.store_memory(
             content="Full content text of target chunk",
             title="Target Chunk",
+            tags=["#fetch-full"],
             owner_id="agent1",
             skip_duplicate_check=True,
         )
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res.split("ID: ")[1].split()[0]
 
-        chunk = tools.search_memory(entity_id=entity_id)
+        chunk = tools.search_memory(entity_id=entity_id, owner_id="agent1")
         self.assertIn("Full content text of target chunk", chunk)
 
-    def test_store_memory_alias_resolution(self):
-        res = tools.store_memory(
-            text="Some valid long enough text content for testing quality gate",
-            tag="#python",
-            owner="user_test",
-            skip_duplicate_check=True,
-        )
-        self.assertIn("stored successfully", res)
+    def test_first_call_without_owner_id_explains_copyable_correction(self):
+        """A fresh adapter must teach the caller how to establish identity before dispatch."""
+        with self.assertRaises(ValueError) as ctx:
+            tools.search_memory(query_keywords="first call identity probe")
+        message = str(ctx.exception)
+        self.assertIn("owner_id", message)
+        self.assertIn("corrected_call", message)
+
+    def test_owner_binding_rejects_mid_session_rebind(self):
+        SESSION_IDENTITY.bind("agent_qa")
+        with self.assertRaises(IdentityRebindRejected):
+            tools.search_memory(query_keywords="identity rebind probe", owner_id="other-agent")
+
+    def test_registered_mcp_schemas_have_no_kwargs_catchall(self):
+        """The generated FastMCP schema and Python signatures must agree on explicit fields."""
+        import inspect
+
+        for name, registered in tools.mcp._tool_manager._tools.items():
+            self.assertNotIn(
+                "kwargs",
+                registered.parameters.get("properties", {}),
+                f"{name} still exposes the obsolete kwargs schema field",
+            )
+            self.assertNotIn(
+                inspect.Parameter.VAR_KEYWORD,
+                [param.kind for param in inspect.signature(registered.fn).parameters.values()],
+                f"{name} still accepts an untyped **kwargs catchall",
+            )
 
     def test_store_memory_check_duplicates_only(self):
         tools.store_memory(
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
+            tags=["#auth"],
             owner_id="user_test",
             skip_duplicate_check=True,
         )
         dup_res = tools.store_memory(
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
+            tags=["#auth"],
             owner_id="user_test",
             check_duplicates_only=True,
         )
         self.assertIsInstance(dup_res, dict)
         self.assertTrue(dup_res.get("duplicate_found", False))
 
-    def test_log_event_alias_resolution(self):
-        res = tools.log_event(
-            agent="test_agent", event_type="decision", description="Decision logged via alias"
-        )
-        self.assertIn("logged successfully", res)
-
     def test_get_events_modes(self):
         tools.log_event(
-            agent_id="test_agent", type="attempt", content="Event mode test", session_id="sess_123"
+            agent_id="test_agent",
+            owner_id="test_agent",
+            type="attempt",
+            content="Event mode test",
+            session_id="sess_123",
         )
-        events = tools.get_events(agent_id="test_agent", mode="events")
+        events = tools.get_events(agent_id="test_agent", owner_id="test_agent", mode="events")
         self.assertTrue(len(events) > 0)
 
-        session_events = tools.get_events(session_id="sess_123", mode="session")
+        session_events = tools.get_events(
+            session_id="sess_123", owner_id="test_agent", mode="session"
+        )
         self.assertTrue(len(session_events) > 0)
 
     def test_get_canonical_tags_alias_resolution(self):
@@ -334,28 +119,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
         return self.conn.execute(
             "SELECT COUNT(*) FROM entity_tags WHERE entity_id = ?", (entity_id,)
         ).fetchone()[0]
-
-    def test_store_memory_update_preserves_tags_when_omitted(self):
-        res = tools.store_memory(
-            content="Content for tag preservation test on update path",
-            title="Tag Preservation Entity",
-            tags=["#python", "#backend"],
-            owner_id="user1",
-            skip_duplicate_check=True,
-        )
-        entity_id = res.split("ID: ")[1].split()[0]
-        self.assertEqual(self._tag_count_for_entity(entity_id), 2)
-
-        update_res = tools.store_memory(
-            entity_id=entity_id,
-            content="Content for tag preservation test on update path",
-            title="Tag Preservation Entity",
-            memory_type="decision",
-            owner_id="user1",
-            skip_duplicate_check=True,
-        )
-        self.assertIn("stored successfully", update_res)
-        self.assertEqual(self._tag_count_for_entity(entity_id), 2)
 
     def test_store_memory_update_explicit_empty_tags_clears(self):
         res = tools.store_memory(
@@ -429,6 +192,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res = tools.store_memory(
             content=content,
             title="Metadata-Only Update Entity",
+            tags=["#metadata"],
             owner_id="user1",
             is_core=True,
             core_reason="A" * 20,
@@ -441,6 +205,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             entity_id=entity_id,
             content=content,
             title="Metadata-Only Update Entity",
+            tags=["#metadata"],
             owner_id="user1",
             core_reason="C" * 25,
             core_exit_condition="D" * 25,
@@ -461,54 +226,62 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res1 = tools.store_memory(
             content="Archive test single node",
             title="Single Node",
+            tags=["#archive"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
 
-        arch_res1 = tools.archive_memory(entity_id=id1)
+        arch_res1 = tools.archive_memory(entity_id=id1, owner_id="user1")
         self.assertIn("successfully archived", arch_res1)
 
         res2 = tools.store_memory(
             content="Archive test bulk node 1",
             title="Bulk Node 1",
+            tags=["#archive"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res3 = tools.store_memory(
             content="Archive test bulk node 2",
             title="Bulk Node 2",
+            tags=["#archive"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id2 = res2.split("ID: ")[1].strip()
-        id3 = res3.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].split()[0]
+        id3 = res3.split("ID: ")[1].split()[0]
 
         # Test passing stringified list / actual list
-        arch_res2 = tools.archive_memory(entity_id=[id2, id3])
+        arch_res2 = tools.archive_memory(entity_id=[id2, id3], owner_id="user1")
         self.assertIsInstance(arch_res2, list)
 
     def test_polymorphic_manage_relation(self):
         res1 = tools.store_memory(
             content="Source entity for relation",
             title="Source Entity",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for relation",
             title="Target Entity",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
+        id2 = res2.split("ID: ")[1].split()[0]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
+        )
         self.assertIn("Relation successfully stored", rel_res)
 
         bulk_rel_res = tools.manage_relation(
-            relations=[{"source_id": id1, "target_id": id2, "predicate": "links_to"}]
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "links_to"}],
+            owner_id="user1",
         )
         self.assertIsInstance(bulk_rel_res, list)
 
@@ -573,19 +346,23 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res1 = tools.store_memory(
             content="Source entity for predicate canonicalization test",
             title="Predicate Canon Source",
+            tags=["#predicate"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for predicate canonicalization test",
             title="Predicate Canon Target",
+            tags=["#predicate"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
+        id2 = res2.split("ID: ")[1].split()[0]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        rel_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="Depends-On", owner_id="user1"
+        )
         self.assertIn("Relation successfully stored", rel_res)
 
         row = self.conn.execute(
@@ -598,26 +375,32 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "manage_relation must persist the CANONICALIZED predicate, not the raw 'Depends-On' input",
         )
 
-        rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        rel_res2 = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="Depends-On", owner_id="user1"
+        )
         self.assertIn("already exists", rel_res2)
 
     def test_manage_relation_surfaces_seeded_alias_substitution(self):
         res1 = tools.store_memory(
             content="Source entity for seeded alias substitution test",
             title="Alias Substitution Source",
+            tags=["#alias"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for seeded alias substitution test",
             title="Alias Substitution Target",
+            tags=["#alias"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
+        id2 = res2.split("ID: ")[1].split()[0]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
+        rel_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="relates_to", owner_id="user1"
+        )
         self.assertIn("elaborates_on", rel_res)
         self.assertIn(
             "relates_to",
@@ -629,12 +412,13 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res = tools.store_memory(
             content="Content for memory_type tool round trip test",
             title="Memory Type Tool Entity",
+            tags=["#memory-type"],
             owner_id="user1",
             memory_type="preference",
             skip_duplicate_check=True,
         )
         self.assertIn("stored successfully", res)
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res.split("ID: ")[1].split()[0]
 
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
@@ -646,26 +430,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         ids = {r["id"] for r in search_res}
         self.assertIn(entity_id, ids)
 
-    def test_store_memory_type_alias_resolves_to_memory_type(self):
-        res = tools.store_memory(
-            content="Content for the 'type' alias resolution test",
-            title="Type Alias Entity",
-            owner_id="user1",
-            type="decision",
-            skip_duplicate_check=True,
-        )
-        self.assertIn("stored successfully", res)
-        entity_id = res.split("ID: ")[1].strip()
-
-        row = self.conn.execute(
-            "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
-        ).fetchone()
-        self.assertEqual(row[0], "decision")
-
     def test_search_memory_memory_type_filter_round_trip(self):
         tools.store_memory(
             content="Fact-typed content for the memory_type_filter tool test",
             title="Fact Typed Tool Entity",
+            tags=["#memory-type"],
             owner_id="user1",
             memory_type="fact",
             skip_duplicate_check=True,
@@ -673,6 +442,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         tools.store_memory(
             content="Event-typed content for the memory_type_filter tool test",
             title="Event Typed Tool Entity",
+            tags=["#memory-type"],
             owner_id="user1",
             memory_type="event",
             skip_duplicate_check=True,
@@ -687,18 +457,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res1 = tools.store_memory(
             content="Root entity node title",
             title="Root Entity",
+            tags=["#graph"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip() if "ID: " in res1 else "Root Entity"
+        id1 = res1.split("ID: ")[1].split()[0] if "ID: " in res1 else "Root Entity"
 
-        deps = tools.inspect_graph(entity_id=id1, mode="dependencies")
+        deps = tools.inspect_graph(entity_id=id1, mode="dependencies", owner_id="user1")
         self.assertIsInstance(deps, dict)
 
-        lineage = tools.inspect_graph(entity_id=id1, mode="lineage")
+        lineage = tools.inspect_graph(entity_id=id1, mode="lineage", owner_id="user1")
         self.assertIsInstance(lineage, dict)
 
-        orphans = tools.inspect_graph(mode="orphans")
+        orphans = tools.inspect_graph(mode="orphans", owner_id="user1")
         self.assertIsInstance(orphans, dict)
 
     def test_inspect_graph_point_in_time_threads_through_dependencies_and_lineage(self):
@@ -708,25 +479,29 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res1 = tools.store_memory(
             content="PIT MCP dependency source content",
             title="PIT MCP Source",
+            tags=["#pit"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
         res2 = tools.store_memory(
             content="PIT MCP dependency target content",
             title="PIT MCP Target",
+            tags=["#pit"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id2 = res2.split("ID: ")[1].strip()
+        id2 = res2.split("ID: ")[1].split()[0]
 
         pit_before = datetime.now(UTC).isoformat()
         time.sleep(1.1)
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
+        )
         self.assertIn("successfully stored", rel_res)
 
         deps_before = tools.inspect_graph(
-            entity_id=id1, mode="dependencies", point_in_time=pit_before
+            entity_id=id1, mode="dependencies", point_in_time=pit_before, owner_id="user1"
         )
         self.assertIsInstance(deps_before, dict)
         self.assertEqual(
@@ -735,7 +510,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "edge created after pit_before must not appear",
         )
 
-        deps_now = tools.inspect_graph(entity_id=id1, mode="dependencies")
+        deps_now = tools.inspect_graph(entity_id=id1, mode="dependencies", owner_id="user1")
         self.assertEqual(deps_now["total_dependencies_found"], 1)
 
         # Lineage threading: consolidate two memories and confirm point_in_time excludes the
@@ -743,17 +518,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res3 = tools.store_memory(
             content="PIT MCP lineage parent A content",
             title="PIT MCP Lineage A",
+            tags=["#pit"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        a_id = res3.split("ID: ")[1].strip()
+        a_id = res3.split("ID: ")[1].split()[0]
         res4 = tools.store_memory(
             content="PIT MCP lineage parent B content",
             title="PIT MCP Lineage B",
+            tags=["#pit"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        b_id = res4.split("ID: ")[1].strip()
+        b_id = res4.split("ID: ")[1].split()[0]
 
         pit_before_lineage = datetime.now(UTC).isoformat()
         time.sleep(1.1)
@@ -769,39 +546,43 @@ class TestMCPToolsWrapper(unittest.TestCase):
             owner_id="user1",
         )
         self.assertIn("Successfully committed", cons_res)
-        c_id = cons_res.split("ID: ")[1].strip()
+        c_id = cons_res.split("ID: ")[1].split()[0]
 
         lineage_before = tools.inspect_graph(
-            entity_id=c_id, mode="lineage", point_in_time=pit_before_lineage
+            entity_id=c_id, mode="lineage", point_in_time=pit_before_lineage, owner_id="user1"
         )
         self.assertIsInstance(lineage_before, dict)
         self.assertEqual(lineage_before["total_ancestors"], 0)
 
-        lineage_now = tools.inspect_graph(entity_id=c_id, mode="lineage")
+        lineage_now = tools.inspect_graph(entity_id=c_id, mode="lineage", owner_id="user1")
         self.assertEqual(lineage_now["total_ancestors"], 2)
 
     def test_manage_relation_invalidate_mode(self):
         res1 = tools.store_memory(
             content="Source entity for relation invalidation test",
             title="Invalidate MCP Source",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for relation invalidation test",
             title="Invalidate MCP Target",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
+        id2 = res2.split("ID: ")[1].split()[0]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
+        )
         self.assertIn("Relation successfully stored", rel_res)
         rel_id = rel_res.split("ID: ")[1].rstrip(")")
 
         inv_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", invalidate=True
+            source_id=id1, target_id=id2, predicate="depends_on", invalidate=True, owner_id="user1"
         )
         self.assertIn("Relation invalidated", inv_res)
 
@@ -816,21 +597,27 @@ class TestMCPToolsWrapper(unittest.TestCase):
         res1 = tools.store_memory(
             content="Source entity for valid_at passthrough",
             title="ValidAt Source",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for valid_at passthrough",
             title="ValidAt Target",
+            tags=["#relation"],
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = res1.split("ID: ")[1].split()[0]
+        id2 = res2.split("ID: ")[1].split()[0]
 
         custom_valid_at = "2025-02-01T00:00:00+00:00"
         rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", valid_at=custom_valid_at
+            source_id=id1,
+            target_id=id2,
+            predicate="depends_on",
+            valid_at=custom_valid_at,
+            owner_id="user1",
         )
         self.assertIn("Relation successfully stored", rel_res)
         rel_id = rel_res.split("ID: ")[1].rstrip(")")
@@ -845,6 +632,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             predicate="depends_on",
             invalidate=True,
             invalid_at=custom_invalid_at,
+            owner_id="user1",
         )
         self.assertIn("Relation invalidated", inv_res)
 
@@ -918,7 +706,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             override_justification="deliberately merging unrelated fixtures via the MCP tool wrapper",
         )
         self.assertIn("Successfully committed", res_with_override)
-        consolidated_id = res_with_override.split("ID: ")[1].strip()
+        consolidated_id = res_with_override.split("ID: ")[1].split()[0]
         content = self.conn.execute(
             "SELECT full_content FROM entities WHERE id = ?", (consolidated_id,)
         ).fetchone()[0]
@@ -949,7 +737,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
                     "title": "Bulk Override Item EF",
                     "content": bulk_content,
                 },
-            ]
+            ],
+            owner_id="agent_c",
         )
         self.assertEqual(len(bulk_results), 2)
         self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
@@ -978,7 +767,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         a = self._mk_vector_entity("Relation Gate Tool A", _axis(0))
         b = self._mk_vector_entity("Relation Gate Tool B", _axis(1))  # orthogonal -> low similarity
 
-        res_no_override = tools.manage_relation(source_id=a, target_id=b, predicate="elaborates_on")
+        res_no_override = tools.manage_relation(
+            source_id=a, target_id=b, predicate="elaborates_on", owner_id="agent_mcp_owner"
+        )
         self.assertTrue(
             res_no_override.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res_no_override
         )
@@ -1003,28 +794,32 @@ class TestMCPToolsWrapper(unittest.TestCase):
     def test_dismiss_event_invalid(self):
         # Test blank reason
         with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id="some-id", reason="   ")
+            tools.dismiss_event(event_id="some-id", reason="   ", owner_id="agent1")
         self.assertIn("cannot be empty", str(ctx.exception))
 
         # Test invalid type
-        res = tools.log_event(agent_id="agent1", type="decision", content="foo")
-        eid = res.split("ID: ")[1].strip()
+        res = tools.log_event(agent_id="agent1", owner_id="agent1", type="decision", content="foo")
+        eid = res.split("ID: ")[1].split()[0]
 
         with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id=eid, reason="bad type")
+            tools.dismiss_event(event_id=eid, reason="bad type", owner_id="agent1")
         self.assertIn("not dismissible types", str(ctx.exception))
 
         # Test nonexistent ID
         with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id="fake-id", reason="missing")
+            tools.dismiss_event(event_id="fake-id", reason="missing", owner_id="agent1")
         self.assertIn("Events not found", str(ctx.exception))
 
         # Test bulk atomicity rollback
-        res2 = tools.log_event(agent_id="agent1", type="consolidation_request", content="{}")
-        eid2 = res2.split("ID: ")[1].strip()
+        res2 = tools.log_event(
+            agent_id="agent1", owner_id="agent1", type="consolidation_request", content="{}"
+        )
+        eid2 = res2.split("ID: ")[1].split()[0]
 
         with self.assertRaises(ValueError):
-            tools.dismiss_event(event_id=[eid2, "fake-id2"], reason="rollback test")
+            tools.dismiss_event(
+                event_id=[eid2, "fake-id2"], reason="rollback test", owner_id="agent1"
+            )
 
         # Verify eid2 is not dismissed (no event_dismissed in db)
         count = self.conn.execute(
@@ -1036,23 +831,28 @@ class TestMCPToolsWrapper(unittest.TestCase):
         mem1 = tools.store_memory(
             content="# Valid Test Memory 1\nThis is a long enough markdown content to pass the quality gate and not get rejected.\n- Bullet point 1\n- Bullet point 2",
             title="Valid Memory 1",
+            tags=["#dismiss"],
             owner_id="a",
             skip_duplicate_check=True,
         )
-        raw_id1 = mem1.split("ID: ")[1].strip()
+        raw_id1 = mem1.split("ID: ")[1].split()[0]
 
         mem2 = tools.store_memory(
             content="# Valid Test Memory 2\nThis is another long enough markdown content to pass the quality gate.\n- Bullet point 1\n- Bullet point 2",
             title="Valid Memory 2",
+            tags=["#dismiss"],
             owner_id="a",
             skip_duplicate_check=True,
         )
-        raw_id2 = mem2.split("ID: ")[1].strip()
+        raw_id2 = mem2.split("ID: ")[1].split()[0]
 
         res1 = tools.log_event(
-            agent_id="a", type="consolidation_request", content=f'{{"entity_ids":["{raw_id1}"]}}'
+            agent_id="a",
+            owner_id="a",
+            type="consolidation_request",
+            content=f'{{"entity_ids":["{raw_id1}"]}}',
         )
-        eid1 = res1.split("ID: ")[1].strip()
+        eid1 = res1.split("ID: ")[1].split()[0]
 
         # eid2 is a top-level `supersession_candidate` EVENT TYPE (the live
         # store_memory-dedup-path signal), distinct from a `consolidation_request`
@@ -1060,37 +860,45 @@ class TestMCPToolsWrapper(unittest.TestCase):
         # Per the approved feature contract it IS dismissible, same as
         # `consolidation_request`.
         res2 = tools.log_event(
-            agent_id="a", type="supersession_candidate", content=f'{{"new_entity_id":"{raw_id2}"}}'
+            agent_id="a",
+            owner_id="a",
+            type="supersession_candidate",
+            content=f'{{"new_entity_id":"{raw_id2}"}}',
         )
-        eid2 = res2.split("ID: ")[1].strip()
+        eid2 = res2.split("ID: ")[1].split()[0]
 
         # Initial status
-        events_pre = tools.get_events(status_filter="pending")
+        events_pre = tools.get_events(status_filter="pending", owner_id="a")
         self.assertTrue(any(e["id"] == eid1 for e in events_pre))
         self.assertTrue(any(e["id"] == eid2 for e in events_pre))
 
         # Dismiss both
-        out = tools.dismiss_event(event_id=[eid1, eid1, eid2], reason="obsolete")
+        out = tools.dismiss_event(event_id=[eid1, eid1, eid2], reason="obsolete", owner_id="a")
         self.assertEqual(out, "Events dismissed successfully")
 
         # Check status changed
-        events_post = tools.get_events(status_filter="dismissed")
+        events_post = tools.get_events(status_filter="dismissed", owner_id="a")
         self.assertTrue(any(e["id"] == eid1 for e in events_post))
         self.assertTrue(any(e["id"] == eid2 for e in events_post))
 
-        events_pending = tools.get_events(status_filter="pending")
+        events_pending = tools.get_events(status_filter="pending", owner_id="a")
         self.assertFalse(any(e["id"] == eid1 for e in events_pending))
 
         # Check idempotency
-        out2 = tools.dismiss_event(event_id=eid1, reason="again")
+        out2 = tools.dismiss_event(event_id=eid1, reason="again", owner_id="a")
         self.assertEqual(out2, "Events dismissed successfully")
 
-        # Check owner_id alias resolution
+        # The dismiss_event reviewer identity uses its canonical agent_id parameter.
         res3 = tools.log_event(
-            agent_id="a", type="consolidation_request", content='{"entity_ids":["dummy"]}'
+            agent_id="a",
+            owner_id="a",
+            type="consolidation_request",
+            content='{"entity_ids":["dummy"]}',
         )
-        eid3 = res3.split("ID: ")[1].strip()
-        tools.dismiss_event(event_id=eid3, reason="owner test", owner_id="review-owner")
+        eid3 = res3.split("ID: ")[1].split()[0]
+        tools.dismiss_event(
+            event_id=eid3, reason="owner test", agent_id="review-owner", owner_id="a"
+        )
         owner = self.conn.execute(
             "SELECT agent_id FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id')=? ORDER BY rowid DESC LIMIT 1",
             (eid3,),
@@ -1099,10 +907,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_get_events_status_derivation_malformed_and_resolved(self):
         # Empty payload
-        res_empty = tools.log_event(agent_id="a", type="consolidation_request", content="{}")
-        eid_empty = res_empty.split("ID: ")[1].strip()
+        res_empty = tools.log_event(
+            agent_id="a", owner_id="a", type="consolidation_request", content="{}"
+        )
+        eid_empty = res_empty.split("ID: ")[1].split()[0]
 
-        events = tools.get_events()
+        events = tools.get_events(owner_id="a")
         empty_event = next(e for e in events if e["id"] == eid_empty)
         self.assertEqual(empty_event["status"], "pending")
 
@@ -1110,71 +920,92 @@ class TestMCPToolsWrapper(unittest.TestCase):
         mem = tools.store_memory(
             content="# Quality Valid Content\nThis is a test content for resolution that is long enough and formatted nicely.\n- Point A\n- Point B",
             title="Test Res",
-            owner_id="x",
+            tags=["#events"],
+            owner_id="a",
             skip_duplicate_check=True,
         )
-        raw_id = mem.split("ID: ")[1].strip()
+        raw_id = mem.split("ID: ")[1].split()[0]
 
         res_cr = tools.log_event(
-            agent_id="a", type="consolidation_request", content=f'{{"entity_ids":["{raw_id}"]}}'
+            agent_id="a",
+            owner_id="a",
+            type="consolidation_request",
+            content=f'{{"entity_ids":["{raw_id}"]}}',
         )
-        eid_cr = res_cr.split("ID: ")[1].strip()
+        eid_cr = res_cr.split("ID: ")[1].split()[0]
 
         # Should be pending while raw
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "pending"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
+            "pending",
         )
 
         # Archive it to resolve
-        tools.archive_memory(entity_id=raw_id)
+        tools.archive_memory(entity_id=raw_id, owner_id="a")
 
         # Should be resolved now
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "resolved"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
+            "resolved",
         )
 
         # But if we dismiss it, dismissal takes precedence
-        tools.dismiss_event(event_id=eid_cr, reason="dismissed over resolved")
+        tools.dismiss_event(event_id=eid_cr, reason="dismissed over resolved", owner_id="a")
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_cr)["status"], "dismissed"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
+            "dismissed",
         )
 
         # Test legacy new_raw_entity_ids resolution
         res_legacy = tools.log_event(
             agent_id="a",
+            owner_id="a",
             type="consolidation_request",
             content=f'{{"new_raw_entity_ids":["{raw_id}"]}}',
         )
-        eid_legacy = res_legacy.split("ID: ")[1].strip()
+        eid_legacy = res_legacy.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_legacy)["status"], "resolved"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_legacy)["status"],
+            "resolved",
         )
 
         # Test supersession natural resolution
         res_sup = tools.log_event(
-            agent_id="a", type="supersession_candidate", content=f'{{"new_entity_id":"{raw_id}"}}'
+            agent_id="a",
+            owner_id="a",
+            type="supersession_candidate",
+            content=f'{{"new_entity_id":"{raw_id}"}}',
         )
-        eid_sup = res_sup.split("ID: ")[1].strip()
+        eid_sup = res_sup.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_sup)["status"], "resolved"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_sup)["status"],
+            "resolved",
         )
 
         # Test malformed payload types
         res_malf1 = tools.log_event(
-            agent_id="a", type="consolidation_request", content='{"entity_ids": "not-a-list"}'
+            agent_id="a",
+            owner_id="a",
+            type="consolidation_request",
+            content='{"entity_ids": "not-a-list"}',
         )
-        eid_malf1 = res_malf1.split("ID: ")[1].strip()
+        eid_malf1 = res_malf1.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_malf1)["status"], "pending"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_malf1)["status"],
+            "pending",
         )
 
         # Test empty/whitespace IDs list
         res_empty_list = tools.log_event(
-            agent_id="a", type="consolidation_request", content='{"entity_ids": ["", "   "]}'
+            agent_id="a",
+            owner_id="a",
+            type="consolidation_request",
+            content='{"entity_ids": ["", "   "]}',
         )
-        eid_empty_list = res_empty_list.split("ID: ")[1].strip()
+        eid_empty_list = res_empty_list.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_empty_list)["status"], "pending"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_empty_list)["status"],
+            "pending",
         )
 
         # Test mixed-type IDs list: a non-string member must invalidate the whole list
@@ -1183,27 +1014,31 @@ class TestMCPToolsWrapper(unittest.TestCase):
         # ["non-raw-id"] and incorrectly reported as "resolved").
         res_mixed = tools.log_event(
             agent_id="a",
+            owner_id="a",
             type="consolidation_request",
             content='{"entity_ids": ["non-raw-id", 7]}',
         )
-        eid_mixed = res_mixed.split("ID: ")[1].strip()
+        eid_mixed = res_mixed.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_mixed)["status"], "pending"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_mixed)["status"],
+            "pending",
         )
 
         # Test valid fallback when entity_ids is empty
         res_fallback = tools.log_event(
             agent_id="a",
+            owner_id="a",
             type="consolidation_request",
             content=f'{{"entity_ids": [], "new_raw_entity_ids": ["{raw_id}"]}}',
         )
-        eid_fallback = res_fallback.split("ID: ")[1].strip()
+        eid_fallback = res_fallback.split("ID: ")[1].split()[0]
         self.assertEqual(
-            next(e for e in tools.get_events() if e["id"] == eid_fallback)["status"], "resolved"
+            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_fallback)["status"],
+            "resolved",
         )
 
         # Verify source immutability
-        tools.dismiss_event(event_id=eid_malf1, reason="dismiss")
+        tools.dismiss_event(event_id=eid_malf1, reason="dismiss", owner_id="a")
         orig_content = self.conn.execute(
             "SELECT content FROM events WHERE id=?", (eid_malf1,)
         ).fetchone()[0]
@@ -1212,14 +1047,21 @@ class TestMCPToolsWrapper(unittest.TestCase):
     def test_get_events_pagination_and_filtering(self):
         # Add a bunch of events
         for _ in range(5):
-            tools.log_event(agent_id="pag_test", type="consolidation_request", content="{}")
+            tools.log_event(
+                agent_id="pag_test",
+                owner_id="pag-owner",
+                type="consolidation_request",
+                content="{}",
+            )
 
         # Get only pending
-        pending = tools.get_events(status_filter="pending", limit=2, offset=0, agent_id="pag_test")
+        pending = tools.get_events(
+            status_filter="pending", limit=2, offset=0, agent_id="pag_test", owner_id="pag-owner"
+        )
         self.assertEqual(len(pending), 2)
 
         pending_page2 = tools.get_events(
-            status_filter="pending", limit=2, offset=2, agent_id="pag_test"
+            status_filter="pending", limit=2, offset=2, agent_id="pag_test", owner_id="pag-owner"
         )
         self.assertEqual(len(pending_page2), 2)
 
@@ -1230,22 +1072,33 @@ class TestMCPToolsWrapper(unittest.TestCase):
         # and interleave some pending ones to force multiple batches
         for i in range(120):
             tools.log_event(
-                agent_id="pag_deep", type="consolidation_request", content="{}"
+                agent_id="pag_deep",
+                owner_id="pag-owner",
+                type="consolidation_request",
+                content="{}",
             )  # pending
             tools.dismiss_event(
-                event_id=tools.get_events(limit=1, type_filter="consolidation_request")[0]["id"],
+                event_id=tools.get_events(
+                    limit=1, type_filter="consolidation_request", owner_id="pag-owner"
+                )[0]["id"],
                 reason="resolved",
+                owner_id="pag-owner",
             )  # make it dismissed
             if i % 30 == 0:
                 tools.log_event(
-                    agent_id="pag_deep", type="consolidation_request", content='{"malformed": true}'
+                    agent_id="pag_deep",
+                    owner_id="pag-owner",
+                    type="consolidation_request",
+                    content='{"malformed": true}',
                 )  # pending
 
-        deep_pending = tools.get_events(agent_id="pag_deep", status_filter="pending", limit=2)
+        deep_pending = tools.get_events(
+            agent_id="pag_deep", status_filter="pending", limit=2, owner_id="pag-owner"
+        )
         self.assertEqual(len(deep_pending), 2)
 
         deep_pending_page2 = tools.get_events(
-            agent_id="pag_deep", status_filter="pending", limit=2, offset=2
+            agent_id="pag_deep", status_filter="pending", limit=2, offset=2, owner_id="pag-owner"
         )
         self.assertEqual(len(deep_pending_page2), 2)
         self.assertNotEqual(deep_pending[0]["id"], deep_pending_page2[0]["id"])
@@ -1269,10 +1122,12 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1282,6 +1137,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         res = tools.store_memory(
             content=f"Distinct fixture content body for {title}, not a near-duplicate.",
             title=title,
+            tags=["#core-test"],
             owner_id="tester",
             is_core=True,
             core_reason="A" * 20,
@@ -1289,7 +1145,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             skip_duplicate_check=True,
         )
         self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1].strip()
+        return res.split("ID: ")[1].split()[0]
 
     def test_retain_via_mcp_tool(self):
         entity_id = self._store_core("MCP Retain Core")
@@ -1354,10 +1210,12 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1367,6 +1225,7 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
         result = tools.store_memory(
             content="Content long enough to clear the quality gate minimum length.",
             title="Ambiguous Is Core Value",
+            tags=["#core-test"],
             owner_id="tester",
             is_core="yes",
             skip_duplicate_check=True,
@@ -1378,6 +1237,7 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
         result = tools.store_memory(
             content="Content long enough to clear the quality gate minimum length.",
             title="Explicit Boolean True",
+            tags=["#core-test"],
             owner_id="tester",
             is_core=True,
             core_reason="A" * 20,

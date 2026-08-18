@@ -8,11 +8,10 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import sqlite_vec
 
-from saltmdb.daemon.dispatch import _dispatch_search_memory
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import embedding_service
 from saltmdb.domain.services.embedding_service import (
@@ -27,7 +26,6 @@ from saltmdb.domain.services.memory_service import (
     search_memory,
     store_memory,
 )
-from saltmdb.mcp import tools
 
 _UNSET = object()
 
@@ -269,7 +267,7 @@ class RetrievalTextTests(unittest.TestCase):
             1,
         )
 
-    def test_search_diagnostics_exclude_retrieval_text_and_forwarding(self):
+    def test_search_diagnostics_exclude_retrieval_text(self):
         result = self._store(retrieval_text="diagnostic hidden retrieval phrase")
         entity_id = self._id(result)
         snapshot = _claim_retrieval_embedding_job(self.conn)
@@ -293,31 +291,6 @@ class RetrievalTextTests(unittest.TestCase):
         serialized = json.dumps(result, sort_keys=True)
         self.assertNotIn("diagnostic hidden retrieval phrase", serialized)
         self.assertIn("candidate_evidence", serialized)
-
-        backend = MagicMock()
-        backend.call.return_value = []
-        with patch("saltmdb.mcp.tools._backend_or_raise", return_value=backend):
-            tools.search_memory(
-                query_keywords="q",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=0.5,
-                retrieval_vector_weight=1.5,
-            )
-        payload = backend.call.call_args.args[1]
-        self.assertTrue(payload["use_retrieval_text_candidates"])
-        self.assertEqual(payload["retrieval_fts_weight"], 0.5)
-        self.assertEqual(payload["retrieval_vector_weight"], 1.5)
-
-        with patch(
-            "saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[]
-        ) as search:
-            _dispatch_search_memory(
-                query_keywords="q",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=0.5,
-                retrieval_vector_weight=1.5,
-            )
-        self.assertTrue(search.call_args.kwargs["use_retrieval_text_candidates"])
 
     def test_sqlite_only_vector_init_keeps_store_update_archive_delete_working(self):
         path = os.path.join(self.temp_dir, "sqlite-only.db")

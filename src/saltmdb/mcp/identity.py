@@ -9,10 +9,10 @@ only into RpcBackend (§4.5), never into daemon/dispatch.py's DISPATCH_TABLE or
 DirectDispatchBackend -- the latter also runs INSIDE the daemon (its own RPC handler) and is
 shared across sessions there, exactly the case this must not touch.
 
-Phase 1 scope: bind and inject only. The hard failure on a first call with no owner_id at all
-(§4.5's "this error text is load-bearing") lands in Phase 2 alongside the tools.py signature
-rewrite -- landing it here would break every existing test that calls a tool without owner_id
-(tests/test_mcp_tools.py, tests/test_tag_merge_tool.py), per the plan's explicit Phase 1/2 split.
+The tool boundary performs the first-call hard failure (including its corrected-call guidance),
+while this holder remains deliberately small: it only owns the immutable bind/inject state.
+Keeping validation in tools.py also means DirectDispatchBackend tests exercise the same contract
+without contaminating the shared daemon dispatch path.
 """
 
 from __future__ import annotations

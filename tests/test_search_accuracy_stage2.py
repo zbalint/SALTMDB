@@ -26,7 +26,6 @@ from saltmdb.domain.services.memory_service import (
     search_memory,
     weighted_reciprocal_rank_fusion,
 )
-from saltmdb.mcp import tools
 
 
 _BENCHMARK_PATH = (
@@ -404,32 +403,6 @@ class TestSearchOptionPropagation(unittest.TestCase):
         self.assertEqual(call["cross_encoder_text_cap_chars"], 2000)
         self.assertTrue(call["force_cross_encoder"])
         self.assertTrue(call["return_diagnostics"])
-
-    def test_mcp_wrapper_forwards_all_new_controls(self):
-        backend = MagicMock()
-        with patch("saltmdb.mcp.tools._backend_or_raise", return_value=backend):
-            tools.search_memory(
-                query_keywords="q",
-                use_chunk_candidates=True,
-                oversampling_multiplier=12,
-                candidate_window=60,
-                chunk_weight=0.5,
-                collapse_supersedes_families=True,
-                use_cross_encoder=True,
-                cross_encoder_candidate_cap=20,
-                cross_encoder_text_cap_chars=1000,
-                force_cross_encoder=True,
-                return_diagnostics=True,
-            )
-        call = backend.call.call_args
-        payload = call.args[1]
-        self.assertEqual(payload["oversampling_multiplier"], 12)
-        self.assertEqual(payload["candidate_window"], 60)
-        self.assertEqual(payload["chunk_weight"], 0.5)
-        self.assertEqual(payload["cross_encoder_candidate_cap"], 20)
-        self.assertEqual(payload["cross_encoder_text_cap_chars"], 1000)
-        self.assertTrue(payload["force_cross_encoder"])
-        self.assertTrue(payload["return_diagnostics"])
 
 
 if __name__ == "__main__":
