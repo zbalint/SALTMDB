@@ -137,6 +137,12 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _store(self, title, memory_type, is_core=None, tags=None):
+        core_kwargs = {}
+        if is_core:
+            core_kwargs = {
+                "core_reason": "Test fixture core reason describing a hazard for memory_type coverage.",
+                "core_exit_condition": "Test fixture exit condition: the memory_type test tears down its temp DB.",
+            }
         res = store_memory(
             content=f"Seed content for search/scan memory_type tests: {title}",
             title=title,
@@ -146,6 +152,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
             tags=tags,
             skip_duplicate_check=True,
             db_connection=self.conn,
+            **core_kwargs,
         )
         self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
         return res.split("ID: ")[1].strip()

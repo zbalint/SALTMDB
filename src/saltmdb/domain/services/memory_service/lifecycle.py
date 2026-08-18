@@ -100,6 +100,44 @@ def touch_memory_access(entity_id: str, db_connection) -> None:
         )
 
 
+def _archive_entity_unchecked(conn, resolved_id: str) -> None:
+    """The archival write itself, with NO ownership/status-guard checks -- callers are
+    responsible for deciding whether this id may be archived. Must run inside an already-open
+    write transaction (the caller's own BEGIN IMMEDIATE), never opens its own.
+
+    Extracted out of archive_memory's `_do_archive` closure (memory-core rework, core-governance
+    plan resolved gap #3) so review_core_memory's `archive` outcome can reuse the exact same
+    archival mechanics through an ownership-NEUTRAL path -- a reviewing agent's owner_id need not
+    match the entity's own owner_id, which archive_memory's public ownership-mismatch guard would
+    otherwise incorrectly reject. archive_memory itself keeps that guard for its own callers
+    (unchanged below); only this internal body is shared.
+    """
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        """
+        UPDATE entities
+        SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
+        WHERE id = ? AND status != 'archived'
+    """,
+        (now, now, resolved_id),
+    )
+    conn.execute(
+        """
+        UPDATE relations
+        SET valid_to = ?
+        WHERE (source_id = ? OR target_id = ?) AND valid_to IS NULL
+    """,
+        (now, resolved_id, resolved_id),
+    )
+    from saltmdb.domain.services.embedding_service import (
+        cancel_embedding_jobs_for_entity,
+        cancel_retrieval_embedding_jobs_for_entity,
+    )
+
+    cancel_embedding_jobs_for_entity(conn, resolved_id)
+    cancel_retrieval_embedding_jobs_for_entity(conn, resolved_id, clear_vector=True)
+
+
 def archive_memory(  # noqa: PLR0911
     entity_id: str = None,
     owner_id: str = None,
@@ -140,39 +178,12 @@ def archive_memory(  # noqa: PLR0911
         if owner_id and existing_owner and existing_owner != owner_id:
             return f"Error: Memory '{resolved_id}' owner mismatch."
 
-        now = datetime.now(UTC).isoformat()
-
-        def _do_archive():
-            conn.execute(
-                """
-                UPDATE entities
-                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
-                WHERE id = ? AND status != 'archived'
-            """,
-                (now, now, resolved_id),
-            )
-            conn.execute(
-                """
-                UPDATE relations
-                SET valid_to = ?
-                WHERE (source_id = ? OR target_id = ?) AND valid_to IS NULL
-            """,
-                (now, resolved_id, resolved_id),
-            )
-            from saltmdb.domain.services.embedding_service import (
-                cancel_embedding_jobs_for_entity,
-                cancel_retrieval_embedding_jobs_for_entity,
-            )
-
-            cancel_embedding_jobs_for_entity(conn, resolved_id)
-            cancel_retrieval_embedding_jobs_for_entity(conn, resolved_id, clear_vector=True)
-
         if _in_transaction:
-            _do_archive()
+            _archive_entity_unchecked(conn, resolved_id)
         else:
 
             def _write(c):
-                _do_archive()
+                _archive_entity_unchecked(conn, resolved_id)
 
             write_transaction_retrying(conn, _write)
 

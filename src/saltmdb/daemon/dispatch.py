@@ -17,6 +17,7 @@ persistent DB, so it was never in scope for this boundary to begin with).
 """
 
 from saltmdb.domain.services import (
+    core_governance_service,
     corpus_snapshot_service,
     event_service,
     librarian_service,
@@ -154,6 +155,10 @@ def _dispatch_store_memory(**kw):
             else memory_service.RETRIEVAL_TEXT_UNSET
         ),
         coordinator=kw.get("coordinator"),
+        core_reason=kw.get("core_reason"),
+        core_exit_condition=kw.get("core_exit_condition"),
+        core_review_after=kw.get("core_review_after"),
+        detail_memory_ids=kw.get("detail_memory_ids"),
     )
 
 
@@ -252,7 +257,38 @@ def _dispatch_commit_consolidation(**kw):
         owner_id=kw.get("owner_id"),
         context_id=kw.get("context_id"),
         override_justification=kw.get("override_justification"),
+        core_reason=kw.get("core_reason"),
+        core_exit_condition=kw.get("core_exit_condition"),
+        core_review_after=kw.get("core_review_after"),
+        detail_memory_ids=kw.get("detail_memory_ids"),
     )
+
+
+def _dispatch_review_core_memory(**kw):
+    # Same pattern as every other DISPATCH_TABLE entry: no explicit connection is threaded
+    # through kwargs -- the domain call's own get_connection() resolves to the ambient
+    # coordinator-owned connection via connection.py's contextvar when running inside
+    # coordinator.submit (see dispatch_tool's MUTATING_TOOLS branch below).
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+
+    conn = get_connection(get_db_path())
+    return core_governance_service.review_core_memory(
+        conn,
+        entity_id=_required_str(kw, "entity_id"),
+        outcome=_required_str(kw, "outcome"),
+        review_rationale=_required_str(kw, "review_rationale"),
+        owner_id=_required_str(kw, "owner_id"),
+        core_review_after=kw.get("core_review_after"),
+    )
+
+
+def _dispatch_get_core_bootstrap_digest(**kw):
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+
+    conn = get_connection(get_db_path())
+    return core_governance_service.render_bootstrap_response(conn)
 
 
 def _dispatch_inspect_graph(**kw):
@@ -324,6 +360,8 @@ DISPATCH_TABLE = {
     "inspect_graph": _dispatch_inspect_graph,
     "get_events": _dispatch_get_events,
     "export_corpus_snapshot": _dispatch_export_corpus_snapshot,
+    "review_core_memory": _dispatch_review_core_memory,
+    "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
 }
 
 # Tool calls that can mutate persistent state.  The daemon server calls these
@@ -338,6 +376,7 @@ MUTATING_TOOLS = frozenset(
         "archive_memory",
         "manage_relation",
         "commit_consolidation",
+        "review_core_memory",
     }
 )
 

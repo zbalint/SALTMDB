@@ -129,6 +129,8 @@ class TestBugFixes(unittest.TestCase):
             is_core=True,
             title="Core Guideline",
             db_path=self.db_path,
+            core_reason="Test fixture core reason for the is_core flag persistence regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
         )
         self.assertIn("Knowledge stored successfully", res)
 

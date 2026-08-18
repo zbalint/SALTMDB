@@ -23,6 +23,7 @@ from saltmdb.domain.services.cohesion_service import (
     min_pairwise_cohesion,
 )
 from saltmdb.domain.services.event_service import log_event
+from saltmdb.domain.services import core_governance_service
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +122,17 @@ def store_relation(  # noqa: C901, PLR0915
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
+    _allow_core_elaborates_on: bool = False,
 ) -> str:
     """Stores a directional relationship edge between two knowledge entities.
+
+    Core-memory governance (see core_governance_service.py, resolved gap #1): an `elaborates_on`
+    edge whose target is an active core memory may only be created through that core's own
+    `core_detail_memory_ids` declaration (store_memory/commit_consolidation), never directly via
+    this function -- `_allow_core_elaborates_on=True` is set ONLY by
+    core_governance_service.reconcile_detail_relations' internal reconciliation calls, never by
+    manage_relation or any other external caller. Re-submitting an edge that already exists
+    remains an idempotent no-op regardless of this flag (checked before the guard below).
 
     _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
     bulk_store_relations, whose caller already holds an open write transaction around the
@@ -166,7 +176,7 @@ def store_relation(  # noqa: C901, PLR0915
     now = datetime.now(UTC).isoformat()
     try:
 
-        def _do_store():  # noqa: C901
+        def _do_store():  # noqa: C901, PLR0912
             normalized_requested = _normalize_predicate_name(predicate)
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
             note = (
@@ -189,6 +199,23 @@ def store_relation(  # noqa: C901, PLR0915
             ).fetchone()
             if existing_edge:
                 return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+
+            # D1b (core-memory governance, resolved gap #1): a NEW elaborates_on edge into an
+            # active core is governed exclusively by that core's own core_detail_memory_ids
+            # declaration -- reject any other path from creating one. Checked after the no-op
+            # short-circuit above (rule 39: repeating the relation remains a no-op) and before
+            # the ordinary similarity/contradiction gates below.
+            if canonical_predicate == "elaborates_on" and not _allow_core_elaborates_on:
+                target_row = conn.execute(
+                    "SELECT is_core, status FROM entities WHERE id = ?", (resolved_target,)
+                ).fetchone()
+                if target_row and bool(target_row[0]) and target_row[1] != "archived":
+                    return (
+                        "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                        "core memory are governed exclusively by that core's own "
+                        "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                        "-- manage_relation cannot create them directly."
+                    )
 
             # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
             # (archived, no usable content) forces a gate failure requiring override -- same
@@ -672,6 +699,27 @@ def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
     return resolved_parents
 
 
+def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, str]]:
+    """Captures {entity_id: (content_hash, status)} for every id, eligible-status-filtered the
+    same way cohesion_service.get_fresh_entity_centroids' fresh-join path is (`status !=
+    'archived'`) -- gives single-parent consolidation (which never runs the cohesion gate, so it
+    never gets a centroid-path observed_state) an equivalent pre-transaction snapshot for
+    _do_commit's TOCTOU revalidation (resolved review finding #8). An id that is already archived
+    at observation time deliberately gets NO entry here, exactly like an unresolved/archived
+    parent in the >=2-parent centroid path -- so it fails the same "missing observed_state entry"
+    revalidation in _do_commit, never silently passing because its archived status happened not
+    to change again before commit."""
+    if not entity_ids:
+        return {}
+    placeholders = ",".join("?" for _ in entity_ids)
+    rows = conn.execute(
+        f"SELECT id, content_hash, status FROM entities WHERE id IN ({placeholders}) "
+        "AND status != 'archived'",
+        entity_ids,
+    ).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
 def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     parent_ids: list[str],
     title: str,
@@ -685,6 +733,10 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     override_justification: str | None = None,
     metadata: dict | None = None,
     memory_type: str | None = None,
+    core_reason: str | None = None,
+    core_exit_condition: str | None = None,
+    core_review_after: str | None = None,
+    detail_memory_ids: list | None = None,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
@@ -713,6 +765,15 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     (this function previously had no columns for either) -- both default None/unset, matching
     every existing caller's behavior exactly (memory_type still resolves to 'fact' via the same
     COALESCE the plain store path uses).
+
+    Core-memory governance (see core_governance_service.py): `is_core` is NEVER inherited from
+    parents. If any resolved parent is currently an active core (is_core=1, status != 'archived')
+    and `is_core` is omitted, the commit is rejected -- pass explicit `is_core=True` (with
+    `core_reason`/`core_exit_condition`/`core_review_after`, optionally `detail_memory_ids`) to
+    keep the result core, or `is_core=False` to let it become an ordinary memory (archiving the
+    core parent's status along with everything else). The authoritative core-state resolution,
+    including capacity admission, happens fresh inside `_do_commit`'s own TOCTOU revalidation --
+    a pre-transaction check would not catch a parent whose core/status changed concurrently.
     """
     if not parent_ids or not isinstance(parent_ids, list):
         return "Error: parent_ids must be a non-empty list of UUID strings."
@@ -749,7 +810,10 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     unresolved: dict[str, str]
     observed_state: dict[str, tuple[str, str]]
     if not cohesion_gate_applicable:
-        centroids, unresolved, observed_state = {}, {}, {}
+        centroids, unresolved = {}, {}
+        # Resolved review finding #8: single-parent consolidation still needs a TOCTOU
+        # observed_state snapshot even though it never runs the cohesion gate.
+        observed_state = _observe_parent_state(conn, resolved_parents)
         min_sim, offending_pair = 1.0, None
     else:
         if (
@@ -806,15 +870,12 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             f"Justification: {justification}"
         )
 
-    if is_core is None:
-        placeholders_core = ",".join("?" for _ in resolved_parents)
-        core_row = conn.execute(
-            f"SELECT 1 FROM entities WHERE id IN ({placeholders_core}) AND is_core = 1 LIMIT 1",
-            resolved_parents,
-        ).fetchone()
-        is_core_val = 1 if core_row else 0
-    else:
-        is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
+    try:
+        is_core_requested = core_governance_service.parse_is_core(is_core)
+    except ValueError as e:
+        if should_close:
+            close_connection(conn)
+        return f"Error: {e}"
 
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
@@ -885,11 +946,13 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # cleanly) aborts the whole transaction. This is also what catches an earlier item
             # in the same bulk batch having already archived a shared parent: that parent's
             # current status reads back 'archived', mismatching its recorded observed_state.
-            # Gated on cohesion_gate_applicable (P1, Codex review bf4qtkp7j / 7a5eba85): for a
-            # single-parent commit the gate never ran, so observed_state is deliberately empty --
-            # there is no cohesion snapshot to revalidate against, and requiring one here would
-            # make every single-parent commit spuriously fail this check.
-            if cohesion_gate_applicable and resolved_parents:
+            # Resolved review finding #8: state revalidation must not be coupled to whether the
+            # cohesion gate ran -- only the cosine-similarity comparison itself is legitimately
+            # parent-count-gated. observed_state is now populated for every resolved parent
+            # regardless of parent count (get_fresh_entity_centroids for >=2 parents, the
+            # equivalent _observe_parent_state helper for a single parent), so this revalidation
+            # runs unconditionally whenever there are resolved parents at all.
+            if resolved_parents:
                 placeholders_reval = ",".join("?" for _ in resolved_parents)
                 current_rows = conn.execute(
                     f"SELECT id, content_hash, status FROM entities WHERE id IN ({placeholders_reval})",
@@ -903,6 +966,61 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             f"cohesion decision was made (observed={observed_state.get(pid)}, "
                             f"current={current_state.get(pid)})"
                         )
+
+            # Core-memory governance (resolved gap #2): authoritative, in-transaction resolution
+            # -- fresh parent is_core/status read, never the outer-scope pre-transaction snapshot
+            # -- so a parent that turned core (or lost core status) between preflight and commit
+            # is always caught here, not silently missed. Raises ValueError on a lifecycle/
+            # validation failure or CoreGovernanceRejected on a capacity failure; either aborts
+            # this transaction before any destructive write below.
+            try:
+                core_state = core_governance_service.resolve_consolidation_core_state(
+                    conn,
+                    resolved_parents=resolved_parents,
+                    is_core_requested=is_core_requested,
+                    content=redacted_content,
+                    scope=scope,
+                    core_reason=core_reason,
+                    core_exit_condition=core_exit_condition,
+                    core_review_after=core_review_after,
+                    detail_memory_ids=detail_memory_ids,
+                )
+                if core_state["is_core"]:
+                    # Resolved review finding #2 / resolved follow-up review finding #2:
+                    # core-producing consolidation must check the overdue-write boundary against
+                    # EVERY active core, including a resolved parent this same transaction is
+                    # about to archive -- silently replacing an overdue parent with a freshly
+                    # created core would reset its lifecycle without recording review provenance
+                    # through review_core_memory. The only sanctioned recovery paths remain an
+                    # explicit non-core consolidation, or a prior review_core_memory
+                    # (retain/demote/archive) of the overdue core.
+                    core_governance_service.enforce_overdue_boundary(
+                        conn,
+                        entity_id=None,
+                        effective_is_core=True,
+                        is_new_core=core_state["is_new_core"],
+                        review_after_changed=False,
+                    )
+            except ValueError as e:
+                raise core_governance_service.CoreGovernanceRejected(str(e)) from e
+
+            if core_state["is_core"]:
+                rejection = core_governance_service.check_capacity_admission(
+                    conn,
+                    exclude_ids=resolved_parents,
+                    new_entry={
+                        "id": consolidated_id,
+                        "title": clean_title,
+                        "memory_type": memory_type or "fact",
+                        "core_reason": core_state["core_reason"],
+                        "core_exit_condition": core_state["core_exit_condition"],
+                        "core_review_after": core_state["core_review_after"],
+                        "full_content": redacted_content,
+                        "owner_id": owner_val,
+                    },
+                )
+                if rejection is not None:
+                    raise core_governance_service.CoreGovernanceRejected(rejection)
 
             # A3: atomic audit trail for an override commit -- written as the first destructive
             # step for fail-fast clarity. log_event catches its own exceptions and RETURNS an
@@ -934,11 +1052,12 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         f"Failed to record consolidation override audit event: {audit_result}"
                     )
 
+            is_core_val = 1 if core_state["is_core"] else 0
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute(
                 """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'))
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
             """,
                 (
                     consolidated_id,
@@ -960,8 +1079,23 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     quality_flags_str,
                     metadata_str,
                     memory_type,
+                    core_state["core_reason"],
+                    core_state["core_exit_condition"],
+                    core_state["core_review_after"],
+                    json.dumps(core_state["core_detail_memory_ids"])
+                    if core_state["core_detail_memory_ids"]
+                    else None,
                 ),
             )
+
+            if core_state["is_core"] and core_state["core_detail_memory_ids"]:
+                core_governance_service.reconcile_detail_relations(
+                    conn,
+                    core_id=consolidated_id,
+                    owner_id=owner_val,
+                    new_detail_ids=core_state["core_detail_memory_ids"],
+                    previous_detail_ids=[],
+                )
 
             # The new consolidated entity and all archived parents transition
             # with their durable embedding work in this one transaction.
@@ -1130,6 +1264,10 @@ def bulk_commit_consolidation(
                 w = item.get("weight", 1)
                 is_core = item.get("is_core")
                 override_justification = item.get("override_justification")
+                core_reason = item.get("core_reason")
+                core_exit_condition = item.get("core_exit_condition")
+                core_review_after = item.get("core_review_after")
+                detail_memory_ids = item.get("detail_memory_ids")
 
                 item_centroids = {pid: centroids[pid] for pid in p_ids if pid in centroids}
                 item_unresolved = {pid: unresolved[pid] for pid in p_ids if pid in unresolved}
@@ -1146,6 +1284,10 @@ def bulk_commit_consolidation(
                     weight=w,
                     is_core=is_core,
                     override_justification=override_justification,
+                    core_reason=core_reason,
+                    core_exit_condition=core_exit_condition,
+                    core_review_after=core_review_after,
+                    detail_memory_ids=detail_memory_ids,
                     db_connection=conn,
                     _in_transaction=True,
                     _precomputed_centroids=item_centroids,

@@ -16,7 +16,7 @@ This directory contains production-ready reference hook scripts and harness conf
 ### Shell Scripts
 | File | Hook Event | Description |
 | :--- | :--- | :--- |
-| [`saltmdb-session-bootstrap.sh`](saltmdb-session-bootstrap.sh) | `SessionStart` / `PreInvocation` / `sessionStart` | Extracts `cwd` from `stdin` JSON, determines project keywords, and runs `saltmdb-cli bootstrap-digest` to auto-inject core persona rules and project memory digests into context. |
+| [`saltmdb-session-bootstrap.sh`](saltmdb-session-bootstrap.sh) | `SessionStart` / `PreInvocation` / `sessionStart` | Runs `saltmdb-cli bootstrap-digest` (no arguments) to auto-inject the canonical core-memory digest -- global, core-only, no project-keyword search -- into context. |
 | [`saltmdb-pre-action-gate.sh`](saltmdb-pre-action-gate.sh) | `PreToolUse` | Enforces Rule 1 ("Think Before You Leap") by checking the session transcript and denying code edit / bash execution until at least one `search_memory` call is logged. |
 | [`saltmdb-copilot-pre-tool.sh`](saltmdb-copilot-pre-tool.sh) | `preToolUse` (Copilot CLI) | Intercepts tool calls in GitHub Copilot CLI, checking session transcript history and outputting JSON permission decisions (`{"permissionDecision": "allow"}` or `"deny"`) on `stdout`. |
 | [`saltmdb-self-critique-gate.sh`](saltmdb-self-critique-gate.sh) | `Stop` / `agentStop` | Triggers a mandatory 2-question quality self-reflection before closing turns that involved code or file modifications. |

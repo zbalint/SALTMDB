@@ -18,6 +18,14 @@ class TestCoreTagSync(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _store(self, title, is_core=None, tags=None, entity_id=None):
+        core_kwargs = {}
+        if is_core:
+            # Core-memory governance: creating/promoting a core now requires these lifecycle
+            # fields -- supplied here so every #core-tag-sync fixture in this file stays valid.
+            core_kwargs = {
+                "core_reason": "Test fixture core reason describing a hazard for tag-sync coverage.",
+                "core_exit_condition": "Test fixture exit condition: the tag-sync test tears down its temp DB.",
+            }
         res = store_memory(
             content=f"Seed content for core-tag-sync tests: {title}",
             title=title,
@@ -27,6 +35,7 @@ class TestCoreTagSync(unittest.TestCase):
             entity_id=entity_id,
             skip_duplicate_check=True,
             db_connection=self.conn,
+            **core_kwargs,
         )
         self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
         return res.split("ID: ")[1].split()[0]

@@ -333,3 +333,25 @@ DAEMON_SHUTDOWN_GRACE_PERIOD_S = 30
 # connected needs an explicit lifecycle-policy change and is intentionally separate work.
 EMBED_STALL_CHECK_INTERVAL_S = 300
 EMBED_STALL_PENDING_AGE_THRESHOLD_S = 300
+
+# Core-memory bootstrap governance (see plans/core_memory_bootstrap_governance_detailed.md and
+# src/saltmdb/domain/services/core_governance_service.py, the sole owner of these rules). is_core
+# is a scarce, temporary bootstrap-delivery mechanism, not a general "important knowledge" tier --
+# these three limits are independent hard caps, enforced inside every write transaction that can
+# create/promote/enlarge a core memory, never just advisory.
+CORE_MAX_ACTIVE = 5  # max non-archived is_core=1 entities at once, global across the whole DB
+CORE_MAX_CONTENT_CHARS = 2500  # max full_content per core, Unicode code points (len(text))
+CORE_MAX_RENDERED_CHARS = 15000  # max exact rendered bootstrap digest, Unicode code points
+CORE_REASON_MIN_CHARS = 20
+CORE_REASON_MAX_CHARS = 500
+CORE_EXIT_MIN_CHARS = 20
+CORE_EXIT_MAX_CHARS = 500
+CORE_REVIEW_RATIONALE_MIN_CHARS = 20
+CORE_REVIEW_RATIONALE_MAX_CHARS = 1000
+CORE_MAX_DETAIL_MEMORY_IDS = 3  # per-core cap on core_detail_memory_ids, the sole governed
+# declaration of a core's linked detail memories -- incidental graph edges are never adopted into it
+CORE_DEFAULT_REVIEW_DAYS = 14
+CORE_MAX_REVIEW_DAYS = 30  # both the default-omitted-timestamp ceiling and retain's own bound
+CORE_BOOTSTRAP_ERROR_MAX_CHARS = 12000  # hard cap on render_bootstrap_error's output (resolved
+# review finding #6) -- comfortably below CORE_MAX_RENDERED_CHARS so a heavily corrupt active-core
+# set can never itself trigger the hook truncation/spill behavior this feature exists to prevent

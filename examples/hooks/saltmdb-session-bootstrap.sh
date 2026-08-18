@@ -1,20 +1,11 @@
 #!/bin/bash
 # SALTMDB Session Bootstrap Hook Script
-# Extract CWD from stdin JSON, determine project keywords, and fetch bootstrap digest.
-
-input="$(cat)"
-
-if command -v jq >/dev/null 2>&1; then
-  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
-else
-  cwd="$(printf '%s' "$input" | grep -o '"cwd"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
-fi
-[ -z "$cwd" ] && cwd="$PWD"
-project_keywords="$(basename "$cwd")"
+# Prints the canonical core-memory bootstrap digest. Core-memory bootstrap governance rewrite:
+# bootstrap-digest is global and core-only now (no per-project keyword search, no CWD/project-name
+# derivation) -- every active core memory counts and is injected, nothing else.
 
 CLI="$HOME/.mcp/SALTMDB/.venv/bin/saltmdb-cli"
 [ -x "$CLI" ] || exit 0
 
-SALTMDB_ENABLE_SEMANTIC=true "$CLI" bootstrap-digest \
-  --project-keywords "$project_keywords" 2>/dev/null
+"$CLI" bootstrap-digest 2>/dev/null
 exit 0

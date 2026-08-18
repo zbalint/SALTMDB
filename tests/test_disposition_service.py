@@ -122,6 +122,8 @@ class TestPreflightSurfacing(DispositionServiceTestBase):
             "Core Architecture Invariant",
             "SALTMDB never opens more than one SQLite connection per process by design invariant.",
             is_core=True,
+            core_reason="Test fixture core reason for a disposition-service regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             skip_duplicate_check=True,
         )
         entity_id = r1.split("ID: ")[1].strip()
@@ -134,9 +136,7 @@ class TestPreflightSurfacing(DispositionServiceTestBase):
         cand = r2["candidates"][0]
         self.assertEqual(cand["target_entity_id"], entity_id)
         self.assertTrue(cand["target_is_core"])
-        self.assertEqual(
-            set(cand["available_dispositions"]), {"distinct", "supersede", "elaborate"}
-        )
+        self.assertEqual(set(cand["available_dispositions"]), {"distinct", "supersede"})
         self.assertNotIn("consolidate", cand["available_dispositions"])
 
 
@@ -199,11 +199,18 @@ class TestCommitDispositions(DispositionServiceTestBase):
         ).fetchone()[0]
         self.assertEqual(old_weight, 5, "supersede must never auto-demote the target's weight")
 
-    def test_elaborate_disposition_on_core_target_creates_elaborates_on_edge(self):
+    def test_elaborate_disposition_rejected_even_against_a_core_target(self):
+        """Core-memory governance resolved gap #1: 'elaborate' was a Track A back door that let
+        any unrelated store_memory call attach itself as a core's "detail" outside
+        core_detail_memory_ids governance -- removed outright. Deliberate detail linking now only
+        happens by updating the core's own declared detail_memory_ids (store_memory's
+        detail_memory_ids param), never through this disposition path."""
         r1 = self._store(
             "Core Rule About Redaction",
             "Secrets are redacted from all stored content before persistence, no exceptions.",
             is_core=True,
+            core_reason="Test fixture core reason for a disposition-service regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             skip_duplicate_check=True,
         )
         core_id = r1.split("ID: ")[1].strip()
@@ -218,22 +225,15 @@ class TestCommitDispositions(DispositionServiceTestBase):
             review_token=r2["review_token"],
             dispositions=[self._resolve_one(r2, "elaborate")],
         )
-        self.assertTrue(r3.startswith("Knowledge stored successfully"))
-        new_id = r3.split("ID: ")[1].strip()
+        self.assertIsInstance(r3, str)
+        self.assertTrue(r3.startswith("Error"))
 
+        # Nothing was written and no edge was created -- a rejected disposition is side-effect-free.
         rel = self.conn.execute(
-            "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
-            (new_id, core_id),
+            "SELECT id FROM relations WHERE target_id = ? AND predicate = 'elaborates_on'",
+            (core_id,),
         ).fetchone()
-        self.assertIsNotNone(rel)
-        self.assertEqual(rel[0], "elaborates_on")
-
-        core_status = self.conn.execute(
-            "SELECT status FROM entities WHERE id = ?", (core_id,)
-        ).fetchone()[0]
-        self.assertEqual(
-            core_status, "raw", "elaborate must never archive/consolidate a core target"
-        )
+        self.assertIsNone(rel)
 
     def test_consolidate_disposition_no_temp_raw_node_ever_created(self):
         r1 = self._store(
@@ -301,6 +301,8 @@ class TestCommitDispositions(DispositionServiceTestBase):
             "Core Invariant Two",
             "Every write transaction uses BEGIN IMMEDIATE to acquire the write lock up front.",
             is_core=True,
+            core_reason="Test fixture core reason for a disposition-service regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             skip_duplicate_check=True,
         )
         r2 = self._store(

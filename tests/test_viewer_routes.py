@@ -290,6 +290,8 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
                 title="Core Architecture Fact",
                 owner_id="viewer_tester",
                 is_core=True,
+                core_reason="Test fixture core reason for the viewer is_core filter regression test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
                 skip_duplicate_check=True,
                 db_connection=self.conn,
             )
@@ -358,6 +360,12 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
 
     def test_get_entities_is_core_combines_with_other_filters_and_pagination(self):
         def create_entity(title, is_core, memory_type):
+            core_kwargs = {}
+            if is_core:
+                core_kwargs = {
+                    "core_reason": "Test fixture core reason for the viewer entities is_core filter test.",
+                    "core_exit_condition": "Test fixture exit condition: this regression test tears down its temp DB.",
+                }
             result = store_memory(
                 content=f"Unique content for {title}",
                 title=title,
@@ -366,6 +374,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
                 memory_type=memory_type,
                 skip_duplicate_check=True,
                 db_connection=self.conn,
+                **core_kwargs,
             )
             return result.split("ID: ")[1].strip()
 
@@ -414,6 +423,8 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             title="Quantum Ground State",
             owner_id="viewer_tester",
             is_core=True,
+            core_reason="Test fixture core reason for the viewer search is_core filter regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             skip_duplicate_check=True,
             db_connection=self.conn,
         )

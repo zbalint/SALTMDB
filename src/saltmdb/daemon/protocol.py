@@ -28,6 +28,7 @@ WRITE_TOOLS = frozenset(
         "manage_relation",
         "commit_consolidation",
         "dismiss_event",
+        "review_core_memory",
     }
 )
 READ_TOOLS = frozenset(
@@ -38,6 +39,10 @@ READ_TOOLS = frozenset(
         "inspect_graph",
         "get_events",
         "export_corpus_snapshot",
+        # Internal-only (no public MCP tool): returns the already-rendered core-memory bootstrap
+        # digest via core_governance_service.render_bootstrap_response. Read-only -- classified
+        # here so the RPC mid-call-failure contract (client.py) retries it like any other read.
+        "get_core_bootstrap_digest",
     }
 )
 

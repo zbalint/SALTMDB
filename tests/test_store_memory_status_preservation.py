@@ -62,6 +62,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             content="Content that will be archived and then metadata-patched.",
             owner_id="agent_c",
             is_core=True,
+            core_reason="Test fixture core reason for the archived-entity status preservation regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
         )
 
@@ -95,6 +97,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             content="Synthesized content produced from the raw source memory.",
             owner_id="agent_c",
             is_core=True,
+            core_reason="Test fixture core reason for the consolidated-entity status preservation regression test.",
+            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
         )
 

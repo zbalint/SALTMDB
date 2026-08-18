@@ -19,6 +19,7 @@ from saltmdb.db.connection import get_connection, write_transaction_retrying, cl
 from saltmdb.utils.text import extract_title_and_snippet, compute_content_hash
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
+from saltmdb.domain.services import core_governance_service
 
 from . import tags as tag_ops
 from . import validation
@@ -83,6 +84,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     transaction. Returns (entity_id, was_existing) -- `was_existing` gates the "[Tip: ...]" suffix
     the same way the pre-Track-A code's local `existing` variable did.
     """
+    was_existing_entity = bool(proposed.get("resolved_entity_id"))
     entity_id = proposed.get("resolved_entity_id") or str(uuid.uuid4())
     title = proposed["title"]
     redacted_content = proposed["content"]
@@ -101,6 +103,81 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     retrieval_text_provided = bool(proposed.get("retrieval_text_provided", False))
     requested_retrieval_text = proposed.get("retrieval_text")
     now = datetime.now(UTC).isoformat()
+
+    # Core-memory governance (resolved gap #2): AUTHORITATIVE, in-transaction re-resolution --
+    # runs against `conn`, the caller's own open write transaction, never the pre-transaction
+    # snapshot store_memory computed for its own advisory early-return. Raises
+    # core_governance_service.CoreGovernanceRejected on a concurrent-state TOCTOU failure
+    # (capacity or lifecycle), aborting this transaction with zero side effects.
+    try:
+        is_core_requested = core_governance_service.parse_is_core(is_core)
+        core_state = core_governance_service.resolve_store_core_state(
+            conn,
+            entity_id=entity_id if was_existing_entity else None,
+            is_core_requested=is_core_requested,
+            content=redacted_content,
+            scope=scope,
+            core_reason=proposed.get("core_reason"),
+            core_exit_condition=proposed.get("core_exit_condition"),
+            core_review_after=proposed.get("core_review_after"),
+            detail_memory_ids=proposed.get("detail_memory_ids"),
+        )
+        # store_memory never itself changes `status` (preserved verbatim on an update -- only
+        # archive_memory/commit_consolidation/review_core_memory do); a fresh insert always
+        # lands as 'raw'. An existing ARCHIVED target therefore stays archived after this write
+        # and never becomes bootstrap-visible -- it must not count against capacity or the
+        # overdue boundary (plan rule 47: archived entities never count), even though its
+        # is_core column is still being set/validated above for consistency.
+        target_will_be_active = True
+        if was_existing_entity:
+            status_row = conn.execute(
+                "SELECT status FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            # A None row means the caller supplied an explicit entity_id that doesn't exist yet
+            # -- _resolve_existing_entity_id always echoes an explicit entity_id back verbatim
+            # regardless of whether it exists (see its own docstring), so was_existing_entity
+            # alone can't distinguish "real update" from "insert under a caller-chosen id". Both
+            # a status_row of None and any non-archived status land this write as active.
+            target_will_be_active = status_row is None or status_row[0] != "archived"
+
+        effective_memory_type = core_governance_service.resolve_effective_memory_type(
+            conn,
+            entity_id=entity_id if was_existing_entity else None,
+            requested_memory_type=memory_type,
+        )
+        prospective_entry = {
+            "id": entity_id,
+            "title": title,
+            "memory_type": effective_memory_type,
+            "core_reason": core_state["core_reason"],
+            "core_exit_condition": core_state["core_exit_condition"],
+            "core_review_after": core_state["core_review_after"],
+            "full_content": redacted_content,
+            "owner_id": owner_id,
+        }
+
+        if target_will_be_active:
+            core_governance_service.enforce_overdue_boundary(
+                conn,
+                entity_id=entity_id if was_existing_entity else None,
+                effective_is_core=core_state["is_core"],
+                is_new_core=core_state["is_new_core"],
+                review_after_changed=core_state["review_after_changed"],
+                prospective_entry=prospective_entry,
+            )
+    except ValueError as e:
+        raise core_governance_service.CoreGovernanceRejected(str(e)) from e
+
+    if core_state["is_core"] and target_will_be_active:
+        rejection = core_governance_service.check_capacity_admission(
+            conn,
+            exclude_ids=[entity_id] if was_existing_entity else [],
+            new_entry=prospective_entry,
+        )
+        if rejection is not None:
+            raise core_governance_service.CoreGovernanceRejected(rejection)
+
+    is_core_val = 1 if core_state["is_core"] else 0
 
     cursor = conn.execute(
         "SELECT created_at, owner_id, valid_from, title, full_content, content_hash "
@@ -126,8 +203,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
 
         conn.execute(
             """
-             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash)
-             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash
+             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
+             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
              FROM entities WHERE id = ?
          """,
             (hist_id, valid_from if valid_from else created_at, now, entity_id),
@@ -164,21 +241,22 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             if final_retrieval_text is not None
             else None
         )
-    if is_core is None:
-        is_core_val = None
-    else:
-        is_core_val = 1 if is_core in (True, 1, "true", "1", "True") else 0
+    core_detail_ids_str = (
+        json.dumps(core_state["core_detail_memory_ids"])
+        if core_state["core_detail_memory_ids"]
+        else None
+    )
 
     conn.execute(
         """
-        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash)
-        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?)
+        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             updated_at = excluded.updated_at,
             last_accessed_at = excluded.last_accessed_at,
             owner_id = COALESCE(excluded.owner_id, entities.owner_id),
             scope = excluded.scope,
-            is_core = COALESCE(?, entities.is_core),
+            is_core = excluded.is_core,
             weight = excluded.weight,
             status = entities.status,
             title = excluded.title,
@@ -194,7 +272,11 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             quality_flags = excluded.quality_flags,
             memory_type = COALESCE(?, entities.memory_type),
             retrieval_text = excluded.retrieval_text,
-            retrieval_text_hash = excluded.retrieval_text_hash
+            retrieval_text_hash = excluded.retrieval_text_hash,
+            core_reason = excluded.core_reason,
+            core_exit_condition = excluded.core_exit_condition,
+            core_review_after = excluded.core_review_after,
+            core_detail_memory_ids = excluded.core_detail_memory_ids
     """,
         (
             entity_id,
@@ -218,9 +300,20 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             memory_type,
             final_retrieval_text,
             final_retrieval_hash,
-            is_core_val,
+            core_state["core_reason"],
+            core_state["core_exit_condition"],
+            core_state["core_review_after"],
+            core_detail_ids_str,
             memory_type,
         ),
+    )
+
+    core_governance_service.reconcile_detail_relations(
+        conn,
+        core_id=entity_id,
+        owner_id=owner_id,
+        new_detail_ids=core_state["core_detail_memory_ids"],
+        previous_detail_ids=core_state["previous_detail_memory_ids"],
     )
 
     if tags is not None:
@@ -318,6 +411,10 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     review_token: str | None = None,
     dispositions: list | None = None,
     retrieval_text: str | None | object = RETRIEVAL_TEXT_UNSET,
+    core_reason: str | None = None,
+    core_exit_condition: str | None = None,
+    core_review_after: str | None = None,
+    detail_memory_ids: list | None = None,
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
@@ -328,14 +425,24 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     is persisted; instead this returns a `REVIEW_REQUIRED` dict carrying an opaque `review_token`
     and the flagged candidates, each with an advisory (never authoritative) `suggested_label` and
     the disposition options available for it. Resend the identical call with `review_token` and
-    `dispositions` (`[{"candidate_id": ..., "disposition": "distinct"|"supersede"|"consolidate"|
-    "elaborate"}, ...]`, one entry per flagged candidate) to commit. A stale/expired token or a
-    proposed write that no longer matches what was previewed returns `REVIEW_STALE` instead of
-    persisting anything -- call again without `review_token` to get a fresh preflight.
+    `dispositions` (`[{"candidate_id": ..., "disposition": "distinct"|"supersede"|"consolidate"},
+    ...]`, one entry per flagged candidate) to commit. A stale/expired token or a proposed write
+    that no longer matches what was previewed returns `REVIEW_STALE` instead of persisting
+    anything -- call again without `review_token` to get a fresh preflight.
 
     `skip_duplicate_check=True` bypasses the preflight entirely (same as before Track A), same as
     an explicit `entity_id` or a same-title/owner/scope match already resolving this call to an
     existing entity -- in both cases this is a direct write, not a create-or-flag decision.
+
+    Core-memory governance (see core_governance_service.py): `is_core=True` requires `scope=
+    "shared"`, `core_reason`/`core_exit_condition` (each 20-500 characters), and admits a hard
+    global cap on active-core count/per-memory length/rendered bootstrap size -- a capacity
+    failure returns a `status: "REJECTED"` dict with zero side effects (no memory, relation, or
+    other state created), never a partial write. Omitting `core_reason`/`core_exit_condition`/
+    `core_review_after`/`detail_memory_ids` on an UPDATE to an already-core memory preserves the
+    existing values; supplying any of them while the effective memory is NOT core is rejected,
+    never silently ignored. `detail_memory_ids=None` preserves the current declaration, `[]`
+    clears it, a replacement list atomically reconciles the declared `elaborates_on` relations.
     """
     if not owner_id:
         return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
@@ -445,6 +552,10 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "quality_flags_str": quality_flags_str,
             "retrieval_text": normalized_retrieval_text,
             "retrieval_text_provided": retrieval_text_provided,
+            "core_reason": core_reason,
+            "core_exit_condition": core_exit_condition,
+            "core_review_after": core_review_after,
+            "detail_memory_ids": detail_memory_ids,
         }
 
         # Deferred import: disposition_service imports relation_service, which imports this very
@@ -455,16 +566,88 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         effective_db_path = db_path or get_db_path()
 
         if review_token:
-            result = disposition_service.commit_disposed_write(
-                conn, proposed, review_token, dispositions or [], effective_db_path
-            )
+            try:
+                result = disposition_service.commit_disposed_write(
+                    conn, proposed, review_token, dispositions or [], effective_db_path
+                )
+            except core_governance_service.CoreGovernanceRejected as e:
+                return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
             if isinstance(result, dict):
-                return result  # REVIEW_STALE
+                return result  # REVIEW_STALE or REJECTED
             if isinstance(result, str) and result.startswith("Error"):
                 return result
             entity_id_out = result.split("ID: ")[-1].strip()
             res_msg = result
         else:
+            # Side-effect-free advisory pre-check (plan order steps 2-6): capacity/lifecycle
+            # validation precedes Track A's duplicate/supersession preflight, so an agent
+            # rebalances core capacity BEFORE spending a round trip on disposition review. This
+            # is advisory, not the safety boundary -- _store_raw_entity re-runs the identical
+            # resolution AUTHORITATIVELY inside the write transaction (step 7/8) and raises
+            # CoreGovernanceRejected on a concurrent-state mismatch, caught below.
+            try:
+                core_state_preview = core_governance_service.resolve_store_core_state(
+                    conn,
+                    entity_id=resolved_entity_id,
+                    is_core_requested=core_governance_service.parse_is_core(is_core),
+                    content=redacted_content,
+                    scope=scope,
+                    core_reason=core_reason,
+                    core_exit_condition=core_exit_condition,
+                    core_review_after=core_review_after,
+                    detail_memory_ids=detail_memory_ids,
+                )
+                # See the matching comment in _store_raw_entity: an existing ARCHIVED target
+                # stays archived after a plain store_memory write and never becomes bootstrap-
+                # visible, so it must not count against capacity or the overdue boundary.
+                preview_target_will_be_active = True
+                if resolved_entity_id:
+                    status_row = conn.execute(
+                        "SELECT status FROM entities WHERE id = ?", (resolved_entity_id,)
+                    ).fetchone()
+                    # See the matching comment in _store_raw_entity: None means an explicit,
+                    # not-yet-existing entity_id -- still a fresh, active insert.
+                    preview_target_will_be_active = (
+                        status_row is None or status_row[0] != "archived"
+                    )
+                effective_memory_type_preview = (
+                    core_governance_service.resolve_effective_memory_type(
+                        conn,
+                        entity_id=resolved_entity_id,
+                        requested_memory_type=memory_type,
+                    )
+                )
+                prospective_entry_preview = {
+                    "id": resolved_entity_id or str(uuid.uuid4()),
+                    "title": title,
+                    "memory_type": effective_memory_type_preview,
+                    "core_reason": core_state_preview["core_reason"],
+                    "core_exit_condition": core_state_preview["core_exit_condition"],
+                    "core_review_after": core_state_preview["core_review_after"],
+                    "full_content": redacted_content,
+                    "owner_id": owner_id,
+                }
+                if preview_target_will_be_active:
+                    core_governance_service.enforce_overdue_boundary(
+                        conn,
+                        entity_id=resolved_entity_id,
+                        effective_is_core=core_state_preview["is_core"],
+                        is_new_core=core_state_preview["is_new_core"],
+                        review_after_changed=core_state_preview["review_after_changed"],
+                        prospective_entry=prospective_entry_preview,
+                    )
+            except ValueError as e:
+                return f"Error: {e}"
+
+            if core_state_preview["is_core"] and preview_target_will_be_active:
+                rejection = core_governance_service.check_capacity_admission(
+                    conn,
+                    exclude_ids=[resolved_entity_id] if resolved_entity_id else [],
+                    new_entry=prospective_entry_preview,
+                )
+                if rejection is not None:
+                    return rejection
+
             # Gated identically to the pre-Track-A dup-check: skipped whenever this call already
             # resolves to an existing entity (explicit entity_id OR a same-title/owner/scope
             # upsert match -- resolved_entity_id covers both) or the caller opted out, exactly
@@ -484,7 +667,10 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             def _write(c):
                 return _store_raw_entity(c, proposed)
 
-            entity_id_out, was_existing = write_transaction_retrying(conn, _write)
+            try:
+                entity_id_out, was_existing = write_transaction_retrying(conn, _write)
+            except core_governance_service.CoreGovernanceRejected as e:
+                return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
             res_msg = f"Knowledge stored successfully with ID: {entity_id_out}"
             if not was_existing and tags:
                 res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"

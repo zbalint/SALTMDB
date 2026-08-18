@@ -8,7 +8,7 @@ from saltmdb.daemon import protocol
 # ephemeral_service is the sole domain.services import remaining in this module (see
 # ephemeral_memory below): EPHEMERAL_CONN never touches the persistent DB, so ephemeral_memory
 # never goes over RPC and stays adapter-local, exactly as before Track B.
-from saltmdb.domain.services import ephemeral_service
+from saltmdb.domain.services import ephemeral_service, core_governance_service
 
 logger = logging.getLogger(__name__)
 
@@ -241,9 +241,34 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
     an advisory `suggested_label` (never authoritative -- use your own judgment, including calling
     it a false alarm) and the `available_dispositions` for it. Resend the identical call with
     `review_token` and `dispositions` (one `{"candidate_id": ..., "disposition": "distinct" |
-    "supersede" | "consolidate" | "elaborate"}` per flagged candidate) to commit. A stale/expired
-    token, or a resend that no longer matches what was previewed, returns `status: "REVIEW_STALE"`
-    instead -- call again without `review_token` for a fresh preflight.
+    "supersede" | "consolidate"}` per flagged candidate) to commit. A stale/expired token, or a
+    resend that no longer matches what was previewed, returns `status: "REVIEW_STALE"` instead --
+    call again without `review_token` for a fresh preflight.
+
+    Core-memory bootstrap governance: `is_core=True` marks a memory for injection into every
+    future session's bootstrap context -- it is a SCARCE, TEMPORARY mechanism for urgent
+    cross-session hazards an agent must know before it could reasonably search for them, not a
+    general "important knowledge" tier. Stable coding rules/preferences belong in AGENTS.md/
+    CLAUDE.md/skills instead. Creating or promoting a core memory requires `scope="shared"` (no
+    private cores), `core_reason` (20-500 chars: the harm that could occur before natural
+    retrieval), `core_exit_condition` (20-500 chars: the observable condition that ends the
+    urgency), and admits three independent hard caps: at most 5 active cores globally, at most
+    2,500 Unicode characters of `content` per core, and a 15,000-character exact rendered
+    bootstrap digest. A capacity failure returns `status: "REJECTED"` with `error_code:
+    "CORE_CAPACITY_EXCEEDED"`, a balanced inventory of every active core (no full content), and
+    zero side effects -- rebalance (demote/archive/shorten/consolidate existing cores) and retry;
+    this never requires a human decision. `core_review_after` defaults to 14 days out and may
+    never exceed 30 days; while ANY core is overdue for review, creating/promoting a new core,
+    enlarging an existing core's content, or changing its review timestamp is blocked (use
+    `review_core_memory` to resolve the overdue review first) -- demote/archive/non-expanding
+    edits stay allowed. Omitting `core_reason`/`core_exit_condition`/`core_review_after`/
+    `detail_memory_ids` on an update to an already-core memory preserves the existing values;
+    supplying any of them when the effective memory is NOT core is rejected, never silently
+    ignored. `detail_memory_ids` (at most 3 full UUIDs of existing shared, non-core memories whose
+    canonical title+UUID must appear in `content`) atomically maintains `elaborates_on` edges from
+    each detail memory to this core -- `None` preserves the current declaration, `[]` clears it.
+    A core must stay directly actionable on its own even if a weaker agent never follows a detail
+    link; move rationale/chronology/evidence into the linked detail memories instead.
     """
 )
 def store_memory(
@@ -259,6 +284,10 @@ def store_memory(
     review_token: str = None,
     dispositions: list = None,
     retrieval_text: str | None = _RETRIEVAL_TEXT_UNSET,
+    core_reason: str | None = None,
+    core_exit_condition: str | None = None,
+    core_review_after: str | None = None,
+    detail_memory_ids: list | None = None,
     **kwargs,
 ) -> str | dict:
     kw = _unwrap_kwargs(kwargs)
@@ -272,10 +301,14 @@ def store_memory(
     tags_ = _normalize_list_or_str(raw_tag) if raw_tag is not None else None
 
     raw_is_core = is_core if is_core is not None else _resolve(None, kw, kwargs, "is_core")
-    if raw_is_core is not None:
-        is_core_ = raw_is_core in (True, 1, "true", "1", "True")
-    else:
-        is_core_ = None
+    try:
+        # Strict tri-state parse (core-memory governance resolved gap #6): an unrecognized value
+        # like "yes" or an integer is rejected outright here, at the adapter boundary, rather
+        # than silently coerced to False the way the old `in (True, 1, "true", "1", "True")`
+        # membership check did.
+        is_core_ = core_governance_service.parse_is_core(raw_is_core)
+    except ValueError as e:
+        return f"Error: {e}"
 
     memory_type_ = _resolve(memory_type, kw, kwargs, "memory_type", "type", "kind")
 
@@ -297,6 +330,18 @@ def store_memory(
         retrieval_text_ = kw.get("retrieval_text") if retrieval_text_provided else None
     else:
         retrieval_text_ = retrieval_text
+
+    core_reason_ = _resolve(core_reason, kw, kwargs, "core_reason")
+    core_exit_condition_ = _resolve(core_exit_condition, kw, kwargs, "core_exit_condition")
+    core_review_after_ = _resolve(core_review_after, kw, kwargs, "core_review_after")
+    raw_detail_ids = (
+        detail_memory_ids
+        if detail_memory_ids is not None
+        else _resolve(None, kw, kwargs, "detail_memory_ids")
+    )
+    detail_memory_ids_ = (
+        _normalize_list_or_str(raw_detail_ids) if raw_detail_ids is not None else None
+    )
 
     return _backend_or_raise().call(
         "store_memory",
@@ -322,6 +367,10 @@ def store_memory(
             "check_duplicates_only": check_duplicates_only_,
             "retrieval_text": retrieval_text_,
             "retrieval_text_provided": retrieval_text_provided,
+            "core_reason": core_reason_,
+            "core_exit_condition": core_exit_condition_,
+            "core_review_after": core_review_after_,
+            "detail_memory_ids": detail_memory_ids_,
         },
     )
 
@@ -665,6 +714,11 @@ def manage_relation(
     force it through -- the override is atomically audited. For the bulk (`relations`) shape,
     put `override_justification`/`owner_id` on each individual item that needs them, not at the
     top level -- neither is shared across items in the same batch.
+
+    Core-memory governance: a NEW `elaborates_on` edge whose target is an active core memory is
+    rejected (`REJECT_CORE_ELABORATES_ON`) -- only that core's own `detail_memory_ids`
+    declaration (via `store_memory`/`commit_consolidation`) may create one. Re-submitting an
+    edge that already exists stays an idempotent no-op regardless.
     """
     kw = _unwrap_kwargs(kwargs)
     relations_ = _resolve(relations, kw, kwargs, "relations")
@@ -708,6 +762,10 @@ def commit_consolidation(
     owner_id: str = None,
     context_id: str = None,
     override_justification: str = None,
+    core_reason: str | None = None,
+    core_exit_condition: str | None = None,
+    core_review_after: str | None = None,
+    detail_memory_ids: list | None = None,
     **kwargs,
 ) -> str | list:
     """Commits single or multiple consolidated memories, archiving raw parents and creating lineage edges.
@@ -718,6 +776,14 @@ def commit_consolidation(
     the override is baked into the committed content and atomically audited. For the bulk
     (`consolidations`) shape, put `override_justification` on each individual item that needs
     it, not at the top level -- it is never shared across items in the same batch.
+
+    Core-memory governance: `is_core` is NEVER inherited from parents. If any resolved parent is
+    currently an active core (is_core=1, not archived) and `is_core` is omitted, the commit is
+    rejected with an actionable error -- pass explicit `is_core=True` (with `core_reason`/
+    `core_exit_condition`, each 20-500 chars, plus optionally `core_review_after`/
+    `detail_memory_ids`) to keep the result core, or `is_core=False` to let it become an ordinary
+    memory. The same capacity caps and detail-relation rules as `store_memory` apply. For the
+    bulk shape, put every `core_*`/`detail_memory_ids` field on each individual item.
     """
     kw = _unwrap_kwargs(kwargs)
     consolidations_ = _resolve(consolidations, kw, kwargs, "consolidations")
@@ -738,6 +804,17 @@ def commit_consolidation(
     override_justification_ = _resolve(
         override_justification, kw, kwargs, "override_justification", "override_reason"
     )
+    core_reason_ = _resolve(core_reason, kw, kwargs, "core_reason")
+    core_exit_condition_ = _resolve(core_exit_condition, kw, kwargs, "core_exit_condition")
+    core_review_after_ = _resolve(core_review_after, kw, kwargs, "core_review_after")
+    raw_detail_ids = (
+        detail_memory_ids
+        if detail_memory_ids is not None
+        else _resolve(None, kw, kwargs, "detail_memory_ids")
+    )
+    detail_memory_ids_ = (
+        _normalize_list_or_str(raw_detail_ids) if raw_detail_ids is not None else None
+    )
 
     return _backend_or_raise().call(
         "commit_consolidation",
@@ -752,6 +829,10 @@ def commit_consolidation(
             "weight": weight,
             "owner_id": owner_id_,
             "context_id": context_id_,
+            "core_reason": core_reason_,
+            "core_exit_condition": core_exit_condition_,
+            "core_review_after": core_review_after_,
+            "detail_memory_ids": detail_memory_ids_,
             "override_justification": override_justification_,
         },
     )
@@ -883,4 +964,44 @@ def dismiss_event(
         raise ValueError("Missing 'event_id' parameter.")
     return _backend_or_raise().call(
         "dismiss_event", {"event_ids": event_ids_, "reason": reason_, "agent_id": agent_id_}
+    )
+
+
+@mcp.tool()
+def review_core_memory(
+    entity_id: str = None,
+    outcome: Literal["retain", "demote", "archive"] = None,
+    review_rationale: str = None,
+    owner_id: str = None,
+    core_review_after: str = None,
+    **kwargs,
+) -> str:
+    """Reviews an active core memory: retain (extend its next review date), demote (turn it back
+    into an ordinary searchable memory), or archive (retire it) -- a direct, synchronous
+    operation, never a request/queue/event.
+
+    `owner_id` identifies the REVIEWING agent; it need not match the entity's own owner and never
+    transfers ownership. `review_rationale` (20-1,000 chars) is stored for provenance but never
+    injected into the bootstrap digest. `retain` requires an absolute `core_review_after`
+    timestamp in the future and no more than 30 days out (omit it to default to 14 days from
+    now); `demote`/`archive` must not supply `core_review_after`. Meaningful CONTENT revision is
+    still a `store_memory` update -- this tool changes lifecycle state only. Repeating `demote`/
+    `archive` on an already-non-core/already-archived memory is a no-op, not an error; `retain`
+    against a non-core or archived memory is rejected.
+    """
+    kw = _unwrap_kwargs(kwargs)
+    entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "id")
+    outcome_ = _resolve(outcome, kw, kwargs, "outcome")
+    review_rationale_ = _resolve(review_rationale, kw, kwargs, "review_rationale", "rationale")
+    owner_id_ = _resolve(owner_id, kw, kwargs, "owner_id", "owner")
+    core_review_after_ = _resolve(core_review_after, kw, kwargs, "core_review_after")
+    return _backend_or_raise().call(
+        "review_core_memory",
+        {
+            "entity_id": entity_id_,
+            "outcome": outcome_,
+            "review_rationale": review_rationale_,
+            "owner_id": owner_id_,
+            "core_review_after": core_review_after_,
+        },
     )

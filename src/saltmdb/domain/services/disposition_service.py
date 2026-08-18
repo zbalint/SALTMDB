@@ -46,6 +46,7 @@ from saltmdb.domain.services.cohesion_service import (
 from saltmdb.domain.services.event_service import log_event
 from saltmdb.domain.services.memory_service import check_duplicate_memories
 from saltmdb.domain.services.relation_service import commit_consolidation, store_relation
+from saltmdb.domain.services import core_governance_service
 from saltmdb.utils.nlp import detect_correction_language
 from saltmdb.utils.text import compute_content_hash
 
@@ -60,7 +61,10 @@ def _proposal_text(proposed: dict[str, Any]) -> tuple[str, str] | None:
     return title, content
 
 
-_CORE_SAFE_DISPOSITIONS = ["distinct", "supersede", "elaborate"]
+_CORE_SAFE_DISPOSITIONS = ["distinct", "supersede"]  # core-memory governance resolved gap #1:
+# "elaborate" was a back door that let any unrelated store_memory call attach itself as a core's
+# "detail" outside core_detail_memory_ids governance -- removed outright. Deliberate detail
+# linking now happens only by updating the core's own declared detail_memory_ids.
 _NON_CORE_DISPOSITIONS = ["distinct", "supersede", "consolidate"]
 _HEURISTIC_NOTE = (
     "heuristic suggestion based on similarity/language signals -- not a determination; use your "
@@ -449,7 +453,6 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
         consolidate_targets: list[str] = []
         supersede_targets: list[str] = []
-        elaborate_targets: list[str] = []
 
         for cid, disposition in given.items():
             tc = token_candidates[cid]
@@ -469,8 +472,6 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 consolidate_targets.append(tc["target_entity_id"])
             elif disposition == "supersede":
                 supersede_targets.append(tc["target_entity_id"])
-            elif disposition == "elaborate":
-                elaborate_targets.append(tc["target_entity_id"])
             # "distinct" contributes nothing
 
         was_existing = False
@@ -497,6 +498,10 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 context_id=proposed.get("context_id"),
                 metadata=proposed.get("metadata"),
                 memory_type=proposed.get("memory_type"),
+                core_reason=proposed.get("core_reason"),
+                core_exit_condition=proposed.get("core_exit_condition"),
+                core_review_after=proposed.get("core_review_after"),
+                detail_memory_ids=proposed.get("detail_memory_ids"),
                 db_connection=c,
                 _in_transaction=True,
                 _precomputed_centroids=centroids,
@@ -518,18 +523,6 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 source_id=output_entity_id,
                 target_id=target_id,
                 predicate="supersedes",
-                owner_id=proposed.get("owner_id"),
-                db_connection=c,
-                _in_transaction=True,
-            )
-            if res.startswith("Error"):
-                raise RuntimeError(f"Disposition commit aborted (all-or-nothing): {res}")
-
-        for target_id in elaborate_targets:
-            res = store_relation(
-                source_id=output_entity_id,
-                target_id=target_id,
-                predicate="elaborates_on",
                 owner_id=proposed.get("owner_id"),
                 db_connection=c,
                 _in_transaction=True,
@@ -565,5 +558,7 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
         }
     except _DispositionRejected as e:
         return f"Error: {e}"
+    except core_governance_service.CoreGovernanceRejected as e:
+        return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
 
     return result_holder["message"]

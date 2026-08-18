@@ -112,6 +112,17 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             # and hash-separated from the authoritative full_content/content_hash pair.
             "retrieval_text TEXT",
             "retrieval_text_hash TEXT",
+            # Core-memory bootstrap governance (see core_governance_service.py, the sole owner of
+            # these columns' semantics). All nullable: a demoted normal memory may retain historical
+            # lifecycle data, but enforcement/rendering ignore it entirely while is_core=0.
+            "core_reason TEXT",
+            "core_exit_condition TEXT",
+            "core_review_after DATETIME",
+            "core_last_reviewed_at DATETIME",
+            "core_last_reviewed_by TEXT",
+            "core_review_rationale TEXT",
+            "core_detail_memory_ids TEXT",  # JSON array of full UUIDs; sole authority for the
+            # 3-detail cap -- incidental elaborates_on graph edges are never silently adopted into it
         ]:
             _add_column_if_missing(conn, "entities", col)
 
@@ -594,6 +605,11 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
+            # Additive, not a replacement for idx_entities_is_core above (that index does not
+            # filter archived rows). Backs core_governance_service.load_active_cores' ordering
+            # (overdue first, earliest upcoming review) over exactly the active-core set.
+            "CREATE INDEX IF NOT EXISTS idx_entities_core_review "
+            "ON entities(core_review_after, created_at) WHERE is_core = 1 AND status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",

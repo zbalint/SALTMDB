@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "saltmdb-cli bootstrap-digest --project-keywords $(basename $PWD)",
+        "command": "saltmdb-cli bootstrap-digest",
         "timeout": 15
       }
     ],

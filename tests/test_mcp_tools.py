@@ -1211,9 +1211,137 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            14,
-            f"MCP server tool count must be exactly 14, got {registered_count}",
+            15,
+            f"MCP server tool count must be exactly 15, got {registered_count}",
         )
+
+
+class TestReviewCoreMemoryTool(unittest.TestCase):
+    """End-to-end coverage of the review_core_memory MCP tool through tools.py's own argument-
+    normalization layer and daemon/dispatch.py's DISPATCH_TABLE entry -- core_governance_service's
+    own logic already has dedicated unit coverage in test_core_governance_service.py."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _store_core(self, title):
+        res = tools.store_memory(
+            content=f"Distinct fixture content body for {title}, not a near-duplicate.",
+            title=title,
+            owner_id="tester",
+            is_core=True,
+            core_reason="A" * 20,
+            core_exit_condition="B" * 20,
+            skip_duplicate_check=True,
+        )
+        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
+        return res.split("ID: ")[1].strip()
+
+    def test_retain_via_mcp_tool(self):
+        entity_id = self._store_core("MCP Retain Core")
+        result = tools.review_core_memory(
+            entity_id=entity_id,
+            outcome="retain",
+            review_rationale="C" * 20,
+            owner_id="reviewer_agent",
+        )
+        self.assertIn("retained as core", result)
+
+    def test_demote_via_mcp_tool(self):
+        entity_id = self._store_core("MCP Demote Core")
+        result = tools.review_core_memory(
+            entity_id=entity_id,
+            outcome="demote",
+            review_rationale="C" * 20,
+            owner_id="reviewer_agent",
+        )
+        self.assertIn("demoted", result)
+        row = self.conn.execute(
+            "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        self.assertFalse(bool(row[0]))
+
+    def test_archive_via_mcp_tool(self):
+        entity_id = self._store_core("MCP Archive Core")
+        result = tools.review_core_memory(
+            entity_id=entity_id,
+            outcome="archive",
+            review_rationale="C" * 20,
+            owner_id="reviewer_agent",
+        )
+        self.assertIn("archived", result)
+
+    def test_missing_required_fields_rejected(self):
+        # Matches dismiss_event's own established convention (mcp/tools.py): a genuinely missing
+        # required field raises ValueError at the dispatch boundary rather than returning an
+        # "Error: ..." string -- a malformed/incomplete *value* (e.g. review_rationale too
+        # short) still returns a string, exercised by the core_governance_service unit tests.
+        entity_id = self._store_core("MCP Missing Fields Core")
+        with self.assertRaises(ValueError):
+            tools.review_core_memory(entity_id=entity_id, outcome="retain")
+
+    def test_get_core_bootstrap_digest_dispatch_entry(self):
+        """Not a public MCP tool -- exercised directly through the daemon dispatch table, the
+        same internal read path saltmdb-cli's bootstrap-digest command calls in production."""
+        from saltmdb.daemon import dispatch
+
+        self._store_core("Dispatch Digest Core")
+        digest = dispatch.DISPATCH_TABLE["get_core_bootstrap_digest"]()
+        self.assertIn("<saltmdb-digest>", digest)
+        self.assertIn("Dispatch Digest Core", digest)
+
+
+class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
+    """Core-memory governance resolved gap #6: the MCP adapter layer must reject ambiguous
+    is_core values outright rather than silently coercing them to False."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_ambiguous_is_core_string_rejected_not_coerced(self):
+        result = tools.store_memory(
+            content="Content long enough to clear the quality gate minimum length.",
+            title="Ambiguous Is Core Value",
+            owner_id="tester",
+            is_core="yes",
+            skip_duplicate_check=True,
+        )
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("Error"), result)
+
+    def test_true_still_creates_a_core_with_lifecycle_fields(self):
+        result = tools.store_memory(
+            content="Content long enough to clear the quality gate minimum length.",
+            title="Explicit Boolean True",
+            owner_id="tester",
+            is_core=True,
+            core_reason="A" * 20,
+            core_exit_condition="B" * 20,
+            skip_duplicate_check=True,
+        )
+        self.assertTrue(result.startswith("Knowledge stored successfully"), result)
 
 
 if __name__ == "__main__":
