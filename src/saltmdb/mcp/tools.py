@@ -87,6 +87,18 @@ class RpcBackend:
 
     def call(self, tool_name: str, kwargs: dict):
         from saltmdb.config import get_db_path
+        from saltmdb.mcp.identity import SESSION_IDENTITY
+
+        # Per-session owner binding (§4.5): the first call that supplies owner_id binds it for
+        # the rest of this adapter process's life; every later call that omits owner_id gets the
+        # bound value injected here. A rebind attempt (a different owner_id later) raises
+        # IdentityRebindRejected -- deliberately NOT caught here, so it surfaces exactly like any
+        # other tool-call exception (Phase 1 scope: bind/inject only, no hard-fail on a MISSING
+        # owner_id yet -- that lands in Phase 2 with the tools.py signature rewrite).
+        if kwargs.get("owner_id"):
+            SESSION_IDENTITY.bind(kwargs["owner_id"])
+        elif SESSION_IDENTITY.owner_id and "owner_id" in kwargs:
+            kwargs = {**kwargs, "owner_id": SESSION_IDENTITY.owner_id}
 
         db_path = get_db_path()
         try:

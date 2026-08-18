@@ -16,6 +16,8 @@ exemption; EPHEMERAL_CONN is a separate in-memory-only connection that never tou
 persistent DB, so it was never in scope for this boundary to begin with).
 """
 
+import logging
+
 from saltmdb.domain.services import (
     core_governance_service,
     corpus_snapshot_service,
@@ -23,8 +25,11 @@ from saltmdb.domain.services import (
     librarian_service,
     memory_service,
     relation_service,
+    telemetry_service,
 )
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 
 def _optional_bool(kw: dict[str, Any], key: str, default: bool) -> bool:
@@ -381,8 +386,7 @@ MUTATING_TOOLS = frozenset(
 )
 
 
-def dispatch_tool(tool: str, kwargs: dict, coordinator):
-    """Invoke one normalized tool with the daemon's single-writer boundary."""
+def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
     fn = DISPATCH_TABLE[tool]
     if tool in MUTATING_TOOLS:
         if tool in {"store_memory", "log_event"}:
@@ -397,3 +401,45 @@ def dispatch_tool(tool: str, kwargs: dict, coordinator):
         )
         return content
     return fn(**kwargs)
+
+
+def dispatch_tool(tool: str, kwargs: dict, coordinator):
+    """Invoke one normalized tool with the daemon's single-writer boundary.
+
+    Wrapped with best-effort usage telemetry (agent API redesign plan §5.9): timing and outcome
+    are recorded via a background, non-blocking coordinator submission AFTER the real call
+    completes or raises -- telemetry must never add latency to, or change the outcome of, the
+    request it describes. This is the only call site of _dispatch_tool_inner; it exists solely
+    so this wrapper has an inner function to time, not as a public seam.
+    """
+    timer = telemetry_service.Timer()
+    result = None
+    raised: BaseException | None = None
+    try:
+        result = _dispatch_tool_inner(tool, kwargs, coordinator)
+        return result
+    except BaseException as exc:
+        raised = exc
+        raise
+    finally:
+        status, error_code = telemetry_service.classify_result(result, raised)
+        latency_ms = timer.elapsed_ms()
+        owner_id = kwargs.get("owner_id") if isinstance(kwargs, dict) else None
+        param_names = list(kwargs.keys()) if isinstance(kwargs, dict) else []
+        try:
+            coordinator.submit(
+                f"telemetry:{tool}",
+                lambda conn: telemetry_service.record_call(
+                    tool,
+                    param_names,
+                    status,
+                    latency_ms,
+                    owner_id=owner_id,
+                    error_code=error_code,
+                    db_connection=conn,
+                ),
+                priority="background",
+                wait=False,
+            )
+        except Exception as e:  # noqa: BLE001 -- telemetry submission is best-effort, see above
+            logger.warning("Could not submit telemetry write for tool '%s': %s", tool, e)

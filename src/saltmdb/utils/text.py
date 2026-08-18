@@ -96,6 +96,40 @@ def resolve_id_prefix(conn, prefix: str) -> tuple[str | None, list[dict], bool]:
     return None, [], False
 
 
+def resolve_entity_ref(conn, raw_id: str) -> tuple[str | None, list[dict], bool]:
+    """Composes resolve_entity_id + resolve_id_prefix into the one shared existence-checked
+    resolution contract (agent API redesign §4.4): full UUID / title match, falling back to
+    short hex-prefix matching when the first pass doesn't land on a real row. Existing
+    call sites (fetch_memory_chunk, touch_memory_access) already hand-roll this same two-step
+    fallback inline; this is the reusable version for new callers (manage_relation,
+    consolidation parent resolution) so a third copy of the pattern doesn't appear.
+
+    Returns (resolved_id, candidates, truncated), same shape as resolve_id_prefix:
+      - resolves to a real, existing row -> (id, [], False)
+      - ambiguous short prefix (2+ matches) -> (None, candidates, truncated)
+      - no match at all -> (None, [], False)
+
+    Unlike resolve_entity_id alone, the returned id (when non-None) is always verified to
+    exist in `entities` -- resolve_entity_id's own UUID-shaped/arbitrary-string echo-back
+    branches are not trusted here without an existence check.
+    """
+    if not raw_id or not isinstance(raw_id, str):
+        return None, [], False
+    resolved = resolve_entity_id(conn, raw_id)
+    if resolved:
+        try:
+            if conn.execute("SELECT 1 FROM entities WHERE id = ?", (resolved,)).fetchone():
+                return resolved, [], False
+        except sqlite3.Error as exc:
+            logger.debug("Existence check unavailable during entity-ref resolution: %s", exc)
+    prefix_id, candidates, truncated = resolve_id_prefix(conn, raw_id)
+    if candidates:
+        return None, candidates, truncated
+    if prefix_id:
+        return prefix_id, [], False
+    return None, [], False
+
+
 def extract_title_and_snippet(markdown_text: str):
     """Heuristic helper to extract a clean title and snippet from markdown text."""
     if not markdown_text:

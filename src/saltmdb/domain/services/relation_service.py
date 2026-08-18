@@ -14,7 +14,7 @@ from saltmdb.config import (
     RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
-from saltmdb.utils.text import resolve_entity_id, compute_content_hash
+from saltmdb.utils.text import resolve_entity_id, resolve_entity_ref, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
@@ -112,6 +112,24 @@ def get_canonical_predicates(
             close_connection(conn)
 
 
+def _resolve_relation_endpoint(conn, raw_id: str, label: str) -> tuple[str | None, str | None]:
+    """Resolves one manage_relation endpoint (source_id/target_id) through the shared
+    resolve_entity_ref contract (§4.4), returning (resolved_id, error_message). error_message
+    is None on success. Replaces the bare 'Could not resolve target entity IDs' string that
+    previously let an unresolved id reach the INSERT and fail with a raw
+    'FOREIGN KEY constraint failed' (§3.15) -- callers must check resolved_id is not None."""
+    resolved, candidates, truncated = resolve_entity_ref(conn, raw_id)
+    if resolved:
+        return resolved, None
+    if candidates:
+        lines = [f"  {c['id']} — {c['title']!r} [{c['status']}]" for c in candidates]
+        return None, (
+            f"Error: AMBIGUOUS_ID_PREFIX - {label} '{raw_id}' matches "
+            f"{len(candidates)}{'+' if truncated else ''} memories:\n" + "\n".join(lines)
+        )
+    return None, f"Error: UNKNOWN_ENTITY_ID - could not resolve {label} '{raw_id}'."
+
+
 def store_relation(  # noqa: C901, PLR0915
     source_id: str = None,
     target_id: str = None,
@@ -159,13 +177,13 @@ def store_relation(  # noqa: C901, PLR0915
         conn = get_connection(db_path)
         should_close = True
 
-    resolved_source = resolve_entity_id(conn, source_id)
-    resolved_target = resolve_entity_id(conn, target_id)
+    resolved_source, source_error = _resolve_relation_endpoint(conn, source_id, "source_id")
+    resolved_target, target_error = _resolve_relation_endpoint(conn, target_id, "target_id")
 
     if not resolved_source or not resolved_target:
         if should_close:
             close_connection(conn)
-        return "Error: Could not resolve target entity IDs."
+        return source_error or target_error or "Error: Could not resolve target entity IDs."
 
     if resolved_source == resolved_target:
         if should_close:
@@ -384,13 +402,13 @@ def invalidate_relation(  # noqa: C901
         conn = get_connection(db_path)
         should_close = True
 
-    resolved_source = resolve_entity_id(conn, source_id)
-    resolved_target = resolve_entity_id(conn, target_id)
+    resolved_source, source_error = _resolve_relation_endpoint(conn, source_id, "source_id")
+    resolved_target, target_error = _resolve_relation_endpoint(conn, target_id, "target_id")
 
     if not resolved_source or not resolved_target:
         if should_close:
             close_connection(conn)
-        return "Error: Could not resolve target entity IDs."
+        return source_error or target_error or "Error: Could not resolve target entity IDs."
 
     now = datetime.now(UTC).isoformat()
     try:
@@ -670,8 +688,12 @@ def analyze_lineage(
 
 
 def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
-    """Resolves each parent_id to its canonical entity id (via resolve_entity_id), dedupes,
-    and filters out any id that doesn't currently exist in entities.
+    """Resolves each parent_id to its canonical entity id (via resolve_entity_ref, §4.4 --
+    falls back to short hex-prefix matching when the exact/UUID/title pass doesn't land on a
+    real row), dedupes, and drops any id that still doesn't resolve to an existing entity
+    (including an ambiguous-prefix id, which resolve_entity_ref never guesses at -- silently
+    dropped here exactly like an outright non-match; §3.8/§5.3 will replace this silent drop
+    with a hard-fail-with-named-error in a later phase).
 
     Single source of truth for this resolution, shared by commit_consolidation's own
     single-item path and bulk_commit_consolidation's pre-transaction cross-item union (Codex
@@ -683,18 +705,10 @@ def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
     resolved_parents = []
     seen = set()
     for p in parent_ids or []:
-        res = resolve_entity_id(conn, str(p))
+        res, _candidates, _truncated = resolve_entity_ref(conn, str(p))
         if res and res not in seen:
             seen.add(res)
             resolved_parents.append(res)
-
-    if resolved_parents:
-        placeholders_exist = ",".join("?" for _ in resolved_parents)
-        existing_rows = conn.execute(
-            f"SELECT id FROM entities WHERE id IN ({placeholders_exist})", resolved_parents
-        ).fetchall()
-        existing_set = {r[0] for r in existing_rows}
-        resolved_parents = [p for p in resolved_parents if p in existing_set]
 
     return resolved_parents
 

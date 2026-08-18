@@ -442,6 +442,31 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         except Exception as e:
             logger.warning("Vector schema init deferred/failed: %s", e)
 
+        # 5b. Usage telemetry (agent API redesign plan §5.9): a separate sink from `events`,
+        # written automatically by the daemon on every dispatched tool call, never by an agent.
+        # Metadata only -- tool name, which parameter names were present, result status, error
+        # code, latency -- NEVER argument values (memory content routinely contains secrets; the
+        # store's redaction posture assumes content passes through middleware, not a raw call
+        # log). Strictly local, CLI-readable, not an MCP tool. No FK to entities/events -- a
+        # telemetry row must remain inspectable even after the entity/event it describes is
+        # gone, exactly like embedding_jobs' own no-FK rationale above.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_call_telemetry (
+            id TEXT PRIMARY KEY,
+            timestamp DATETIME NOT NULL,
+            tool_name TEXT NOT NULL,
+            owner_id TEXT,
+            param_names TEXT NOT NULL, -- JSON array of parameter names present in the call, never values
+            status TEXT NOT NULL,
+            error_code TEXT,
+            latency_ms REAL NOT NULL
+        );
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_call_telemetry_tool_time "
+            "ON tool_call_telemetry(tool_name, timestamp DESC)"
+        )
+
         # 6. Mutex Lock Table for Leader Election
         conn.execute("""
         CREATE TABLE IF NOT EXISTS _system_locks (
