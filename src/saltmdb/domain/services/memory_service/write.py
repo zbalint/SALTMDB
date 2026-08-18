@@ -19,11 +19,127 @@ from saltmdb.db.connection import get_connection, write_transaction_retrying, cl
 from saltmdb.utils.text import extract_title_and_snippet, compute_content_hash
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
+from saltmdb.utils.envelope import error as envelope_error, rejected
 from saltmdb.domain.services import core_governance_service
 
 from . import tags as tag_ops
 from . import validation
 from ._shared import logger, RETRIEVAL_TEXT_UNSET
+
+
+def _legacy_update_guard(  # noqa: C901, PLR0912
+    conn,
+    *,
+    resolved_entity_id: str | None,
+    title: str,
+    content: str,
+    tags: list | None,
+    owner_id: str,
+    scope: str,
+    memory_type: str | None,
+    context_id: str | None,
+    metadata: dict | None,
+) -> tuple[dict | None, dict | None]:
+    """Reject frozen-field mutation before the legacy SCD writer can create an ``_h_`` row.
+
+    This applies to explicit IDs and implicit same-title/owner/scope resolutions alike. The second
+    return value is a set of canonical frozen values to feed the administrative-only update path.
+    It prevents omitted/default fields (notably ``scope=shared`` and metadata=None) from being
+    written back over an existing version while still allowing lifecycle/core/retrieval fields to
+    change in place.
+    """
+    if not resolved_entity_id:
+        return None, None
+    row = conn.execute(
+        """
+        SELECT title, full_content, owner_id, context_id, scope, memory_type,
+               metadata, created_at, content_hash, parent_ids, valid_from
+        FROM entities WHERE id = ?
+        """,
+        (resolved_entity_id,),
+    ).fetchone()
+    if row is None:
+        # Explicit caller-chosen IDs that do not exist are still fresh inserts.
+        return None, None
+    current = dict(
+        zip(
+            (
+                "title",
+                "full_content",
+                "owner_id",
+                "context_id",
+                "scope",
+                "memory_type",
+                "metadata",
+                "created_at",
+                "content_hash",
+                "parent_ids",
+                "valid_from",
+            ),
+            row,
+        )
+    )
+    changes: list[str] = []
+    if title != current["title"]:
+        changes.append("title")
+    if content != current["full_content"]:
+        changes.append("full_content")
+    if owner_id != current["owner_id"]:
+        changes.append("owner_id")
+    # ``store_memory`` historically defaulted scope to ``shared``.  Treat that default as an
+    # omitted value when the existing version is private; otherwise an administrative update that
+    # never mentioned scope would be misclassified as a disclosure attempt.
+    if scope != current["scope"] and not (scope == "shared" and current["scope"] == "private"):
+        changes.append("scope")
+    if memory_type is not None and memory_type != current["memory_type"]:
+        changes.append("memory_type")
+    if context_id is not None and context_id != current["context_id"]:
+        changes.append("context_id")
+    if metadata is not None:
+        try:
+            requested_metadata = json.dumps(metadata, sort_keys=True)
+            current_metadata = (
+                json.dumps(json.loads(current["metadata"]), sort_keys=True)
+                if current["metadata"]
+                else None
+            )
+        except (TypeError, json.JSONDecodeError):
+            requested_metadata = json.dumps(metadata)
+            current_metadata = current["metadata"]
+        if requested_metadata != current_metadata:
+            changes.append("metadata")
+    if tags is not None:
+        requested_tags = {
+            tag_ops.normalize_tag_name(tag).lower()
+            for tag in tags
+            if isinstance(tag, str) and tag.strip()
+        }
+        existing_tags = {
+            row[0].lower()
+            for row in conn.execute(
+                "SELECT t.name FROM tags t JOIN entity_tags et ON et.tag_id = t.id WHERE et.entity_id = ?",
+                (resolved_entity_id,),
+            ).fetchall()
+            if row[0].lower() != "#core"
+        }
+        if requested_tags != existing_tags:
+            changes.append("tags")
+    if changes:
+        field = changes[0]
+        return (
+            rejected(
+                [
+                    envelope_error(
+                        "IMMUTABLE_MEMORY",
+                        "Frozen field(s) cannot be changed by store_memory; use revise_memory or supersede_memory to create a new version: "
+                        + ", ".join(changes),
+                        field,
+                    )
+                ]
+            ),
+            None,
+        )
+    return None, current
 
 
 def _resolve_existing_entity_id(
@@ -199,30 +315,30 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
         ).fetchone()
         if prior_retrieval:
             existing_retrieval_text, existing_retrieval_hash = prior_retrieval
-        hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
-
-        conn.execute(
-            """
-             INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
-             SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
-             FROM entities WHERE id = ?
-         """,
-            (hist_id, valid_from if valid_from else created_at, now, entity_id),
-        )
-        conn.execute(
-            """
-             INSERT INTO entity_tags (entity_id, tag_id)
-             SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
-         """,
-            (hist_id, entity_id),
-        )
+        if not proposed.get("_skip_scd_history", False):
+            hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
+            conn.execute(
+                """
+                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
+                 SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
+                 FROM entities WHERE id = ?
+             """,
+                (hist_id, valid_from if valid_from else created_at, now, entity_id),
+            )
+            conn.execute(
+                """
+                 INSERT INTO entity_tags (entity_id, tag_id)
+                 SELECT ?, tag_id FROM entity_tags WHERE entity_id = ?
+             """,
+                (hist_id, entity_id),
+            )
     else:
         base_source_changed = True
 
     if tags is not None:
         conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
 
-    metadata_str = json.dumps(metadata) if metadata else None
+    metadata_str = json.dumps(metadata) if metadata is not None else None
     if existing:
         if retrieval_text_provided:
             final_retrieval_text = requested_retrieval_text
@@ -261,7 +377,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             status = entities.status,
             title = excluded.title,
             full_content = excluded.full_content,
-            valid_from = excluded.valid_from,
+            valid_from = entities.valid_from,
             valid_to = CASE WHEN entities.status IN ('consolidated', 'archived')
                              THEN entities.valid_to ELSE NULL END,
             metadata = excluded.metadata,
@@ -534,6 +650,37 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if hash_collision_error:
             return hash_collision_error
 
+        legacy_error, frozen_current = _legacy_update_guard(
+            conn,
+            resolved_entity_id=resolved_entity_id,
+            title=title,
+            content=redacted_content,
+            tags=tags,
+            owner_id=owner_id,
+            scope=scope,
+            memory_type=memory_type,
+            context_id=context_id,
+            metadata=metadata,
+        )
+        if legacy_error is not None:
+            return legacy_error
+        if frozen_current is not None:
+            # The current row is the immutable source of truth for an administrative-only
+            # update.  Preserve omitted/default frozen inputs before entering _store_raw_entity.
+            title = frozen_current["title"]
+            redacted_content = frozen_current["full_content"]
+            owner_id = frozen_current["owner_id"]
+            scope = frozen_current["scope"]
+            context_id = frozen_current["context_id"]
+            memory_type = frozen_current["memory_type"]
+            content_hash = frozen_current["content_hash"]
+            tags = None
+            if metadata is None and frozen_current["metadata"]:
+                try:
+                    metadata = json.loads(frozen_current["metadata"])
+                except json.JSONDecodeError:
+                    metadata = None
+
         proposed = {
             "content": redacted_content,
             "title": title,
@@ -556,6 +703,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "core_exit_condition": core_exit_condition,
             "core_review_after": core_review_after,
             "detail_memory_ids": detail_memory_ids,
+            "_skip_scd_history": frozen_current is not None,
         }
 
         # Deferred import: disposition_service imports relation_service, which imports this very

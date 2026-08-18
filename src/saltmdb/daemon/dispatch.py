@@ -256,12 +256,54 @@ def _dispatch_manage_relation(**kw):
     )
 
 
-def _dispatch_commit_consolidation(**kw):
+def _dispatch_replacement(**kw):
+    """Dispatch an immutable lifecycle replacement to the DB-worker service.
+
+    The lifecycle services own validation, successor lookup, archival, and edge creation.  The
+    daemon only enforces the typed adapter contract before entering the coordinator transaction.
+    """
+    required = ("entity_id", "title", "content", "reason")
+    for key in required:
+        _required_str(kw, key)
+    tags = _required_str_list(kw, "tags")
+    if not tags:
+        raise ValueError("tags is required")
+    service_name = kw.pop("_service_name")
+    service = getattr(memory_service, service_name)
+    return service(
+        entity_id=kw["entity_id"],
+        title=kw["title"],
+        content=kw["content"],
+        tags=tags,
+        reason=kw["reason"],
+        owner_id=kw.get("owner_id"),
+        context_id=kw.get("context_id"),
+        scope=kw.get("scope"),
+        memory_type=kw.get("memory_type"),
+    )
+
+
+def _dispatch_revise_memory(**kw):
+    return _dispatch_replacement(**{**kw, "_service_name": "revise_memory"})
+
+
+def _dispatch_supersede_memory(**kw):
+    return _dispatch_replacement(**{**kw, "_service_name": "supersede_memory"})
+
+
+def _dispatch_consolidate_memories(**kw):
     if kw.get("consolidations"):
-        return relation_service.bulk_commit_consolidation(
-            consolidations=_required_list(kw, "consolidations")
+        # The singular Phase-4 worker entry point is new; its bulk companion is still named
+        # ``bulk_commit_consolidation`` until the relation-service migration lands.  Keep this
+        # fallback local to the daemon adapter; neither spelling is a public MCP method.
+        bulk = getattr(
+            relation_service,
+            "bulk_consolidate_memories",
+            relation_service.bulk_commit_consolidation,
         )
-    return relation_service.commit_consolidation(
+        return bulk(consolidations=_required_list(kw, "consolidations"))
+    consolidate = getattr(relation_service, "consolidate_memories")
+    return consolidate(
         parent_ids=_required_str_list(kw, "parent_ids"),
         title=_required_str(kw, "title"),
         content=_required_str(kw, "content"),
@@ -277,6 +319,11 @@ def _dispatch_commit_consolidation(**kw):
         core_review_after=kw.get("core_review_after"),
         detail_memory_ids=kw.get("detail_memory_ids"),
     )
+
+
+# Private compatibility name for focused adapter tests and downstream daemon extensions.  It is
+# intentionally absent from DISPATCH_TABLE and therefore is not a public MCP method.
+_dispatch_commit_consolidation = _dispatch_consolidate_memories
 
 
 def _dispatch_review_core_memory(**kw):
@@ -383,7 +430,9 @@ DISPATCH_TABLE = {
     "get_memory": _dispatch_get_memory,
     "archive_memory": _dispatch_archive_memory,
     "manage_relation": _dispatch_manage_relation,
-    "commit_consolidation": _dispatch_commit_consolidation,
+    "revise_memory": _dispatch_revise_memory,
+    "supersede_memory": _dispatch_supersede_memory,
+    "consolidate_memories": _dispatch_consolidate_memories,
     "get_lineage": _dispatch_get_lineage,
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
@@ -403,7 +452,9 @@ MUTATING_TOOLS = frozenset(
         "store_memory",
         "archive_memory",
         "manage_relation",
-        "commit_consolidation",
+        "revise_memory",
+        "supersede_memory",
+        "consolidate_memories",
         "review_core_memory",
     }
 )

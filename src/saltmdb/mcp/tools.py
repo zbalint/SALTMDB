@@ -468,7 +468,7 @@ def manage_relation(
 
     Core-memory governance: a NEW `elaborates_on` edge whose target is an active core memory is
     rejected (`REJECT_CORE_ELABORATES_ON`) -- only that core's own `detail_memory_ids`
-    declaration (via `store_memory`/`commit_consolidation`) may create one. Re-submitting an
+    declaration (via `store_memory`/`consolidate_memories`) may create one. Re-submitting an
     edge that already exists stays an idempotent no-op regardless.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=manage_relation, submitted=locals())
@@ -493,7 +493,7 @@ def manage_relation(
 
 
 @mcp.tool()
-def commit_consolidation(
+def consolidate_memories(
     consolidations: list | None = None,
     parent_ids: list | None = None,
     title: str | None = None,
@@ -510,7 +510,12 @@ def commit_consolidation(
     core_review_after: str | None = None,
     detail_memory_ids: list | None = None,
 ) -> str | list:
-    """Commits single or multiple consolidated memories, archiving raw parents and creating lineage edges.
+    """Creates a canonical memory from two or more explicit parents.
+
+    The parents are archived unchanged and linked with ``consolidated_from``. Semantic
+    relations are never repointed; the response may include an optional orphaned-edge worklist
+    whose items are safe, optional follow-up declarations. The new memory's identity is
+    immutable after creation.
 
     A pairwise-cohesion gate rejects parent sets whose chunk-embedding centroids fail a minimum
     similarity threshold (REJECT_LOW_COHESION), unless override_justification (a non-throwaway
@@ -527,7 +532,7 @@ def commit_consolidation(
     memory. The same capacity caps and detail-relation rules as `store_memory` apply. For the
     bulk shape, put every `core_*`/`detail_memory_ids` field on each individual item.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=commit_consolidation, submitted=locals())
+    owner_id_ = _effective_owner(owner_id, tool_func=consolidate_memories, submitted=locals())
     consolidations_ = consolidations
     if consolidations_ and isinstance(consolidations_, str):
         consolidations_ = _normalize_list_or_str(consolidations_)
@@ -539,7 +544,7 @@ def commit_consolidation(
     )
 
     return _backend_or_raise().call(
-        "commit_consolidation",
+        "consolidate_memories",
         {
             "consolidations": consolidations_,
             "parent_ids": parent_ids_,
@@ -557,6 +562,108 @@ def commit_consolidation(
             "detail_memory_ids": detail_memory_ids_,
             "override_justification": override_justification,
         },
+    )
+
+
+# Python-level compatibility for callers migrating from the pre-Phase-4 adapter.  This alias is
+# deliberately not decorated, so ``commit_consolidation`` cannot be invoked as a public MCP tool.
+commit_consolidation = consolidate_memories
+
+
+def _replacement_payload(
+    *,
+    entity_id: str,
+    title: str,
+    content: str,
+    tags: list[str],
+    reason: str,
+    owner_id: str | None,
+    context_id: str | None,
+    scope: Literal["private", "shared"] | None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
+) -> dict:
+    """Build the common replacement request without hidden aliases or front matter parsing."""
+    return {
+        "entity_id": entity_id,
+        "title": title,
+        "content": content,
+        "tags": _normalize_list_or_str(tags),
+        "reason": reason,
+        "owner_id": owner_id,
+        "context_id": context_id,
+        "scope": scope,
+        "memory_type": memory_type,
+    }
+
+
+@mcp.tool()
+def revise_memory(
+    entity_id: str,
+    title: str,
+    content: str,
+    tags: list[str],
+    reason: str,
+    owner_id: str | None = None,
+    context_id: str | None = None,
+    scope: Literal["private", "shared"] | None = None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+) -> dict | str:
+    """Repairs a deficient memory representation using a new immutable entity ID.
+
+    ``entity_id`` is never mutated in place. The predecessor is archived byte-for-byte and the
+    new entity links to it with ``revises``. An inactive target is a hard failure: inspect the
+    reported successor before retrying. ``owner_id``, ``context_id``, ``scope``, ``memory_type``,
+    are inherited when omitted and may be changed deliberately when supplied.
+    """
+    owner_id_ = _effective_owner(owner_id, tool_func=revise_memory, submitted=locals())
+    return _backend_or_raise().call(
+        "revise_memory",
+        _replacement_payload(
+            entity_id=entity_id,
+            title=title,
+            content=content,
+            tags=tags,
+            reason=reason,
+            owner_id=owner_id_,
+            context_id=context_id,
+            scope=scope,
+            memory_type=memory_type,
+        ),
+    )
+
+
+@mcp.tool()
+def supersede_memory(
+    entity_id: str,
+    title: str,
+    content: str,
+    tags: list[str],
+    reason: str,
+    owner_id: str | None = None,
+    context_id: str | None = None,
+    scope: Literal["private", "shared"] | None = None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+) -> dict | str:
+    """Replaces valid knowledge with newer knowledge using a new immutable entity ID.
+
+    The predecessor remains byte-identical and is linked with ``supersedes``. An inactive target
+    is never silently redirected; the error reports known active successors and lineage. Optional
+    administrative fields are inherited unless explicitly supplied.
+    """
+    owner_id_ = _effective_owner(owner_id, tool_func=supersede_memory, submitted=locals())
+    return _backend_or_raise().call(
+        "supersede_memory",
+        _replacement_payload(
+            entity_id=entity_id,
+            title=title,
+            content=content,
+            tags=tags,
+            reason=reason,
+            owner_id=owner_id_,
+            context_id=context_id,
+            scope=scope,
+            memory_type=memory_type,
+        ),
     )
 
 

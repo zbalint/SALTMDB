@@ -857,6 +857,66 @@ def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
     return resolved_parents
 
 
+def _resolve_and_validate_parent_ids(
+    conn, parent_ids: list
+) -> tuple[list[str], dict[str, str] | None]:
+    """Resolve every submitted consolidation parent before any transaction starts.
+
+    The old helper intentionally filtered unresolved IDs out.  That is unsafe for a
+    destructive lifecycle operation: a typo could silently turn a requested merge into a
+    different merge.  Keep the old helper for legacy bulk callers, but make the Phase 4 path
+    fail closed with an actionable, named error for unknown, ambiguous, or inactive parents.
+    """
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for raw_parent in parent_ids or []:
+        raw = str(raw_parent)
+        entity_id, candidates, truncated = resolve_entity_ref(conn, raw)
+        if not entity_id:
+            if candidates:
+                return [], {
+                    "code": "AMBIGUOUS_PARENT_ID",
+                    "message": (
+                        f"parent_id '{raw}' is ambiguous; it matches "
+                        f"{len(candidates)}{'+' if truncated else ''} memories."
+                    ),
+                }
+            return [], {
+                "code": "UNKNOWN_PARENT_ID",
+                "message": f"could not resolve parent_id '{raw}'.",
+            }
+        if entity_id in seen:
+            continue
+        seen.add(entity_id)
+        row = conn.execute("SELECT status FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        if row is None:
+            # Defensive: resolve_entity_ref should only return existing rows, but retain the
+            # hard-fail invariant if its implementation changes.
+            return [], {
+                "code": "UNKNOWN_PARENT_ID",
+                "message": f"could not resolve parent_id '{raw}'.",
+            }
+        if row[0] != "raw":
+            return [], {
+                "code": "INACTIVE_PARENT",
+                "message": (
+                    f"parent '{entity_id}' is inactive (status='{row[0]}'); inspect its "
+                    "successor with get_lineage(direction='descendants') before retrying."
+                ),
+            }
+        resolved.append(entity_id)
+
+    if len(resolved) < 2:
+        return [], {
+            "code": "REJECT_PARENT_COUNT",
+            "message": (
+                "consolidate_memories requires at least 2 distinct active parents; "
+                "use revise_memory for a single parent."
+            ),
+        }
+    return resolved, None
+
+
 def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, str]]:
     """Captures {entity_id: (content_hash, status)} for every id, eligible-status-filtered the
     same way cohesion_service.get_fresh_entity_centroids' fresh-join path is (`status !=
@@ -878,7 +938,16 @@ def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, s
     return {r[0]: (r[1], r[2]) for r in rows}
 
 
-def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _consolidation_rejected(code: str, message: str) -> dict:
+    """Build the Phase 4 mutation envelope for a validation rejection."""
+    return {
+        "status": "rejected",
+        "errors": [{"code": code, "message": message}],
+        "warnings": [],
+    }
+
+
+def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     parent_ids: list[str],
     title: str,
     content: str,
@@ -901,8 +970,8 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     _precomputed_centroids: dict[str, list[float]] | None = None,
     _precomputed_unresolved: dict[str, str] | None = None,
     _precomputed_observed_state: dict[str, tuple[str, str]] | None = None,
-) -> str:
-    """Commits a consolidated memory synthesized by the agent, atomically archiving the raw parents and repointing relations.
+) -> dict:
+    """Create one canonical memory and archive its parents without semantic edge mutation.
 
     _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
     bulk_commit_consolidation, whose caller already holds an open write transaction around the
@@ -934,9 +1003,13 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     a pre-transaction check would not catch a parent whose core/status changed concurrently.
     """
     if not parent_ids or not isinstance(parent_ids, list):
-        return "Error: parent_ids must be a non-empty list of UUID strings."
+        return _consolidation_rejected(
+            "INVALID_PARENT_IDS", "parent_ids must be a non-empty list of UUID strings."
+        )
     if not title or not content:
-        return "Error: title and content are mandatory."
+        return _consolidation_rejected(
+            "MISSING_REQUIRED_FIELDS", "title and content are mandatory."
+        )
 
     should_close = False
     conn = db_connection
@@ -945,12 +1018,13 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         conn = get_connection(db_path)
         should_close = True
 
-    resolved_parents = _resolve_and_filter_parent_ids(conn, parent_ids)
-
-    if not resolved_parents:
+    # This is deliberately before quality/dedup work and before BEGIN IMMEDIATE: all parent
+    # errors are deterministic validation failures with zero side effects.
+    resolved_parents, parent_error = _resolve_and_validate_parent_ids(conn, parent_ids)
+    if parent_error is not None:
         if should_close:
             close_connection(conn)
-        return "Error: None of the provided parent_ids could be resolved."
+        return _consolidation_rejected(parent_error["code"], parent_error["message"])
 
     # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
     # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted
@@ -1003,11 +1077,12 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if override_applied and len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
         if should_close:
             close_connection(conn)
-        return (
-            f"Error: REJECT_LOW_COHESION - parent set fails pairwise similarity gate "
-            f"(min={min_sim:.4f} < {COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
-            f"{', unresolved=' + str(unresolved) if unresolved else ''}). "
-            f"Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge."
+        return _consolidation_rejected(
+            "REJECT_LOW_COHESION",
+            f"parent set fails pairwise similarity gate (min={min_sim:.4f} < "
+            f"{COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
+            f"{', unresolved=' + str(unresolved) if unresolved else ''}). Pass "
+            f"override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge.",
         )
 
     if override_applied:
@@ -1033,7 +1108,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     except ValueError as e:
         if should_close:
             close_connection(conn)
-        return f"Error: {e}"
+        return _consolidation_rejected("INVALID_CORE_REQUEST", str(e))
 
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
@@ -1044,7 +1119,11 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if quality_res["status"] == "REJECT":
         if should_close:
             close_connection(conn)
-        return f"Error: Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
+        return _consolidation_rejected(
+            "REJECT_QUALITY",
+            f"Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). "
+            f"Reason: {quality_res['reason']}",
+        )
 
     content_hash = compute_content_hash(redacted_content)
     quality_score = quality_res["quality_score"]
@@ -1064,7 +1143,10 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if row:
             if should_close:
                 close_connection(conn)
-            return f"Error: REJECT_EXACT_DUPLICATE - Consolidated memory exact hash matches existing entity ID: {row[0]}"
+            return _consolidation_rejected(
+                "REJECT_EXACT_DUPLICATE",
+                f"Consolidated memory exact hash matches existing entity ID: {row[0]}",
+            )
     except sqlite3.Error as exc:
         logger.warning(
             "Consolidation exact-hash lookup unavailable; continuing with duplicate checks: %s", exc
@@ -1091,6 +1173,7 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
+    orphaned_edges: list[dict[str, str]] = []
 
     try:
 
@@ -1296,42 +1379,36 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             for parent_id in resolved_parents:
                 cancel_embedding_jobs_for_entity(conn, parent_id)
 
+            # Semantic relations remain historical claims about the archived parents.  Capture
+            # them as an optional replay worklist, but do not close, copy, or repoint them.
             parent_set = set(resolved_parents)
             active_touching_rows = conn.execute(
                 f"""
-                SELECT id, source_id, target_id, predicate, valid_at, invalid_at
+                SELECT id, source_id, target_id, predicate
                 FROM relations
                 WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
                   AND valid_to IS NULL
-                  AND predicate != 'consolidated_from'
-            """,
-                resolved_parents + resolved_parents,
-            ).fetchall()
-
-            for rel_id, src, tgt, pred, old_valid_at, old_invalid_at in active_touching_rows:
-                conn.execute("UPDATE relations SET valid_to = ? WHERE id = ?", (now, rel_id))
-
-                new_src = consolidated_id if src in parent_set else src
-                new_tgt = consolidated_id if tgt in parent_set else tgt
-                if new_src == new_tgt:
-                    continue  # self-loop guard: edge was directly between two parents in this batch
-
-                conn.execute(
-                    """
-                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at, invalid_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
+                  AND predicate NOT IN ({",".join("?" for _ in _LINEAGE_PREDICATES)})
                 """,
-                    (
-                        str(uuid.uuid4()),
-                        new_src,
-                        new_tgt,
-                        pred,
-                        now,
-                        now,
-                        old_valid_at,
-                        old_invalid_at,
-                    ),
+                resolved_parents + resolved_parents + list(_LINEAGE_PREDICATES),
+            ).fetchall()
+            seen_relation_ids: set[str] = set()
+            for rel_id, src, tgt, pred in active_touching_rows:
+                if rel_id in seen_relation_ids:
+                    continue
+                seen_relation_ids.add(rel_id)
+                originating_parent = src if src in parent_set else tgt
+                other_endpoint = tgt if src in parent_set else src
+                orphaned_edges.append(
+                    {
+                        "predicate": pred,
+                        "other_endpoint": other_endpoint,
+                        "originating_parent": originating_parent,
+                        # Preserve direction so an agent can replay this item through
+                        # manage_relation without guessing which side was the parent.
+                        "source_id": src,
+                        "target_id": tgt,
+                    }
                 )
 
             for parent_id in resolved_parents:
@@ -1353,13 +1430,50 @@ def commit_consolidation(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             write_transaction_retrying(conn, _write)
 
-        return f"Successfully committed consolidated memory with ID: {consolidated_id}"
+        return {
+            "status": "ok",
+            "data": {
+                "entity_id": consolidated_id,
+                "message": f"Successfully committed consolidated memory with ID: {consolidated_id}",
+                "orphaned_relations": orphaned_edges,
+                "orphaned_edge_worklist": orphaned_edges,
+                "orphaned_edges": orphaned_edges,
+                "worklist_guidance": (
+                    "Re-declaring these relations through manage_relation is optional; "
+                    "skipping them leaves a correct historical graph."
+                ),
+            },
+            "warnings": [],
+        }
     except Exception as e:
         logger.error("Error committing consolidation: %s", e)
-        return f"Error committing consolidation: {e}"
+        return _consolidation_rejected("CONSOLIDATION_FAILED", str(e))
     finally:
         if should_close:
             close_connection(conn)
+
+
+def commit_consolidation(*args, **kwargs) -> str:
+    """Temporary internal compatibility alias for pre-Phase-4 callers.
+
+    The public lifecycle operation is ``consolidate_memories`` and returns the response
+    envelope/worklist.  Older internal services still consume the historical text response;
+    keep that adapter local while those callers are migrated.
+    """
+    result = consolidate_memories(*args, **kwargs)
+    if isinstance(result, dict):
+        if result.get("status") == "ok":
+            return result["data"]["message"]
+        errors = result.get("errors") or [{"message": "consolidation rejected"}]
+        first = errors[0]
+        code = first.get("code", "CONSOLIDATION_REJECTED")
+        message = first.get("message", "")
+        # Preserve the historical text for callers/tests that still consume the alias while
+        # keeping the new machine-readable code available from consolidate_memories.
+        if code == "REJECT_QUALITY":
+            return f"Error: {message}"
+        return f"Error: {code} - {message}"
+    return str(result)
 
 
 def bulk_commit_consolidation(
@@ -1401,7 +1515,14 @@ def bulk_commit_consolidation(
         union_ids: list[str] = []
         seen_union: set[str] = set()
         for item in consolidations:
-            p_ids = _resolve_and_filter_parent_ids(conn, item.get("parent_ids", []))
+            p_ids, parent_error = _resolve_and_validate_parent_ids(conn, item.get("parent_ids", []))
+            if parent_error is not None:
+                return [
+                    {
+                        "status": "error",
+                        "error": f"{parent_error['code']}: {parent_error['message']}",
+                    }
+                ]
             item_resolved_parents.append(p_ids)
             for pid in p_ids:
                 if pid not in seen_union:
@@ -1433,7 +1554,7 @@ def bulk_commit_consolidation(
                     pid: observed_state[pid] for pid in p_ids if pid in observed_state
                 }
 
-                res = commit_consolidation(
+                res = consolidate_memories(
                     parent_ids=p_ids,
                     title=t,
                     content=c,
@@ -1452,11 +1573,20 @@ def bulk_commit_consolidation(
                     _precomputed_unresolved=item_unresolved,
                     _precomputed_observed_state=item_observed_state,
                 )
-                if res.startswith("Error"):
+                if not isinstance(res, dict) or res.get("status") != "ok":
                     raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")
-                new_id = res.split("ID: ")[-1].strip()
+                data = res["data"]
+                new_id = data["entity_id"]
                 results.append(
-                    {"status": "success", "entity_id": new_id, "title": t, "result": res}
+                    {
+                        "status": "success",
+                        "entity_id": new_id,
+                        "title": t,
+                        "data": data,
+                        "orphaned_relations": data.get("orphaned_relations", []),
+                        "orphaned_edge_worklist": data.get("orphaned_edge_worklist", []),
+                        "result": res,
+                    }
                 )
 
         write_transaction_retrying(conn, _write)
@@ -1469,6 +1599,11 @@ def bulk_commit_consolidation(
     finally:
         if should_close:
             close_connection(conn)
+
+
+# Canonical Phase 4 spelling for the bulk worker; the single-item operation above is the
+# response-envelope source of truth.  Keep the old name for in-process callers during migration.
+bulk_consolidate_memories = bulk_commit_consolidation
 
 
 def bulk_store_relations(relations: list, db_connection=None, db_path: str = None) -> list:

@@ -77,14 +77,23 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             title="Consolidation Source",
             content="Raw source memory that will be folded into a consolidation.",
             owner_id="agent_c",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        ).split("ID: ")[1]
+        p2 = store_memory(
+            title="Second Consolidation Source",
+            content="A second raw source memory required by the consolidation lifecycle contract.",
+            owner_id="agent_c",
+            skip_duplicate_check=True,
             db_connection=self.conn,
         ).split("ID: ")[1]
 
         res = commit_consolidation(
-            parent_ids=[p1],
+            parent_ids=[p1, p2],
             title="Consolidated Result",
             content="Synthesized content produced from the raw source memory.",
             owner_id="agent_c",
+            override_justification="Test fixture deliberately consolidates two isolated parents.",
             db_connection=self.conn,
         )
         consolidated_id = res.split("ID: ")[1].strip()
@@ -106,7 +115,7 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
         self.assertEqual(status, "consolidated")
         self.assertTrue(is_core)
 
-    def test_raw_entity_update_is_unaffected(self):
+    def test_raw_entity_frozen_update_is_rejected_without_resurrection(self):
         p1 = store_memory(
             title="Raw Entry",
             content="Original raw content.",
@@ -114,7 +123,7 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             db_connection=self.conn,
         ).split("ID: ")[1]
 
-        store_memory(
+        result = store_memory(
             entity_id=p1,
             title="Raw Entry Updated",
             content="Updated raw content.",
@@ -122,6 +131,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             db_connection=self.conn,
         )
 
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "IMMUTABLE_MEMORY")
         status, valid_to, _ = self._row(p1)
         self.assertEqual(status, "raw")
         self.assertIsNone(valid_to)

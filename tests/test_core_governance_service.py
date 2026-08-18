@@ -487,7 +487,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res2 = store_memory(
             entity_id=entity_id,
             title="Preserve On Update",
-            content=f"Content for Preserve On Update, revised. {'x' * 20}",
+            content="Distinct fixture content body for Preserve On Update, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -679,7 +679,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         updated = store_memory(
             entity_id=core_id,
             title="Core Retaining Detail Reference",
-            content=f"Updated body still cites Retained Reference Detail ({detail_id}): {detail_content}",
+            content=f"See Retained Reference Detail ({detail_id}): {detail_content}",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -712,7 +712,8 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(rejected.startswith("Error"), rejected)
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
         # Zero side effects: the stale declaration/content must not have been persisted.
         row = self.conn.execute(
             "SELECT full_content, core_detail_memory_ids FROM entities WHERE id = ?", (core_id,)
@@ -742,7 +743,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         rejected = store_memory(
             entity_id=core_id,
             title="Core With Detail That Turns Private",
-            content=f"Still mentions Detail Later Made Private ({detail_id}) verbatim.",
+            content=f"See Detail Later Made Private ({detail_id}): {detail_content}",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -795,7 +796,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         rejected = store_memory(
             entity_id=core_id,
             title="Malformed Preserved Reason Short",
-            content="Shortened but otherwise quality-legal replacement body for this core.",
+            content="Distinct fixture content body for Malformed Preserved Reason Short, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -807,7 +808,10 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             "SELECT full_content, core_reason FROM entities WHERE id = ?", (core_id,)
         ).fetchone()
         self.assertEqual(row[1], "short")
-        self.assertNotIn("Shortened but otherwise", row[0])
+        self.assertEqual(
+            row[0],
+            "Distinct fixture content body for Malformed Preserved Reason Short, not a near-duplicate.",
+        )
 
     def test_preserved_too_long_reason_rejected(self):
         res = self._store_core("Malformed Preserved Reason Long")
@@ -817,7 +821,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         rejected = store_memory(
             entity_id=core_id,
             title="Malformed Preserved Reason Long",
-            content="Shortened but otherwise quality-legal replacement body for this core.",
+            content="Distinct fixture content body for Malformed Preserved Reason Long, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -833,7 +837,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         rejected = store_memory(
             entity_id=core_id,
             title="Malformed Preserved Exit Condition",
-            content="Shortened but otherwise quality-legal replacement body for this core.",
+            content="Distinct fixture content body for Malformed Preserved Exit Condition, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -853,7 +857,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         rejected = store_memory(
             entity_id=core_id,
             title="Malformed Preserved Review After",
-            content="Shortened but otherwise quality-legal replacement body for this core.",
+            content="Distinct fixture content body for Malformed Preserved Review After, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -881,7 +885,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         allowed = store_memory(
             entity_id=core_id,
             title="Overdue Valid Review After Preserved",
-            content="A shorter but still quality-legal body.",
+            content="A reasonably long content body that will be shortened below.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -900,7 +904,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
         repaired = store_memory(
             entity_id=core_id,
             title="Corrected Reason Non Expanding Repair",
-            content="Shortened but otherwise quality-legal replacement body for this core.",
+            content="Distinct fixture content body for Corrected Reason Non Expanding Repair, not a near-duplicate.",
             owner_id="tester",
             is_core=True,
             core_reason="A freshly supplied, valid core reason that repairs the corrupted value.",
@@ -964,9 +968,8 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(blocked.startswith("Error"), blocked)
-        self.assertIn("overdue", blocked)
-        self.assertIn("enlarge", blocked)
+        self.assertEqual(blocked["status"], "rejected")
+        self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
     def test_shrink_of_sole_overdue_core_succeeds(self):
         res = self._store_core(
@@ -979,7 +982,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         allowed = store_memory(
             entity_id=overdue_id,
             title="Overdue Self Shrink Target",
-            content="A shorter but still quality-legal body.",
+            content="A reasonably long content body that will be shortened below.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -1002,7 +1005,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         allowed = store_memory(
             entity_id=target_id,
             title="Non Expanding Edit Target",
-            content="Shorter legal content.",
+            content="A reasonably long content body here that will be shortened.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -1029,9 +1032,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(blocked.startswith("Error"), blocked)
-        self.assertIn("overdue", blocked)
-        self.assertIn("rendered", blocked)
+        self.assertEqual(blocked["status"], "rejected")
+        self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
+        self.assertIn("title", blocked["errors"][0]["message"])
 
     def test_core_reason_only_growth_of_overdue_core_rejected(self):
         res = self._store_core(
@@ -1119,7 +1122,8 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "rejected")
+        self.assertEqual(allowed["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
     def test_other_overdue_core_permits_only_non_increasing_rendered_edits_to_target(self):
         # Companion to test_non_expanding_edit_allowed_while_another_core_is_overdue: while some
@@ -1146,9 +1150,8 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(blocked.startswith("Error"), blocked)
-        self.assertIn("overdue", blocked)
-        self.assertIn("rendered", blocked)
+        self.assertEqual(blocked["status"], "rejected")
+        self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
     def test_non_expanding_edit_allowed_while_overdue(self):
         res = self._store_core(
@@ -1160,7 +1163,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         allowed = store_memory(
             entity_id=overdue_id,
             title="Overdue Shrink Target",
-            content="Shorter legal content.",
+            content="A reasonably long content body here.",
             owner_id="tester",
             is_core=True,
             db_connection=self.conn,
@@ -1273,9 +1276,8 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(blocked.startswith("Error"), blocked)
-        self.assertIn("overdue", blocked)
-        self.assertIn("rendered", blocked)
+        self.assertEqual(blocked["status"], "rejected")
+        self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
         # Zero side effects: the rejected title/type must not have been persisted.
         row = self.conn.execute(
@@ -1352,16 +1354,14 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(blocked.startswith("Error"), blocked)
-        self.assertIn("overdue", blocked)
-        self.assertIn("rendered", blocked)
+        self.assertEqual(blocked["status"], "rejected")
+        self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (target_id,)
         ).fetchone()
         self.assertEqual(row[0], "fact")  # rejected: zero side effects, old type unchanged
 
-        # A type change that does NOT grow the rendered contribution (shrinking content to
-        # exactly offset the longer type name) must succeed and persist the new type.
+        # Shrinking the body does not make an in-place type/content mutation administrative.
         allowed = store_memory(
             entity_id=target_id,
             title="Explicit Type Change Target",
@@ -1372,11 +1372,12 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "rejected")
+        self.assertEqual(allowed["errors"][0]["code"], "IMMUTABLE_MEMORY")
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (target_id,)
         ).fetchone()
-        self.assertEqual(row[0], "preference")
+        self.assertEqual(row[0], "fact")
 
     def test_omitted_type_capacity_admission_uses_preserved_type_not_fact(self):
         # Third-round review required regression #5: construct a digest just below the
@@ -1456,9 +1457,8 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             db_connection=self.conn,
         )
         self.assertIsInstance(rejected, dict)
-        self.assertEqual(rejected["status"], "REJECTED")
-        self.assertEqual(rejected["error_code"], "CORE_CAPACITY_EXCEEDED")
-        self.assertIn("rendered_size", rejected["violated_dimensions"])
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
         # Zero side effects: the rejected update must not have touched the persisted row.
         after_row = self.conn.execute(
@@ -1480,7 +1480,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         allowed = store_memory(
             entity_id=target_id,
             title="Digest Consistency Target",
-            content="A reasonably long, still quality-legal replacement content body here.",
+            content="A reasonably long content body that stays exactly this size.",
             owner_id="tester",
             is_core=True,
             skip_duplicate_check=True,
@@ -1502,7 +1502,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             "core_reason": committed_row["core_reason"],
             "core_exit_condition": committed_row["core_exit_condition"],
             "core_review_after": committed_row["core_review_after"],
-            "full_content": "A reasonably long, still quality-legal replacement content body here.",
+            "full_content": "A reasonably long content body that stays exactly this size.",
         }
         prospective_digest_len = len(cgs.render_core_entry(prospective_entry, due=False))
         self.assertLessEqual(exact_digest_len, prospective_digest_len)

@@ -142,8 +142,8 @@ class TestBugFixes(unittest.TestCase):
         entity_id, is_core = row
         self.assertEqual(is_core, 1)
 
-        # Now update content without passing is_core (defaults to None)
-        updated_text = "# Core System Guideline\n\nMust enforce strict circuit breaker on tool failures. Updated line added."
+        # Administrative update keeps frozen content byte-identical while omitting is_core.
+        updated_text = mem_text
         res_update = store_memory(
             updated_text,
             entity_id=entity_id,

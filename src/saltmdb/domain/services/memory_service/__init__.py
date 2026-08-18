@@ -82,6 +82,8 @@ from .lifecycle import (
     touch_memory_access,
     archive_memory,
     detect_orphaned_memories,
+    revise_memory,
+    supersede_memory,
 )
 from .duplicates import check_duplicate_memories, scan_memories, bulk_archive_memory
 
@@ -137,6 +139,8 @@ __all__ = [
     "touch_memory_access",
     "archive_memory",
     "detect_orphaned_memories",
+    "revise_memory",
+    "supersede_memory",
     "check_duplicate_memories",
     "scan_memories",
     "bulk_archive_memory",

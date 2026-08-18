@@ -96,7 +96,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             "omitting memory_type on an update must preserve the existing DB value, not reset to 'fact'",
         )
 
-    def test_update_with_explicit_new_memory_type_changes_stored_value(self):
+    def test_update_with_explicit_new_memory_type_rejects_frozen_mutation(self):
         res = store_memory(
             content="Content for explicit memory_type change test on update path",
             title="Memory Type Change Entity",
@@ -118,11 +118,12 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertFalse(update_res.startswith("Error"))
+        self.assertEqual(update_res["status"], "rejected")
+        self.assertEqual(update_res["errors"][0]["code"], "IMMUTABLE_MEMORY")
         self.assertEqual(
             self._memory_type_of(entity_id),
-            "event",
-            "an update explicitly supplying a new memory_type must overwrite the old value",
+            "fact",
+            "legacy store_memory must not mutate frozen memory_type in place",
         )
 
 

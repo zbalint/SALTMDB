@@ -33,6 +33,7 @@ class DispositionServiceTestBase(unittest.TestCase):
         return memory_service.store_memory(
             title=title,
             content=content,
+            tags=kwargs.pop("tags", None),
             owner_id=kwargs.pop("owner_id", "agent1"),
             db_connection=self.conn,
             **kwargs,
@@ -246,22 +247,26 @@ class TestCommitDispositions(DispositionServiceTestBase):
         r2 = self._store(
             "Redis Eviction Policy Refresh",
             "Redis maxmemory-policy is configured to allkeys-lru for the cache cluster now.",
+            tags=["#redis"],
         )
         r3 = self._store(
             "Redis Eviction Policy Refresh",
             "Redis maxmemory-policy is configured to allkeys-lru for the cache cluster now.",
+            tags=["#redis"],
             review_token=r2["review_token"],
             dispositions=[self._resolve_one(r2, "consolidate")],
         )
         self.assertTrue(
-            r3.startswith("Successfully committed") or r3.startswith("Knowledge stored")
+            r3.startswith("Successfully revised")
+            or r3.startswith("Successfully committed")
+            or r3.startswith("Knowledge stored")
         )
         new_id = r3.split("ID: ")[1].strip()
 
         new_row = self.conn.execute(
             "SELECT status FROM entities WHERE id = ?", (new_id,)
         ).fetchone()
-        self.assertEqual(new_row[0], "consolidated")
+        self.assertEqual(new_row[0], "raw")
 
         old_row = self.conn.execute(
             "SELECT status FROM entities WHERE id = ?", (old_id,)
@@ -273,7 +278,9 @@ class TestCommitDispositions(DispositionServiceTestBase):
             "SELECT COUNT(*) FROM entities WHERE title = ? AND status = 'raw'",
             ("Redis Eviction Policy Refresh",),
         ).fetchone()[0]
-        self.assertEqual(stray, 0)
+        # The immutable revision is the one intended active row; no temporary raw node was
+        # created in addition to it.
+        self.assertEqual(stray, 1)
 
     def test_missing_disposition_for_flagged_candidate_rejected(self):
         self._store(
@@ -413,15 +420,22 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
         integrity-only check (which only fires on cohesion drift)."""
         parent = self._store(
             "Consolidation Parent",
-            "The staging environment database uses a single replica for cost reasons.",
+            "The staging environment database uses a single replica for cost reasons during deployments.",
             skip_duplicate_check=True,
         )
         parent_id = parent.split("ID: ")[1].strip()
 
+        sibling = self._store(
+            "Consolidation Sibling",
+            "The staging environment database uses a single replica for cost reasons.",
+            skip_duplicate_check=True,
+        )
+        sibling_id = sibling.split("ID: ")[1].strip()
+
         from saltmdb.domain.services.relation_service import commit_consolidation
 
         cons_res = commit_consolidation(
-            parent_ids=[parent_id],
+            parent_ids=[parent_id, sibling_id],
             title="Consolidated Staging DB Note",
             content="The staging environment database uses a single replica for cost reasons.",
             owner_id="agent1",
@@ -473,7 +487,7 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
             # at all), so this synthetic fixture mirrors that by construction.
             "content": "The CDN cache TTL for static assets is set to 86400 seconds, consolidated with the load balancer health check interval notes.",
             "title": "Multi Candidate Combined",
-            "tags": None,
+            "tags": ["#multi-candidate"],
             "owner_id": "agent1",
             "scope": "shared",
             "memory_type": None,
@@ -548,7 +562,7 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
         new_status = self.conn.execute(
             "SELECT status FROM entities WHERE id = ?", (new_id,)
         ).fetchone()[0]
-        self.assertEqual(new_status, "consolidated")
+        self.assertEqual(new_status, "raw")
 
     def test_live_is_core_change_after_preflight_rejects_stale_disposition_choice(self):
         """A candidate that was non-core at preflight time but becomes core before commit must be
@@ -603,6 +617,7 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
             "Metadata Preservation Copy",
             "The API gateway enforces a 30 second upstream timeout for all proxied requests now.",
             memory_type="procedure",
+            tags=["#gateway"],
             metadata={"runbook_id": "gw-timeout-001"},
         )
         self.assertIsInstance(r2, dict)
@@ -611,12 +626,15 @@ class TestCodexImplementationReviewFixes(DispositionServiceTestBase):
             "Metadata Preservation Copy",
             "The API gateway enforces a 30 second upstream timeout for all proxied requests now.",
             memory_type="procedure",
+            tags=["#gateway"],
             metadata={"runbook_id": "gw-timeout-001"},
             review_token=r2["review_token"],
             dispositions=[self._resolve_one(r2, "consolidate")],
         )
         self.assertTrue(
-            res.startswith("Successfully committed") or res.startswith("Knowledge stored")
+            res.startswith("Successfully revised")
+            or res.startswith("Successfully committed")
+            or res.startswith("Knowledge stored")
         )
         new_id = res.split("ID: ")[1].strip()
 

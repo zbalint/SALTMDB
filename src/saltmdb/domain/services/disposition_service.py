@@ -480,38 +480,79 @@ def commit_disposed_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if proposal_text is None:
                 return "Error: title and content are required for consolidation."
             proposed_title, proposed_content = proposal_text
-            if precomputed is not None:
-                centroids, unresolved, observed_state = precomputed
-            else:
-                centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                    consolidate_targets, c, db_path
+            if len(consolidate_targets) == 1:
+                # Phase 4 deliberately rejects single-parent consolidate_memories calls: that
+                # operation is a revision with the wrong lineage predicate. Preserve the
+                # disposition workflow by expressing this one-candidate choice as an immutable
+                # revise, in the same transaction, without creating a temporary raw node.
+                from saltmdb.domain.services.memory_service import revise_memory
+
+                revision_tags = proposed.get("tags")
+                if not revision_tags:
+                    revision_tags = [
+                        row[0]
+                        for row in c.execute(
+                            """
+                            SELECT t.name FROM tags t
+                            JOIN entity_tags et ON et.tag_id = t.id
+                            WHERE et.entity_id = ? AND t.name != '#core'
+                            ORDER BY t.name
+                            """,
+                            (consolidate_targets[0],),
+                        ).fetchall()
+                    ]
+
+                revision = revise_memory(
+                    entity_id=consolidate_targets[0],
+                    title=proposed_title,
+                    content=proposed_content,
+                    tags=revision_tags,
+                    reason="Resolved a single-candidate consolidate disposition as a revision.",
+                    owner_id=proposed.get("owner_id"),
+                    context_id=proposed.get("context_id"),
+                    scope=proposed.get("scope"),
+                    memory_type=proposed.get("memory_type"),
+                    metadata=proposed.get("metadata"),
+                    db_connection=c,
+                    _in_transaction=True,
                 )
-            res = commit_consolidation(
-                parent_ids=consolidate_targets,
-                title=proposed_title,
-                content=proposed_content,
-                tags=proposed.get("tags"),
-                scope=proposed.get("scope") or "shared",
-                weight=proposed.get("weight") or 1,
-                is_core=proposed.get("is_core"),
-                owner_id=proposed.get("owner_id"),
-                context_id=proposed.get("context_id"),
-                metadata=proposed.get("metadata"),
-                memory_type=proposed.get("memory_type"),
-                core_reason=proposed.get("core_reason"),
-                core_exit_condition=proposed.get("core_exit_condition"),
-                core_review_after=proposed.get("core_review_after"),
-                detail_memory_ids=proposed.get("detail_memory_ids"),
-                db_connection=c,
-                _in_transaction=True,
-                _precomputed_centroids=centroids,
-                _precomputed_unresolved=unresolved,
-                _precomputed_observed_state=observed_state,
-            )
-            if res.startswith("Error"):
-                raise RuntimeError(f"Disposition commit aborted (all-or-nothing): {res}")
-            output_entity_id = res.split("ID: ")[-1].strip()
-            message = res
+                if not isinstance(revision, dict) or revision.get("status") != "ok":
+                    raise RuntimeError(f"Disposition revision aborted (all-or-nothing): {revision}")
+                output_entity_id = revision["data"]["new_id"]
+                message = f"Successfully revised memory with ID: {output_entity_id}"
+            else:
+                if precomputed is not None:
+                    centroids, unresolved, observed_state = precomputed
+                else:
+                    centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                        consolidate_targets, c, db_path
+                    )
+                res = commit_consolidation(
+                    parent_ids=consolidate_targets,
+                    title=proposed_title,
+                    content=proposed_content,
+                    tags=proposed.get("tags"),
+                    scope=proposed.get("scope") or "shared",
+                    weight=proposed.get("weight") or 1,
+                    is_core=proposed.get("is_core"),
+                    owner_id=proposed.get("owner_id"),
+                    context_id=proposed.get("context_id"),
+                    metadata=proposed.get("metadata"),
+                    memory_type=proposed.get("memory_type"),
+                    core_reason=proposed.get("core_reason"),
+                    core_exit_condition=proposed.get("core_exit_condition"),
+                    core_review_after=proposed.get("core_review_after"),
+                    detail_memory_ids=proposed.get("detail_memory_ids"),
+                    db_connection=c,
+                    _in_transaction=True,
+                    _precomputed_centroids=centroids,
+                    _precomputed_unresolved=unresolved,
+                    _precomputed_observed_state=observed_state,
+                )
+                if res.startswith("Error"):
+                    raise RuntimeError(f"Disposition commit aborted (all-or-nothing): {res}")
+                output_entity_id = res.split("ID: ")[-1].strip()
+                message = res
         else:
             from saltmdb.domain.services.memory_service import _store_raw_entity
 

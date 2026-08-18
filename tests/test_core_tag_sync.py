@@ -37,6 +37,9 @@ class TestCoreTagSync(unittest.TestCase):
             db_connection=self.conn,
             **core_kwargs,
         )
+        if isinstance(res, dict):
+            self.assertEqual(res.get("status"), "ok", f"seed store_memory failed: {res}")
+            return res["data"]["new_id"]
         self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
         return res.split("ID: ")[1].split()[0]
 
@@ -69,16 +72,22 @@ class TestCoreTagSync(unittest.TestCase):
         entity_id = self._store("Core Sync Override Entity", is_core=False)
         self.assertNotIn("#core", self._tags_of(entity_id))
 
-        # Caller tries to sneak "#core" in via tags while leaving is_core untouched (None ->
-        # preserved as False). The server must strip it right back out.
-        self._store(
-            "Core Sync Override Entity",
+        # Caller tries to change frozen tags while leaving is_core untouched. The legacy path
+        # must reject the mutation and leave the original tag set unchanged.
+        rejected = store_memory(
+            content="Seed content for core-tag-sync tests: Core Sync Override Entity",
+            title="Core Sync Override Entity",
             tags=["#core", "#foo"],
             entity_id=entity_id,
+            owner_id="tester",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
         )
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
         tags = self._tags_of(entity_id)
         self.assertNotIn("#core", tags)
-        self.assertIn("#foo", tags)
+        self.assertNotIn("#foo", tags)
 
     def test_is_core_true_self_heals_legacy_entity_with_tags_omitted(self):
         entity_id = self._store("Core Sync Self Heal Entity", is_core=False, tags=["#foo"])

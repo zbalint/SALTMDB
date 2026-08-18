@@ -121,7 +121,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "SELECT COUNT(*) FROM entity_tags WHERE entity_id = ?", (entity_id,)
         ).fetchone()[0]
 
-    def test_store_memory_update_explicit_empty_tags_clears(self):
+    def test_store_memory_update_explicit_empty_tags_rejects_frozen_mutation(self):
         res = tools.store_memory(
             content="Content for explicit tag clearing test on update path",
             title="Tag Clearing Entity",
@@ -132,7 +132,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         entity_id = res.split("ID: ")[1].split()[0]
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
 
-        tools.store_memory(
+        rejected = tools.store_memory(
             entity_id=entity_id,
             content="Content for explicit tag clearing test on update path",
             title="Tag Clearing Entity",
@@ -140,9 +140,17 @@ class TestMCPToolsWrapper(unittest.TestCase):
             owner_id="user1",
             skip_duplicate_check=True,
         )
-        self.assertEqual(self._tag_count_for_entity(entity_id), 0)
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
+        self.assertEqual(self._tag_count_for_entity(entity_id), 1)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE id LIKE ?", (entity_id + "_h_%",)
+            ).fetchone()[0],
+            0,
+        )
 
-    def test_store_memory_update_explicit_tags_replaces(self):
+    def test_store_memory_update_explicit_tags_rejects_frozen_mutation(self):
         res = tools.store_memory(
             content="Content for explicit tag replacement test on update path",
             title="Tag Replacement Entity",
@@ -152,7 +160,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         entity_id = res.split("ID: ")[1].split()[0]
 
-        tools.store_memory(
+        rejected = tools.store_memory(
             entity_id=entity_id,
             content="Content for explicit tag replacement test on update path",
             title="Tag Replacement Entity",
@@ -160,6 +168,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             owner_id="user1",
             skip_duplicate_check=True,
         )
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
         row = self.conn.execute(
             """
@@ -167,7 +177,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         """,
             (entity_id,),
         ).fetchone()
-        self.assertEqual(row[0], "#beta")
+        self.assertEqual(row[0], "#alpha")
 
     def test_store_memory_entity_id_is_explicit_parameter(self):
         """MCP wrapper regression (SALTMDB rework Phase-8 live test, 2026-08-18): entity_id was
@@ -523,14 +533,14 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "Synthesized summary combining PIT MCP lineage parent facts for point-in-time threading.\n"
             "- Detail alpha\n- Detail beta"
         )
-        cons_res = tools.commit_consolidation(
+        cons_res = tools.consolidate_memories(
             parent_ids=[a_id, b_id],
             title="PIT MCP Consolidated Lineage Entity",
             content=cons_content,
             owner_id="user1",
         )
-        self.assertIn("Successfully committed", cons_res)
-        c_id = cons_res.split("ID: ")[1].split()[0]
+        self.assertEqual(cons_res["status"], "ok")
+        c_id = cons_res["data"]["entity_id"]
 
         lineage_now = tools.get_lineage(entity_id=c_id, owner_id="user1")
         self.assertEqual(lineage_now["total"], 2)
@@ -662,7 +672,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         a = self._mk_vector_entity("Override Tool A", _axis(0))
         b = self._mk_vector_entity("Override Tool B", _axis(1))  # orthogonal -> incohesive
 
-        res_no_override = tools.commit_consolidation(
+        res_no_override = tools.consolidate_memories(
             parent_ids=[a, b],
             title="C Override Tool No Justification",
             content=(
@@ -671,9 +681,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             ),
             owner_id="agent_c",
         )
-        self.assertTrue(res_no_override.startswith("Error: REJECT_LOW_COHESION"))
+        self.assertEqual(res_no_override["status"], "rejected")
+        self.assertEqual(res_no_override["errors"][0]["code"], "REJECT_LOW_COHESION")
 
-        res_with_override = tools.commit_consolidation(
+        res_with_override = tools.consolidate_memories(
             parent_ids=[a, b],
             title="C Override Tool With Justification",
             content=(
@@ -683,8 +694,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             owner_id="agent_c",
             override_justification="deliberately merging unrelated fixtures via the MCP tool wrapper",
         )
-        self.assertIn("Successfully committed", res_with_override)
-        consolidated_id = res_with_override.split("ID: ")[1].split()[0]
+        self.assertEqual(res_with_override["status"], "ok")
+        consolidated_id = res_with_override["data"]["entity_id"]
         content = self.conn.execute(
             "SELECT full_content FROM entities WHERE id = ?", (consolidated_id,)
         ).fetchone()[0]
@@ -1085,8 +1096,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            17,
-            f"MCP server tool count must be exactly 17 in Phase 3, got {registered_count}",
+            19,
+            f"MCP server tool count must be exactly 19 after Phase 4, got {registered_count}",
         )
 
 

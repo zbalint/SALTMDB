@@ -25,7 +25,7 @@ class TestPhase3McpSurface(unittest.TestCase):
         SESSION_IDENTITY.reset()
 
     def test_tool_count_and_registration(self):
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 17)
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 19)
         self.assertIn("get_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("get_lineage", dispatch.DISPATCH_TABLE)
         self.assertIn("get_related_memories", dispatch.DISPATCH_TABLE)

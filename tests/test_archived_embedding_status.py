@@ -3,7 +3,7 @@ import tempfile
 import os
 import re
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, archive_memory
+from saltmdb.domain.services.memory_service import archive_memory, revise_memory, store_memory
 
 
 class TestArchivedEmbeddingStatus(unittest.TestCase):
@@ -47,7 +47,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         self.assertEqual(row[0], "archived")
         self.assertEqual(row[1], "archived")
 
-    def test_scd2_history_has_archived_embedding_status(self):
+    def test_revision_predecessor_has_archived_embedding_status(self):
         res = store_memory(
             title="Original Memory Entry",
             content="Original content text block",
@@ -59,15 +59,17 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         self.assertIsNotNone(match, f"Could not parse entity ID from store_memory result: {res}")
         entity_id = match.group(1)
 
-        # Update memory (triggers SCD2 historical copy)
-        store_memory(
+        # Immutable revision archives the predecessor and creates a new ID.
+        result = revise_memory(
             title="Updated Memory Entry",
-            content="Updated content text block",
+            content="Updated content text block with enough descriptive detail.",
+            tags=["#updated"],
+            reason="Correct the representation.",
             entity_id=entity_id,
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
+        self.assertEqual(result["status"], "ok")
 
         rows = self.conn.execute(
             "SELECT id, status, embedding_status FROM entities WHERE status = 'archived'"

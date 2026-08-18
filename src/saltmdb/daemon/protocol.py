@@ -26,7 +26,9 @@ WRITE_TOOLS = frozenset(
         "merge_tags",
         "archive_memory",
         "manage_relation",
-        "commit_consolidation",
+        "revise_memory",
+        "supersede_memory",
+        "consolidate_memories",
         "dismiss_event",
         "review_core_memory",
     }

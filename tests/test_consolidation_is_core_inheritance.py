@@ -67,6 +67,17 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         self.assertTrue(res.startswith("Knowledge stored successfully"), res)
         return res.split("ID: ")[1]
 
+    def _store_plain(self, title, content):
+        res = store_memory(
+            title=title,
+            content=content,
+            owner_id="agent_c",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        )
+        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
+        return res.split("ID: ")[1]
+
     def test_omitted_is_core_with_active_core_parent_is_rejected(self):
         core_parent = self._store_core_parent(
             "Core Rule Parent",
@@ -134,25 +145,34 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         core_parent = self._store_core_parent(
             "Core Rule Parent Two", "Another core operational rule for the explicit-True test."
         )
+        plain_parent = store_memory(
+            title="Plain Explicit Core Partner",
+            content="An ordinary partner for the explicit core lifecycle test.",
+            owner_id="agent_c",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        ).split("ID: ")[1]
 
         rejected = commit_consolidation(
-            parent_ids=[core_parent],
+            parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation Missing Fields",
             content="Synthesized content that tries to stay core without a reason/exit condition.",
             owner_id="agent_c",
             is_core=True,
             db_connection=self.conn,
+            override_justification="test override to isolate explicit core lifecycle validation",
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
 
         accepted = commit_consolidation(
-            parent_ids=[core_parent],
+            parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation With Fields",
             content="Synthesized content that stays core with a complete lifecycle declaration.",
             owner_id="agent_c",
             is_core=True,
             core_reason="Test fixture core reason for the explicit-is_core consolidation test.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            override_justification="test override to isolate explicit core lifecycle validation",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", accepted)
@@ -164,14 +184,22 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         core_parent = self._store_core_parent(
             "Core Rule Parent Three", "A third core operational rule for the override test."
         )
+        plain_parent = store_memory(
+            title="Plain Demotion Partner",
+            content="An ordinary partner for the explicit core demotion test.",
+            owner_id="agent_c",
+            skip_duplicate_check=True,
+            db_connection=self.conn,
+        ).split("ID: ")[1]
 
         res = commit_consolidation(
-            parent_ids=[core_parent],
+            parent_ids=[core_parent, plain_parent],
             title="Deliberately Demoted Consolidation",
             content="Synthesized content where the caller explicitly demotes core status.",
             owner_id="agent_c",
             is_core=False,
             db_connection=self.conn,
+            override_justification="test override to isolate explicit core demotion validation",
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
         consolidated_id = res.split("ID: ")[1].strip()
@@ -181,13 +209,15 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         core_parent = self._store_core_parent(
             "Bulk Core Rule Parent", "A core rule consolidated via the bulk pathway."
         )
+        plain_parent = self._store_plain("Bulk Core Omitted Partner", "A plain bulk partner.")
 
         results = bulk_commit_consolidation(
             consolidations=[
                 {
-                    "parent_ids": [core_parent],
+                    "parent_ids": [core_parent, plain_parent],
                     "title": "Bulk Consolidated Core Omitted",
                     "content": "Synthesized content for the bulk core consolidation test.",
+                    "override_justification": "test override to isolate omitted core inheritance validation",
                 }
             ],
             db_connection=self.conn,
@@ -201,16 +231,18 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         core_parent = self._store_core_parent(
             "Bulk Core Rule Parent Two", "A second core rule consolidated via the bulk pathway."
         )
+        plain_parent = self._store_plain("Bulk Core Explicit Partner", "A plain bulk partner.")
 
         results = bulk_commit_consolidation(
             consolidations=[
                 {
-                    "parent_ids": [core_parent],
+                    "parent_ids": [core_parent, plain_parent],
                     "title": "Bulk Consolidated Core Explicit",
                     "content": "Synthesized content for the bulk core consolidation explicit test.",
                     "is_core": True,
                     "core_reason": "Test fixture core reason for the bulk explicit-is_core test.",
                     "core_exit_condition": "Test fixture exit condition: this regression test tears down its temp DB.",
+                    "override_justification": "test override to isolate explicit bulk core validation",
                 }
             ],
             db_connection=self.conn,
@@ -278,7 +310,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             "core_exit_condition": "Test fixture exit condition: this regression test tears down its temp DB.",
         }
 
-    def test_single_parent_core_consolidation_rejected_while_unrelated_core_overdue(self):
+    def test_single_parent_core_consolidation_rejected_by_parent_count(self):
         overdue_id = self._store_core(
             "Unrelated Overdue Core", "Body of the unrelated overdue core."
         )
@@ -297,7 +329,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             **self._core_reason_kwargs(),
         )
         self.assertTrue(res.startswith("Error"), res)
-        self.assertIn("overdue", res)
+        self.assertIn("REJECT_PARENT_COUNT", res)
         # Zero side effects: the plain parent must be untouched.
         row = self.conn.execute("SELECT status FROM entities WHERE id = ?", (parent_id,)).fetchone()
         self.assertEqual(row[0], "raw")
@@ -333,14 +365,18 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         )
         self._make_overdue(overdue_id)
         parent_id = self._store_plain("Bulk Plain Parent", "Bulk plain parent body text.")
+        bulk_partner = self._store_plain(
+            "Bulk Overdue Partner", "Bulk overdue consolidation partner."
+        )
 
         results = bulk_commit_consolidation(
             consolidations=[
                 {
-                    "parent_ids": [parent_id],
+                    "parent_ids": [parent_id, bulk_partner],
                     "title": "Bulk Core Consolidation While Overdue",
                     "content": "Synthesized bulk content that tries to become core while overdue.",
                     "is_core": True,
+                    "override_justification": "test override to isolate overdue core boundary validation",
                     **self._core_reason_kwargs(),
                 }
             ],
@@ -356,18 +392,20 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             "Overdue Parent Demoted", "Body of the overdue parent being demoted."
         )
         self._make_overdue(overdue_id)
+        plain_partner = self._store_plain("Overdue Demotion Partner", "A plain demotion partner.")
 
         res = commit_consolidation(
-            parent_ids=[overdue_id],
+            parent_ids=[overdue_id, plain_partner],
             title="Demote Overdue Parent Via Consolidation",
             content="Synthesized content where the overdue parent becomes a plain memory.",
             owner_id="agent_c",
             is_core=False,
             db_connection=self.conn,
+            override_justification="test override to isolate overdue demotion behavior",
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
 
-    def test_core_result_replacing_sole_overdue_parent_rejected(self):
+    def test_core_result_replacing_overdue_parent_rejected(self):
         # Reversed (follow-up review finding #2): a core-producing consolidation must never
         # replace its own sole overdue parent. Excluding resolved parents about to be archived
         # from the overdue scan let a core-producing consolidation silently reset an overdue
@@ -380,9 +418,12 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             "Sole Overdue Parent Not Replaced", "Body of the sole overdue parent staying put."
         )
         self._make_overdue(overdue_id)
+        plain_partner = self._store_plain(
+            "Overdue Core Partner", "A plain partner for overdue core."
+        )
 
         res = commit_consolidation(
-            parent_ids=[overdue_id],
+            parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Sole Overdue Parent Rejected",
             content="Synthesized content that must not be allowed to replace the sole overdue parent.",
             owner_id="agent_c",
@@ -416,6 +457,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             "Body of the parent that gets reviewed before being replaced.",
         )
         self._make_overdue(overdue_id)
+        plain_partner = self._store_plain("Reviewed Core Partner", "A plain reviewed-core partner.")
 
         review_msg = review_core_memory(
             self.conn,
@@ -427,13 +469,14 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         self.assertIn("retained as core", review_msg)
 
         res = commit_consolidation(
-            parent_ids=[overdue_id],
+            parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Reviewed Parent",
             content="Synthesized content replacing the now-reviewed, no-longer-overdue parent.",
             owner_id="agent_c",
             is_core=True,
             db_connection=self.conn,
             **self._core_reason_kwargs(),
+            override_justification="test override to isolate reviewed overdue core behavior",
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
         consolidated_id = res.split("ID: ")[1].strip()
@@ -448,10 +491,8 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         self.assertEqual(parent_row[0], "archived")
 
 
-class TestConsolidationSingleParentToctou(unittest.TestCase):
-    """Resolved review finding #8: single-parent consolidation never ran the cohesion gate, so it
-    never got a TOCTOU observed_state snapshot either -- state revalidation must not be coupled
-    to whether the cohesion gate ran."""
+class TestConsolidationToctou(unittest.TestCase):
+    """TOCTOU state revalidation remains covered for the required two-parent operation."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -486,9 +527,12 @@ class TestConsolidationSingleParentToctou(unittest.TestCase):
             "SELECT COUNT(*) FROM entities WHERE status = 'consolidated'"
         ).fetchone()[0]
 
-    def test_single_parent_content_change_between_observe_and_commit_aborts(self):
+    def test_two_parent_content_change_between_observe_and_commit_aborts(self):
         parent_id = self._store_plain(
             "Race Content Parent", "Original content for the content-race test."
+        )
+        partner_id = self._store_plain(
+            "Race Content Partner", "A second parent for the content-race test."
         )
 
         # check_duplicate_memories runs AFTER commit_consolidation's own pre-transaction observe
@@ -507,11 +551,12 @@ class TestConsolidationSingleParentToctou(unittest.TestCase):
 
         with patch.object(rs_module, "check_duplicate_memories", side_effect=_racing_check):
             res = commit_consolidation(
-                parent_ids=[parent_id],
+                parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Content Change",
-                content="Synthesized content for the single-parent content-race test.",
+                content="Synthesized content for the two-parent content-race test.",
                 owner_id="agent_c",
                 db_connection=self.conn,
+                override_justification="test override to isolate content TOCTOU revalidation",
             )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("state changed", res)
@@ -519,9 +564,12 @@ class TestConsolidationSingleParentToctou(unittest.TestCase):
         row = self.conn.execute("SELECT status FROM entities WHERE id = ?", (parent_id,)).fetchone()
         self.assertEqual(row[0], "raw")
 
-    def test_single_parent_archival_between_observe_and_commit_aborts(self):
+    def test_two_parent_archival_between_observe_and_commit_aborts(self):
         parent_id = self._store_plain(
             "Race Archive Parent", "Original content for the archive-race test."
+        )
+        partner_id = self._store_plain(
+            "Race Archive Partner", "A second parent for the archive-race test."
         )
 
         from saltmdb.domain.services import relation_service as rs_module
@@ -535,21 +583,25 @@ class TestConsolidationSingleParentToctou(unittest.TestCase):
 
         with patch.object(rs_module, "check_duplicate_memories", side_effect=_racing_check):
             res = commit_consolidation(
-                parent_ids=[parent_id],
+                parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Archival",
-                content="Synthesized content for the single-parent archival-race test.",
+                content="Synthesized content for the two-parent archival-race test.",
                 owner_id="agent_c",
                 db_connection=self.conn,
+                override_justification="test override to isolate archival TOCTOU revalidation",
             )
         self.assertTrue(res.startswith("Error"), res)
         self.assertEqual(self._consolidated_count(), 0)
 
-    def test_single_parent_promoted_to_core_between_observe_and_commit_is_reevaluated(self):
+    def test_two_parent_promoted_to_core_between_observe_and_commit_is_reevaluated(self):
         # Not a TOCTOU content/status mismatch -- resolve_consolidation_core_state re-reads
         # is_core fresh inside _do_commit regardless, so a parent that becomes core mid-call is
         # still correctly caught by the existing "is_core was omitted" rule.
         parent_id = self._store_plain(
             "Race Promote Parent", "Original content for the promotion-race test."
+        )
+        partner_id = self._store_plain(
+            "Race Promote Partner", "A second parent for the promotion-race test."
         )
 
         from saltmdb.domain.services import relation_service as rs_module
@@ -572,11 +624,12 @@ class TestConsolidationSingleParentToctou(unittest.TestCase):
 
         with patch.object(rs_module, "check_duplicate_memories", side_effect=_racing_check):
             res = commit_consolidation(
-                parent_ids=[parent_id],
+                parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Promotion",
-                content="Synthesized content for the single-parent promotion-race test.",
+                content="Synthesized content for the two-parent promotion-race test.",
                 owner_id="agent_c",
                 db_connection=self.conn,
+                override_justification="test override to isolate promotion TOCTOU revalidation",
             )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("is_core was omitted", res)

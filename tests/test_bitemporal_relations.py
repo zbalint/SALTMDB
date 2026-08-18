@@ -491,7 +491,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.assertTrue(res2.startswith("Knowledge stored successfully with ID: "))
         self.assertNotIn("[Tip: consider calling manage_relation", res2)
 
-        # (c) Re-storing existing entity_id (update path) WITH tags -> NO tip suffix
+        # (c) Legacy frozen update is rejected; callers must use revise_memory/supersede_memory.
         entity_id_1 = res1.split("ID: ")[1].split()[0]
         res3 = store_memory(
             entity_id=entity_id_1,
@@ -501,8 +501,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             owner_id="user1",
             db_connection=self.conn,
         )
-        self.assertTrue(res3.startswith("Knowledge stored successfully with ID: "))
-        self.assertNotIn("[Tip: consider calling manage_relation", res3)
+        self.assertEqual(res3["status"], "rejected")
+        self.assertEqual(res3["errors"][0]["code"], "IMMUTABLE_MEMORY")
 
     def test_store_memory_near_duplicate_triggers_review_required_not_silent_persist(self):
         """Track A successor to the pre-rework "duplicate_warning_str + tip coexist" test: a

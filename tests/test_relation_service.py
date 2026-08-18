@@ -24,6 +24,7 @@ from saltmdb.domain.services.relation_service import (
     get_lineage,
     get_related_memories,
     commit_consolidation,
+    consolidate_memories,
     bulk_commit_consolidation,
 )
 from saltmdb.domain.services.memory_service import (
@@ -794,7 +795,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             params,
         ).fetchall()
 
-    def test_basic_repoint_original_row_preserved_and_new_active_row_created(self):
+    def test_single_parent_rejects_before_relation_mutation(self):
         p1 = self._mk("Repoint P1")
         x = self._mk("Repoint X")
         store_relation(source_id=p1, target_id=x, predicate="depends_on", db_connection=self.conn)
@@ -805,6 +806,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(orig_row)
         orig_id = orig_row[0]
+        before_entities = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
 
         res = commit_consolidation(
             parent_ids=[p1],
@@ -813,38 +815,51 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res)
-        c_id = res.split("ID: ")[1].strip()
+        self.assertIn("REJECT_PARENT_COUNT", res)
 
         row = self.conn.execute(
             "SELECT source_id, valid_to FROM relations WHERE id=?", (orig_id,)
         ).fetchone()
-        self.assertEqual(row[0], p1, "original row's source_id must remain unchanged (still P1)")
-        self.assertIsNotNone(row[1], "original row's valid_to must now be set (expired)")
+        self.assertEqual(row, (p1, None))
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], before_entities
+        )
 
-        new_active = self._active_relations(source_id=c_id, target_id=x, predicate="depends_on")
-        self.assertEqual(len(new_active), 1, "a NEW active C -> X row must exist")
-
-    def test_dedup_two_parents_same_target_produces_single_active_row(self):
+    def test_semantic_edges_remain_active_and_are_reported_in_worklist(self):
         p1 = self._mk("Dedup P1")
         p2 = self._mk("Dedup P2")
         x = self._mk("Dedup X")
         store_relation(source_id=p1, target_id=x, predicate="depends_on", db_connection=self.conn)
         store_relation(source_id=p2, target_id=x, predicate="depends_on", db_connection=self.conn)
 
-        res = commit_consolidation(
+        result = consolidate_memories(
             parent_ids=[p1, p2],
             title="C Dedup",
             content=_cons_content("dedup"),
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res)
-        c_id = res.split("ID: ")[1].strip()
+        self.assertEqual(result["status"], "ok")
+        c_id = result["data"]["entity_id"]
 
         active = self._active_relations(target_id=x, predicate="depends_on")
-        self.assertEqual(len(active), 1, "exactly one active C->X row must exist, not two")
-        self.assertEqual(active[0][1], c_id)
+        self.assertEqual(
+            len(active), 2, "both semantic edges remain active on their archived parents"
+        )
+        self.assertEqual({row[1] for row in active}, {p1, p2})
+        worklist = result["data"]["orphaned_relations"]
+        self.assertEqual(len(worklist), 2)
+        self.assertEqual({item["originating_parent"] for item in worklist}, {p1, p2})
+        self.assertEqual({item["other_endpoint"] for item in worklist}, {x})
+        self.assertEqual(
+            len(
+                self.conn.execute(
+                    "SELECT id FROM relations WHERE source_id=? AND target_id=? AND predicate='depends_on' AND valid_to IS NULL",
+                    (c_id, x),
+                ).fetchall()
+            ),
+            0,
+        )
 
         old_rows = self.conn.execute(
             "SELECT source_id, valid_to FROM relations WHERE target_id=? AND predicate='depends_on' AND source_id IN (?, ?)",
@@ -853,12 +868,12 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         self.assertEqual(
             len(old_rows),
             2,
-            "both P1's and P2's original rows must still exist (expired, not deleted)",
+            "both P1's and P2's original rows must still exist and remain active",
         )
         for _src, valid_to in old_rows:
-            self.assertIsNotNone(valid_to)
+            self.assertIsNone(valid_to)
 
-    def test_self_loop_between_both_consolidated_parents_expires_with_no_self_loop_row(self):
+    def test_inter_parent_semantic_edge_remains_active_without_self_loop_copy(self):
         p1 = self._mk("SelfLoop P1")
         p2 = self._mk("SelfLoop P2")
         store_relation(source_id=p1, target_id=p2, predicate="depends_on", db_connection=self.conn)
@@ -869,29 +884,29 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(orig_row)
 
-        res = commit_consolidation(
+        result = consolidate_memories(
             parent_ids=[p1, p2],
             title="C Self Loop",
             content=_cons_content("self-loop"),
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res)
-        c_id = res.split("ID: ")[1].strip()
+        self.assertEqual(result["status"], "ok")
+        c_id = result["data"]["entity_id"]
 
         row = self.conn.execute(
             "SELECT valid_to FROM relations WHERE id=?", (orig_row[0],)
         ).fetchone()
-        self.assertIsNotNone(
-            row[0], "original P1->P2 row must still be expired (history preserved)"
-        )
+        self.assertIsNone(row[0], "semantic inter-parent edge remains active historical truth")
+        self.assertEqual(len(result["data"]["orphaned_relations"]), 1)
+        self.assertEqual(result["data"]["orphaned_relations"][0]["other_endpoint"], p2)
 
         self_loop_count = self.conn.execute(
             "SELECT COUNT(*) FROM relations WHERE source_id=? AND target_id=?", (c_id, c_id)
         ).fetchone()[0]
         self.assertEqual(self_loop_count, 0, "no C->C self-loop row should ever be created")
 
-    def test_multi_generation_consolidated_from_edges_are_not_repointed(self):
+    def test_consolidated_parent_is_rejected_without_touching_lineage_edges(self):
         a = self._mk("MultiGen A")
         b = self._mk("MultiGen B")
         d = self._mk("MultiGen D")
@@ -924,8 +939,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res2)
-        c2 = res2.split("ID: ")[1].strip()
+        self.assertIn("INACTIVE_PARENT", res2)
 
         c1_to_a_after = self.conn.execute(
             "SELECT source_id, valid_to FROM relations WHERE id=?", (c1_to_a[0],)
@@ -945,61 +959,42 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         self.assertIsNone(c1_to_b_after[1])
 
         new_edge_count = self.conn.execute(
-            "SELECT COUNT(*) FROM relations WHERE source_id=? AND target_id=? AND predicate='consolidated_from' AND valid_to IS NULL",
-            (c2, c1),
+            "SELECT COUNT(*) FROM relations WHERE predicate='consolidated_from' AND target_id=? AND valid_to IS NULL",
+            (c1,),
         ).fetchone()[0]
-        self.assertEqual(new_edge_count, 1, "a new C2 -consolidated_from-> C1 edge must exist")
+        self.assertEqual(new_edge_count, 0, "rejected consolidation must not add a descendant edge")
 
     def test_exclusion_is_predicate_scoped_not_parent_scoped(self):
         a = self._mk("PredScope A")
         b = self._mk("PredScope B")
-        d2 = self._mk("PredScope D2")
         y = self._mk("PredScope Y")
 
-        res1 = commit_consolidation(
+        store_relation(source_id=a, target_id=y, predicate="depends_on", db_connection=self.conn)
+        result = consolidate_memories(
             parent_ids=[a, b],
-            title="C1 PredScope",
-            content=_cons_content("predscope-c1"),
+            title="C PredScope",
+            content=_cons_content("predscope"),
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res1)
-        c1 = res1.split("ID: ")[1].strip()
-
-        # Give C1 an unrelated, non-consolidated_from edge.
-        store_relation(source_id=c1, target_id=y, predicate="depends_on", db_connection=self.conn)
-        c1_to_y_row = self.conn.execute(
-            "SELECT id FROM relations WHERE source_id=? AND target_id=? AND predicate='depends_on'",
-            (c1, y),
-        ).fetchone()
-        self.assertIsNotNone(c1_to_y_row)
-
-        res3 = commit_consolidation(
-            parent_ids=[c1, d2],
-            title="C3 PredScope",
-            content=_cons_content("predscope-c3"),
-            owner_id="agent_c",
-            db_connection=self.conn,
-        )
-        self.assertIn("Successfully committed", res3)
-        c3 = res3.split("ID: ")[1].strip()
-
+        self.assertEqual(result["status"], "ok")
+        c_id = result["data"]["entity_id"]
         old_row = self.conn.execute(
-            "SELECT valid_to FROM relations WHERE id=?", (c1_to_y_row[0],)
+            "SELECT valid_to FROM relations WHERE source_id=? AND target_id=? AND predicate='depends_on'",
+            (a, y),
         ).fetchone()
-        self.assertIsNotNone(
-            old_row[0],
-            "the depends_on edge (NOT consolidated_from) must be expired by the re-merge",
-        )
+        self.assertIsNone(old_row[0], "semantic edge remains active on archived parent")
+        self.assertEqual(result["data"]["orphaned_relations"][0]["originating_parent"], a)
+        self.assertEqual(result["data"]["orphaned_relations"][0]["other_endpoint"], y)
 
         new_row_count = self.conn.execute(
             "SELECT COUNT(*) FROM relations WHERE source_id=? AND target_id=? AND predicate='depends_on' AND valid_to IS NULL",
-            (c3, y),
+            (c_id, y),
         ).fetchone()[0]
         self.assertEqual(
             new_row_count,
-            1,
-            "the depends_on edge must be repointed to C3 -> Y, proving the exclusion is predicate-scoped (consolidated_from only), not parent-scoped",
+            0,
+            "semantic edges must not be repointed to C3",
         )
 
     def test_bulk_commit_consolidation_rollback_leaves_no_relations_repointed(self):
@@ -1068,10 +1063,9 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
         )
         return res.split("ID: ")[1].strip()
 
-    def test_three_generation_chain_and_no_parent_ids_key(self):
+    def test_lineage_chain_and_no_parent_ids_key(self):
         a = self._mk("Lineage A")
         b = self._mk("Lineage B")
-        d = self._mk("Lineage D")
 
         res1 = commit_consolidation(
             parent_ids=[a, b],
@@ -1081,28 +1075,15 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             db_connection=self.conn,
         )
         c1 = res1.split("ID: ")[1].strip()
-        res2 = commit_consolidation(
-            parent_ids=[c1, d],
-            title="Lineage C2",
-            content=_cons_content("lineage-c2"),
-            owner_id="agent_c",
-            db_connection=self.conn,
-        )
-        c2 = res2.split("ID: ")[1].strip()
-
-        result = analyze_lineage(entity_id=c2, db_connection=self.conn)
+        result = analyze_lineage(entity_id=c1, db_connection=self.conn)
         self.assertNotIn("error", result)
         ancestors = result["ancestors"]
         by_id = {entry["id"]: entry for entry in ancestors}
 
-        self.assertIn(c1, by_id)
-        self.assertEqual(by_id[c1]["generation_depth"], 1)
-        self.assertIn(d, by_id)
-        self.assertEqual(by_id[d]["generation_depth"], 1)
         self.assertIn(a, by_id)
-        self.assertEqual(by_id[a]["generation_depth"], 2)
+        self.assertEqual(by_id[a]["generation_depth"], 1)
         self.assertIn(b, by_id)
-        self.assertEqual(by_id[b]["generation_depth"], 2)
+        self.assertEqual(by_id[b]["generation_depth"], 1)
 
         for entry in ancestors:
             self.assertNotIn(
@@ -1412,8 +1393,9 @@ class TestRelationPointInTime(unittest.TestCase):
         self.assertEqual(len(result["edges"]), 4, "diamond has exactly 4 distinct relations")
         self.assertEqual(result["total_dependencies_found"], 4)
 
-    def test_analyze_dependencies_shows_expired_edge_at_earlier_pit_and_repointed_edge_at_now(self):
+    def test_analyze_dependencies_preserves_truthful_edge_history_without_repointing(self):
         p1 = self._mk("PIT Cons P1")
+        p2 = self._mk("PIT Cons P2")
         x = self._mk("PIT Cons X")
         store_relation(source_id=p1, target_id=x, predicate="depends_on", db_connection=self.conn)
 
@@ -1421,7 +1403,7 @@ class TestRelationPointInTime(unittest.TestCase):
         time.sleep(1.1)
 
         res = commit_consolidation(
-            parent_ids=[p1],
+            parent_ids=[p1, p2],
             title="PIT Cons C",
             content=_cons_content("pit-deps-cons"),
             owner_id="agent_c",
@@ -1441,18 +1423,22 @@ class TestRelationPointInTime(unittest.TestCase):
         current_from_p1 = analyze_dependencies(root_entity_id=p1, db_connection=self.conn)
         self.assertEqual(
             current_from_p1["total_dependencies_found"],
-            0,
-            "expired edge must not appear with no point_in_time (now)",
+            1,
+            "semantic edge remains active on archived parent; no repointing closes it",
         )
 
         current_from_c = analyze_dependencies(root_entity_id=c_id, db_connection=self.conn)
-        # Root C now also carries its own outgoing 'consolidated_from' edge to P1 (created by
-        # commit_consolidation itself), so total_dependencies_found is 2 (C->P1, C->X), not 1 --
-        # assert on the specific repointed node rather than the raw total.
+        # C only has lifecycle edges to its parents.  The semantic neighbour is not fabricated
+        # on C, while point-in-time history and the archived parent still expose the true edge.
         dep_ids = {n["id"] for n in current_from_c["dependencies"]}
-        self.assertIn(x, dep_ids, "the new repointed edge C->X must appear at now")
-        x_node = next(n for n in current_from_c["dependencies"] if n["id"] == x)
-        self.assertEqual(x_node["depth"], 1)
+        self.assertIn(x, dep_ids, "lineage traversal may truthfully reach X through archived P1")
+        direct_replacement = self.conn.execute(
+            "SELECT id FROM relations WHERE source_id=? AND target_id=? AND predicate='depends_on' AND valid_to IS NULL",
+            (c_id, x),
+        ).fetchone()
+        self.assertIsNone(
+            direct_replacement, "no fabricated direct replacement edge C->X may appear"
+        )
 
     def test_analyze_lineage_excludes_edge_created_after_point_in_time(self):
         a = self._mk("PIT Lineage A")
@@ -1714,8 +1700,9 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         )
         self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
 
-    def test_commit_consolidation_gate_noops_for_single_parent(self):
+    def test_commit_consolidation_rejects_single_parent_with_zero_side_effects(self):
         a, _ = self._mk_vector_entity("Solo Parent", _axis_vector(0))
+        before_entities = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         res = commit_consolidation(
             parent_ids=[a],
             title="C Solo",
@@ -1723,13 +1710,17 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res, res)
+        self.assertIn("REJECT_PARENT_COUNT", res, res)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], before_entities
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM entities WHERE id = ?", (a,)).fetchone()[0], "raw"
+        )
 
-    def test_commit_consolidation_gate_noops_for_single_unresolvable_parent(self):
-        """P1 regression (Codex review bf4qtkp7j / 7a5eba85): a lone parent with no usable
-        content used to land in `unresolved`, which unconditionally forced min_sim=0.0 and
-        rejected the merge -- even though there is only one parent and nothing to compare it
-        against. The gate must short-circuit on parent count alone, before any centroid work."""
+    def test_commit_consolidation_rejects_single_unscorable_parent_with_zero_side_effects(self):
+        """Single-parent consolidation is rejected before cohesion/embedding work regardless of
+        whether the parent has usable content."""
         a = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
@@ -1741,6 +1732,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         )
         self.conn.commit()
 
+        before_entities = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         res = commit_consolidation(
             parent_ids=[a],
             title="C Solo Unresolvable",
@@ -1748,7 +1740,13 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res, res)
+        self.assertIn("REJECT_PARENT_COUNT", res, res)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], before_entities
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM entities WHERE id = ?", (a,)).fetchone()[0], "raw"
+        )
 
     def test_commit_consolidation_accepts_override_for_active_unscorable_parent(self):
         """P1 regression (Codex review bf4qtkp7j / 7a5eba85): get_fresh_entity_centroids used to
@@ -1912,12 +1910,13 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         )
         self.assertIn("Successfully committed", res2, res2)
 
-    def test_commit_consolidation_accepts_already_consolidated_entity_as_parent(self):
+    def test_commit_consolidation_rejects_consolidated_entity_as_inactive_parent(self):
         consolidated_id, _ = self._mk_vector_entity(
             "Already Consolidated Parent", _axis_vector(0), status="consolidated"
         )
         fresh_raw, _ = self._mk_vector_entity("Refresh Raw Evidence", _axis_vector(0))
 
+        before_entities = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         res = commit_consolidation(
             parent_ids=[consolidated_id, fresh_raw],
             title="C Refresh Consolidated",
@@ -1925,7 +1924,16 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        self.assertIn("Successfully committed", res, res)
+        self.assertIn("INACTIVE_PARENT", res, res)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], before_entities
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status FROM entities WHERE id = ?", (consolidated_id,)
+            ).fetchone()[0],
+            "consolidated",
+        )
 
     def test_bulk_commit_consolidation_per_item_override_does_not_leak_to_other_items(self):
         a1, _ = self._mk_vector_entity("Bulk Leak A1", _axis_vector(0))
