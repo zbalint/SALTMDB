@@ -405,6 +405,49 @@ class TestMCPToolsWrapper(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], "#beta")
 
+    def test_store_memory_entity_id_is_explicit_parameter(self):
+        """MCP wrapper regression (SALTMDB rework Phase-8 live test, 2026-08-18): entity_id was
+        only ever reachable through **kwargs, so FastMCP's auto-generated JSON Schema for the
+        live MCP tool never declared it as a property -- real MCP clients calling through the
+        schema-validated transport (unlike a direct in-process Python call, which happily
+        forwards any keyword into **kwargs regardless of transport) could never actually get an
+        explicit entity_id through. entity_id must be a named parameter, same as
+        archive_memory/review_core_memory/inspect_graph/search_memory already are."""
+        import inspect
+
+        params = inspect.signature(tools.store_memory).parameters
+        self.assertIn("entity_id", params)
+        self.assertIs(params["entity_id"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
+    def test_store_memory_entity_id_bypasses_exact_duplicate_on_metadata_only_update(self):
+        """Behavioral counterpart to the schema test above: an explicit entity_id alone (no
+        skip_duplicate_check) must let a metadata-only edit -- content byte-identical, only
+        core_reason/core_exit_condition changing -- go through, matching store_memory's own
+        docstring promise. Before the live incident this fixed, this exact call pattern (against
+        the real MCP tool, not this direct Python call) returned REJECT_EXACT_DUPLICATE."""
+        content = "Content for entity_id-targeted metadata-only update test, left unchanged."
+        res = tools.store_memory(
+            content=content,
+            title="Metadata-Only Update Entity",
+            owner_id="user1",
+            is_core=True,
+            core_reason="A" * 20,
+            core_exit_condition="B" * 20,
+            skip_duplicate_check=True,
+        )
+        entity_id = res.split("ID: ")[1].split()[0]
+
+        update_res = tools.store_memory(
+            entity_id=entity_id,
+            content=content,
+            title="Metadata-Only Update Entity",
+            owner_id="user1",
+            core_reason="C" * 25,
+            core_exit_condition="D" * 25,
+        )
+        self.assertIn("stored successfully", update_res)
+        self.assertNotIn("REJECT_EXACT_DUPLICATE", update_res)
+
     def test_ephemeral_memory_tool(self):
         store_res = tools.ephemeral_memory(
             action="store", key="secret_token", value="super_secret_123"

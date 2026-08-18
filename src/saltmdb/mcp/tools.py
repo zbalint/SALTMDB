@@ -231,6 +231,11 @@ def merge_tags(keep_tag: str = None, tags_to_merge: list = None, **kwargs) -> st
     The '#core' tag is a derived label the server auto-maintains from is_core on every write --
     do not set '#core' via the tags list, it will be silently overridden to match is_core.
 
+    entity_id (optional) targets an existing memory directly for an update -- when supplied it
+    takes precedence over the automatic same-title/owner/scope match and bypasses the
+    exact-content-hash duplicate check, so a metadata-only edit (e.g. re-tagging, backfilling
+    core_reason/core_exit_condition) doesn't require changing content.
+
     If check_duplicates_only is True, returns duplicate detection results without writing to the database.
 
     Store-time disposition (Track A): every call is preflighted before persistence. If
@@ -275,6 +280,7 @@ def store_memory(
     content: str = None,
     title: str = None,
     tags: list = None,
+    entity_id: str = None,
     is_core: bool = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] = None,
     owner_id: str = None,
@@ -314,7 +320,7 @@ def store_memory(
 
     check_duplicates_only_ = check_duplicates_only or kw.get("check_duplicates_only") or False
 
-    entity_id = _resolve(None, kw, kwargs, "entity_id", "id")
+    entity_id_ = _resolve(entity_id, kw, kwargs, "entity_id", "id")
     weight = _resolve(None, kw, kwargs, "weight") or 1
     relevance = _resolve(None, kw, kwargs, "relevance")
     impact = _resolve(None, kw, kwargs, "impact")
@@ -354,7 +360,7 @@ def store_memory(
             "is_core": is_core_,
             "memory_type": memory_type_,
             "title": title_,
-            "entity_id": entity_id,
+            "entity_id": entity_id_,
             "relevance": relevance,
             "impact": impact,
             "novelty": novelty,
