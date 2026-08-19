@@ -1517,8 +1517,12 @@ def commit_consolidation(*args, **kwargs) -> str:
     return str(result)
 
 
-def bulk_commit_consolidation(
-    consolidations: list, db_connection=None, db_path: str = None
+def bulk_commit_consolidation(  # noqa: PLR0915
+    consolidations: list,
+    owner_id: str = None,
+    context_id: str = None,
+    db_connection=None,
+    db_path: str = None,
 ) -> list:
     """Executes multiple consolidation commits atomically in a single transaction -- all-or-nothing.
 
@@ -1527,6 +1531,13 @@ def bulk_commit_consolidation(
     failure unwinds every prior "successful" item in the same batch, a mixed per-item
     success/error list would misrepresent the outcome -- so on failure this returns a
     single top-level error result instead of claiming any individual items succeeded.
+
+    `owner_id`/`context_id` are batch-wide defaults, applied to any item that doesn't set its
+    own -- an item's own `owner_id`/`context_id` always wins when present, same override
+    relationship `override_justification` already has to the batch. This mirrors
+    `bulk_store_relations`'s per-item `owner_id` support (a batch can legitimately mix
+    ownership) while still letting the common single-owner batch set it once instead of
+    repeating it on every item.
 
     A4 (memory-core rework Phase 3): every item's parent_ids is resolved/deduped FIRST via the
     same helper commit_consolidation itself uses (_resolve_and_filter_parent_ids), so the
@@ -1588,6 +1599,8 @@ def bulk_commit_consolidation(
                 core_exit_condition = item.get("core_exit_condition")
                 core_review_after = item.get("core_review_after")
                 detail_memory_ids = item.get("detail_memory_ids")
+                item_owner_id = item.get("owner_id", owner_id)
+                item_context_id = item.get("context_id", context_id)
 
                 item_centroids = {pid: centroids[pid] for pid in p_ids if pid in centroids}
                 item_unresolved = {pid: unresolved[pid] for pid in p_ids if pid in unresolved}
@@ -1603,6 +1616,8 @@ def bulk_commit_consolidation(
                     scope=scope,
                     weight=w,
                     is_core=is_core,
+                    owner_id=item_owner_id,
+                    context_id=item_context_id,
                     override_justification=override_justification,
                     core_reason=core_reason,
                     core_exit_condition=core_exit_condition,

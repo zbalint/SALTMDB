@@ -683,6 +683,11 @@ def consolidate_memories(
     (`consolidations`) shape, put `override_justification` on each individual item that needs
     it, not at the top level -- it is never shared across items in the same batch.
 
+    `owner_id`/`context_id` behave differently for the bulk shape: the top-level value (if any)
+    is the batch-wide default, applied to any item that doesn't set its own -- an item's own
+    `owner_id`/`context_id` always wins when present, so a single-owner batch can set it once
+    while a batch that legitimately mixes ownership can still override per item.
+
     Core-memory governance: `is_core` is NEVER inherited from parents. If any resolved parent is
     currently an active core (is_core=1, not archived) and `is_core` is omitted, the commit is
     rejected with an actionable error -- pass explicit `is_core=True` (with `core_reason`/

@@ -711,6 +711,63 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("[Consolidation Override]", cd_content)
         self.assertNotIn("[Consolidation Override]", ef_content)
 
+    def test_commit_consolidation_tool_forwards_owner_id_and_context_id(self):
+        """owner_id/context_id must reach relation_service.bulk_commit_consolidation through the
+        actual MCP tool wrapper for the bulk (`consolidations`) shape: a top-level value is the
+        batch-wide default, while an item's own value overrides it per item. Regression for the
+        bulk-consolidation ownership-attribution gap found 2026-08-19 live-testing: dispatch.py's
+        bulk branch was forwarding only `consolidations`, silently dropping owner_id/context_id,
+        so every bulk-consolidated entity landed with relation_service's fallback
+        owner_id="system" and context_id=None regardless of what was requested."""
+        dim = 384
+
+        def _axis(i):
+            v = [0.0] * dim
+            v[i] = 1.0
+            return v
+
+        a = self._mk_vector_entity("Owner Default Bulk A", _axis(0))
+        b = self._mk_vector_entity("Owner Default Bulk B", _axis(0))  # same axis -> cohesive
+        c = self._mk_vector_entity("Owner Override Bulk C", _axis(1))
+        d = self._mk_vector_entity("Owner Override Bulk D", _axis(1))
+
+        bulk_content = (
+            "# Consolidated Bulk Record\n\nSynthesized summary combining bulk source facts.\n"
+            "- Merged bulk detail alpha\n- Merged bulk detail beta"
+        )
+        bulk_results = tools.commit_consolidation(
+            consolidations=[
+                {
+                    "parent_ids": [a, b],
+                    "title": "Bulk Owner Default Item AB",
+                    "content": bulk_content,
+                    # no owner_id/context_id here -> must inherit the top-level batch defaults
+                },
+                {
+                    "parent_ids": [c, d],
+                    "title": "Bulk Owner Override Item CD",
+                    "content": bulk_content,
+                    "owner_id": "agent_override",
+                    "context_id": "ctx_override",
+                },
+            ],
+            owner_id="agent_batch_default",
+            context_id="ctx_batch_default",
+        )
+        self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
+        self.assertEqual(bulk_results[1]["status"], "success", bulk_results)
+
+        row_ab = self.conn.execute(
+            "SELECT owner_id, context_id FROM entities WHERE id = ?",
+            (bulk_results[0]["entity_id"],),
+        ).fetchone()
+        row_cd = self.conn.execute(
+            "SELECT owner_id, context_id FROM entities WHERE id = ?",
+            (bulk_results[1]["entity_id"],),
+        ).fetchone()
+        self.assertEqual(row_ab, ("agent_batch_default", "ctx_batch_default"))
+        self.assertEqual(row_cd, ("agent_override", "ctx_override"))
+
     def test_manage_relation_tool_forwards_override_justification_and_owner_id(self):
         """owner_id and override_justification must reach relation_service.store_relation's
         governance gate through the actual MCP tool wrapper (memory-core rework Phase 5), not

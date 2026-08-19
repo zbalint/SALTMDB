@@ -280,7 +280,11 @@ def _dispatch_consolidate_memories(**kw):
             "bulk_consolidate_memories",
             relation_service.bulk_commit_consolidation,
         )
-        return bulk(consolidations=_required_list(kw, "consolidations"))
+        return bulk(
+            consolidations=_required_list(kw, "consolidations"),
+            owner_id=kw.get("owner_id"),
+            context_id=kw.get("context_id"),
+        )
     consolidate = getattr(relation_service, "consolidate_memories")
     return consolidate(
         parent_ids=_required_str_list(kw, "parent_ids"),
