@@ -38,3 +38,6 @@ test_*.db
 *.db.bak
 build/
 test_data/
+
+# Generated reports/audit output
+reports/
