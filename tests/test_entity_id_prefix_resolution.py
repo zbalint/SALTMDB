@@ -5,6 +5,7 @@ import unittest
 
 from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
 from saltmdb.daemon.dispatch import dispatch_tool
+from saltmdb.db import connection as connection_module
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 from saltmdb.utils.text import resolve_id_prefix
@@ -260,6 +261,72 @@ class TestEntityIdPrefixResolutionViaDispatch(unittest.TestCase):
             ).fetchone()[0],
         )
         self.assertNotEqual(last_accessed_at, "2000-01-01T00:00:00+00:00")
+
+
+class TestGetMemoryUnderRealReadOnlyBoundary(unittest.TestCase):
+    """Regression coverage for the MEMORY_READ_FAILED live bug (SALTMDB memory
+    da6f5409-f363-4b55-a68d-07f451d51145): get_memory is dispatched outside the
+    coordinator (it is deliberately absent from dispatch.MUTATING_TOOLS and present in
+    protocol.READ_TOOLS), so once the daemon's single-writer boundary is active
+    (connection.enable_daemon_connection_boundary(), set for real by server.py at daemon
+    startup) its own get_connection() call resolves to a genuinely read-only SQLite
+    connection (mode=ro + PRAGMA query_only=ON). Every other test in this module only
+    exercises get_memory against the legacy writable connection branch (boundary never
+    enabled), so none of them would have caught this -- this test enables the real
+    boundary, which is the one condition that actually reproduced the bug live."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        conn = init_db(self.db_path)
+        conn.close()
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self.coordinator = DbWriteCoordinator(self.db_path)
+        self.coordinator.start()
+
+    def tearDown(self):
+        connection_module._daemon_boundary_enabled = False
+        self.coordinator.shutdown(2)
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_get_memory_succeeds_when_boundary_makes_the_connection_readonly(self):
+        entity_id = self.coordinator.submit(
+            "store", lambda conn: _store(conn, "Read-Only Boundary Target")
+        )
+
+        connection_module.enable_daemon_connection_boundary()
+        result = dispatch_tool("get_memory", {"entity_id": entity_id}, self.coordinator)
+
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("Read-Only Boundary Target", result["data"]["content"])
+
+    def test_get_memory_skips_touch_rather_than_failing_on_readonly_connection(self):
+        """The access-time bookkeeping write is best-effort: it must not surface as a
+        read failure, and last_accessed_at legitimately stays unchanged when skipped."""
+        entity_id = self.coordinator.submit("store", lambda conn: _store(conn, "Touch Skip Target"))
+        self.coordinator.submit(
+            "backdate",
+            lambda conn: conn.execute(
+                "UPDATE entities SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                (entity_id,),
+            ),
+        )
+
+        connection_module.enable_daemon_connection_boundary()
+        result = dispatch_tool("get_memory", {"entity_id": entity_id}, self.coordinator)
+
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["last_accessed_at"], "2000-01-01T00:00:00+00:00")
+
+        last_accessed_at = self.coordinator.submit(
+            "check",
+            lambda conn: conn.execute(
+                "SELECT last_accessed_at FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()[0],
+        )
+        self.assertEqual(last_accessed_at, "2000-01-01T00:00:00+00:00")
 
 
 if __name__ == "__main__":

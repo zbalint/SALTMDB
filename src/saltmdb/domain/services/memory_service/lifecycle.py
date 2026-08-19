@@ -5,6 +5,7 @@ within this package.
 """
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime, UTC
 from typing import Any, cast, Literal
@@ -671,14 +672,29 @@ def get_memory(
 
         # Explicit retrieval is still a memory access. Preserve the old
         # search_memory(entity_id=...) contract's access-time bookkeeping while
-        # moving the read to its dedicated Phase 3 tool.
+        # moving the read to its dedicated Phase 3 tool. Best-effort: on a
+        # genuinely read-only connection (the daemon's single-writer boundary --
+        # connection.py's open_read_connection, used for every non-coordinator
+        # dispatch once enable_daemon_connection_boundary() is active) this write
+        # is expected to fail. get_memory is a READ_TOOLS/non-MUTATING_TOOLS entry
+        # by design (protocol.py, dispatch.py), so skip the touch rather than
+        # turning an already-successful read into MEMORY_READ_FAILED.
         accessed_at = datetime.now(UTC).isoformat()
-        conn.execute(
-            "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
-            (accessed_at, resolved_id),
-        )
-        if not is_coordinator_connection(conn):
-            conn.commit()
+        try:
+            conn.execute(
+                "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+                (accessed_at, resolved_id),
+            )
+            if not is_coordinator_connection(conn):
+                conn.commit()
+        except sqlite3.OperationalError as touch_exc:
+            if "readonly database" not in str(touch_exc).lower():
+                raise
+            accessed_at = row[6]  # touch skipped; report the untouched stored value
+            logger.debug(
+                "get_memory: skipped last_accessed_at touch on read-only connection for %s",
+                resolved_id,
+            )
 
         lineage = _memory_lineage(resolved_id, conn, max_depth=max_depth)
         data = {
