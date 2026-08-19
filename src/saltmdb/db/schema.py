@@ -24,6 +24,130 @@ def _add_column_if_missing(conn, table: str, column_def: str) -> None:
             raise
 
 
+def _migrate_predicate_drift(conn, now: str) -> None:  # noqa: C901
+    """Agent API redesign plan §7.1 (Phase 8 data migration): rewrites every relation edge whose
+    predicate is a known drifted alias (saltmdb.utils.predicate_vocabulary.PREDICATE_ALIASES --
+    the SAME 36-name mapping Phase 6's write-time gate already enforces for new writes, so a
+    predicate rejected today migrates identically here) onto its canonical spelling, swapping
+    source_id/target_id for the 6 aliases whose drifted verb reads the relationship from the
+    opposite end (e.g. 'A resolved_by B' means 'B resolves A').
+
+    Active rows (valid_to IS NULL) are protected by a partial UNIQUE index on
+    (source_id, target_id, predicate) -- a bare UPDATE that would create a duplicate triple
+    aborts the WHOLE statement (reproduced in isolated SQLite during the original plan review),
+    so collisions are pre-detected here and resolved by closing the newer row (valid_to = now),
+    processed in deterministic rowid (insertion) order -- never by INSERT OR IGNORE/UPDATE OR
+    IGNORE, which would silently drop a row and violate the plan's §1.4 information-preservation
+    law. Closed rows (valid_to IS NOT NULL) can never collide against the partial index, but
+    still get the same rewrite (predicate label, and source/target for swap aliases) -- leaving
+    a closed swap row's direction unrewritten would literally assert the reverse of what
+    happened (a closed 'A resolved_by B' row relabeled to 'resolves' without swapping would
+    claim A resolves B, the opposite of the original fact); the plan is explicit that a
+    predicate rename is a vocabulary correction, not a factual change, and must apply to history
+    too. Must run inside the caller's own write transaction.
+    """
+    active_rows = conn.execute(
+        "SELECT rowid, id, source_id, target_id, predicate FROM relations WHERE valid_to IS NULL"
+    ).fetchall()
+
+    # Every ALREADY-canonical (or otherwise unrecognized, e.g. a genuinely custom pre-existing
+    # predicate outside the closed universe) active triple is fixed and claims its slot first,
+    # so an alias row that would collide with it is detected correctly regardless of rowid order.
+    taken: set[tuple[str, str, str]] = {
+        (source_id, target_id, predicate)
+        for _, _, source_id, target_id, predicate in active_rows
+        if predicate not in PREDICATE_ALIASES
+    }
+
+    for rowid, rid, source_id, target_id, predicate in sorted(active_rows, key=lambda r: r[0]):
+        if predicate not in PREDICATE_ALIASES:
+            continue
+        canonical, swap = PREDICATE_ALIASES[predicate]
+        new_source, new_target = (target_id, source_id) if swap else (source_id, target_id)
+        triple = (new_source, new_target, canonical)
+        if triple in taken:
+            conn.execute("UPDATE relations SET valid_to = ? WHERE id = ?", (now, rid))
+            continue
+        conn.execute(
+            "UPDATE relations SET source_id = ?, target_id = ?, predicate = ? WHERE id = ?",
+            (new_source, new_target, canonical, rid),
+        )
+        taken.add(triple)
+
+    closed_rows = conn.execute(
+        "SELECT id, source_id, target_id, predicate FROM relations WHERE valid_to IS NOT NULL"
+    ).fetchall()
+    for rid, source_id, target_id, predicate in closed_rows:
+        if predicate not in PREDICATE_ALIASES:
+            continue
+        canonical, swap = PREDICATE_ALIASES[predicate]
+        new_source, new_target = (target_id, source_id) if swap else (source_id, target_id)
+        conn.execute(
+            "UPDATE relations SET source_id = ?, target_id = ?, predicate = ? WHERE id = ?",
+            (new_source, new_target, canonical, rid),
+        )
+
+
+def _rebuild_predicate_registry(conn) -> None:
+    """Agent API redesign plan §7.2: unconditionally repoints every known alias's canonical_id
+    at its correct canonical row. The seed block earlier in init_db() already does this for a
+    FRESH database, but only via `INSERT OR IGNORE` plus an `UPDATE ... WHERE canonical_id IS
+    NULL` guard -- deliberately soft, to protect a future manual re-merge tool's decision on an
+    already-migrated registry. That guard does NOT protect a pre-Phase-6 database, where
+    relates_to/references may already carry a STALE canonical_id pointing at elaborates_on (the
+    old, reversed alias target) rather than related_to. This is the deliberate, one-time,
+    versioned rebuild the plan calls for -- unconditional by design, run once behind
+    PRAGMA user_version, never on every init_db() call.
+    """
+    for alias_name, (canonical_name, _swap) in PREDICATE_ALIASES.items():
+        canon_row = conn.execute(
+            "SELECT id FROM predicates WHERE name = ?", (canonical_name,)
+        ).fetchone()
+        if canon_row:
+            conn.execute(
+                "UPDATE predicates SET canonical_id = ? WHERE name = ? AND id != ?",
+                (canon_row[0], alias_name, canon_row[0]),
+            )
+
+
+def _backfill_scd_history_revises_edges(conn, now: str) -> None:
+    """Agent API redesign plan §7.3: pre-immutable-identity SCD history rows
+    (`<entity_id>_h_<suffix>`, created by the legacy in-place-update writer at
+    memory_service/write.py before/around this redesign) predate `revises` edges and are
+    otherwise unreachable from `get_lineage`. Recommended remedy per the plan: leave them in
+    place (never delete authoritative content, §1.4) and backfill a `revises` edge from the
+    live canonical entity to each history snapshot it superseded -- the same direction
+    revise_memory's own hardcoded edge uses (new/current -> old/predecessor).
+
+    `revises` is a reserved predicate (Phase 6, §5.8) that only lifecycle tools may create; a
+    migration inserting it directly via a hardcoded literal, exactly like revise_memory/
+    supersede_memory/consolidate_memories already do, is the established pattern for
+    system-created reserved-predicate edges, not a bypass of the write-time gate (which exists
+    to stop AGENT-submitted text from forging one).
+    """
+    history_rows = conn.execute(
+        "SELECT id FROM entities WHERE id LIKE '%\\_h\\_%' ESCAPE '\\'"
+    ).fetchall()
+    for (hist_id,) in history_rows:
+        base_id = hist_id.split("_h_", 1)[0]
+        if base_id == hist_id:
+            continue  # defensive: literal match required '_h_' to be present at all
+        base_exists = conn.execute("SELECT 1 FROM entities WHERE id = ?", (base_id,)).fetchone()
+        if not base_exists:
+            continue  # the canonical entity this snapshot belonged to no longer exists
+        conn.execute(
+            """
+            INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+            SELECT ?, ?, ?, 'revises', ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM relations
+                WHERE source_id = ? AND target_id = ? AND predicate = 'revises'
+            )
+            """,
+            (str(uuid.uuid4()), base_id, hist_id, now, now, base_id, hist_id),
+        )
+
+
 def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
     """Initialize the local SQLite database with Write-Ahead Logging (WAL), DDL tables, triggers, and migrations."""
     if not db_path:
@@ -300,11 +424,26 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # CREATE UNIQUE INDEX would otherwise fail at startup on any DB with existing dupes).
         # Uses rowid (monotonic insertion order) not MIN(id) -- id is a random UUID with no
         # relationship to insertion order. Idempotent: matches zero rows on every run after the first.
+        #
+        # Scoped to `valid_to IS NULL` (agent API redesign Phase 8 fix): the UNIQUE index this
+        # backfill protects is itself PARTIAL (`WHERE valid_to IS NULL`, see below), so only
+        # ACTIVE rows can ever collide against it -- deduping closed rows too was never necessary
+        # for that index to succeed, and is actively destructive: a closed (historical) row can
+        # legitimately share an identical (source_id, target_id, predicate) triple with an
+        # unrelated active row (e.g. after §7.1's predicate-vocabulary migration renames a
+        # collision-losing active row and closes it, its triple now matches the active winner's)
+        # or with another closed row from a different point in time (created, invalidated,
+        # later recreated, invalidated again). The original unscoped DELETE would silently drop
+        # one of those on the very next startup, violating §1.4 (information is never lost) --
+        # caught via test_predicate_migration.py's post-migration idempotency check.
         try:
             conn.execute("""
                 DELETE FROM relations
-                WHERE rowid NOT IN (
-                    SELECT MIN(rowid) FROM relations GROUP BY source_id, target_id, predicate
+                WHERE valid_to IS NULL
+                  AND rowid NOT IN (
+                    SELECT MIN(rowid) FROM relations
+                    WHERE valid_to IS NULL
+                    GROUP BY source_id, target_id, predicate
                 );
             """)
         except sqlite3.OperationalError as e:
@@ -701,6 +840,32 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         except sqlite3.OperationalError as e:
             logger.warning(
                 "Track A migration sweep skipped/failed (will retry next startup): %s", e
+            )
+
+        # Agent API redesign plan §7 (Phase 8 data migration): closed predicate vocabulary --
+        # rewrite every drifted relation edge onto its canonical spelling (§7.1), rebuild the
+        # canonical predicate registry (§7.2), and backfill revises edges for pre-immutable-
+        # identity SCD history rows (§7.3). Ships as a `user_version = 2` block inside init_db(),
+        # never a hand-run script (§7.0): a script migrates one database and nothing else, not
+        # third-party clones, not temp test DBs; running inside init_db() also solves daemon
+        # concurrency for free (the daemon holds the DB open and serializes writes through the
+        # coordinator, so this runs at the right moment by construction). Same crash-safety shape
+        # as the Track A sweep above: a crash mid-migration leaves user_version at 1 and the
+        # whole block safely retries next startup; a completed migration never re-runs.
+        try:
+            if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+                from datetime import UTC, datetime
+
+                now = datetime.now(UTC).isoformat()
+                _migrate_predicate_drift(conn, now)
+                _rebuild_predicate_registry(conn)
+                _backfill_scd_history_revises_edges(conn, now)
+                conn.execute("PRAGMA user_version = 2")
+        except sqlite3.OperationalError as e:
+            logger.warning(
+                "Phase 8 predicate-vocabulary migration skipped/failed (will retry next "
+                "startup): %s",
+                e,
             )
 
     write_transaction_retrying(conn, _write)

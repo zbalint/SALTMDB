@@ -262,6 +262,70 @@ class TestRelationsDedupBackfill(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_dedup_backfill_never_touches_closed_rows(self):
+        """Agent API redesign Phase 8 fix: the dedup backfill exists solely to protect the
+        PARTIAL unique index (WHERE valid_to IS NULL), so it must never delete a closed
+        (valid_to IS NOT NULL) row, even when it shares an identical (source_id, target_id,
+        predicate) triple with another closed row or with an active one. Before this fix, an
+        unscoped DELETE grouped by the triple alone would silently drop one of a legitimate
+        {active, closed} pair -- exactly what §7.1's predicate-vocabulary migration produces
+        for a collision-losing alias row that gets renamed+closed onto the active winner's
+        triple (see tests/test_predicate_migration.py for the full migration-level regression)."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(temp_dir, "test.db")
+            raw_conn = sqlite3.connect(db_path)
+            raw_conn.execute("""
+                CREATE TABLE relations (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    valid_from DATETIME,
+                    valid_to DATETIME
+                );
+            """)
+            # An active row and a closed row sharing the identical triple -- a legitimate
+            # "current fact" plus "historical record of the same fact" pair, not a duplicate.
+            raw_conn.execute(
+                "INSERT INTO relations (id, source_id, target_id, predicate, valid_to) "
+                "VALUES ('rel-active', 'src-y', 'tgt-y', 'dup_pred', NULL)"
+            )
+            raw_conn.execute(
+                "INSERT INTO relations (id, source_id, target_id, predicate, valid_to) "
+                "VALUES ('rel-closed', 'src-y', 'tgt-y', 'dup_pred', '2020-01-01T00:00:00+00:00')"
+            )
+            # Two closed rows sharing an identical triple from different points in time.
+            raw_conn.execute(
+                "INSERT INTO relations (id, source_id, target_id, predicate, valid_to) "
+                "VALUES ('rel-closed-1', 'src-z', 'tgt-z', 'dup_pred', '2019-01-01T00:00:00+00:00')"
+            )
+            raw_conn.execute(
+                "INSERT INTO relations (id, source_id, target_id, predicate, valid_to) "
+                "VALUES ('rel-closed-2', 'src-z', 'tgt-z', 'dup_pred', '2021-01-01T00:00:00+00:00')"
+            )
+            raw_conn.commit()
+            raw_conn.close()
+
+            conn = init_db(db_path)
+            try:
+                surviving_ids = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT id FROM relations WHERE id LIKE 'rel-%'"
+                    ).fetchall()
+                }
+                self.assertEqual(
+                    surviving_ids,
+                    {"rel-active", "rel-closed", "rel-closed-1", "rel-closed-2"},
+                    "no closed row may ever be dropped by the dedup backfill",
+                )
+            finally:
+                conn.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 class TestStoreRelationDedup(unittest.TestCase):
     def setUp(self):
