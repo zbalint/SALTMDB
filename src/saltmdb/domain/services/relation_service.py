@@ -24,6 +24,7 @@ from saltmdb.domain.services.cohesion_service import (
 )
 from saltmdb.domain.services.event_service import log_event
 from saltmdb.domain.services import core_governance_service
+from saltmdb.utils.predicate_vocabulary import AGENT_SELECTABLE_PREDICATES, classify_predicate
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +35,22 @@ def _normalize_predicate_name(raw: str) -> str:
 
 
 def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None) -> str | None:
-    """Write-time predicate canonicalization. Must be called inside an open write transaction
-    (mirrors resolve_or_create_tag's contract). Returns the resolved CANONICAL NAME STRING to
-    store directly in relations.predicate (not a row id -- predicate is free text, no FK).
+    """Closed-vocabulary predicate lookup (agent API redesign plan §5.8, Phase 6 item 25).
 
-    Non-blocking: an unrecognized predicate is always auto-created and returned, never rejected.
-    Returns None only when input has no salvageable characters after normalization -- caller
-    falls back to the raw input string.
+    INVERTED CONTRACT: this used to auto-create any unrecognized predicate; it now never writes
+    to the `predicates` table at all. Returns the canonical name for anything in the closed
+    51-name universe (saltmdb.utils.predicate_vocabulary: 11 agent-selectable + 3 reserved + 1
+    legacy-read-only + 36 known drifted aliases) -- including aliases, since this function is
+    also the READ-side canonicalizer used to compare an EXISTING relations row against the
+    contradictory-predicate-pair gate (store_relation's D4 check) and to look up an existing
+    edge by canonical name (invalidate_relation). Those callers must keep resolving a legacy
+    spelling already sitting in the DB even though NEW writes of that spelling are rejected
+    elsewhere (store_relation's write-time gate, added alongside this inversion).
 
-    Simpler than resolve_or_create_tag: no '#'-prefix handling, no plural/suffix fallback (seed
-    vocabulary is short and already snake_case; a suffix heuristic risks false merges like
-    resolves/resolved with no observed drift evidence to justify it).
+    Falls back to a DB predicates-table lookup (by exact name, never inserting) for anything
+    outside the closed universe, so a pre-existing custom row from before this closure (a
+    genuinely older clone/DB) still resolves for read purposes. Returns None when nothing
+    matches at all -- caller falls back to the raw input string, same contract as before.
     """
     raw = (predicate_name or "").strip()
     if not raw:
@@ -52,6 +58,10 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
     normalized = _normalize_predicate_name(raw)
     if not normalized:
         return None
+
+    disposition = classify_predicate(normalized)
+    if disposition.canonical:
+        return disposition.canonical
 
     row = conn.execute(
         "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
@@ -69,24 +79,15 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
     if row:
         return row[1] if row[1] else row[0]
 
-    conn.execute(
-        "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-        (str(uuid.uuid4()), normalized, normalized),
-    )
-    row = conn.execute(
-        "SELECT p.name, c.name FROM predicates p LEFT JOIN predicates c ON c.id = p.canonical_id "
-        "WHERE p.name = ?",
-        (normalized,),
-    ).fetchone()
-    if row:
-        return row[1] if row[1] else row[0]
-    return normalized
+    return None
 
 
-def get_canonical_predicates(
+def list_predicates(
     query: str = None, limit: int = 50, db_connection=None, db_path: str = None
 ) -> list:
-    """Mirrors memory_service.get_canonical_tags for the predicates table."""
+    """Lists the closed relation-predicate vocabulary (agent API redesign plan §5.12, Phase 6
+    item 27: renamed from get_canonical_predicates). Mirrors memory_service.search_tags for the
+    predicates table."""
     should_close = False
     conn = db_connection
     if not conn:
@@ -130,7 +131,7 @@ def _resolve_relation_endpoint(conn, raw_id: str, label: str) -> tuple[str | Non
     return None, f"Error: UNKNOWN_ENTITY_ID - could not resolve {label} '{raw_id}'."
 
 
-def store_relation(  # noqa: C901, PLR0915
+def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
@@ -189,6 +190,49 @@ def store_relation(  # noqa: C901, PLR0915
         if should_close:
             close_connection(conn)
         return "Error: Self-referential relations (source_id == target_id) are forbidden."
+
+    # Closed predicate vocabulary write-time gate (plan §5.8, Phase 6 item 25). This is the
+    # domain-layer backstop -- mcp/tools.py's manage_relation runs the same classification
+    # earlier, before any backend call, so it can emit a schema-derived corrected_call (this
+    # layer cannot: it has no reference to the MCP tool_func to build one from). Both layers
+    # exist so a caller that bypasses the adapter (an internal service, a direct domain-layer
+    # test) still cannot create a non-canonical predicate row.
+    disposition = classify_predicate(predicate)
+    if disposition.status == "reserved":
+        if should_close:
+            close_connection(conn)
+        return (
+            f"Error: RESERVED_PREDICATE - '{predicate}' is reserved; it is created only by "
+            f"{disposition.lifecycle_tool}, never directly via manage_relation."
+        )
+    if disposition.status == "legacy_readonly":
+        if should_close:
+            close_connection(conn)
+        return (
+            f"Error: LEGACY_READONLY_PREDICATE - '{predicate}' edges are legacy; existing ones "
+            "remain readable but no new ones may be created."
+        )
+    if disposition.status == "alias":
+        if should_close:
+            close_connection(conn)
+        swap_note = (
+            f" with source_id/target_id swapped (canonical direction is "
+            f"'{disposition.canonical}' from the current target to the current source)"
+            if disposition.swap
+            else ""
+        )
+        return (
+            f"Error: NONCANONICAL_PREDICATE - '{predicate}' is not canonical; the canonical "
+            f"form is '{disposition.canonical}'{swap_note}. Retry with predicate="
+            f"'{disposition.canonical}'."
+        )
+    if disposition.status == "unknown":
+        if should_close:
+            close_connection(conn)
+        return (
+            f"Error: UNKNOWN_PREDICATE - '{predicate}' is not part of the closed predicate "
+            f"vocabulary. Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
+        )
 
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()

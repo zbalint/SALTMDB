@@ -100,15 +100,6 @@ def _required_str_list(kw: dict[str, Any], key: str) -> list[str]:
     return value
 
 
-def _required_str_or_list(kw: dict[str, Any], key: str) -> str | list[str]:
-    value = kw.get(key)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return value
-    raise ValueError(f"{key} must be a string or list of strings")
-
-
 def _optional_tag_operator(kw: dict[str, Any]) -> Literal["AND", "OR"]:
     value = kw.get("tag_operator")
     if value is None:
@@ -370,25 +361,15 @@ def _dispatch_get_related_memories(**kw):
 
 
 def _dispatch_get_events(**kw):
-    mode = kw.get("mode") or "events"
-    session_id = kw.get("session_id")
-    if session_id or mode == "session":
-        return event_service.get_session_summary(session_id=_required_str(kw, "session_id"))
-    elif mode == "memories":
-        return memory_service.scan_memories(
-            owner_id=kw.get("owner_id"),
-            status_filter=kw.get("status_filter"),
-            limit=kw.get("limit") or 20,
-            offset=kw.get("offset") or 0,
-        )
-    else:
-        return event_service.get_recent_events(
-            agent_id=kw.get("agent_id"),
-            type_filter=kw.get("type_filter"),
-            limit=kw.get("limit") or 20,
-            offset=kw.get("offset") or 0,
-            status_filter=kw.get("status_filter"),
-        )
+    return event_service.get_recent_events(
+        context_id=kw.get("context_id"),
+        agent_id=kw.get("agent_id"),
+        type_filter=kw.get("event_type"),
+        session_id=kw.get("session_id"),
+        order=kw.get("order") or "newest_first",
+        limit=kw.get("limit") or 20,
+        offset=kw.get("offset") or 0,
+    )
 
 
 def _dispatch_export_corpus_snapshot(**kw):
@@ -405,14 +386,9 @@ def _dispatch_export_corpus_snapshot(**kw):
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
-    "get_canonical_tags": lambda **kw: memory_service.get_canonical_tags(**kw),
-    "get_canonical_predicates": lambda **kw: relation_service.get_canonical_predicates(**kw),
+    "search_tags": lambda **kw: memory_service.search_tags(**kw),
+    "list_predicates": lambda **kw: relation_service.list_predicates(**kw),
     "merge_tags": lambda **kw: librarian_service.merge_tags(**kw),
-    "dismiss_event": lambda **kw: event_service.dismiss_events(
-        _required_str_or_list(kw, "event_ids"),
-        _required_str(kw, "reason"),
-        kw.get("agent_id") or "system",
-    ),
     # Multi-branch
     "store_memory": _dispatch_store_memory,
     "search_memory": _dispatch_search_memory,
@@ -437,7 +413,6 @@ MUTATING_TOOLS = frozenset(
     {
         "log_event",
         "merge_tags",
-        "dismiss_event",
         "store_memory",
         "archive_memory",
         "manage_relation",

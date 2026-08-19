@@ -85,16 +85,27 @@ def log_event(
             close_connection(conn)
 
 
-def get_recent_events(  # noqa: PLR0912, C901, PLR0915
+def get_recent_events(
+    context_id: str = None,
     agent_id: str = None,
     type_filter: str = None,
+    session_id: str = None,
+    order: str = "newest_first",
     limit: int = 20,
     offset: int = 0,
-    status_filter: str = None,
     db_connection=None,
     db_path: str = None,
 ) -> list:
-    """Retrieves recent logged events from the events ledger."""
+    """Retrieves events from the append-only events ledger (agent API redesign plan §5.7,
+    Phase 6 item 23).
+
+    `context_id` is the headline filter (§3.3 fixed: previously stored on every row but
+    unreachable from any agent-facing path). Every filter is a plain equality clause,
+    including `session_id` -- there is no more forced "session mode" (§3.4's `mode='session'`
+    is gone) and no more dismissed-event/entity-status derivation loop (§3.5's `status_filter`
+    is gone): this is now exactly one `SELECT ... LIMIT ? OFFSET ?`, ordered by `timestamp`
+    ascending ("oldest_first") or descending ("newest_first", default).
+    """
     should_close = False
     conn = db_connection
     if not conn:
@@ -104,114 +115,40 @@ def get_recent_events(  # noqa: PLR0912, C901, PLR0915
 
     try:
         where_clauses = []
-        params = []
+        params: list = []
+        if context_id:
+            where_clauses.append("context_id = ?")
+            params.append(context_id)
         if agent_id:
             where_clauses.append("agent_id = ?")
             params.append(agent_id)
         if type_filter:
             where_clauses.append("type = ?")
             params.append(type_filter)
+        if session_id:
+            where_clauses.append("session_id = ?")
+            params.append(session_id)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        direction = "ASC" if order == "oldest_first" else "DESC"
 
-        # We need to fetch batches to handle status_filter and pagination correctly
-        batch_size = max(100, limit + offset)
-        sql_offset = 0
-        filtered_results: list[dict] = []
+        cursor = conn.execute(
+            f"""
+            SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
+            FROM events
+            {where_sql}
+            ORDER BY timestamp {direction}
+            LIMIT ? OFFSET ?
+        """,
+            params + [limit, offset],
+        )
 
-        while len(filtered_results) < limit + offset:
-            cursor = conn.execute(
-                f"""
-                SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
-                FROM events
-                {where_sql}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-            """,
-                params + [batch_size, sql_offset],
-            )
-
-            rows = cursor.fetchall()
-            if not rows:
-                break
-
-            sql_offset += batch_size
-
-            # Pre-fetch dismissals for all relevant events in this batch
-            review_event_ids = [
-                r[0] for r in rows if r[3] in ("consolidation_request", "supersession_candidate")
-            ]
-            dismissed_event_ids = set()
-            if review_event_ids:
-                ph = ",".join("?" for _ in review_event_ids)
-                dismiss_cursor = conn.execute(
-                    f"SELECT json_extract(content, '$.target_event_id') FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id') IN ({ph})",
-                    review_event_ids,
-                )
-                dismissed_event_ids = {r[0] for r in dismiss_cursor.fetchall() if r[0]}
-
-            # Pre-fetch entity statuses
-            all_source_entity_ids = set()
-            row_entities_map = {}
-            for r in rows:
-                etype = r[3]
-                if etype in ("consolidation_request", "supersession_candidate"):
-                    try:
-                        data = json.loads(r[4])
-                        source_ids: list[str] | None = []
-                        if etype == "consolidation_request":
-
-                            def _get_valid(lst):
-                                # Reject the whole list if it's malformed (wrong container
-                                # type, empty, or any member isn't a non-blank string)
-                                # rather than silently sanitizing bad members out --
-                                # a partially-typed payload must stay "pending", never
-                                # be treated as if the bad members were never there.
-                                if not isinstance(lst, list) or not lst:
-                                    return None
-                                valid = []
-                                for x in lst:
-                                    if not isinstance(x, str) or not x.strip():
-                                        return None
-                                    valid.append(x.strip())
-                                return valid
-
-                            valid_ids = _get_valid(data.get("entity_ids"))
-                            if not valid_ids:
-                                valid_ids = _get_valid(data.get("new_raw_entity_ids"))
-                            source_ids = valid_ids
-                        elif etype == "supersession_candidate":
-                            new_entity = data.get("new_entity_id")
-                            if isinstance(new_entity, str) and new_entity.strip():
-                                source_ids = [new_entity.strip()]
-                            else:
-                                source_ids = None
-
-                        row_entities_map[r[0]] = source_ids
-                        if source_ids:
-                            all_source_entity_ids.update(source_ids)
-                    except Exception:
-                        row_entities_map[r[0]] = None
-
-            raw_entities = set()
-            if all_source_entity_ids:
-                ph = ",".join("?" for _ in all_source_entity_ids)
-                raw_cursor = conn.execute(
-                    f"SELECT id FROM entities WHERE id IN ({ph}) AND status = 'raw'",
-                    list(all_source_entity_ids),
-                )
-                raw_entities = {r[0] for r in raw_cursor.fetchall()}
-
-            for r in rows:
-                eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
-
-                # Truncate content for non-consolidation_request events if longer than 1000 chars
-                if etype != "consolidation_request" and len(econtent) > 1000:
-                    display_content = econtent[:1000] + " [TRUNCATED]"
-                else:
-                    display_content = econtent
-
-                item = {
+        results = []
+        for r in cursor.fetchall():
+            eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
+            display_content = econtent[:1000] + " [TRUNCATED]" if len(econtent) > 1000 else econtent
+            results.append(
+                {
                     "id": eid,
                     "timestamp": etime,
                     "agent_id": eagent,
@@ -221,69 +158,10 @@ def get_recent_events(  # noqa: PLR0912, C901, PLR0915
                     "session_id": esess,
                     "context_id": ectx,
                 }
-
-                # Dynamic status check
-                if etype in ("consolidation_request", "supersession_candidate"):
-                    if eid in dismissed_event_ids:
-                        item["status"] = "dismissed"
-                    else:
-                        source_ids = row_entities_map.get(eid, [])
-                        if not source_ids:
-                            item["status"] = "pending"
-                        else:
-                            has_raw = any(sid in raw_entities for sid in source_ids)
-                            item["status"] = "pending" if has_raw else "resolved"
-
-                if status_filter and item.get("status") != status_filter:
-                    continue
-
-                filtered_results.append(item)
-
-        return filtered_results[offset : offset + limit]
+            )
+        return results
     except Exception as e:
         logger.error("Error fetching recent events: %s", e)
-        return [{"error": str(e)}]
-    finally:
-        if should_close:
-            close_connection(conn)
-
-
-def get_session_summary(session_id: str, db_connection=None, db_path: str = None) -> list:
-    """Retrieves all event logs associated with a specific session ID."""
-    if not session_id:
-        return []
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
-    try:
-        cursor = conn.execute(
-            """
-            SELECT id, timestamp, agent_id, type, content, error_code, context_id
-            FROM events
-            WHERE session_id = ?
-            ORDER BY timestamp ASC
-        """,
-            (session_id,),
-        )
-        rows = cursor.fetchall()
-        return [
-            {
-                "id": r[0],
-                "timestamp": r[1],
-                "agent_id": r[2],
-                "type": r[3],
-                "content": r[4],
-                "error_code": r[5],
-                "context_id": r[6],
-            }
-            for r in rows
-        ]
-    except Exception as e:
-        logger.error("Error fetching session summary: %s", e)
         return [{"error": str(e)}]
     finally:
         if should_close:

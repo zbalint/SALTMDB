@@ -43,7 +43,7 @@ from .validation import (
 from .tags import (
     normalize_tag_name,
     resolve_or_create_tag,
-    get_canonical_tags,
+    search_tags,
     _TAG_NAME_RE,
 )
 from .write import store_memory, _resolve_existing_entity_id, _store_raw_entity
@@ -104,7 +104,7 @@ __all__ = [
     "_validate_cross_encoder_controls",
     "normalize_tag_name",
     "resolve_or_create_tag",
-    "get_canonical_tags",
+    "search_tags",
     "_TAG_NAME_RE",
     "store_memory",
     "_resolve_existing_entity_id",

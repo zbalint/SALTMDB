@@ -2,6 +2,8 @@ import unittest
 import tempfile
 import os
 import shutil
+import uuid
+from datetime import datetime, UTC
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.relation_service import (
     store_relation,
@@ -237,11 +239,12 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.assertEqual(res2, "Error: relation not found")
 
     def test_invalidate_relation_canonical_alias_matching(self):
-        # references is an alias for canonical predicate elaborates_on
+        # Phase 6 reversed-behavior regression (plan §3.17/§5.8): references is now an alias
+        # for canonical predicate related_to, not elaborates_on (its pre-Phase-6 target).
         store_relation(
             source_id=self.id_alpha,
             target_id=self.id_beta,
-            predicate="elaborates_on",
+            predicate="related_to",
             db_connection=self.conn,
         )
         # Call invalidate passing alias 'references'
@@ -252,11 +255,11 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             db_connection=self.conn,
         )
         self.assertTrue(res_inv.startswith("Relation invalidated"))
-        self.assertIn("elaborates_on", res_inv)
+        self.assertIn("related_to", res_inv)
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
-            (self.id_alpha, self.id_beta, "elaborates_on"),
+            (self.id_alpha, self.id_beta, "related_to"),
         ).fetchone()
         self.assertIsNotNone(row[0])
 
@@ -284,12 +287,16 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         self.assertEqual(res_dep["total_dependencies_found"], 0)
         self.assertEqual(len(res_dep["dependencies"]), 1)
 
-        store_relation(
-            source_id=self.id_alpha,
-            target_id=self.id_beta,
-            predicate="consolidated_from",
-            valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn,
+        # 'consolidated_from' is now a RESERVED predicate (plan §5.8): store_relation refuses to
+        # create one directly, exactly like the real lifecycle tool (consolidate_memories) does,
+        # which writes it via a hardcoded literal INSERT rather than store_relation. Seed the
+        # same way here to simulate that pre-existing edge without going through the (now-closed)
+        # gate.
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'consolidated_from', ?, ?, ?)",
+            (str(uuid.uuid4()), self.id_alpha, self.id_beta, now, now, "2025-01-01T00:00:00+00:00"),
         )
         invalidate_relation(
             source_id=self.id_alpha,
@@ -335,12 +342,16 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         dep_ids = {d["id"] for d in res_dep["dependencies"]}
         self.assertIn(self.id_beta, dep_ids)
 
-        store_relation(
-            source_id=self.id_alpha,
-            target_id=self.id_beta,
-            predicate="consolidated_from",
-            valid_at="2025-01-01T00:00:00+00:00",
-            db_connection=self.conn,
+        # 'consolidated_from' is now a RESERVED predicate (plan §5.8): store_relation refuses to
+        # create one directly, exactly like the real lifecycle tool (consolidate_memories) does,
+        # which writes it via a hardcoded literal INSERT rather than store_relation. Seed the
+        # same way here to simulate that pre-existing edge without going through the (now-closed)
+        # gate.
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'consolidated_from', ?, ?, ?)",
+            (str(uuid.uuid4()), self.id_alpha, self.id_beta, now, now, "2025-01-01T00:00:00+00:00"),
         )
         self.conn.execute(
             "UPDATE relations SET valid_from = '2025-01-01T00:00:00+00:00' WHERE source_id = ? AND target_id = ? AND predicate = 'consolidated_from'",

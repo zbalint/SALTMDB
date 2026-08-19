@@ -4,6 +4,12 @@ import uuid
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying
 from saltmdb.utils.text import compute_content_hash
+from saltmdb.utils.predicate_vocabulary import (
+    AGENT_SELECTABLE_PREDICATES,
+    LEGACY_READONLY_PREDICATES,
+    PREDICATE_ALIASES,
+    RESERVED_PREDICATES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,35 +340,38 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             FOREIGN KEY (canonical_id) REFERENCES predicates(id) ON DELETE SET NULL
         );
         """)
-        for _pred_name in (
-            "resolves",
-            "depends_on",
-            "references",
-            "elaborates_on",
-            "consolidated_from",
-            "supersedes",
-            "relates_to",
-            "similar_to",
-        ):
+        # Closed predicate vocabulary (agent API redesign plan §5.8, Phase 6 item 25): the 15
+        # canonical spellings (11 agent-selectable + 3 reserved/system-owned + 1 legacy-
+        # read-only) plus every drifted spelling from the §7.1 migration mapping, seeded as
+        # aliases of their canonical target. Mirrors saltmdb.utils.predicate_vocabulary exactly
+        # -- that module is the single source of truth this block renders into the DB registry,
+        # so search_tags/list_predicates and this seed can never drift apart.
+        _canonical_pred_names = (
+            *sorted(AGENT_SELECTABLE_PREDICATES),
+            *sorted(RESERVED_PREDICATES),
+            *sorted(LEGACY_READONLY_PREDICATES),
+        )
+        for _pred_name in _canonical_pred_names:
             conn.execute(
                 "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
                 (str(uuid.uuid4()), _pred_name, _pred_name),
             )
-        # Pre-alias observed drift (relates_to/references used interchangeably with elaborates_on)
-        # onto elaborates_on as canonical. Guarded by canonical_id IS NULL so a future manual
-        # re-merge tool's decision is never silently clobbered on restart.
-        # similar_to is deliberately NOT aliased here: elaborates_on is an agent-curated,
-        # judgment-based edge, while similar_to is reserved for store_memory's mechanical
-        # cosine-similarity auto-linking (see memory_service.py Stage 5) -- keeping them
-        # distinct lets callers tell a reviewed edge from an unreviewed one.
-        _canon_row = conn.execute(
-            "SELECT id FROM predicates WHERE name = 'elaborates_on'"
-        ).fetchone()
-        if _canon_row:
+        for _alias_name, (_canon_name, _swap) in PREDICATE_ALIASES.items():
             conn.execute(
-                "UPDATE predicates SET canonical_id = ? WHERE name IN ('relates_to', 'references') AND canonical_id IS NULL AND id != ?",
-                (_canon_row[0], _canon_row[0]),
+                "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+                (str(uuid.uuid4()), _alias_name, _alias_name),
             )
+            # Alias onto the canonical row. Guarded by canonical_id IS NULL so a future manual
+            # re-merge tool's decision is never silently clobbered on restart -- this is a seed
+            # default, not an unconditional re-assertion.
+            _canon_row = conn.execute(
+                "SELECT id FROM predicates WHERE name = ?", (_canon_name,)
+            ).fetchone()
+            if _canon_row:
+                conn.execute(
+                    "UPDATE predicates SET canonical_id = ? WHERE name = ? AND canonical_id IS NULL AND id != ?",
+                    (_canon_row[0], _alias_name, _canon_row[0]),
+                )
 
         # 5. Virtual FTS5 Table with Porter Tokenizer & Search Aliases
         try:
@@ -659,9 +668,11 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # scratch/plans/track_a_disposition_detailed.md §5): one-time retirement of the legacy
         # `consolidation_request`/`supersession_candidate` event backlog, now that store_memory no
         # longer emits either type. Reuses the existing `dismiss_events` mechanism (an
-        # `event_dismissed` audit record per event, reason="track_a_migration") rather than
-        # introducing new event-type/status-derivation logic -- get_recent_events'/dismiss_events'
-        # own dismissed-suppression logic already treats a dismissed event as no longer pending.
+        # `event_dismissed` audit record per event, reason="track_a_migration") purely as a
+        # historical audit trail -- agent API redesign Phase 6 removed both the public
+        # `dismiss_event` MCP tool and `get_recent_events`' dismissed-suppression/status-
+        # derivation logic (§3.5), so this sweep no longer has any effect on what `get_events`
+        # returns; `dismiss_events` itself is kept only because this sweep still calls it.
         # Gated on PRAGMA user_version (unused elsewhere in this codebase) so this genuinely runs
         # once, ever, per DB -- NOT on every init_db() call -- otherwise it would silently
         # auto-dismiss any future legitimate event of either type too, not just this one-time

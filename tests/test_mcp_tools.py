@@ -86,30 +86,30 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(dup_res["status"], "rejected")
         self.assertEqual(dup_res["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
 
-    def test_get_events_modes(self):
+    def test_get_events_filters_by_context_and_agent(self):
+        # Phase 6 (plan §5.7): log_event/get_events no longer have `mode` -- context_id/
+        # agent_id/event_type/session_id are all plain equality filters now.
         tools.log_event(
-            agent_id="test_agent",
-            owner_id="test_agent",
-            type="attempt",
+            event_type="attempt",
             content="Event mode test",
-            session_id="sess_123",
+            owner_id="test_agent",
+            context_id="ctx_get_events_modes_test",
         )
-        events = tools.get_events(agent_id="test_agent", owner_id="test_agent", mode="events")
+        events = tools.get_events(agent_id="test_agent")
         self.assertTrue(len(events) > 0)
 
-        session_events = tools.get_events(
-            session_id="sess_123", owner_id="test_agent", mode="session"
-        )
-        self.assertTrue(len(session_events) > 0)
+        context_events = tools.get_events(context_id="ctx_get_events_modes_test")
+        self.assertTrue(len(context_events) > 0)
+        self.assertTrue(all(e["context_id"] == "ctx_get_events_modes_test" for e in context_events))
 
-    def test_get_canonical_tags_alias_resolution(self):
+    def test_search_tags_alias_resolution(self):
         tools.store_memory(
             content="Tag test content",
             title="Tag Test",
             tags=["#database"],
             owner_id="user1",
         )
-        tags = tools.get_canonical_tags(query="data")
+        tags = tools.search_tags(query="data")
         self.assertIsInstance(tags, list)
 
     def _tag_count_for_entity(self, entity_id):
@@ -275,18 +275,20 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         self.assertIn("Relation successfully stored", rel_res)
 
+        # 'part_of' -- an agent-selectable, non-strong canonical predicate -- so this exercises
+        # the bulk-shape plumbing itself, not the predicate-vocabulary gate (covered separately).
         bulk_rel_res = tools.manage_relation(
-            relations=[{"source_id": id1, "target_id": id2, "predicate": "links_to"}],
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}],
             owner_id="user1",
         )
         self.assertIsInstance(bulk_rel_res, list)
 
-    def test_get_canonical_predicates_tool(self):
-        results = tools.get_canonical_predicates(query="elaborates")
+    def test_list_predicates_tool(self):
+        results = tools.list_predicates(query="elaborates")
         names = {r["name"] for r in results}
         self.assertIn("elaborates_on", names)
 
-    def test_get_canonical_predicates_respects_explicit_limit_kwarg(self):
+    def test_list_predicates_respects_explicit_limit_kwarg(self):
         for i in range(10):
             self.conn.execute(
                 "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
@@ -294,10 +296,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.get_canonical_predicates(limit=3)
+        results = tools.list_predicates(limit=3)
         self.assertEqual(len(results), 3)
 
-    def test_get_canonical_tags_respects_explicit_limit_kwarg(self):
+    def test_search_tags_respects_explicit_limit_kwarg(self):
         for i in range(10):
             self.conn.execute(
                 "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
@@ -305,10 +307,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.get_canonical_tags(limit=3)
+        results = tools.search_tags(limit=3)
         self.assertEqual(len(results), 3)
 
-    def test_get_canonical_predicates_explicit_zero_limit_is_respected_not_defaulted(self):
+    def test_list_predicates_explicit_zero_limit_is_respected_not_defaulted(self):
         for i in range(5):
             self.conn.execute(
                 "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
@@ -316,14 +318,14 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.get_canonical_predicates(limit=0)
+        results = tools.list_predicates(limit=0)
         self.assertEqual(
             len(results),
             0,
             "an explicit limit=0 must be honored (LIMIT 0), not silently replaced by the default 50",
         )
 
-    def test_get_canonical_tags_explicit_zero_limit_is_respected_not_defaulted(self):
+    def test_search_tags_explicit_zero_limit_is_respected_not_defaulted(self):
         for i in range(5):
             self.conn.execute(
                 "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
@@ -331,7 +333,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.get_canonical_tags(limit=0)
+        results = tools.search_tags(limit=0)
         self.assertEqual(
             len(results),
             0,
@@ -374,7 +376,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         self.assertIn("already exists", rel_res2)
 
-    def test_manage_relation_surfaces_seeded_alias_substitution(self):
+    def test_manage_relation_rejects_seeded_alias_with_resubmittable_corrected_call(self):
+        # Phase 6 write-time gate (plan §5.8): manage_relation no longer silently substitutes a
+        # drifted alias spelling -- it rejects the call with a corrected_call naming the
+        # canonical replacement ('relates_to' now aliases 'related_to', the Phase 6 reversal).
         res1 = tools.store_memory(
             content="Source entity for seeded alias substitution test",
             title="Alias Substitution Source",
@@ -393,12 +398,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="relates_to", owner_id="user1"
         )
-        self.assertIn("elaborates_on", rel_res)
-        self.assertIn(
-            "relates_to",
-            rel_res,
-            "manage_relation must surface the originally requested predicate, not just the canonical one",
-        )
+        self.assertEqual(rel_res["status"], "rejected")
+        self.assertEqual(rel_res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
+        corrected_call = rel_res["corrected_call"]
+        self.assertEqual(corrected_call["predicate"], "related_to")
+        self.assertEqual(corrected_call["source_id"], id1)
+        self.assertEqual(corrected_call["target_id"], id2)
+
+        resubmit = tools.manage_relation(**corrected_call)
+        self.assertIn("Relation successfully stored", resubmit)
 
     def test_store_memory_memory_type_round_trip(self):
         res = tools.store_memory(
@@ -750,321 +758,34 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "deliberately forcing a low-similarity relation via the MCP tool wrapper", event[1]
         )
 
-    def test_dismiss_event_invalid(self):
-        # Test blank reason
-        with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id="some-id", reason="   ", owner_id="agent1")
-        self.assertIn("cannot be empty", str(ctx.exception))
-
-        # Test invalid type
-        res = tools.log_event(agent_id="agent1", owner_id="agent1", type="decision", content="foo")
-        eid = res.split("ID: ")[1].split()[0]
-
-        with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id=eid, reason="bad type", owner_id="agent1")
-        self.assertIn("not dismissible types", str(ctx.exception))
-
-        # Test nonexistent ID
-        with self.assertRaises(ValueError) as ctx:
-            tools.dismiss_event(event_id="fake-id", reason="missing", owner_id="agent1")
-        self.assertIn("Events not found", str(ctx.exception))
-
-        # Test bulk atomicity rollback
-        res2 = tools.log_event(
-            agent_id="agent1", owner_id="agent1", type="consolidation_request", content="{}"
-        )
-        eid2 = res2.split("ID: ")[1].split()[0]
-
-        with self.assertRaises(ValueError):
-            tools.dismiss_event(
-                event_id=[eid2, "fake-id2"], reason="rollback test", owner_id="agent1"
-            )
-
-        # Verify eid2 is not dismissed (no event_dismissed in db)
-        count = self.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE type='event_dismissed'"
-        ).fetchone()[0]
-        self.assertEqual(count, 0)
-
-    def test_dismiss_event_success_and_idempotency(self):
-        mem1 = tools.store_memory(
-            content="# Valid Test Memory 1\nThis is a long enough markdown content to pass the quality gate and not get rejected.\n- Bullet point 1\n- Bullet point 2",
-            title="Valid Memory 1",
-            tags=["#dismiss"],
-            owner_id="a",
-        )
-        raw_id1 = mem1["data"]["id"]
-
-        mem2 = tools.store_memory(
-            content="# Valid Test Memory 2\nThis is another long enough markdown content to pass the quality gate.\n- Bullet point 1\n- Bullet point 2",
-            title="Valid Memory 2",
-            tags=["#dismiss"],
-            owner_id="a",
-        )
-        raw_id2 = mem2["data"]["id"]
-
-        res1 = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content=f'{{"entity_ids":["{raw_id1}"]}}',
-        )
-        eid1 = res1.split("ID: ")[1].split()[0]
-
-        # eid2 is a top-level `supersession_candidate` EVENT TYPE (the live
-        # store_memory-dedup-path signal), distinct from a `consolidation_request`
-        # whose `content.target` happens to be the string "supersession_candidate".
-        # Per the approved feature contract it IS dismissible, same as
-        # `consolidation_request`.
-        res2 = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="supersession_candidate",
-            content=f'{{"new_entity_id":"{raw_id2}"}}',
-        )
-        eid2 = res2.split("ID: ")[1].split()[0]
-
-        # Initial status
-        events_pre = tools.get_events(status_filter="pending", owner_id="a")
-        self.assertTrue(any(e["id"] == eid1 for e in events_pre))
-        self.assertTrue(any(e["id"] == eid2 for e in events_pre))
-
-        # Dismiss both
-        out = tools.dismiss_event(event_id=[eid1, eid1, eid2], reason="obsolete", owner_id="a")
-        self.assertEqual(out, "Events dismissed successfully")
-
-        # Check status changed
-        events_post = tools.get_events(status_filter="dismissed", owner_id="a")
-        self.assertTrue(any(e["id"] == eid1 for e in events_post))
-        self.assertTrue(any(e["id"] == eid2 for e in events_post))
-
-        events_pending = tools.get_events(status_filter="pending", owner_id="a")
-        self.assertFalse(any(e["id"] == eid1 for e in events_pending))
-
-        # Check idempotency
-        out2 = tools.dismiss_event(event_id=eid1, reason="again", owner_id="a")
-        self.assertEqual(out2, "Events dismissed successfully")
-
-        # The dismiss_event reviewer identity uses its canonical agent_id parameter.
-        res3 = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content='{"entity_ids":["dummy"]}',
-        )
-        eid3 = res3.split("ID: ")[1].split()[0]
-        tools.dismiss_event(
-            event_id=eid3, reason="owner test", agent_id="review-owner", owner_id="a"
-        )
-        owner = self.conn.execute(
-            "SELECT agent_id FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id')=? ORDER BY rowid DESC LIMIT 1",
-            (eid3,),
-        ).fetchone()[0]
-        self.assertEqual(owner, "review-owner")
-
-    def test_get_events_status_derivation_malformed_and_resolved(self):
-        # Empty payload
-        res_empty = tools.log_event(
-            agent_id="a", owner_id="a", type="consolidation_request", content="{}"
-        )
-        eid_empty = res_empty.split("ID: ")[1].split()[0]
-
-        events = tools.get_events(owner_id="a")
-        empty_event = next(e for e in events if e["id"] == eid_empty)
-        self.assertEqual(empty_event["status"], "pending")
-
-        # Resolved naturally
-        mem = tools.store_memory(
-            content="# Quality Valid Content\nThis is a test content for resolution that is long enough and formatted nicely.\n- Point A\n- Point B",
-            title="Test Res",
-            tags=["#events"],
-            owner_id="a",
-        )
-        raw_id = mem["data"]["id"]
-
-        res_cr = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content=f'{{"entity_ids":["{raw_id}"]}}',
-        )
-        eid_cr = res_cr.split("ID: ")[1].split()[0]
-
-        # Should be pending while raw
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
-            "pending",
-        )
-
-        # Archive it to resolve
-        tools.archive_memory(entity_id=raw_id, owner_id="a")
-
-        # Should be resolved now
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
-            "resolved",
-        )
-
-        # But if we dismiss it, dismissal takes precedence
-        tools.dismiss_event(event_id=eid_cr, reason="dismissed over resolved", owner_id="a")
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_cr)["status"],
-            "dismissed",
-        )
-
-        # Test legacy new_raw_entity_ids resolution
-        res_legacy = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content=f'{{"new_raw_entity_ids":["{raw_id}"]}}',
-        )
-        eid_legacy = res_legacy.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_legacy)["status"],
-            "resolved",
-        )
-
-        # Test supersession natural resolution
-        res_sup = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="supersession_candidate",
-            content=f'{{"new_entity_id":"{raw_id}"}}',
-        )
-        eid_sup = res_sup.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_sup)["status"],
-            "resolved",
-        )
-
-        # Test malformed payload types
-        res_malf1 = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content='{"entity_ids": "not-a-list"}',
-        )
-        eid_malf1 = res_malf1.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_malf1)["status"],
-            "pending",
-        )
-
-        # Test empty/whitespace IDs list
-        res_empty_list = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content='{"entity_ids": ["", "   "]}',
-        )
-        eid_empty_list = res_empty_list.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_empty_list)["status"],
-            "pending",
-        )
-
-        # Test mixed-type IDs list: a non-string member must invalidate the whole list
-        # rather than being silently filtered out (regression guard for a bug where a
-        # payload like {"entity_ids": ["non-raw-id", 7]} was sanitized down to
-        # ["non-raw-id"] and incorrectly reported as "resolved").
-        res_mixed = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content='{"entity_ids": ["non-raw-id", 7]}',
-        )
-        eid_mixed = res_mixed.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_mixed)["status"],
-            "pending",
-        )
-
-        # Test valid fallback when entity_ids is empty
-        res_fallback = tools.log_event(
-            agent_id="a",
-            owner_id="a",
-            type="consolidation_request",
-            content=f'{{"entity_ids": [], "new_raw_entity_ids": ["{raw_id}"]}}',
-        )
-        eid_fallback = res_fallback.split("ID: ")[1].split()[0]
-        self.assertEqual(
-            next(e for e in tools.get_events(owner_id="a") if e["id"] == eid_fallback)["status"],
-            "resolved",
-        )
-
-        # Verify source immutability
-        tools.dismiss_event(event_id=eid_malf1, reason="dismiss", owner_id="a")
-        orig_content = self.conn.execute(
-            "SELECT content FROM events WHERE id=?", (eid_malf1,)
-        ).fetchone()[0]
-        self.assertEqual(orig_content, '{"entity_ids": "not-a-list"}')
-
-    def test_get_events_pagination_and_filtering(self):
-        # Add a bunch of events
+    def test_get_events_pagination(self):
+        # Phase 6 (plan §5.7): get_events collapsed to one unconditional SELECT ... LIMIT ?
+        # OFFSET ? -- no more status_filter/dismiss-driven pagination semantics (dismiss_event
+        # itself was removed this phase). Extracted from the old
+        # test_get_events_pagination_and_filtering, keeping only the plain limit/offset
+        # assertion that is still meaningful under the new contract.
         for _ in range(5):
             tools.log_event(
-                agent_id="pag_test",
-                owner_id="pag-owner",
-                type="consolidation_request",
+                event_type="consolidation_request",
                 content="{}",
+                owner_id="pag_test",
             )
 
-        # Get only pending
-        pending = tools.get_events(
-            status_filter="pending", limit=2, offset=0, agent_id="pag_test", owner_id="pag-owner"
-        )
-        self.assertEqual(len(pending), 2)
+        page1 = tools.get_events(agent_id="pag_test", limit=2, offset=0)
+        self.assertEqual(len(page1), 2)
 
-        pending_page2 = tools.get_events(
-            status_filter="pending", limit=2, offset=2, agent_id="pag_test", owner_id="pag-owner"
-        )
-        self.assertEqual(len(pending_page2), 2)
+        page2 = tools.get_events(agent_id="pag_test", limit=2, offset=2)
+        self.assertEqual(len(page2), 2)
 
-        self.assertNotEqual(pending[0]["id"], pending_page2[0]["id"])
-
-        # Test filtering through nonmatching rows before matching results
-        # We add 150 resolved events (which means they have no source IDs)
-        # and interleave some pending ones to force multiple batches
-        for i in range(120):
-            tools.log_event(
-                agent_id="pag_deep",
-                owner_id="pag-owner",
-                type="consolidation_request",
-                content="{}",
-            )  # pending
-            tools.dismiss_event(
-                event_id=tools.get_events(
-                    limit=1, type_filter="consolidation_request", owner_id="pag-owner"
-                )[0]["id"],
-                reason="resolved",
-                owner_id="pag-owner",
-            )  # make it dismissed
-            if i % 30 == 0:
-                tools.log_event(
-                    agent_id="pag_deep",
-                    owner_id="pag-owner",
-                    type="consolidation_request",
-                    content='{"malformed": true}',
-                )  # pending
-
-        deep_pending = tools.get_events(
-            agent_id="pag_deep", status_filter="pending", limit=2, owner_id="pag-owner"
-        )
-        self.assertEqual(len(deep_pending), 2)
-
-        deep_pending_page2 = tools.get_events(
-            agent_id="pag_deep", status_filter="pending", limit=2, offset=2, owner_id="pag-owner"
-        )
-        self.assertEqual(len(deep_pending_page2), 2)
-        self.assertNotEqual(deep_pending[0]["id"], deep_pending_page2[0]["id"])
+        self.assertNotEqual(page1[0]["id"], page2[0]["id"])
 
     def test_mcp_tool_count_regression_guard(self):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            19,
-            f"MCP server tool count must be exactly 19 after Phase 4, got {registered_count}",
+            18,
+            f"MCP server tool count must be exactly 18 after Phase 6 (dismiss_event removed), "
+            f"got {registered_count}",
         )
 
 
@@ -1198,6 +919,428 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             core_exit_condition="B" * 20,
         )
         self.assertEqual(result["status"], "ok")
+
+
+class TestManageRelationPredicateGate(unittest.TestCase):
+    """End-to-end coverage of manage_relation's closed-vocabulary pre-flight gate (agent API
+    redesign plan §5.8, Phase 6 item 25), through tools.py's real argument-normalization layer
+    against a temp DB via DirectDispatchBackend -- same pattern as TestMCPToolsWrapper."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk_pair(self, label):
+        res1 = tools.store_memory(
+            content=f"Source entity content for {label} test",
+            title=f"{label} Source",
+            tags=["#gate"],
+            owner_id="gate_tester",
+        )
+        res2 = tools.store_memory(
+            content=f"Target entity content for {label} test",
+            title=f"{label} Target",
+            tags=["#gate"],
+            owner_id="gate_tester",
+        )
+        return res1["data"]["id"], res2["data"]["id"]
+
+    def test_selectable_predicate_succeeds(self):
+        id1, id2 = self._mk_pair("selectable")
+        res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="part_of", owner_id="gate_tester"
+        )
+        self.assertIsInstance(res, str)
+        self.assertIn("Relation successfully stored", res)
+
+    def test_each_reserved_predicate_is_refused_naming_its_lifecycle_tool_with_no_corrected_call(
+        self,
+    ):
+        expected_tools = {
+            "supersedes": "supersede_memory",
+            "consolidated_from": "consolidate_memories",
+            "revises": "revise_memory",
+        }
+        for predicate, lifecycle_tool in expected_tools.items():
+            id1, id2 = self._mk_pair(f"reserved_{predicate}")
+            res = tools.manage_relation(
+                source_id=id1, target_id=id2, predicate=predicate, owner_id="gate_tester"
+            )
+            self.assertEqual(res["status"], "rejected", predicate)
+            self.assertEqual(res["errors"][0]["code"], "RESERVED_PREDICATE", predicate)
+            self.assertIn(lifecycle_tool, res["errors"][0]["message"], predicate)
+            self.assertNotIn("corrected_call", res, predicate)
+
+    def test_similar_to_is_refused_with_no_corrected_call(self):
+        id1, id2 = self._mk_pair("similar_to")
+        res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="similar_to", owner_id="gate_tester"
+        )
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "LEGACY_READONLY_PREDICATE")
+        self.assertNotIn("corrected_call", res)
+
+    def test_same_direction_alias_is_refused_and_corrected_call_resubmits_successfully(self):
+        id1, id2 = self._mk_pair("same_direction_alias")
+        res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="relates_to", owner_id="gate_tester"
+        )
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
+        corrected_call = res["corrected_call"]
+        self.assertEqual(corrected_call["predicate"], "related_to")
+        self.assertEqual(corrected_call["source_id"], id1)
+        self.assertEqual(corrected_call["target_id"], id2)
+
+        resubmit = tools.manage_relation(**corrected_call)
+        self.assertIn("Relation successfully stored", resubmit)
+
+    def test_swap_alias_is_refused_and_corrected_call_swaps_ids_and_resubmits_successfully(self):
+        # 'affects' -> 'caused_by' with source_id/target_id swapped (A affects B -> B caused_by
+        # A). caused_by is not a RELATION_GATE_STRONG_PREDICATE, so this exercises the swap
+        # mechanics in isolation from the embedding-similarity gate.
+        id1, id2 = self._mk_pair("swap_alias")
+        res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="affects", owner_id="gate_tester"
+        )
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
+        corrected_call = res["corrected_call"]
+        self.assertEqual(corrected_call["predicate"], "caused_by")
+        self.assertEqual(corrected_call["source_id"], id2)
+        self.assertEqual(corrected_call["target_id"], id1)
+
+        resubmit = tools.manage_relation(**corrected_call)
+        self.assertIn("Relation successfully stored", resubmit)
+
+        row = self.conn.execute(
+            "SELECT source_id, target_id FROM relations WHERE predicate = 'caused_by'"
+        ).fetchone()
+        self.assertEqual(row, (id2, id1))
+
+    def test_unknown_predicate_is_refused_listing_valid_predicates_with_no_corrected_call(self):
+        id1, id2 = self._mk_pair("unknown")
+        res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="completely_made_up", owner_id="gate_tester"
+        )
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "UNKNOWN_PREDICATE")
+        self.assertIn("depends_on", res["errors"][0]["message"])
+        self.assertNotIn("corrected_call", res)
+
+    def test_invalidate_true_bypasses_the_gate_entirely(self):
+        # invalidate=True never runs the create-time gate (single-item shape) -- confirmed
+        # intentional per manage_relation's own docstring: "This gate applies only to creating
+        # a new edge, never to invalidate=True".
+        id1, id2 = self._mk_pair("invalidate_bypass")
+        create_res = tools.manage_relation(
+            source_id=id1, target_id=id2, predicate="related_to", owner_id="gate_tester"
+        )
+        self.assertIn("Relation successfully stored", create_res)
+
+        # (a) invalidating with the already-canonical predicate works, unsurprisingly.
+        inv_res = tools.manage_relation(
+            source_id=id1,
+            target_id=id2,
+            predicate="related_to",
+            invalidate=True,
+            owner_id="gate_tester",
+        )
+        self.assertIn("Relation invalidated", inv_res)
+
+        # (b) invalidating with a predicate that WOULD be gated on create ('relates_to' is an
+        # alias, refused by test_same_direction_alias_is_refused_... above) still succeeds when
+        # invalidate=True, because invalidate_relation's read-side canonicalization still
+        # resolves the alias to the same underlying edge.
+        id3, id4 = self._mk_pair("invalidate_bypass_alias")
+        tools.manage_relation(
+            source_id=id3, target_id=id4, predicate="related_to", owner_id="gate_tester"
+        )
+        inv_res2 = tools.manage_relation(
+            source_id=id3,
+            target_id=id4,
+            predicate="relates_to",
+            invalidate=True,
+            owner_id="gate_tester",
+        )
+        self.assertIsInstance(
+            inv_res2,
+            str,
+            "invalidate=True with a would-be-gated alias predicate must reach "
+            "invalidate_relation directly, not the rejected-envelope gate",
+        )
+        self.assertIn("Relation invalidated", inv_res2)
+
+    def test_bulk_one_valid_one_alias_rejects_whole_call_with_zero_side_effects_and_resubmits(
+        self,
+    ):
+        id1, id2 = self._mk_pair("bulk_valid")
+        id3, id4 = self._mk_pair("bulk_alias")
+
+        res = tools.manage_relation(
+            relations=[
+                {"source_id": id1, "target_id": id2, "predicate": "part_of"},
+                {"source_id": id3, "target_id": id4, "predicate": "relates_to"},
+            ],
+            owner_id="gate_tester",
+        )
+        self.assertEqual(res["status"], "rejected")
+        codes = {e["code"] for e in res["errors"]}
+        self.assertEqual(codes, {"NONCANONICAL_PREDICATE"})
+
+        # Zero side effects: the valid item's edge must NOT have been created.
+        row = self.conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = 'part_of'",
+            (id1, id2),
+        ).fetchone()
+        self.assertIsNone(row)
+
+        corrected_call = res["corrected_call"]
+        corrected_predicates = {r["predicate"] for r in corrected_call["relations"]}
+        self.assertEqual(corrected_predicates, {"part_of", "related_to"})
+
+        resubmit = tools.manage_relation(**corrected_call)
+        self.assertIsInstance(resubmit, list)
+        self.assertTrue(all(item["status"] == "success" for item in resubmit), resubmit)
+
+    def test_bulk_one_alias_one_reserved_rejects_with_no_corrected_call(self):
+        id1, id2 = self._mk_pair("bulk_alias_only")
+        id3, id4 = self._mk_pair("bulk_reserved_only")
+
+        res = tools.manage_relation(
+            relations=[
+                {"source_id": id1, "target_id": id2, "predicate": "relates_to"},
+                {"source_id": id3, "target_id": id4, "predicate": "supersedes"},
+            ],
+            owner_id="gate_tester",
+        )
+        self.assertEqual(res["status"], "rejected")
+        codes = {e["code"] for e in res["errors"]}
+        self.assertEqual(codes, {"NONCANONICAL_PREDICATE", "RESERVED_PREDICATE"})
+        self.assertNotIn(
+            "corrected_call",
+            res,
+            "a batch with a non-derivable item (reserved/legacy_readonly/unknown) must not "
+            "offer a corrected_call, even though another item in the same batch was a "
+            "mechanically-derivable alias",
+        )
+
+
+class TestGetEventsEndToEnd(unittest.TestCase):
+    """End-to-end coverage of get_events' reshaped filters (agent API redesign plan §5.7, Phase
+    6 item 23): context_id/agent_id/event_type/session_id equality filters, order, limit/offset,
+    and the removed-kwarg regression guard."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_context_id_filters_correctly(self):
+        tools.log_event(
+            event_type="issue", content="ctx A event", owner_id="agent_x", context_id="ctx_A"
+        )
+        tools.log_event(
+            event_type="issue", content="ctx B event", owner_id="agent_x", context_id="ctx_B"
+        )
+
+        events = tools.get_events(context_id="ctx_A")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["context_id"], "ctx_A")
+
+    def test_agent_id_filters_correctly(self):
+        tools.log_event(event_type="issue", content="agent one event", owner_id="agent_one")
+        # owner_id is bound per adapter session (immutable for its life, §4.5) -- reset between
+        # calls attributed to a different agent, exactly like starting a new MCP connection.
+        SESSION_IDENTITY.reset()
+        tools.log_event(event_type="issue", content="agent two event", owner_id="agent_two")
+
+        events = tools.get_events(agent_id="agent_one")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["agent_id"], "agent_one")
+
+    def test_event_type_filters_correctly(self):
+        tools.log_event(event_type="issue", content="an issue", owner_id="agent_evt_type")
+        tools.log_event(event_type="decision", content="a decision", owner_id="agent_evt_type")
+
+        events = tools.get_events(agent_id="agent_evt_type", event_type="decision")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "decision")
+
+    def test_session_id_filters_correctly(self):
+        SESSION_IDENTITY.bind_host_session_id("host-session-filter-test")
+        tools.log_event(event_type="issue", content="session-bound event", owner_id="agent_sess")
+        tools.log_event(event_type="issue", content="no session id from get_events' own filter arg")
+
+        events = tools.get_events(session_id="host-session-filter-test")
+        self.assertTrue(len(events) >= 1)
+        self.assertTrue(all(e["session_id"] == "host-session-filter-test" for e in events))
+
+    def test_order_oldest_first_vs_newest_first_changes_result_order(self):
+        tools.log_event(event_type="issue", content="first", owner_id="agent_order")
+        tools.log_event(event_type="issue", content="second", owner_id="agent_order")
+        tools.log_event(event_type="issue", content="third", owner_id="agent_order")
+
+        newest_first = tools.get_events(agent_id="agent_order", order="newest_first")
+        oldest_first = tools.get_events(agent_id="agent_order", order="oldest_first")
+
+        self.assertEqual(len(newest_first), 3)
+        self.assertEqual(len(oldest_first), 3)
+        self.assertEqual(list(reversed(newest_first)), oldest_first)
+        self.assertNotEqual([e["id"] for e in newest_first], [e["id"] for e in oldest_first])
+
+    def test_limit_and_offset_paginate_correctly(self):
+        for i in range(5):
+            tools.log_event(event_type="issue", content=f"paged {i}", owner_id="agent_page")
+
+        page1 = tools.get_events(agent_id="agent_page", order="oldest_first", limit=2, offset=0)
+        page2 = tools.get_events(agent_id="agent_page", order="oldest_first", limit=2, offset=2)
+        self.assertEqual(len(page1), 2)
+        self.assertEqual(len(page2), 2)
+        self.assertNotEqual([e["id"] for e in page1], [e["id"] for e in page2])
+
+    def test_removed_kwargs_raise_type_error(self):
+        for bad_kwargs in (
+            {"mode": "events"},
+            {"status_filter": "pending"},
+            {"owner_id": "someone"},
+        ):
+            with self.assertRaises(TypeError, msg=bad_kwargs):
+                tools.get_events(**bad_kwargs)
+
+
+class TestLogEventEndToEnd(unittest.TestCase):
+    """End-to-end coverage of log_event's Phase 6 reshaping (agent API redesign plan §5.7, item
+    23): event_type as the parameter name, no agent_id parameter, owner binding as agent_id, and
+    session_id auto-populated from SESSION_IDENTITY.host_session_id."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_event_type_is_the_parameter_name(self):
+        res = tools.log_event(event_type="decision", content="picked option A", owner_id="agent_p")
+        self.assertIn("Event logged successfully", res)
+
+    def test_no_agent_id_parameter_exists(self):
+        with self.assertRaises(TypeError):
+            tools.log_event(
+                agent_id="agent_p", event_type="decision", content="x", owner_id="agent_p"
+            )
+
+    def test_bound_owner_becomes_stored_agent_id(self):
+        res = tools.log_event(
+            event_type="issue", content="owner binding check", owner_id="agent_bound"
+        )
+        event_id = res.split("ID: ")[1].split()[0]
+        row = self.conn.execute("SELECT agent_id FROM events WHERE id = ?", (event_id,)).fetchone()
+        self.assertEqual(row[0], "agent_bound")
+
+    def test_session_id_reflects_bound_host_session_id(self):
+        SESSION_IDENTITY.bind_host_session_id("host-session-log-event-test")
+        res = tools.log_event(
+            event_type="issue", content="session id check", owner_id="agent_sess2"
+        )
+        event_id = res.split("ID: ")[1].split()[0]
+        row = self.conn.execute(
+            "SELECT session_id FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+        self.assertEqual(row[0], "host-session-log-event-test")
+
+    def test_session_id_is_none_when_unbound(self):
+        res = tools.log_event(
+            event_type="issue", content="no session bound", owner_id="agent_sess3"
+        )
+        event_id = res.split("ID: ")[1].split()[0]
+        row = self.conn.execute(
+            "SELECT session_id FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+        self.assertIsNone(row[0])
+
+
+class TestDismissEventRemovalRegression(unittest.TestCase):
+    """Phase 6 item 24 removal regression: dismiss_event must be gone from every registry, while
+    the still-legitimate internal dismiss_events (schema.py's migration sweep) must remain."""
+
+    def test_not_a_registered_mcp_tool(self):
+        self.assertNotIn("dismiss_event", tools.mcp._tool_manager._tools)
+
+    def test_not_in_dispatch_table(self):
+        from saltmdb.daemon import dispatch
+
+        self.assertNotIn("dismiss_event", dispatch.DISPATCH_TABLE)
+
+    def test_not_in_write_tools(self):
+        from saltmdb.daemon import protocol
+
+        self.assertNotIn("dismiss_event", protocol.WRITE_TOOLS)
+
+    def test_domain_service_dismiss_events_still_importable_and_callable(self):
+        from saltmdb.domain.services.event_service import dismiss_events
+
+        self.assertTrue(callable(dismiss_events))
+
+
+class TestSearchTagsListPredicatesRegistration(unittest.TestCase):
+    """Phase 6 item 27 rename regression: search_tags/list_predicates are registered under
+    their new names everywhere, and the old get_canonical_* names are gone everywhere."""
+
+    def test_new_names_registered_in_mcp_tools(self):
+        self.assertIn("search_tags", tools.mcp._tool_manager._tools)
+        self.assertIn("list_predicates", tools.mcp._tool_manager._tools)
+        self.assertNotIn("get_canonical_tags", tools.mcp._tool_manager._tools)
+        self.assertNotIn("get_canonical_predicates", tools.mcp._tool_manager._tools)
+
+    def test_new_names_registered_in_dispatch_table(self):
+        from saltmdb.daemon import dispatch
+
+        self.assertIn("search_tags", dispatch.DISPATCH_TABLE)
+        self.assertIn("list_predicates", dispatch.DISPATCH_TABLE)
+        self.assertNotIn("get_canonical_tags", dispatch.DISPATCH_TABLE)
+        self.assertNotIn("get_canonical_predicates", dispatch.DISPATCH_TABLE)
+
+    def test_new_names_registered_in_read_tools(self):
+        from saltmdb.daemon import protocol
+
+        self.assertIn("search_tags", protocol.READ_TOOLS)
+        self.assertIn("list_predicates", protocol.READ_TOOLS)
+        self.assertNotIn("get_canonical_tags", protocol.READ_TOOLS)
+        self.assertNotIn("get_canonical_predicates", protocol.READ_TOOLS)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from saltmdb.db.schema import init_db
 from saltmdb.db.connection import write_transaction_retrying
 from saltmdb.domain.services.relation_service import (
     resolve_or_create_predicate,
-    get_canonical_predicates,
+    list_predicates,
     store_relation,
     invalidate_relation,
     bulk_store_relations,
@@ -31,7 +31,7 @@ from saltmdb.domain.services.relation_service import (
 from saltmdb.domain.services.memory_service import (
     store_memory,
     detect_orphaned_memories,
-    get_canonical_tags,
+    search_tags,
 )
 from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
 
@@ -303,7 +303,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         res1 = store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="dup_test_predicate",
+            predicate="related_to",
             db_connection=self.conn,
         )
         self.assertIn("successfully stored", res1)
@@ -313,7 +313,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         res2 = store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="dup_test_predicate",
+            predicate="related_to",
             db_connection=self.conn,
         )
         self.assertIn("already exists", res2)
@@ -325,19 +325,19 @@ class TestStoreRelationDedup(unittest.TestCase):
             id_in_res2,
             "the dup no-op must report the SAME existing relation id as the original insert",
         )
-        self.assertEqual(self._relation_count(self.id1, self.id2, "dup_test_predicate"), 1)
+        self.assertEqual(self._relation_count(self.id1, self.id2, "related_to"), 1)
 
     def test_same_pair_different_predicates_both_persist(self):
         store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="predicate_alpha",
+            predicate="related_to",
             db_connection=self.conn,
         )
         store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="predicate_beta",
+            predicate="depends_on",
             db_connection=self.conn,
         )
         self.assertEqual(
@@ -350,32 +350,33 @@ class TestStoreRelationDedup(unittest.TestCase):
         store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="already_there",
+            predicate="related_to",
             db_connection=self.conn,
         )
 
         results = bulk_store_relations(
-            relations=[
-                {"source_id": self.id1, "target_id": self.id2, "predicate": "already_there"}
-            ],
+            relations=[{"source_id": self.id1, "target_id": self.id2, "predicate": "related_to"}],
             db_connection=self.conn,
         )
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["status"], "duplicate")
-        self.assertEqual(self._relation_count(self.id1, self.id2, "already_there"), 1)
+        self.assertEqual(self._relation_count(self.id1, self.id2, "related_to"), 1)
 
-    def test_bulk_store_relations_result_string_surfaces_aliased_predicate(self):
+    def test_bulk_store_relations_rejects_aliased_predicate_and_reports_error(self):
+        # Phase 6 write-time gate (plan §5.8): store_relation now rejects a drifted alias
+        # spelling outright instead of silently canonicalizing it, and bulk_store_relations
+        # aborts the whole batch (all-or-nothing) on any "Error"-prefixed per-item result.
         results = bulk_store_relations(
             relations=[{"source_id": self.id1, "target_id": self.id2, "predicate": "references"}],
             db_connection=self.conn,
         )
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["status"], "success")
-        self.assertIn("elaborates_on", results[0]["result"])
-        self.assertIn(
-            "references",
-            results[0]["result"],
-            "bulk_store_relations must not lose the canonicalization note on the result string",
+        self.assertEqual(results[0]["status"], "error")
+        self.assertIn("NONCANONICAL_PREDICATE", results[0]["error"])
+        self.assertEqual(
+            self._relation_count(self.id1, self.id2),
+            0,
+            "a rejected bulk item must leave no relation stored",
         )
 
     def test_store_relation_already_exists_message_references_active_row_not_expired_one(self):
@@ -384,14 +385,14 @@ class TestStoreRelationDedup(unittest.TestCase):
         past = "2020-01-01T00:00:00+00:00"
         self.conn.execute(
             "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_to) "
-            "VALUES (?, ?, ?, 'stale_lookup_pred', ?, ?, ?)",
+            "VALUES (?, ?, ?, 'depends_on', ?, ?, ?)",
             (expired_id, self.id1, self.id2, past, past, past),
         )
 
         active_res = store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="stale_lookup_pred",
+            predicate="depends_on",
             db_connection=self.conn,
         )
         self.assertIn("successfully stored", active_res)
@@ -401,7 +402,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         dup_res = store_relation(
             source_id=self.id1,
             target_id=self.id2,
-            predicate="stale_lookup_pred",
+            predicate="depends_on",
             db_connection=self.conn,
         )
         self.assertIn("already exists", dup_res)
@@ -446,39 +447,45 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(names))
 
-    def test_relates_to_and_references_alias_to_elaborates_on(self):
-        self.assertEqual(self._resolve("relates_to"), "elaborates_on")
-        self.assertEqual(self._resolve("references"), "elaborates_on")
+    def test_relates_to_and_references_alias_to_related_to(self):
+        # Phase 6 reversed-behavior regression (plan §3.17/§5.8): relates_to/references now
+        # alias onto related_to, NOT elaborates_on (their pre-Phase-6 target).
+        self.assertEqual(self._resolve("relates_to"), "related_to")
+        self.assertEqual(self._resolve("references"), "related_to")
 
         row_relates_to = self.conn.execute(
             "SELECT c.name FROM predicates p JOIN predicates c ON c.id = p.canonical_id WHERE p.name = 'relates_to'"
         ).fetchone()
         self.assertIsNotNone(row_relates_to)
-        self.assertEqual(row_relates_to[0], "elaborates_on")
+        self.assertEqual(row_relates_to[0], "related_to")
 
         row_references = self.conn.execute(
             "SELECT c.name FROM predicates p JOIN predicates c ON c.id = p.canonical_id WHERE p.name = 'references'"
         ).fetchone()
         self.assertIsNotNone(row_references)
-        self.assertEqual(row_references[0], "elaborates_on")
+        self.assertEqual(row_references[0], "related_to")
 
-    def test_idempotent_repeated_calls_return_same_canonical_name(self):
+    def test_repeated_calls_on_unrecognized_predicate_both_return_none_and_create_nothing(self):
+        # INVERTED CONTRACT (Phase 6): resolve_or_create_predicate no longer creates predicate
+        # rows at all -- an unrecognized name resolves to None on every call, not just the first.
         first = self._resolve("brand_new_predicate_idem")
         second = self._resolve("brand_new_predicate_idem")
-        self.assertEqual(first, second)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
 
         rows = self.conn.execute(
             "SELECT id FROM predicates WHERE name = 'brand_new_predicate_idem'"
         ).fetchall()
         self.assertEqual(
             len(rows),
-            1,
-            "repeated resolution of the same input must not create duplicate predicate rows",
+            0,
+            "resolve_or_create_predicate must never insert a predicate row under the closed "
+            "vocabulary's inverted (read-only) contract",
         )
 
     def test_alias_input_returns_canonical_name_not_alias_name(self):
         resolved = self._resolve("relates_to")
-        self.assertEqual(resolved, "elaborates_on")
+        self.assertEqual(resolved, "related_to")
         self.assertNotEqual(resolved, "relates_to")
 
     def test_normalization_dash_and_space_variants_resolve_to_depends_on(self):
@@ -503,30 +510,26 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             "normalized_name fallback must return the row's ORIGINAL name string unchanged, not silently rename it",
         )
 
-    def test_unrecognized_predicate_is_auto_created(self):
+    def test_unrecognized_predicate_resolves_to_none_and_is_not_created(self):
+        # INVERTED CONTRACT (Phase 6): a name outside the closed 51-name universe and absent
+        # from the predicates table resolves to None -- it is never auto-created.
         resolved = self._resolve("totally_new_predicate_xyz")
-        self.assertEqual(resolved, "totally_new_predicate_xyz")
+        self.assertIsNone(resolved)
 
         row = self.conn.execute(
             "SELECT id FROM predicates WHERE name = 'totally_new_predicate_xyz'"
         ).fetchone()
-        self.assertIsNotNone(
-            row, "an unrecognized predicate must be auto-created (non-blocking), not rejected"
+        self.assertIsNone(
+            row, "resolve_or_create_predicate must never create a row for an unrecognized name"
         )
-
-    def test_new_predicate_creation_populates_normalized_name(self):
-        self._resolve("another_fresh_predicate")
-        row = self.conn.execute(
-            "SELECT normalized_name FROM predicates WHERE name = 'another_fresh_predicate'"
-        ).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(row[0], "another_fresh_predicate")
 
     def test_empty_or_punctuation_only_input_returns_none(self):
         self.assertIsNone(self._resolve("   "))
         self.assertIsNone(self._resolve("!!!"))
 
-    def test_store_relation_with_degenerate_predicate_still_succeeds_and_stores_raw_string(self):
+    def test_store_relation_with_degenerate_predicate_is_rejected_as_unknown(self):
+        # Phase 6 write-time gate (plan §5.8): a predicate that normalizes to empty (e.g.
+        # '!!!') is now classified "unknown" and rejected outright, never stored raw.
         res1 = store_memory(
             content="Source entity content for degenerate predicate test",
             title="Degenerate Predicate Source",
@@ -545,29 +548,19 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         result = store_relation(
             source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
         )
-        self.assertIn(
-            "successfully stored", result, "a degenerate predicate must not block relation storage"
-        )
-        self.assertFalse(result.startswith("Error"))
-        self.assertNotIn(
-            "canonicalized",
-            result,
-            "a degenerate predicate that normalizes to empty (e.g. '!!!') and falls back to the "
-            "raw input on both sides must NOT be reported as canonicalized -- 'requested X, stored X' "
-            "is not a real substitution",
-        )
+        self.assertTrue(result.startswith("Error: UNKNOWN_PREDICATE"))
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
         ).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(
-            row[0],
-            "!!!",
-            "when resolve_or_create_predicate returns None, the raw input string must be stored as-is (the 'or predicate' fallback)",
+        self.assertIsNone(
+            row, "a rejected write-time-gated predicate must leave no relation row stored"
         )
 
-    def test_seeded_alias_predicate_substitution_is_surfaced_in_result_message(self):
+    def test_store_relation_rejects_seeded_alias_predicate_naming_canonical_form(self):
+        # Phase 6 write-time gate (plan §5.8): store_relation no longer silently substitutes a
+        # drifted alias spelling -- it rejects the call and names the canonical replacement,
+        # matching the manage_relation adapter's own pre-flight gate (mcp/tools.py).
         res1 = store_memory(
             content="Source entity content for alias surfacing test",
             title="Alias Surfacing Source",
@@ -586,16 +579,18 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         result = store_relation(
             source_id=id1, target_id=id2, predicate="relates_to", db_connection=self.conn
         )
+        self.assertTrue(result.startswith("Error: NONCANONICAL_PREDICATE"))
         self.assertIn(
-            "elaborates_on",
+            "related_to",
             result,
-            "the canonical predicate that was actually stored must still be reported",
+            "the canonical replacement name must still be surfaced so the caller knows how to retry",
         )
-        self.assertIn(
-            "relates_to",
-            result,
-            "the originally requested predicate must be surfaced, not silently discarded",
-        )
+        self.assertIn("relates_to", result)
+
+        row = self.conn.execute(
+            "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
+        ).fetchone()
+        self.assertIsNone(row, "a rejected alias submission must leave no relation row stored")
 
     def test_non_aliased_predicate_normalization_does_not_add_canonicalization_note(self):
         res1 = store_memory(
@@ -623,6 +618,11 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         )
 
     def test_invalidate_relation_degenerate_predicate_does_not_add_canonicalization_note(self):
+        # invalidate_relation is READ-side only (never write-time-gated, per manage_relation's
+        # own contract: "this gate applies only to creating a new edge, never to
+        # invalidate=True") -- so a degenerate predicate '!!!' can still be looked up and
+        # invalidated on an existing row even though store_relation could no longer create one.
+        # The row is planted directly via SQL (store_relation would now reject '!!!' outright).
         res1 = store_memory(
             content="Source entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Source",
@@ -638,7 +638,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         id1 = _memory_id(res1)
         id2 = _memory_id(res2)
 
-        store_relation(source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn)
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+            "VALUES (?, ?, ?, '!!!', ?, ?, ?)",
+            (str(uuid.uuid4()), id1, id2, now, now, now),
+        )
+
         result = invalidate_relation(
             source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
         )
@@ -651,7 +657,7 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         )
 
 
-class TestGetCanonicalPredicates(unittest.TestCase):
+class TestListPredicates(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "test.db")
@@ -662,24 +668,34 @@ class TestGetCanonicalPredicates(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_fresh_db_excludes_aliased_predicates(self):
-        results = get_canonical_predicates(db_connection=self.conn)
+        results = list_predicates(db_connection=self.conn)
         names = {r["name"] for r in results}
         self.assertEqual(
             names,
             {
+                "elaborates_on",
+                "related_to",
                 "resolves",
                 "depends_on",
-                "elaborates_on",
-                "consolidated_from",
+                "verifies",
+                "corrects",
+                "caused_by",
+                "derived_from",
+                "distinguishes_from",
+                "part_of",
+                "contradicts",
                 "supersedes",
+                "consolidated_from",
+                "revises",
                 "similar_to",
             },
             "relates_to/references must be excluded from canonical predicates since they alias "
-            "elaborates_on; similar_to is a distinct, non-aliased canonical predicate",
+            "related_to; the closed universe's 15 canonical names (11 agent-selectable + 3 "
+            "reserved + 1 legacy-read-only) must all be present with no aliases mixed in",
         )
 
     def test_query_filters_to_matching_predicate(self):
-        results = get_canonical_predicates(query="depend", db_connection=self.conn)
+        results = list_predicates(query="depend", db_connection=self.conn)
         names = {r["name"] for r in results}
         self.assertEqual(names, {"depends_on"})
 
@@ -693,7 +709,7 @@ class TestGetCanonicalPredicates(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = get_canonical_predicates(db_connection=self.conn)
+        results = list_predicates(db_connection=self.conn)
         self.assertEqual(
             len(results), 50, "default limit must cap unfiltered results at 50, not return all rows"
         )
@@ -712,11 +728,11 @@ class TestGetCanonicalPredicates(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = get_canonical_predicates(limit=5, db_connection=self.conn)
+        results = list_predicates(limit=5, db_connection=self.conn)
         self.assertEqual(len(results), 5)
 
 
-class TestGetCanonicalTags(unittest.TestCase):
+class TestSearchTags(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "test.db")
@@ -736,7 +752,7 @@ class TestGetCanonicalTags(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = get_canonical_tags(db_connection=self.conn)
+        results = search_tags(db_connection=self.conn)
         self.assertEqual(
             len(results),
             50,
@@ -753,7 +769,7 @@ class TestGetCanonicalTags(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = get_canonical_tags(limit=5, db_connection=self.conn)
+        results = search_tags(limit=5, db_connection=self.conn)
         self.assertEqual(len(results), 5)
 
 
@@ -2215,36 +2231,57 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         self.assertTrue(res.startswith("Relation successfully stored"), res)
         self.assertEqual(self._override_events(), [])
 
-    def test_store_relation_similar_to_bypasses_gate(self):
+    def test_store_relation_similar_to_is_rejected_as_legacy_readonly(self):
+        # Phase 6 write-time gate (plan §5.8): similar_to is now legacy/read-only -- it can no
+        # longer be created via store_relation at all, so the old similarity-gate-bypass
+        # behavior for this predicate is moot; the write-time gate now rejects it outright,
+        # before the D3 similarity gate would ever run.
         a, _ = self._mk_vector_entity("Similar To A", _axis_vector(0))
         b, _ = self._mk_vector_entity("Similar To B", _axis_vector(1))
 
         res = store_relation(
             source_id=a, target_id=b, predicate="similar_to", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertTrue(res.startswith("Error: LEGACY_READONLY_PREDICATE"), res)
         self.assertEqual(self._override_events(), [])
 
+        row = self.conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND target_id = ?", (a, b)
+        ).fetchone()
+        self.assertIsNone(row)
+
     def test_store_relation_gate_checks_canonical_predicate_not_alias(self):
-        """D1 regression: the gate must run on the resolved CANONICAL predicate name, not the
-        raw caller-supplied string -- 'references' aliases to 'elaborates_on' (schema.py seed
-        data), so it must be gated exactly like an explicit 'elaborates_on' request."""
+        """Phase 6 regression: the closed-vocabulary write-time gate must run on the raw
+        submitted predicate BEFORE the D3 similarity gate ever executes -- 'references' aliases
+        to 'related_to' (Phase 6 reversed the old elaborates_on target, plan §3.17/§5.8), so an
+        alias submission is rejected as NONCANONICAL_PREDICATE, never reaching (and therefore
+        never surfacing) a REJECT_LOW_RELATION_SIMILARITY failure."""
         a, _ = self._mk_vector_entity("Alias Gate A", _axis_vector(0))
         b, _ = self._mk_vector_entity("Alias Gate B", _axis_vector(1))
 
         res = store_relation(
             source_id=a, target_id=b, predicate="references", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
+        self.assertTrue(res.startswith("Error: NONCANONICAL_PREDICATE"), res)
+        self.assertIn("related_to", res)
+        self.assertNotIn("REJECT_LOW_RELATION_SIMILARITY", res)
 
     def test_store_relation_rejects_contradictory_predicate_pair(self):
         a, _ = self._mk_vector_entity("Contradiction A", _axis_vector(0))
         b, _ = self._mk_vector_entity("Contradiction B", _axis_vector(0))  # sim=1.0, isolates test
 
-        seed_res = store_relation(
-            source_id=a, target_id=b, predicate="supersedes", db_connection=self.conn
+        # 'supersedes' is now a RESERVED predicate (plan §5.8): store_relation refuses to create
+        # one directly, exactly like the real lifecycle tool (supersede_memory) does, which
+        # writes it via a hardcoded literal INSERT rather than store_relation. Seed the same way
+        # here to simulate that pre-existing edge without going through the (now-closed) gate.
+        seed_id = str(uuid.uuid4())
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
+            " VALUES (?, ?, ?, 'supersedes', ?, ?, ?)",
+            (seed_id, a, b, now, now, now),
         )
-        self.assertTrue(seed_res.startswith("Relation successfully stored"), seed_res)
+        self.conn.commit()
 
         res = store_relation(
             source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
@@ -2268,27 +2305,6 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             ).fetchall()
         }
         self.assertEqual(active_predicates, {"supersedes", "elaborates_on"})
-
-    def test_store_relation_rejects_contradictory_predicate_pair_via_legacy_alias(self):
-        """[R2 fix #3] regression: a pre-canonicalization-era row holding the raw literal
-        'references' string (never rewritten in relations.predicate) must still be recognized
-        as contradicting a new 'supersedes' edge via canonicalization at check time."""
-        a, _ = self._mk_vector_entity("Legacy Alias A", _axis_vector(0))
-        b, _ = self._mk_vector_entity("Legacy Alias B", _axis_vector(0))  # sim=1.0, isolates test
-
-        now = datetime.now(UTC).isoformat()
-        self.conn.execute(
-            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)"
-            " VALUES (?, ?, ?, 'references', ?, ?, ?)",
-            (str(uuid.uuid4()), a, b, now, now, now),
-        )
-        self.conn.commit()
-
-        res = store_relation(
-            source_id=a, target_id=b, predicate="supersedes", db_connection=self.conn
-        )
-        self.assertTrue(res.startswith("Error: REJECT_CONTRADICTORY_PREDICATE"), res)
-        self.assertIn("elaborates_on", res)
 
     def test_store_relation_unresolved_entity_forces_gate_failure(self):
         a, _ = self._mk_vector_entity("Unresolved Partner", _axis_vector(0))

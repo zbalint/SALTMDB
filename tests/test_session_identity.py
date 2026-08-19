@@ -80,8 +80,8 @@ class TestRpcBackendIdentityWiring(unittest.TestCase):
         self.assertEqual(forwarded_kwargs["owner_id"], "claude")
 
     def test_no_owner_id_key_at_all_is_left_untouched(self):
-        # Tools without an owner_id concept (merge_tags, get_canonical_tags, ...) never carry
-        # the key -- injection must not fabricate one.
+        # Tools without an owner_id concept (merge_tags, search_tags, get_events, ...) never
+        # carry the key -- injection must not fabricate one.
         SESSION_IDENTITY.bind("claude")
         backend = mcp_tools.RpcBackend()
         with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:

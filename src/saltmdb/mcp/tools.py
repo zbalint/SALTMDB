@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 import json
 import logging
 import re
@@ -189,48 +189,65 @@ def _set_backend_for_test(backend):
 
 @mcp.tool()
 def log_event(
-    agent_id: str | None = None,
-    type: str = "event",
-    content: str = "",
-    error_code: str | None = None,
-    session_id: str | None = None,
+    event_type: str,
+    content: str,
     context_id: str | None = None,
+    error_code: str | None = None,
     owner_id: str | None = None,
 ) -> str:
-    """Appends an event to the append-only events ledger."""
+    """Appends an event to the append-only events ledger.
+
+    The bound owner (§4.5's per-session identity) is injected as the event's `agent_id` --
+    log_event has no separate agent_id parameter of its own. `get_events` keeps `agent_id` as a
+    FILTER for cross-agent coordination, which is why the two tools are asymmetric on this
+    field: an agent always logs as itself, but may read what any agent logged.
+
+    `session_id` is not a parameter here either -- the adapter auto-populates it from the host
+    harness's own session id (an opaque, advisory pointer; see get_events' docstring).
+    """
     owner_id_ = _effective_owner(owner_id, tool_func=log_event, submitted=locals())
+    from saltmdb.mcp.identity import SESSION_IDENTITY
+
     return _backend_or_raise().call(
         "log_event",
         {
-            "agent_id": agent_id or owner_id_,
-            "type": type,
+            "agent_id": owner_id_,
+            "type": event_type,
             "content": content,
             "error_code": error_code,
-            "session_id": session_id,
             "context_id": context_id,
+            "session_id": SESSION_IDENTITY.host_session_id,
         },
     )
 
 
 @mcp.tool()
-def get_canonical_tags(query: str | None = None, limit: int | None = None) -> list:
+def search_tags(query: str | None = None, limit: int | None = None) -> list:
     """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use query='auth' to filter by tag name substring.
 
-    limit caps the number of tags returned (default 50), including when query is omitted --
-    the full canonical tag table is never dumped unbounded."""
+    Advisory discovery, not a prerequisite -- tags need not pre-exist; a new domain still
+    creates a tag automatically on write. limit caps the number of tags returned (default 50),
+    including when query is omitted -- the full canonical tag table is never dumped unbounded."""
     return _backend_or_raise().call(
-        "get_canonical_tags", {"domain": query, "limit": limit if limit is not None else 50}
+        "search_tags", {"domain": query, "limit": limit if limit is not None else 50}
     )
 
 
 @mcp.tool()
-def get_canonical_predicates(query: str | None = None, limit: int | None = None) -> list:
-    """Queries existing canonical relation predicates matching a search substring, to reduce
-    predicate drift (e.g. elaborates_on vs relates_to vs references).
+def list_predicates(query: str | None = None, limit: int | None = None) -> list:
+    """Lists the closed relation-predicate vocabulary manage_relation accepts, optionally
+    filtered by a search substring (e.g. query='resolve').
+
+    11 agent-selectable predicates (elaborates_on, related_to, resolves, depends_on, verifies,
+    corrects, caused_by, derived_from, distinguishes_from, part_of, contradicts); 3 reserved/
+    system-owned predicates (supersedes, consolidated_from, revises) created only by their
+    matching lifecycle tool; and similar_to, legacy and read-only. A non-canonical or drifted
+    spelling submitted to manage_relation is rejected with a corrected call rather than silently
+    accepted, so this list is advisory discovery, not something an agent must memorize.
 
     limit caps the number of predicates returned (default 50)."""
     return _backend_or_raise().call(
-        "get_canonical_predicates", {"query": query, "limit": limit if limit is not None else 50}
+        "list_predicates", {"query": query, "limit": limit if limit is not None else 50}
     )
 
 
@@ -464,6 +481,74 @@ def archive_memory(
     return _backend_or_raise().call("archive_memory", {"mode": "none", "owner_id": owner_id_})
 
 
+def _predicate_disposition_error(
+    predicate: str, field: str
+) -> tuple[dict, str | None, bool] | None:
+    """Classifies one submitted predicate against the closed vocabulary (plan §5.8) for
+    manage_relation's pre-flight gate. Returns None when the predicate is fine as submitted.
+    Otherwise returns (error_dict, canonical_or_None, swap): canonical is the mechanically
+    derivable replacement for an "alias" disposition (None for reserved/legacy_readonly/unknown,
+    since there is nothing manage_relation's own schema can substitute for those)."""
+    from saltmdb.utils.predicate_vocabulary import AGENT_SELECTABLE_PREDICATES, classify_predicate
+
+    disposition = classify_predicate(predicate)
+    if disposition.status == "selectable":
+        return None
+    if disposition.status == "reserved":
+        return (
+            {
+                "code": "RESERVED_PREDICATE",
+                "message": (
+                    f"predicate '{predicate}' is reserved; it is created only by "
+                    f"{disposition.lifecycle_tool}, never directly via manage_relation."
+                ),
+                "field": field,
+            },
+            None,
+            False,
+        )
+    if disposition.status == "legacy_readonly":
+        return (
+            {
+                "code": "LEGACY_READONLY_PREDICATE",
+                "message": (
+                    f"predicate '{predicate}' is legacy and read-only; existing edges remain "
+                    "readable but no new ones may be created."
+                ),
+                "field": field,
+            },
+            None,
+            False,
+        )
+    if disposition.status == "alias":
+        return (
+            {
+                "code": "NONCANONICAL_PREDICATE",
+                "message": (
+                    f"predicate '{predicate}' is not canonical; the canonical form is "
+                    f"'{disposition.canonical}'"
+                    + (" with source_id/target_id swapped" if disposition.swap else "")
+                    + "."
+                ),
+                "field": field,
+            },
+            disposition.canonical,
+            disposition.swap,
+        )
+    return (
+        {
+            "code": "UNKNOWN_PREDICATE",
+            "message": (
+                f"predicate '{predicate}' is not part of the closed predicate vocabulary. "
+                f"Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
+            ),
+            "field": field,
+        },
+        None,
+        False,
+    )
+
+
 @mcp.tool()
 def manage_relation(
     relations: list | None = None,
@@ -475,8 +560,17 @@ def manage_relation(
     invalid_at: str | None = None,
     override_justification: str | None = None,
     owner_id: str | None = None,
-) -> str | list:
+) -> str | list | dict:
     """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True).
+
+    `predicate` must be one of the 11 agent-selectable closed-vocabulary predicates
+    (elaborates_on, related_to, resolves, depends_on, verifies, corrects, caused_by,
+    derived_from, distinguishes_from, part_of, contradicts) -- see `list_predicates`. A drifted
+    spelling is rejected with a `corrected_call` using the canonical name (and source_id/
+    target_id swapped, when the drift reversed direction); `supersedes`/`consolidated_from`/
+    `revises` are reserved and rejected, naming the lifecycle tool that creates them instead
+    (`supersede_memory`/`consolidate_memories`/`revise_memory`); `similar_to` is legacy and
+    read-only. This gate applies only to creating a new edge, never to `invalidate=True`.
 
     A governance gate rejects "strong" predicates (elaborates_on/resolves/supersedes) whose
     source/target chunk-embedding centroids fail a minimum similarity threshold
@@ -492,10 +586,72 @@ def manage_relation(
     declaration (via `store_memory`/`consolidate_memories`) may create one. Re-submitting an
     edge that already exists stays an idempotent no-op regardless.
     """
+    submitted = locals().copy()
     owner_id_ = _effective_owner(owner_id, tool_func=manage_relation, submitted=locals())
     relations_ = relations
     if relations_ and isinstance(relations_, str):
         relations_ = _normalize_list_or_str(relations_)
+
+    if relations_:
+        from saltmdb.utils.corrected_call import build_corrected_call
+        from saltmdb.utils.envelope import error as env_error
+        from saltmdb.utils.envelope import rejected
+
+        errors: list[dict] = []
+        corrected_items: list = []
+        can_fully_correct = True
+        for idx, item in enumerate(relations_):
+            item_predicate = item.get("predicate") if isinstance(item, dict) else None
+            check = (
+                _predicate_disposition_error(item_predicate, f"relations[{idx}].predicate")
+                if item_predicate
+                else None
+            )
+            if check is None:
+                corrected_items.append(item)
+                continue
+            error_entry, canonical, swap = check
+            errors.append(error_entry)
+            if canonical is not None:
+                fixed_item = dict(item)
+                fixed_item["predicate"] = canonical
+                if swap:
+                    fixed_item["source_id"] = item.get("target_id")
+                    fixed_item["target_id"] = item.get("source_id")
+                corrected_items.append(fixed_item)
+            else:
+                can_fully_correct = False
+                corrected_items.append(item)
+
+        if errors:
+            corrected_call = (
+                build_corrected_call(manage_relation, submitted, {"relations": corrected_items})
+                if can_fully_correct
+                else None
+            )
+            return rejected(
+                [env_error(e["code"], e["message"], e.get("field")) for e in errors],
+                corrected_call=corrected_call,
+            )
+    elif not invalidate and predicate:
+        check = _predicate_disposition_error(predicate, "predicate")
+        if check is not None:
+            from saltmdb.utils.corrected_call import build_corrected_call
+            from saltmdb.utils.envelope import error as env_error
+            from saltmdb.utils.envelope import rejected
+
+            error_entry, canonical, swap = check
+            corrected_call = None
+            if canonical is not None:
+                fixes: dict[str, Any] = {"predicate": canonical}
+                if swap:
+                    fixes["source_id"] = target_id
+                    fixes["target_id"] = source_id
+                corrected_call = build_corrected_call(manage_relation, submitted, fixes)
+            return rejected(
+                [env_error(error_entry["code"], error_entry["message"], error_entry.get("field"))],
+                corrected_call=corrected_call,
+            )
 
     return _backend_or_raise().call(
         "manage_relation",
@@ -735,29 +891,38 @@ def get_related_memories(entity_id: str, max_depth: int = 5, owner_id: str | Non
 
 @mcp.tool()
 def get_events(
+    context_id: str | None = None,
     agent_id: str | None = None,
-    type_filter: str | None = None,
+    event_type: str | None = None,
     session_id: str | None = None,
+    order: Literal["newest_first", "oldest_first"] = "newest_first",
     limit: int | None = None,
     offset: int | None = None,
-    status_filter: str | None = None,
-    owner_id: str | None = None,
-    mode: Literal["events", "session", "memories"] = "events",
 ) -> list:
-    """Retrieves operational events, session summary events, or scans memory logs."""
-    owner_id_ = _effective_owner(owner_id, tool_func=get_events, submitted=locals())
+    """Retrieves events from the append-only events ledger, for multi-agent coordination and
+    wrap-up thread review.
 
+    `context_id` is the headline filter -- reading back every event logged under a shared
+    thread handle, survivable across a power cut. `agent_id` filters to one agent's events, for
+    "what did the other agent just decide" in a multi-agent DB (this tool has no notion of "my
+    own events" the way log_event has a bound owner -- it is a read across the whole ledger,
+    narrowed by whichever filters are supplied). `session_id` filters to one host harness
+    session (an opaque, advisory pointer set by log_event automatically; agents never set it,
+    only pass one back here if they already have it from elsewhere).
+
+    `order`: "newest_first" (default, for discovery) or "oldest_first" (for chronological
+    wrap-up synthesis) -- always explicit, never inferred from which filter was passed.
+    """
     return _backend_or_raise().call(
         "get_events",
         {
-            "mode": mode,
+            "context_id": context_id,
+            "agent_id": agent_id,
+            "event_type": event_type,
+            "session_id": session_id,
+            "order": order,
             "limit": limit if limit is not None else 20,
             "offset": offset if offset is not None else 0,
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "type_filter": type_filter,
-            "status_filter": status_filter,
-            "owner_id": owner_id_,
         },
     )
 
@@ -786,23 +951,6 @@ def export_corpus_snapshot(
             "snapshot_hash": snapshot_hash,
             "include_archived": include_archived,
         },
-    )
-
-
-@mcp.tool()
-def dismiss_event(
-    event_id: str | list[str] | None = None,
-    reason: str | None = None,
-    agent_id: str | None = None,
-    owner_id: str | None = None,
-) -> str:
-    """Dismisses review events to prevent them from remaining pending."""
-    owner_id_ = _effective_owner(owner_id, tool_func=dismiss_event, submitted=locals())
-    if not event_id:
-        raise ValueError("Missing 'event_id' parameter.")
-    return _backend_or_raise().call(
-        "dismiss_event",
-        {"event_ids": event_id, "reason": reason, "agent_id": agent_id or owner_id_},
     )
 
 

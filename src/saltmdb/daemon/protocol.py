@@ -29,15 +29,14 @@ WRITE_TOOLS = frozenset(
         "revise_memory",
         "supersede_memory",
         "consolidate_memories",
-        "dismiss_event",
         "review_core_memory",
     }
 )
 READ_TOOLS = frozenset(
     {
         "search_memory",
-        "get_canonical_tags",
-        "get_canonical_predicates",
+        "search_tags",
+        "list_predicates",
         "get_memory",
         "get_lineage",
         "get_related_memories",

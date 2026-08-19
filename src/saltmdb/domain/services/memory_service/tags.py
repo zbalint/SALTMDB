@@ -117,10 +117,11 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
 
 
 # NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
-def get_canonical_tags(
+def search_tags(
     domain: str = None, limit: int = 50, db_connection=None, db_path: str = None
 ) -> list:
-    """Queries canonical tags."""
+    """Queries canonical tags (agent API redesign plan §5.12, Phase 6 item 27: renamed from
+    get_canonical_tags -- advisory discovery, not a prerequisite)."""
     should_close = False
     conn = db_connection
     if not conn:

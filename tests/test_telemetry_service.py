@@ -138,11 +138,9 @@ class TestDispatchToolTelemetryWiring(unittest.TestCase):
         return []
 
     def test_read_tool_call_is_recorded_as_ok(self):
-        result = dispatch_tool(
-            "get_canonical_predicates", {"query": None, "limit": 10}, self.coordinator
-        )
+        result = dispatch_tool("list_predicates", {"query": None, "limit": 10}, self.coordinator)
         self.assertIsInstance(result, list)
-        rows = self._telemetry_rows("get_canonical_predicates")
+        rows = self._telemetry_rows("list_predicates")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], "ok")
 
