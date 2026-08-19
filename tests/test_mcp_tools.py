@@ -781,6 +781,63 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
 
 
+class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
+    """Live-verification regression (2026-08-19): every prior test called
+    tools.consolidate_memories(...) as a plain Python function, which never exercises FastMCP's
+    own output-schema Pydantic validation -- only the real mcp.call_tool(...) round trip does
+    that. That gap let consolidate_memories's `-> str | list` return annotation (missing `dict`,
+    unlike store_memory/revise_memory/supersede_memory's `str | dict` siblings) go undetected:
+    the singular/non-bulk path's actual dict envelope failed validation on every live call despite
+    the underlying consolidation succeeding server-side every time. Fixed by widening the
+    annotation to `str | list | dict` (tools.py:671)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_singular_consolidate_survives_real_call_tool_output_validation(self):
+        a = tools.store_memory(
+            content="Parent A content for the real call_tool output-schema regression probe",
+            title="Output Schema Probe Parent A",
+            tags=["#probe"],
+            owner_id="user1",
+        )
+        b = tools.store_memory(
+            content="Parent B content, closely related, for the same output-schema probe",
+            title="Output Schema Probe Parent B",
+            tags=["#probe"],
+            owner_id="user1",
+        )
+
+        # This must go through tools.mcp.call_tool (the real FastMCP protocol entry point, not a
+        # direct tools.consolidate_memories(...) call) -- only call_tool runs the output-schema
+        # Pydantic validation that the return-type annotation feeds.
+        result = await tools.mcp.call_tool(
+            "consolidate_memories",
+            {
+                "parent_ids": [a["data"]["id"], b["data"]["id"]],
+                "title": "Output Schema Probe Consolidated",
+                "content": "Consolidated probe content combining A and B.",
+                "owner_id": "user1",
+            },
+        )
+        structured = result[1]["result"]
+        self.assertEqual(structured["status"], "ok")
+        self.assertIn("entity_id", structured["data"])
+
+
 class TestReviewCoreMemoryTool(unittest.TestCase):
     """End-to-end coverage of the review_core_memory MCP tool through tools.py's own argument-
     normalization layer and daemon/dispatch.py's DISPATCH_TABLE entry -- core_governance_service's

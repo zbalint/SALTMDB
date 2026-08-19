@@ -668,7 +668,7 @@ def consolidate_memories(
     core_exit_condition: str | None = None,
     core_review_after: str | None = None,
     detail_memory_ids: list | None = None,
-) -> str | list:
+) -> str | list | dict:
     """Creates a canonical memory from two or more explicit parents.
 
     The parents are archived unchanged and linked with ``consolidated_from``. Semantic
