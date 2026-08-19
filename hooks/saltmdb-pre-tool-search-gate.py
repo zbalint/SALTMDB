@@ -28,7 +28,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     emit,
     get_field,
     read_stdin_json,
-    read_transcript_tail,
+    read_transcript_full,
 )
 
 SEARCH_MEMORY_PATTERN = re.compile(r'"(name|tool|toolName)"\s*:\s*"[^"]*search_memory"')
@@ -69,7 +69,11 @@ def main() -> None:
     if tool_name and READ_ONLY_TOOL_PREFIXES.match(tool_name):
         emit_allow()
 
-    segment = read_transcript_tail(transcript_path)
+    # Unbounded, not a tail window: this check is "was search_memory called ANYWHERE this
+    # session", not "recently" -- a tail window let this gate re-trigger deep into a long
+    # session purely because the matching line scrolled out of a fixed-size window (a real bug,
+    # caught live).
+    segment = read_transcript_full(transcript_path)
     if not segment:
         # Can't verify search history -- fail open rather than block on missing/unreadable data.
         sys.exit(0)

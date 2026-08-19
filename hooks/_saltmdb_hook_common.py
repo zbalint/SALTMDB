@@ -57,9 +57,27 @@ def get_field(data: dict, *aliases: str) -> str:
     return ""
 
 
+def read_transcript_full(transcript_path: str) -> str:
+    """Reads a transcript file in full, or "" if unreadable. For checks that need to know
+    whether something happened ANYWHERE in the session (e.g. "was search_memory ever called"),
+    not just recently -- a bounded tail window would let the check re-trigger deep into a long
+    session purely because the matching line scrolled out of the window, which is a real bug a
+    fixed-window version of this hook had (caught live: the search-gate hook denied a Bash call
+    outright mid-session despite search_memory having already been called many times earlier)."""
+    path = Path(transcript_path)
+    if not transcript_path or not path.is_file():
+        return ""
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
 def read_transcript_tail(transcript_path: str, max_lines: int = 400) -> str:
     """Reads a transcript file's last max_lines as raw text, or "" if unreadable. Deliberately
-    text, not parsed JSONL -- see module docstring."""
+    text, not parsed JSONL -- see module docstring. Only appropriate for a check that is
+    genuinely about "this turn"/"recently", not "ever this session" -- see read_transcript_full
+    for the distinction and why it matters."""
     path = Path(transcript_path)
     if not transcript_path or not path.is_file():
         return ""
