@@ -104,8 +104,7 @@ def adapter_model_lock(artifact: Mapping[str, Any], cache_dir: Path, *, kind: st
         kind=kind,
     )
     files = tuple(
-        ModelFile(row["path"], row["sha256"], row["size_bytes"])
-        for row in validated["files"]
+        ModelFile(row["path"], row["sha256"], row["size_bytes"]) for row in validated["files"]
     )
     return ModelLock(spec, cache_dir.resolve(), files)
 
@@ -405,9 +404,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert args.corpus_export and args.model_lock and args.model_cache and args.sidecar
         lock = adapter_model_lock(_load_json(args.model_lock), args.model_cache, kind=args.kind)
         channel = "entity" if args.kind == "late_interaction" else args.channel
-        documents = load_frozen_documents(
-            _load_json(args.corpus_export), manifest, channel
-        )
+        documents = load_frozen_documents(_load_json(args.corpus_export), manifest, channel)
         if args.kind == "dense":
             result = execute_dense_cell(
                 spec=spec,

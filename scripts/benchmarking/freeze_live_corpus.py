@@ -190,12 +190,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     _atomic_write(args.out_dir / "corpus_export.json", corpus_export)
     _atomic_write(args.out_dir / "corpus_representation_manifest.json", manifest)
     _atomic_write(args.out_dir / "index_storage_projection.json", projection)
-    print(json.dumps({
-        "snapshot_hash": corpus_export["snapshot_hash"],
-        "corpus_root_hash": manifest["corpus_root_hash"],
-        "entity_count": projection["entity_count"],
-        "chunk_count": projection["chunk_count"],
-    }, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "snapshot_hash": corpus_export["snapshot_hash"],
+                "corpus_root_hash": manifest["corpus_root_hash"],
+                "entity_count": projection["entity_count"],
+                "chunk_count": projection["chunk_count"],
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

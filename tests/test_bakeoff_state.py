@@ -54,8 +54,7 @@ def spec(slots=None):
             "split_targets": {"dev": 400, "blind": 800},
             "facet_targets": {
                 split: {
-                    facet: total // len(MANDATORY_FACETS)
-                    + (index < total % len(MANDATORY_FACETS))
+                    facet: total // len(MANDATORY_FACETS) + (index < total % len(MANDATORY_FACETS))
                     for index, facet in enumerate(sorted(MANDATORY_FACETS))
                 }
                 for split, total in (("dev", 400), ("blind", 800))
@@ -125,14 +124,20 @@ def blind_evaluation(frozen_spec, selected, unlock, receipt, *, passes=True):
             "candidate_metrics": candidate_metrics,
             "baseline_metrics": baseline_metrics,
             "accuracy_deltas": {
-                "ndcg_at_10": candidate_metrics["macro_positive_ndcg_at_10"] - baseline_metrics["macro_positive_ndcg_at_10"],
-                "grade2_recall_at_20": candidate_metrics["grade2_recall_at_20"] - baseline_metrics["grade2_recall_at_20"],
-                "same_specific_fact_grade2_top1": candidate_metrics["same_specific_fact_grade2_top1"] - baseline_metrics["same_specific_fact_grade2_top1"],
+                "ndcg_at_10": candidate_metrics["macro_positive_ndcg_at_10"]
+                - baseline_metrics["macro_positive_ndcg_at_10"],
+                "grade2_recall_at_20": candidate_metrics["grade2_recall_at_20"]
+                - baseline_metrics["grade2_recall_at_20"],
+                "same_specific_fact_grade2_top1": candidate_metrics[
+                    "same_specific_fact_grade2_top1"
+                ]
+                - baseline_metrics["same_specific_fact_grade2_top1"],
             },
             "safety_deltas": {
                 "exact": baseline_metrics["exact_safety"] - candidate_metrics["exact_safety"],
                 "keyword": baseline_metrics["keyword_safety"] - candidate_metrics["keyword_safety"],
-                "strict_negative": baseline_metrics["strict_negative_safety"] - candidate_metrics["strict_negative_safety"],
+                "strict_negative": baseline_metrics["strict_negative_safety"]
+                - candidate_metrics["strict_negative_safety"],
             },
             "confidence_intervals": {"ndcg_delta_ci95": [0.01 if passes else -0.01, 0.2]},
             "holm_results": [
@@ -159,7 +164,9 @@ def blind_evaluation(frozen_spec, selected, unlock, receipt, *, passes=True):
                 "raw_judgments": _hash("raw-judgments"),
                 "merged_labels": _hash("merged-labels"),
                 "metrics_artifact": _hash("metrics-artifact"),
-                "blind_query_ids": fingerprint(sorted([f"blind-{index:03d}" for index in range(800)])),
+                "blind_query_ids": fingerprint(
+                    sorted([f"blind-{index:03d}" for index in range(800)])
+                ),
             },
         },
     )
@@ -178,7 +185,9 @@ def promotion_decision(frozen_spec, selected, unlock, receipt, evaluation, *, pr
             "confidence_intervals": evaluation["confidence_intervals"],
             "holm_results": evaluation["holm_results"],
             "safety_deltas": evaluation["safety_deltas"],
-            "failures": [] if evaluation["candidate_metrics"]["benchmark_failures"] == 0 else ["candidate_benchmark_failures"],
+            "failures": []
+            if evaluation["candidate_metrics"]["benchmark_failures"] == 0
+            else ["candidate_benchmark_failures"],
             "latency": {"candidate_warm_p95_seconds": 0.5},
             "promotion": promotion,
             "evidence_fingerprints": {
@@ -194,7 +203,9 @@ def promotion_decision(frozen_spec, selected, unlock, receipt, evaluation, *, pr
 def retained_decision(frozen_spec):
     """Legacy-shaped helper retained for malformed-decision tests only."""
     selected = winner(frozen_spec)
-    unlock = build_blind_unlock(frozen_spec, selected, user_confirmation="synthetic test confirmation")
+    unlock = build_blind_unlock(
+        frozen_spec, selected, user_confirmation="synthetic test confirmation"
+    )
     receipt = build_blind_manifest_receipt(frozen_spec, selected, unlock, _hash("blind-bytes"))
     evaluation = blind_evaluation(frozen_spec, selected, unlock, receipt, passes=False)
     return promotion_decision(frozen_spec, selected, unlock, receipt, evaluation, promotion=False)
@@ -274,7 +285,9 @@ def test_corpus_manifest_binds_ordered_entities_and_chunk_hashes():
     validate_corpus_manifest(sign_artifact("CorpusRepresentationManifest", payload))
     with pytest.raises(BakeoffContractError, match="root hash"):
         validate_corpus_manifest(
-            sign_artifact("CorpusRepresentationManifest", {**payload, "corpus_root_hash": _hash("bad")})
+            sign_artifact(
+                "CorpusRepresentationManifest", {**payload, "corpus_root_hash": _hash("bad")}
+            )
         )
 
 
@@ -292,9 +305,7 @@ def test_state_machine_is_atomic_sequential_and_terminal(tmp_path):
         {"indexes": evidence},
         expected_spec_fingerprint=frozen["artifact_fingerprint"],
     )
-    assert next_checkpoint["previous_checkpoint_fingerprint"] == checkpoint[
-        "artifact_fingerprint"
-    ]
+    assert next_checkpoint["previous_checkpoint_fingerprint"] == checkpoint["artifact_fingerprint"]
     with pytest.raises(BakeoffContractError, match="invalid transition"):
         machine.transition(
             RunState.BLIND_UNLOCKED,
@@ -363,7 +374,9 @@ def test_blind_vault_does_not_read_before_matching_unlock(tmp_path):
     vault = BlindVault(tmp_path / "private-vault")
     vault.seal_slots(slots, frozen, custodian="codex")
 
-    with mock.patch.object(Path, "read_text", side_effect=AssertionError("blind file opened")) as read:
+    with mock.patch.object(
+        Path, "read_text", side_effect=AssertionError("blind file opened")
+    ) as read:
         with pytest.raises(BlindAccessError):
             vault.open_slots({}, frozen, selected, custodian="codex")
         read.assert_not_called()
@@ -453,14 +466,17 @@ def test_blind_file_authorization_checks_unlock_before_opening_target(tmp_path):
     receipt_path.write_text(
         json.dumps(build_blind_manifest_receipt(frozen, selected, unlock, expected_hash))
     )
-    assert authorize_blind_file(
-        target,
-        vault,
-        spec_path,
-        winner_path,
-        unlock_path,
-        receipt_path,
-    ) == b"blind material"
+    assert (
+        authorize_blind_file(
+            target,
+            vault,
+            spec_path,
+            winner_path,
+            unlock_path,
+            receipt_path,
+        )
+        == b"blind material"
+    )
     target.write_text("tampered")
     original_read = target.read_bytes
     with mock.patch.object(Path, "read_bytes", wraps=original_read) as read_target:
@@ -535,14 +551,32 @@ def test_blind_complete_reaches_promoted_or_retained_with_complete_custody(tmp_p
     )
     receipt = build_blind_manifest_receipt(frozen, selected, unlock, _hash("blind-bytes"))
     evaluation = blind_evaluation(frozen, selected, unlock, receipt, passes=promotion)
-    decision = promotion_decision(frozen, selected, unlock, receipt, evaluation, promotion=promotion)
+    decision = promotion_decision(
+        frozen, selected, unlock, receipt, evaluation, promotion=promotion
+    )
     machine = BakeoffStateMachine(tmp_path / ("promoted" if promotion else "retained"))
     machine.initialize(frozen)
     common = {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]}
     for state, artifact in (
-        (RunState.DEV_INDEXED, sign_artifact("IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []})),
-        (RunState.DEV_RETRIEVED, sign_artifact("RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []})),
-        (RunState.DEV_JUDGED, sign_artifact("DevelopmentJudgments", {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0})),
+        (
+            RunState.DEV_INDEXED,
+            sign_artifact(
+                "IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []}
+            ),
+        ),
+        (
+            RunState.DEV_RETRIEVED,
+            sign_artifact(
+                "RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []}
+            ),
+        ),
+        (
+            RunState.DEV_JUDGED,
+            sign_artifact(
+                "DevelopmentJudgments",
+                {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0},
+            ),
+        ),
         (RunState.DEV_WINNER_SIGNED, selected),
         (RunState.BLIND_UNLOCKED, unlock),
         (RunState.BLIND_COMPLETE, evaluation),
@@ -552,7 +586,9 @@ def test_blind_complete_reaches_promoted_or_retained_with_complete_custody(tmp_p
             evidence["winner"] = selected
         elif state is RunState.BLIND_COMPLETE:
             evidence.update({"winner": selected, "unlock": unlock, "manifest_receipt": receipt})
-        machine.transition(state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"])
+        machine.transition(
+            state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"]
+        )
     terminal = RunState.PROMOTED if promotion else RunState.RETAINED
     machine.transition(
         terminal,
@@ -581,9 +617,25 @@ def test_terminal_transition_rejects_missing_or_mismatched_custody_evidence(tmp_
     # Move the machine to BLIND_COMPLETE with valid evidence, then exercise terminal binding.
     common = {"run_id": frozen["run_id"], "spec_fingerprint": frozen["artifact_fingerprint"]}
     for state, artifact in (
-        (RunState.DEV_INDEXED, sign_artifact("IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []})),
-        (RunState.DEV_RETRIEVED, sign_artifact("RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []})),
-        (RunState.DEV_JUDGED, sign_artifact("DevelopmentJudgments", {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0})),
+        (
+            RunState.DEV_INDEXED,
+            sign_artifact(
+                "IndexBuildReceipt", {**common, "coverage_complete": True, "failures": []}
+            ),
+        ),
+        (
+            RunState.DEV_RETRIEVED,
+            sign_artifact(
+                "RetrievalRunBundle", {**common, "complete_query_count": 400, "failures": []}
+            ),
+        ),
+        (
+            RunState.DEV_JUDGED,
+            sign_artifact(
+                "DevelopmentJudgments",
+                {**common, "judge_artifact_count": 3, "unresolved_disagreements": 0},
+            ),
+        ),
         (RunState.DEV_WINNER_SIGNED, selected),
         (RunState.BLIND_UNLOCKED, unlock),
         (RunState.BLIND_COMPLETE, evaluation),
@@ -593,7 +645,9 @@ def test_terminal_transition_rejects_missing_or_mismatched_custody_evidence(tmp_
             evidence["winner"] = selected
         elif state is RunState.BLIND_COMPLETE:
             evidence.update({"winner": selected, "unlock": unlock, "manifest_receipt": receipt})
-        machine.transition(state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"])
+        machine.transition(
+            state, evidence, expected_spec_fingerprint=frozen["artifact_fingerprint"]
+        )
     with pytest.raises(BakeoffContractError, match="complete custody evidence"):
         machine.transition(
             RunState.RETAINED,
@@ -602,12 +656,24 @@ def test_terminal_transition_rejects_missing_or_mismatched_custody_evidence(tmp_
         )
     mismatched = sign_artifact(
         "PromotionDecision",
-        {**decision, "evidence_fingerprints": {**decision["evidence_fingerprints"], "blind_unlock": _hash("wrong-unlock")}},
+        {
+            **decision,
+            "evidence_fingerprints": {
+                **decision["evidence_fingerprints"],
+                "blind_unlock": _hash("wrong-unlock"),
+            },
+        },
     )
     with pytest.raises(BakeoffContractError, match="does not bind"):
         machine.transition(
             RunState.RETAINED,
-            {"evidence": mismatched, "winner": selected, "blind_evaluation": evaluation, "unlock": unlock, "manifest_receipt": receipt},
+            {
+                "evidence": mismatched,
+                "winner": selected,
+                "blind_evaluation": evaluation,
+                "unlock": unlock,
+                "manifest_receipt": receipt,
+            },
             expected_spec_fingerprint=frozen["artifact_fingerprint"],
         )
 

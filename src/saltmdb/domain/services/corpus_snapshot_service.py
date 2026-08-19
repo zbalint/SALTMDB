@@ -118,9 +118,9 @@ def _data_version(conn: sqlite3.Connection) -> int:
 
 
 def _sha256_json(value: object) -> str:
-    payload = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -175,13 +175,7 @@ def _entity_rows(
         predicates.append("id > ?")
         params.append(after_id)
     where = " WHERE " + " AND ".join(predicates) if predicates else ""
-    sql = (
-        "SELECT "
-        + ", ".join(_ENTITY_COLUMNS)
-        + " FROM entities"
-        + where
-        + " ORDER BY id"
-    )
+    sql = "SELECT " + ", ".join(_ENTITY_COLUMNS) + " FROM entities" + where + " ORDER BY id"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)

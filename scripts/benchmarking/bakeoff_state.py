@@ -784,7 +784,9 @@ def validate_blind_evaluation(  # noqa: C901, PLR0912, PLR0915
     if not isinstance(attestation, dict) or attestation.get("frozen") is not True:
         raise BakeoffContractError("blind evaluation lacks a fixed-configuration attestation")
     if attestation.get("configuration_hash") != spec["configuration_hash"]:
-        raise BakeoffContractError("blind configuration attestation does not match the frozen configuration")
+        raise BakeoffContractError(
+            "blind configuration attestation does not match the frozen configuration"
+        )
     _require_hash(
         attestation.get("winner_pipeline_fingerprint"),
         "winner pipeline fingerprint",

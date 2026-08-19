@@ -78,10 +78,7 @@ class FakeLate:
 
     def passage_embed(self, documents: list[str]) -> list[np.ndarray]:
         self.documents.extend(documents)
-        return [
-            np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-            for _ in documents
-        ]
+        return [np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32) for _ in documents]
 
     def query_embed(self, query: str) -> np.ndarray:
         self.queries.append(query)
@@ -172,9 +169,7 @@ def test_dense_adapter_verifies_cache_before_factory_and_renders_prefixes_once(t
         ("size", "size mismatch"),
     ],
 )
-def test_model_lock_rejects_every_inventory_mismatch(
-    tmp_path: Path, mutation: str, message: str
-):
+def test_model_lock_rejects_every_inventory_mismatch(tmp_path: Path, mutation: str, message: str):
     root = tmp_path / "cache"
     root.mkdir()
     _write_inventory(root)
@@ -416,8 +411,16 @@ def test_maxsim_is_pure_and_supports_sum_and_mean_reduction():
     ("method", "value", "message"),
     [
         ("embed_documents", [np.ones((2, 3), dtype=np.float32)], "shape"),
-        ("embed_documents", [np.array([[np.nan, 0.0], [0.0, 1.0]], dtype=np.float32)], "non-finite"),
-        ("embed_documents", [np.array([[2.0, 0.0], [0.0, 1.0]], dtype=np.float32)], "normalization"),
+        (
+            "embed_documents",
+            [np.array([[np.nan, 0.0], [0.0, 1.0]], dtype=np.float32)],
+            "non-finite",
+        ),
+        (
+            "embed_documents",
+            [np.array([[2.0, 0.0], [0.0, 1.0]], dtype=np.float32)],
+            "normalization",
+        ),
     ],
 )
 def test_late_adapter_rejects_token_matrix_contract_violations(

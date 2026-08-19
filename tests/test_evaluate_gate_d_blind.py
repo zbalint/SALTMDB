@@ -18,8 +18,15 @@ from merge_judgments import JUDGES, artifact_fingerprint  # noqa: E402
 
 
 FACETS = (
-    "exact_sentence", "keyword", "typo", "short_memory", "long_body",
-    "current_vs_superseded", "close_sibling", "multilingual", "strict_negative",
+    "exact_sentence",
+    "keyword",
+    "typo",
+    "short_memory",
+    "long_body",
+    "current_vs_superseded",
+    "close_sibling",
+    "multilingual",
+    "strict_negative",
 )
 COMPARISONS = [
     "winner_vs_baseline_same_specific_fact",
@@ -61,10 +68,7 @@ def _spec() -> dict[str, Any]:
 
 
 def _winner(spec: dict[str, Any]) -> dict[str, Any]:
-    metrics = {
-        name: (0 if name == "benchmark_failures" else 1.0)
-        for name in bs.REQUIRED_METRICS
-    }
+    metrics = {name: (0 if name == "benchmark_failures" else 1.0) for name in bs.REQUIRED_METRICS}
     metrics["warm_latency_p50_seconds"] = 0.01
     metrics["warm_latency_p95_seconds"] = 0.02
     return bs.sign_artifact(
@@ -107,9 +111,22 @@ def _matrix(spec: dict[str, Any], queries: list[dict[str, Any]]) -> dict[str, An
             "pool_top_n": 20,
             "pools": {
                 query["id"]: {
-                    **({"good": {"title": "Good", "full_content": "good", "ground_truth_forced_include": True}}
-                       if query["facet"] != "strict_negative" else {}),
-                    "bad": {"title": "Bad", "full_content": "bad", "ground_truth_forced_include": False},
+                    **(
+                        {
+                            "good": {
+                                "title": "Good",
+                                "full_content": "good",
+                                "ground_truth_forced_include": True,
+                            }
+                        }
+                        if query["facet"] != "strict_negative"
+                        else {}
+                    ),
+                    "bad": {
+                        "title": "Bad",
+                        "full_content": "bad",
+                        "ground_truth_forced_include": False,
+                    },
                 }
                 for query in queries
             },
@@ -117,15 +134,30 @@ def _matrix(spec: dict[str, Any], queries: list[dict[str, Any]]) -> dict[str, An
     )
 
 
-def _bundle(spec: dict[str, Any], queries: list[dict[str, Any]], contender: str, *, winner_good: bool = True) -> dict[str, Any]:
+def _bundle(
+    spec: dict[str, Any], queries: list[dict[str, Any]], contender: str, *, winner_good: bool = True
+) -> dict[str, Any]:
     rows = []
     for query in queries:
         good = query["facet"] != "strict_negative" and winner_good
         entity_id = "good" if (contender == blind.WINNER_ID and good) else "bad"
-        rows.append({"query_id": query["id"], "top20": [{"entity_id": entity_id}], "latency_ms": 10.0, "failure": None})
-    cell = {"kind": "lexical", "channel": "bm25_plus_current_head"} if contender == blind.BASELINE_ID else {
-        "kind": "late_interaction", "model_id": "answerdotai/answerai-colbert-small-v1", "channel": "entity"
-    }
+        rows.append(
+            {
+                "query_id": query["id"],
+                "top20": [{"entity_id": entity_id}],
+                "latency_ms": 10.0,
+                "failure": None,
+            }
+        )
+    cell = (
+        {"kind": "lexical", "channel": "bm25_plus_current_head"}
+        if contender == blind.BASELINE_ID
+        else {
+            "kind": "late_interaction",
+            "model_id": "answerdotai/answerai-colbert-small-v1",
+            "channel": "entity",
+        }
+    )
     return bs.sign_artifact(
         "RetrievalRunBundle",
         {
@@ -139,7 +171,9 @@ def _bundle(spec: dict[str, Any], queries: list[dict[str, Any]], contender: str,
     )
 
 
-def _raw_and_merged(matrix: dict[str, Any], *, unresolved: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _raw_and_merged(
+    matrix: dict[str, Any], *, unresolved: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw = []
     for judge in JUDGES:
         value = {"judge": judge, "labels": []}
@@ -163,7 +197,9 @@ def _raw_and_merged(matrix: dict[str, Any], *, unresolved: bool = False) -> tupl
     return raw, merged
 
 
-def _authorization_artifacts(tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
+def _authorization_artifacts(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], bytes]:
     spec = _spec()
     winner = _winner(spec)
     unlock = bs.build_blind_unlock(spec, winner, user_confirmation="synthetic approval")
@@ -172,7 +208,9 @@ def _authorization_artifacts(tmp_path: Path) -> tuple[dict[str, Any], dict[str, 
     return spec, winner, unlock, receipt, payload
 
 
-def test_authorized_loader_requires_800_unique_blind_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_authorized_loader_requires_800_unique_blind_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     spec, winner, unlock, receipt, payload = _authorization_artifacts(tmp_path)
     calls = []
 
@@ -182,9 +220,12 @@ def test_authorized_loader_requires_800_unique_blind_rows(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(blind, "authorize_blind_file", authorize)
     queries, query_fp = blind.load_authorized_blind_queries(
-        queries_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-        spec_path=tmp_path / "spec.json", winner_path=tmp_path / "winner.json",
-        unlock_path=tmp_path / "unlock.json", receipt_path=tmp_path / "receipt.json",
+        queries_path=tmp_path / "sealed.json",
+        vault_dir=tmp_path,
+        spec_path=tmp_path / "spec.json",
+        winner_path=tmp_path / "winner.json",
+        unlock_path=tmp_path / "unlock.json",
+        receipt_path=tmp_path / "receipt.json",
     )
     assert len(queries) == 800 and len({q["id"] for q in queries}) == 800
     assert query_fp == bs.fingerprint(sorted(q["id"] for q in queries))
@@ -192,34 +233,49 @@ def test_authorized_loader_requires_800_unique_blind_rows(monkeypatch: pytest.Mo
 
     malformed = json.loads(payload)
     malformed["queries"][-1]["id"] = malformed["queries"][0]["id"]
-    monkeypatch.setattr(blind, "authorize_blind_file", lambda *a, **k: json.dumps(malformed).encode())
+    monkeypatch.setattr(
+        blind, "authorize_blind_file", lambda *a, **k: json.dumps(malformed).encode()
+    )
     with pytest.raises(blind.GateDBlindError, match="malformed query metadata"):
         blind.load_authorized_blind_queries(
-            queries_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-            spec_path=tmp_path / "spec.json", winner_path=tmp_path / "winner.json",
-            unlock_path=tmp_path / "unlock.json", receipt_path=tmp_path / "receipt.json",
+            queries_path=tmp_path / "sealed.json",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            receipt_path=tmp_path / "receipt.json",
         )
 
 
-def test_loader_rejects_wrong_count_and_non_blind(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_loader_rejects_wrong_count_and_non_blind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     spec, winner, unlock, receipt, payload = _authorization_artifacts(tmp_path)
     del spec, winner, unlock, receipt
     value = json.loads(payload)
     replacement = value["queries"][:-1]
-    monkeypatch.setattr(blind, "authorize_blind_file", lambda *a, **k: json.dumps({"queries": replacement}).encode())
+    monkeypatch.setattr(
+        blind, "authorize_blind_file", lambda *a, **k: json.dumps({"queries": replacement}).encode()
+    )
     with pytest.raises(blind.GateDBlindError, match="exactly 800"):
         blind.load_authorized_blind_queries(
-            queries_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-            spec_path=tmp_path / "spec.json", winner_path=tmp_path / "winner.json",
-            unlock_path=tmp_path / "unlock.json", receipt_path=tmp_path / "receipt.json",
+            queries_path=tmp_path / "sealed.json",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            receipt_path=tmp_path / "receipt.json",
         )
     value["queries"][0]["split"] = "dev"
     monkeypatch.setattr(blind, "authorize_blind_file", lambda *a, **k: json.dumps(value).encode())
     with pytest.raises(blind.GateDBlindError, match="non-blind"):
         blind.load_authorized_blind_queries(
-            queries_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-            spec_path=tmp_path / "spec.json", winner_path=tmp_path / "winner.json",
-            unlock_path=tmp_path / "unlock.json", receipt_path=tmp_path / "receipt.json",
+            queries_path=tmp_path / "sealed.json",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            receipt_path=tmp_path / "receipt.json",
         )
 
 
@@ -231,10 +287,16 @@ def test_two_bundle_loader_rejects_stale_duplicate_and_extra(tmp_path: Path) -> 
     # The loader consumes paths, so write only synthetic signed bundle bytes.
     (tmp_path / "winner.json").write_text(json.dumps(winner_bundle))
     (tmp_path / "baseline.json").write_text(json.dumps(baseline_bundle))
-    assert set(blind._load_two_bundles([tmp_path / "winner.json", tmp_path / "baseline.json"], spec, winner)) == {blind.WINNER_ID, blind.BASELINE_ID}
+    assert set(
+        blind._load_two_bundles(
+            [tmp_path / "winner.json", tmp_path / "baseline.json"], spec, winner
+        )
+    ) == {blind.WINNER_ID, blind.BASELINE_ID}
     stale = dict(baseline_bundle)
     stale["spec_fingerprint"] = "4" * 64
-    stale["artifact_fingerprint"] = bs.fingerprint({k: v for k, v in stale.items() if k != "artifact_fingerprint"})
+    stale["artifact_fingerprint"] = bs.fingerprint(
+        {k: v for k, v in stale.items() if k != "artifact_fingerprint"}
+    )
     (tmp_path / "stale.json").write_text(json.dumps(stale))
     with pytest.raises(blind.GateDBlindError, match="stale"):
         blind._load_two_bundles([tmp_path / "winner.json", tmp_path / "stale.json"], spec, winner)
@@ -259,7 +321,9 @@ def test_raw_and_merged_coverage_and_arbitration_fail_closed(tmp_path: Path) -> 
     with pytest.raises(blind.GateDBlindError, match="three-judge"):
         blind._raw_labels([paths[0], paths[1], duplicate_path], merged)
     incomplete = {**merged, "labels": merged["labels"][:-1]}
-    incomplete["fingerprint"] = artifact_fingerprint({k: v for k, v in incomplete.items() if k != "fingerprint"})
+    incomplete["fingerprint"] = artifact_fingerprint(
+        {k: v for k, v in incomplete.items() if k != "fingerprint"}
+    )
     with pytest.raises(blind.GateDBlindError, match="exactly match"):
         blind.load_final_labels_from_value(incomplete, matrix)
     _, unresolved = _raw_and_merged(matrix, unresolved=True)
@@ -272,7 +336,9 @@ def test_holm_has_three_frozen_comparisons_and_unknown_fails_closed() -> None:
     relevance = {"q": {"good": 2, "bad": 0}}
     rows = {"q": {"top20": [{"entity_id": "good"}]}}
     for name in COMPARISONS:
-        result = blind._mcnemar(name, queries, relevance, rows, {"q": {"top20": [{"entity_id": "bad"}]}})
+        result = blind._mcnemar(
+            name, queries, relevance, rows, {"q": {"top20": [{"entity_id": "bad"}]}}
+        )
         assert result["comparison"] == name and 0 <= result["raw_p"] <= 1
     with pytest.raises(blind.GateDBlindError, match="unsupported frozen Holm"):
         blind._mcnemar("unknown", queries, relevance, rows, rows)
@@ -289,9 +355,16 @@ def test_evaluate_emits_signed_evidence_and_both_promotion_outcomes(tmp_path: Pa
     }
     raw_fps = {item["judge"]: item["fingerprint"] for item in raw}
     metrics, evaluation = blind.evaluate(
-        spec=spec, winner=winner, unlock=unlock, receipt=receipt,
-        queries=queries, query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
-        matrix=matrix, merged=merged, raw_fingerprints=raw_fps, bundles=bundles,
+        spec=spec,
+        winner=winner,
+        unlock=unlock,
+        receipt=receipt,
+        queries=queries,
+        query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
+        matrix=matrix,
+        merged=merged,
+        raw_fingerprints=raw_fps,
+        bundles=bundles,
     )
     assert bs.validate_signed_artifact(metrics, kind="BlindMetrics")["artifact_fingerprint"]
     assert bs.validate_blind_evaluation(evaluation, spec)["unresolved_disagreements"] == 0
@@ -301,9 +374,16 @@ def test_evaluate_emits_signed_evidence_and_both_promotion_outcomes(tmp_path: Pa
     poor_bundles = dict(bundles)
     poor_bundles[blind.WINNER_ID] = _bundle(spec, queries, blind.WINNER_ID, winner_good=False)
     _, retained_evaluation = blind.evaluate(
-        spec=spec, winner=winner, unlock=unlock, receipt=receipt,
-        queries=queries, query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
-        matrix=matrix, merged=merged, raw_fingerprints=raw_fps, bundles=poor_bundles,
+        spec=spec,
+        winner=winner,
+        unlock=unlock,
+        receipt=receipt,
+        queries=queries,
+        query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
+        matrix=matrix,
+        merged=merged,
+        raw_fingerprints=raw_fps,
+        bundles=poor_bundles,
     )
     retained = bs.build_promotion_decision(spec, retained_evaluation, winner, unlock, receipt)
     assert retained["promotion"] is False

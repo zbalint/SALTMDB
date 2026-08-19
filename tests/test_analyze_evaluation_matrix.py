@@ -150,7 +150,8 @@ class TestAnalyzeEvaluationMatrix(unittest.TestCase):
         )
         vectors = {
             category: {
-                name: [True, True, True, True] for name in [am.CURRENT_DEFAULT_CONFIG_NAME, *contenders]
+                name: [True, True, True, True]
+                for name in [am.CURRENT_DEFAULT_CONFIG_NAME, *contenders]
             }
             for category in am.HIGH_VALUE_CATEGORIES
         }

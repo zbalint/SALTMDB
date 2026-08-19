@@ -86,9 +86,7 @@ def test_build_snapshot_db_inserts_expected_entity_and_relation_counts(tmp_path)
     try:
         rows = conn.execute("SELECT id, title FROM entities ORDER BY id").fetchall()
         assert [r[0] for r in rows] == ["e1", "e2"]
-        rel = conn.execute(
-            "SELECT source_id, target_id, predicate FROM relations"
-        ).fetchone()
+        rel = conn.execute("SELECT source_id, target_id, predicate FROM relations").fetchone()
         assert rel == ("e1", "e2", "supersedes")
         fts_count = conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
         assert fts_count == 2

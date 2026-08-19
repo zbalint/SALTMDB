@@ -77,7 +77,9 @@ class TestEvaluationArtifactSafety(unittest.TestCase):
             "errors": [],
         }
         with self.assertRaises(ValueError):
-            rem._validate_matrix_contract(result, [query], [{"name": "only"}, {"name": "other"}], 20)
+            rem._validate_matrix_contract(
+                result, [query], [{"name": "only"}, {"name": "other"}], 20
+            )
 
     def test_run_directory_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as directory:

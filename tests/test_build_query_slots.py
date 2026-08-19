@@ -38,7 +38,9 @@ def _entity_row(entity_id: str, title: str, body: str) -> dict:
     }
 
 
-def _write_corpus(tmp_path: Path, entities: list[tuple[str, str, str]], edges=()) -> tuple[Path, Path]:
+def _write_corpus(
+    tmp_path: Path, entities: list[tuple[str, str, str]], edges=()
+) -> tuple[Path, Path]:
     """Write a synthetic ``corpus_export.json`` + validly-signed manifest for ``entities``."""
     ids = sorted(entity_id for entity_id, _title, _body in entities)
     by_id = {entity_id: (title, body) for entity_id, title, body in entities}
@@ -452,11 +454,7 @@ def test_build_source_slots_rejects_insufficient_sibling_pairs(tmp_path):
 
 def test_build_source_slots_rejects_insufficient_simple_facet_entities(tmp_path):
     entities, edges = _full_entity_pool()
-    entities = [
-        row
-        for row in entities
-        if not row[0].startswith(("short-", "long-", "mid-"))
-    ]
+    entities = [row for row in entities if not row[0].startswith(("short-", "long-", "mid-"))]
     export_path, manifest_path = _write_corpus(tmp_path, entities, edges=edges)
     with pytest.raises(bqs.GateBSlotError, match="simple facets"):
         bqs.build_source_slots_from_export(export_path, manifest_path)
@@ -469,15 +467,30 @@ def test_build_source_slots_rejects_insufficient_simple_facet_entities(tmp_path)
 
 def test_deterministic_local_generation_covers_every_facet_with_nonempty_text():
     slots = [
-        {"slot_id": "s-exact", "category": "exact_sentence", "source_text": "Verbatim sentence text.", "lang": "en"},
+        {
+            "slot_id": "s-exact",
+            "category": "exact_sentence",
+            "source_text": "Verbatim sentence text.",
+            "lang": "en",
+        },
         {
             "slot_id": "s-keyword",
             "category": "keyword",
             "source_text": "Title: Sample Title\n\nBody content about a specific distinguishing detail here.",
             "lang": "en",
         },
-        {"slot_id": "s-typo", "category": "typo", "source_text": "Sample Title Words", "lang": "en"},
-        {"slot_id": "s-short", "category": "short_memory", "source_text": "Sample Title Words", "lang": "en"},
+        {
+            "slot_id": "s-typo",
+            "category": "typo",
+            "source_text": "Sample Title Words",
+            "lang": "en",
+        },
+        {
+            "slot_id": "s-short",
+            "category": "short_memory",
+            "source_text": "Sample Title Words",
+            "lang": "en",
+        },
         {
             "slot_id": "s-long",
             "category": "long_body",
@@ -496,7 +509,12 @@ def test_deterministic_local_generation_covers_every_facet_with_nonempty_text():
             "source_text": "Title A: First Title\nTitle B: Second Title",
             "lang": "en",
         },
-        {"slot_id": "s-multi", "category": "multilingual", "source_text": "Titre Exemple", "lang": "und"},
+        {
+            "slot_id": "s-multi",
+            "category": "multilingual",
+            "source_text": "Titre Exemple",
+            "lang": "und",
+        },
         {
             "slot_id": "s-neg1",
             "category": "strict_negative",
@@ -521,8 +539,18 @@ def test_deterministic_local_generation_covers_every_facet_with_nonempty_text():
 
 def test_deterministic_local_generation_dedups_identical_text_with_variant_suffix():
     slots = [
-        {"slot_id": "s1", "category": "exact_sentence", "source_text": "Repeated line.", "lang": "en"},
-        {"slot_id": "s2", "category": "exact_sentence", "source_text": "Repeated line.", "lang": "en"},
+        {
+            "slot_id": "s1",
+            "category": "exact_sentence",
+            "source_text": "Repeated line.",
+            "lang": "en",
+        },
+        {
+            "slot_id": "s2",
+            "category": "exact_sentence",
+            "source_text": "Repeated line.",
+            "lang": "en",
+        },
     ]
     results = bqs.deterministic_local_generation(slots)
     texts = [row["query"] for row in results]

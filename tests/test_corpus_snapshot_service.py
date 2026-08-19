@@ -69,9 +69,7 @@ def snapshot_db(tmp_path: Path):
 
 def test_snapshot_pages_are_keyset_ordered_and_provenance_bound(snapshot_db):
     path, conn = snapshot_db
-    first = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=1, db_connection=conn
-    )
+    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
 
     assert [entity["id"] for entity in first["entities"]] == ["entity-a"]
     assert first["next_cursor"] == "entity-a"
@@ -121,9 +119,7 @@ def test_snapshot_scopes_private_entities_to_owner_but_includes_shared_entities(
     _insert_entity(conn, "other-private", owner_id="other-owner", scope="private")
     _insert_entity(conn, "other-shared", owner_id="other-owner", scope="shared")
 
-    page = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=20, db_connection=conn
-    )
+    page = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=20, db_connection=conn)
 
     assert [entity["id"] for entity in page["entities"]] == [
         "entity-a",
@@ -170,9 +166,7 @@ def test_snapshot_exports_current_supersedes_edges_only_between_visible_entities
         ),
     )
 
-    page = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=20, db_connection=conn
-    )
+    page = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=20, db_connection=conn)
 
     assert [edge["id"] for edge in page["supersedes_edges"]] == ["rel-visible"]
     assert page["relations"] == page["supersedes_edges"]
@@ -183,9 +177,7 @@ def test_snapshot_exports_current_supersedes_edges_only_between_visible_entities
 
 def test_snapshot_fails_closed_when_corpus_changes_between_pages(snapshot_db):
     _, conn = snapshot_db
-    first = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=1, db_connection=conn
-    )
+    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
     _insert_entity(conn, "entity-c")
 
     with pytest.raises(SnapshotChangedError, match="changed"):
@@ -200,9 +192,7 @@ def test_snapshot_fails_closed_when_corpus_changes_between_pages(snapshot_db):
 
 def test_iter_pages_enforces_provenance_between_calls(snapshot_db):
     path, conn = snapshot_db
-    pages = iter_corpus_snapshot_pages(
-        owner_id="snapshot-owner", page_size=1, db_connection=conn
-    )
+    pages = iter_corpus_snapshot_pages(owner_id="snapshot-owner", page_size=1, db_connection=conn)
     first = next(pages)
     external = get_connection(str(path))
     try:
@@ -217,9 +207,7 @@ def test_iter_pages_enforces_provenance_between_calls(snapshot_db):
 
 def test_schema_change_is_detected_between_pages(snapshot_db):
     _, conn = snapshot_db
-    first = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=1, db_connection=conn
-    )
+    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
     write_transaction_retrying(
         conn,
         lambda c: c.execute("ALTER TABLE entities ADD COLUMN snapshot_test_marker TEXT"),
@@ -255,9 +243,7 @@ def test_snapshot_read_transaction_has_no_write_statements(snapshot_db):
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
     try:
-        export_corpus_snapshot_page(
-            owner_id="snapshot-owner", page_size=1, db_connection=conn
-        )
+        export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
     finally:
         conn.set_trace_callback(None)
 

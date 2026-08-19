@@ -238,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
         "--db-path", type=Path, required=True, help="Output path for the new lexical snapshot db"
     )
     parser.add_argument(
-        "--receipt-out", type=Path, help="Optional path to write the signed LexicalSnapshotReceipt JSON"
+        "--receipt-out",
+        type=Path,
+        help="Optional path to write the signed LexicalSnapshotReceipt JSON",
     )
     args = parser.parse_args(argv)
 

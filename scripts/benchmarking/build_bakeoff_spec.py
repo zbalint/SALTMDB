@@ -346,8 +346,10 @@ def build_bakeoff_spec(
     corpus_manifest = load_corpus_manifest(corpus_manifest_path)
     query_slots_hash = derive_query_slots_hash(slots_path, assignments_path, corpus_manifest)
     contenders, contender_specs = load_contenders(model_locks_dir, pinned_models)
-    grids = dict(hyperparameter_grids) if hyperparameter_grids is not None else dict(
-        HYPERPARAMETER_GRIDS
+    grids = (
+        dict(hyperparameter_grids)
+        if hyperparameter_grids is not None
+        else dict(HYPERPARAMETER_GRIDS)
     )
     configuration_hash = derive_configuration_hash(contender_specs, grids)
     payload = {
@@ -383,7 +385,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True, help="Fresh, filename-safe run identifier")
     parser.add_argument(
-        "--corpus-manifest", type=Path, required=True, help="Signed corpus_representation_manifest.json"
+        "--corpus-manifest",
+        type=Path,
+        required=True,
+        help="Signed corpus_representation_manifest.json",
     )
     parser.add_argument(
         "--slots",
@@ -404,7 +409,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory containing the 9 signed Gate-A ModelLock JSON files",
     )
     parser.add_argument("--repo-root", type=Path, default=None)
-    parser.add_argument("--spec-out", type=Path, required=True, help="Output path for the signed BakeoffSpec")
+    parser.add_argument(
+        "--spec-out", type=Path, required=True, help="Output path for the signed BakeoffSpec"
+    )
     return parser
 
 

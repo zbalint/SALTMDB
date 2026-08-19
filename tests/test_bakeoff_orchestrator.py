@@ -114,7 +114,9 @@ def _generic(kind: str, spec: dict, **extra: object) -> dict:
     )
 
 
-def _blind_evaluation(spec: dict, winner: dict, unlock: dict, receipt: dict, *, passes: bool) -> dict:
+def _blind_evaluation(
+    spec: dict, winner: dict, unlock: dict, receipt: dict, *, passes: bool
+) -> dict:
     baseline_metrics = _metrics()
     candidate_metrics = _metrics(failures=0 if passes else 1)
     if passes:
@@ -140,14 +142,20 @@ def _blind_evaluation(spec: dict, winner: dict, unlock: dict, receipt: dict, *, 
             "candidate_metrics": candidate_metrics,
             "baseline_metrics": baseline_metrics,
             "accuracy_deltas": {
-                "ndcg_at_10": candidate_metrics["macro_positive_ndcg_at_10"] - baseline_metrics["macro_positive_ndcg_at_10"],
-                "grade2_recall_at_20": candidate_metrics["grade2_recall_at_20"] - baseline_metrics["grade2_recall_at_20"],
-                "same_specific_fact_grade2_top1": candidate_metrics["same_specific_fact_grade2_top1"] - baseline_metrics["same_specific_fact_grade2_top1"],
+                "ndcg_at_10": candidate_metrics["macro_positive_ndcg_at_10"]
+                - baseline_metrics["macro_positive_ndcg_at_10"],
+                "grade2_recall_at_20": candidate_metrics["grade2_recall_at_20"]
+                - baseline_metrics["grade2_recall_at_20"],
+                "same_specific_fact_grade2_top1": candidate_metrics[
+                    "same_specific_fact_grade2_top1"
+                ]
+                - baseline_metrics["same_specific_fact_grade2_top1"],
             },
             "safety_deltas": {
                 "exact": baseline_metrics["exact_safety"] - candidate_metrics["exact_safety"],
                 "keyword": baseline_metrics["keyword_safety"] - candidate_metrics["keyword_safety"],
-                "strict_negative": baseline_metrics["strict_negative_safety"] - candidate_metrics["strict_negative_safety"],
+                "strict_negative": baseline_metrics["strict_negative_safety"]
+                - candidate_metrics["strict_negative_safety"],
             },
             "confidence_intervals": {"ndcg_delta_ci95": [0.01 if passes else -0.01, 0.2]},
             "holm_results": [
@@ -174,13 +182,23 @@ def _blind_evaluation(spec: dict, winner: dict, unlock: dict, receipt: dict, *, 
                 "raw_judgments": _hash("raw-judgments"),
                 "merged_labels": _hash("merged-labels"),
                 "metrics_artifact": _hash("metrics-artifact"),
-                "blind_query_ids": fingerprint(sorted([f"blind-{index:03d}" for index in range(800)])),
+                "blind_query_ids": fingerprint(
+                    sorted([f"blind-{index:03d}" for index in range(800)])
+                ),
             },
         },
     )
 
 
-def _decision(spec: dict, evaluation: dict, winner: dict, unlock: dict, receipt: dict, *, promotion: bool = False) -> dict:
+def _decision(
+    spec: dict,
+    evaluation: dict,
+    winner: dict,
+    unlock: dict,
+    receipt: dict,
+    *,
+    promotion: bool = False,
+) -> dict:
     return sign_artifact(
         "PromotionDecision",
         {
@@ -191,7 +209,9 @@ def _decision(spec: dict, evaluation: dict, winner: dict, unlock: dict, receipt:
             "confidence_intervals": evaluation["confidence_intervals"],
             "holm_results": evaluation["holm_results"],
             "safety_deltas": evaluation["safety_deltas"],
-            "failures": [] if evaluation["candidate_metrics"]["benchmark_failures"] == 0 else ["candidate_benchmark_failures"],
+            "failures": []
+            if evaluation["candidate_metrics"]["benchmark_failures"] == 0
+            else ["candidate_benchmark_failures"],
             "latency": {"candidate_warm_p95_seconds": 0.5},
             "promotion": promotion,
             "evidence_fingerprints": {
@@ -318,7 +338,9 @@ def test_receipt_chain_detects_tampering(tmp_path):
 
 def test_blind_query_path_is_rejected_before_first_read(tmp_path):
     blind_path = tmp_path / "queries_blind.json"
-    with mock.patch.object(Path, "read_text", side_effect=AssertionError("blind file opened")) as read:
+    with mock.patch.object(
+        Path, "read_text", side_effect=AssertionError("blind file opened")
+    ) as read:
         with pytest.raises(OrchestrationError, match="blind query"):
             _read_control_artifact(blind_path)
         read.assert_not_called()
@@ -379,7 +401,13 @@ def test_orchestrator_terminal_rejects_missing_or_mismatched_custody(tmp_path):
         orchestrator.advance(RunState.RETAINED, {"evidence": decision, "winner": winner})
     mismatched = sign_artifact(
         "PromotionDecision",
-        {**decision, "evidence_fingerprints": {**decision["evidence_fingerprints"], "blind_unlock": _hash("wrong-unlock")}},
+        {
+            **decision,
+            "evidence_fingerprints": {
+                **decision["evidence_fingerprints"],
+                "blind_unlock": _hash("wrong-unlock"),
+            },
+        },
     )
     with pytest.raises(OrchestrationError, match="does not bind"):
         orchestrator.advance(

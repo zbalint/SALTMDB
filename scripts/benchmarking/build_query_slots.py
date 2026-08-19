@@ -116,7 +116,12 @@ FACET_TARGETS: dict[str, dict[str, int]] = {
     },
 }
 ENTITY_FACETS = tuple(sorted(MANDATORY_FACETS - {"strict_negative"}))
-_SIMPLE_FACETS = ("exact_sentence", "keyword", "typo", "multilingual")  # short/long assigned separately
+_SIMPLE_FACETS = (
+    "exact_sentence",
+    "keyword",
+    "typo",
+    "multilingual",
+)  # short/long assigned separately
 
 if set(FACET_TARGETS["dev"]) != MANDATORY_FACETS or set(FACET_TARGETS["blind"]) != MANDATORY_FACETS:
     raise GateBSlotError("FACET_TARGETS must declare exactly the mandatory facet set")
@@ -260,7 +265,10 @@ def load_export_bound_to_manifest(
         title = _normalize(row.get("title"))
         body = _normalize(row.get("body"))
         expected = manifest_rows[entity_id]
-        if _sha256_text(title) != expected["title_hash"] or _sha256_text(body) != expected["body_hash"]:
+        if (
+            _sha256_text(title) != expected["title_hash"]
+            or _sha256_text(body) != expected["body_hash"]
+        ):
             raise GateBSlotError(f"entity {entity_id} text does not match the signed manifest hash")
         entities[entity_id] = {"title": title, "body": body}
     return entities, manifest["corpus_root_hash"]
@@ -398,10 +406,15 @@ def build_source_slots_from_export(  # noqa: C901, PLR0912, PLR0915
     slots: list[dict[str, Any]] = []
     used_ids: set[str] = set()
 
-    total_cvs = FACET_TARGETS["dev"]["current_vs_superseded"] + FACET_TARGETS["blind"]["current_vs_superseded"]
+    total_cvs = (
+        FACET_TARGETS["dev"]["current_vs_superseded"]
+        + FACET_TARGETS["blind"]["current_vs_superseded"]
+    )
     cvs_families = pick_supersedes_families(export, entities, needed=total_cvs // 2)
     if not cvs_families:
-        raise GateBSlotError("frozen export has no usable supersedes pairs for current_vs_superseded")
+        raise GateBSlotError(
+            "frozen export has no usable supersedes pairs for current_vs_superseded"
+        )
     for (current_id, old_id), variants in zip(
         cvs_families, _variant_schedule(len(cvs_families), total_cvs)
     ):
@@ -459,15 +472,15 @@ def build_source_slots_from_export(  # noqa: C901, PLR0912, PLR0915
             f"frozen export lacks enough unused entities for the simple facets: "
             f"found {len(remaining)}, need {needed_pool}"
         )
-    by_body_length = sorted(remaining, key=lambda entity_id: (len(entities[entity_id]["body"]), entity_id))
+    by_body_length = sorted(
+        remaining, key=lambda entity_id: (len(entities[entity_id]["body"]), entity_id)
+    )
     short_ids = by_body_length[:per_facet_entities]
     long_ids = by_body_length[-per_facet_entities:]
     consumed = set(short_ids) | set(long_ids)
     rest = sorted(entity_id for entity_id in remaining if entity_id not in consumed)
 
-    def _simple_family_slots(
-        facet: str, entity_ids: list[str], make_source_text
-    ) -> None:
+    def _simple_family_slots(facet: str, entity_ids: list[str], make_source_text) -> None:
         total = FACET_TARGETS["dev"][facet] + FACET_TARGETS["blind"][facet]
         for entity_id, variants in zip(entity_ids, _variant_schedule(len(entity_ids), total)):
             entity = entities[entity_id]
@@ -488,9 +501,7 @@ def build_source_slots_from_export(  # noqa: C901, PLR0912, PLR0915
                 )
             used_ids.add(entity_id)
 
-    _simple_family_slots(
-        "short_memory", short_ids, lambda entity: entity["title"]
-    )
+    _simple_family_slots("short_memory", short_ids, lambda entity: entity["title"])
     _simple_family_slots(
         "long_body",
         long_ids,
@@ -517,7 +528,9 @@ def build_source_slots_from_export(  # noqa: C901, PLR0912, PLR0915
         "multilingual", facet_pools["multilingual"], lambda entity: entity["title"]
     )
 
-    total_negative = FACET_TARGETS["dev"]["strict_negative"] + FACET_TARGETS["blind"]["strict_negative"]
+    total_negative = (
+        FACET_TARGETS["dev"]["strict_negative"] + FACET_TARGETS["blind"]["strict_negative"]
+    )
     negative_subtypes = (
         "pure_gibberish",
         "partial_real_word_nonsense",
@@ -578,7 +591,9 @@ def deterministic_local_generation(slots: list[dict[str, Any]]) -> list[dict[str
             title, _, body = text.partition("\n\n")
             title = title.removeprefix("Title: ").strip()
             phrase = _extract_keyword_phrase(body, title)
-            query = f"What is the documented guidance about {title}, specifically regarding {phrase}?"
+            query = (
+                f"What is the documented guidance about {title}, specifically regarding {phrase}?"
+            )
         elif facet == "current_vs_superseded":
             current_line = next(
                 line for line in text.splitlines() if line.startswith("Current title: ")
@@ -593,7 +608,9 @@ def deterministic_local_generation(slots: list[dict[str, Any]]) -> list[dict[str
         elif facet == "strict_negative":
             templates = {
                 "pure_gibberish": lambda: generate_gibberish_query(seed=index),
-                "partial_real_word_nonsense": lambda: generate_partial_word_nonsense_query(seed=index),
+                "partial_real_word_nonsense": lambda: generate_partial_word_nonsense_query(
+                    seed=index
+                ),
                 "nl_off_topic": lambda: "How do I train a pet dragon to repair a bicycle?",
                 "false_premise": lambda: "Which documented policy requires every memory to be deleted nightly?",
                 "fictional_unanswerable": lambda: "What was the color of the captain's invisible spacecraft?",
@@ -637,9 +654,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest", type=Path, required=True, help="Signed corpus_representation_manifest.json"
     )
-    parser.add_argument("--slots-out", type=Path, required=True, help="Private slots JSON (never send externally)")
-    parser.add_argument("--assignments-out", type=Path, required=True, help="Signed QuerySlotAssignments JSON")
-    parser.add_argument("--dev-out", type=Path, help="Materialize the 400 dev queries with deterministic-fallback text")
+    parser.add_argument(
+        "--slots-out", type=Path, required=True, help="Private slots JSON (never send externally)"
+    )
+    parser.add_argument(
+        "--assignments-out", type=Path, required=True, help="Signed QuerySlotAssignments JSON"
+    )
+    parser.add_argument(
+        "--dev-out",
+        type=Path,
+        help="Materialize the 400 dev queries with deterministic-fallback text",
+    )
     return parser
 
 

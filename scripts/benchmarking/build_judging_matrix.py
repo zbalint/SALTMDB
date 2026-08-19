@@ -351,15 +351,10 @@ def build_blind_judging_matrix(
     artifact (the matrix is keyed exclusively by opaque query IDs).
     """
     spec = validate_bakeoff_spec(json.loads(spec_path.read_text(encoding="utf-8")))
-    winner = validate_development_winner(
-        json.loads(winner_path.read_text(encoding="utf-8")), spec
-    )
+    winner = validate_development_winner(json.loads(winner_path.read_text(encoding="utf-8")), spec)
     winner_id = winner.get("pipeline", {}).get("contender_id")
     expected = {BLIND_WINNER_ID, BLIND_BASELINE_ID}
-    if (
-        winner_id != BLIND_WINNER_ID
-        or not expected.issubset(set(spec["contenders"]))
-    ):
+    if winner_id != BLIND_WINNER_ID or not expected.issubset(set(spec["contenders"])):
         raise JudgingMatrixBuildError(
             "blind matrix requires the fixed ColBERT winner and lexical:bm25"
         )
