@@ -23,10 +23,10 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             content=self.body,
             tags=["#original"],
             owner_id="legacy-tests",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return result.split("ID: ")[1].split()[0]
+        self.assertEqual(result["status"], "ok")
+        return result["data"]["id"]
 
     def test_frozen_update_rejects_before_scd_history_or_mutation(self):
         entity_id = self._store()
@@ -40,7 +40,6 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             content="A complete and sufficiently descriptive changed body.",
             tags=["#changed"],
             owner_id="legacy-tests",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
@@ -68,12 +67,10 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             content=self.body,
             owner_id="legacy-tests",
             weight=5,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
-        self.assertIsInstance(result, str)
-        self.assertNotIn("Error", result)
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(
             self.conn.execute(
                 "SELECT weight, status FROM entities WHERE id = ?", (entity_id,)
@@ -93,7 +90,6 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             title="Immutable Write Test",
             content="A complete and sufficiently descriptive same-title replacement body.",
             owner_id="legacy-tests",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 

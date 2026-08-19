@@ -28,10 +28,10 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
             title=title,
             content=f"Detailed, durable description of {title} used in consolidation tests.",
             owner_id="agent_db",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        return result.split("ID: ", 1)[1]
+        self.assertEqual(result["status"], "ok")
+        return result["data"]["id"]
 
     def _cohesion(self, ids, _conn, _db_path):
         state = {

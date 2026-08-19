@@ -18,7 +18,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         call = store.call_args.kwargs
         self.assertEqual(call["scope"], "shared")
         self.assertEqual(call["weight"], 1)
-        self.assertFalse(call["skip_duplicate_check"])
+        self.assertNotIn("skip_duplicate_check", call)
 
     @patch("saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[])
     def test_search_omitted_options_match_service_defaults(self, search):

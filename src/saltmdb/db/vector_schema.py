@@ -142,8 +142,7 @@ def init_entity_chunk_vector_schema(conn: sqlite3.Connection) -> None:
     cohesion_service.get_fresh_entity_centroids, which calls try_load_vector_extension internally
     and degrades to a per-entity fallback (on-demand embedding) rather than raising if the load
     fails, instead of a bespoke try/except that silently abandons the whole pass. This includes
-    Track A's disposition_service.py (store-time consolidated-node integrity check) and
-    relation_service.py's commit_consolidation, both callers of get_fresh_entity_centroids --
+    relation_service.py's commit_consolidation, a caller of get_fresh_entity_centroids --
     the retired consolidate_vector_clusters/scout_consolidated_supersessions (memory-core rework,
     see scratch/plans/track_a_disposition_detailed.md) used to be two more such callers.
     """

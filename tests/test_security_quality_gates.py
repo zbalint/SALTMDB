@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
-from saltmdb.domain.services.disposition_service import _decode_review_token
 from saltmdb.mcp.tools import _normalize_list_or_str
 from saltmdb.utils.text import resolve_entity_id
 
@@ -61,9 +60,6 @@ class VectorExtensionCleanupTests(unittest.TestCase):
 
 
 class NarrowFallbackTests(unittest.TestCase):
-    def test_malformed_review_token_returns_none(self):
-        self.assertIsNone(_decode_review_token("%%%not-a-token%%%"))
-
     def test_malformed_json_list_uses_string_fallback_and_logs(self):
         with self.assertLogs("saltmdb.mcp.tools", level="DEBUG") as logs:
             result = _normalize_list_or_str("[not valid json]")

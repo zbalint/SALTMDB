@@ -53,10 +53,10 @@ class TestQueryCenteredSnippets(unittest.TestCase):
             title="Buried Token Memory",
             content=content,
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        self.assertIn("ID:", res)
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("id", res["data"])
 
         results = search_memory(
             query_keywords="RARETOKENXYZ", owner_id="user1", db_path=self.db_path
@@ -80,10 +80,9 @@ class TestQueryCenteredSnippets(unittest.TestCase):
             title="Unrelated Content Memory",
             content=content,
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        entity_id = res.split("ID: ")[1].split()[0]
+        entity_id = res["data"]["id"]
 
         with patch(
             "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
@@ -105,7 +104,6 @@ class TestQueryCenteredSnippets(unittest.TestCase):
             title="Listing Only Memory",
             content=content,
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
 

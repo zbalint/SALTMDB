@@ -3,7 +3,6 @@ import tempfile
 import os
 import time
 import shutil
-import re
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory, search_memory
@@ -120,10 +119,9 @@ DISTRACTOR_TITLES_AND_CONTENT = [
 ]
 
 
-def _extract_id(result: str) -> str:
-    match = re.search(r"ID:\s*([a-f0-9\-]+)", result)
-    assert match, f"Could not parse entity ID from result: {result}"
-    return match.group(1)
+def _extract_id(result: dict) -> str:
+    assert result["status"] == "ok", result
+    return result["data"]["id"]
 
 
 class TestE2ETopicRerank(unittest.TestCase):
@@ -143,9 +141,12 @@ class TestE2ETopicRerank(unittest.TestCase):
     def _store(self, title: str, content: str) -> str:
         res = store_memory(
             title=title,
-            content=content,
+            content=(
+                f"# {title}\n\n{content}"
+                if title == NEEDLE_TITLE
+                else f"{content}\n\nThis note records the document scope."
+            ),
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
         return _extract_id(res)

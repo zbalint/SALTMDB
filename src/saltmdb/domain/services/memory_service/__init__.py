@@ -18,8 +18,8 @@ rationale and staged history). See the submodules for internal organization:
 
 This module re-exports the full public+legacy-private surface so existing
 `from saltmdb.domain.services.memory_service import X` and `memory_service.X` call
-sites (disposition_service.py, librarian_service.py, relation_service.py,
-daemon/server.py, daemon/dispatch.py, viewer/routes.py, benchmarking scripts, and the
+sites (librarian_service.py, relation_service.py, daemon/server.py, daemon/dispatch.py,
+viewer/routes.py, benchmarking scripts, and the
 test suite) are unaffected by the internal split. This deliberately deviates from this
 repo's other multi-module package (`saltmdb.utils`, which uses direct-submodule
 imports and a bare-docstring `__init__.py`) -- justified because this package's

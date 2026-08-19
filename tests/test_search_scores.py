@@ -89,14 +89,12 @@ class TestSearchScores(unittest.TestCase):
             title="Authentication Module",
             content="Handles OAuth2 and JWT token authentication",
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
         store_memory(
             title="Database Backup Service",
             content="Performs hourly PostgreSQL and SQLite snapshot backups",
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
 

@@ -45,9 +45,11 @@ def _mix_vector(cos_theta: float, dim: int = DIM) -> list:
     return v
 
 
-def _extract_id(result: str) -> str:
+def _extract_id(result) -> str:
+    if isinstance(result, dict):
+        return result["data"]["id"]
     match = re.search(r"ID:\s*([a-f0-9\-]+)", result)
-    assert match, f"Could not parse entity ID from result: {result}"
+    assert match, f"Could not parse entity ID from result: {result!r}"
     return match.group(1)
 
 
@@ -257,7 +259,6 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
             title=title,
             content=content,
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
         return _extract_id(res)
@@ -451,7 +452,6 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
             title=title,
             content=content,
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
         return _extract_id(res)
@@ -543,7 +543,6 @@ class TestRrfGapGateSmoke(unittest.TestCase):
             title=title,
             content=content,
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
         return _extract_id(res)

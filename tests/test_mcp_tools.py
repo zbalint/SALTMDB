@@ -34,9 +34,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Target Chunk",
             tags=["#fetch-full"],
             owner_id="agent1",
-            skip_duplicate_check=True,
         )
-        entity_id = res.split("ID: ")[1].split()[0]
+        entity_id = res["data"]["id"]
 
         result = tools.get_memory(entity_id=entity_id, owner_id="agent1")
         self.assertEqual(result["status"], "ok")
@@ -71,23 +70,21 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 f"{name} still accepts an untyped **kwargs catchall",
             )
 
-    def test_store_memory_check_duplicates_only(self):
+    def test_store_memory_exact_duplicate_is_rejected(self):
         tools.store_memory(
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
             tags=["#auth"],
             owner_id="user_test",
-            skip_duplicate_check=True,
         )
         dup_res = tools.store_memory(
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
             tags=["#auth"],
             owner_id="user_test",
-            check_duplicates_only=True,
         )
-        self.assertIsInstance(dup_res, dict)
-        self.assertTrue(dup_res.get("duplicate_found", False))
+        self.assertEqual(dup_res["status"], "rejected")
+        self.assertEqual(dup_res["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
 
     def test_get_events_modes(self):
         tools.log_event(
@@ -111,7 +108,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Tag Test",
             tags=["#database"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         tags = tools.get_canonical_tags(query="data")
         self.assertIsInstance(tags, list)
@@ -127,9 +123,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Tag Clearing Entity",
             tags=["#python"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        entity_id = res.split("ID: ")[1].split()[0]
+        entity_id = res["data"]["id"]
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
 
         rejected = tools.store_memory(
@@ -138,7 +133,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Tag Clearing Entity",
             tags=[],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -156,9 +150,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Tag Replacement Entity",
             tags=["#alpha"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        entity_id = res.split("ID: ")[1].split()[0]
+        entity_id = res["data"]["id"]
 
         rejected = tools.store_memory(
             entity_id=entity_id,
@@ -166,7 +159,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Tag Replacement Entity",
             tags=["#beta"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -195,7 +187,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_store_memory_entity_id_bypasses_exact_duplicate_on_metadata_only_update(self):
         """Behavioral counterpart to the schema test above: an explicit entity_id alone (no
-        skip_duplicate_check) must let a metadata-only edit -- content byte-identical, only
+        explicit entity_id must let a metadata-only edit -- content byte-identical, only
         core_reason/core_exit_condition changing -- go through, matching store_memory's own
         docstring promise. Before the live incident this fixed, this exact call pattern (against
         the real MCP tool, not this direct Python call) returned REJECT_EXACT_DUPLICATE."""
@@ -208,9 +200,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
-            skip_duplicate_check=True,
         )
-        entity_id = res.split("ID: ")[1].split()[0]
+        entity_id = res["data"]["id"]
 
         update_res = tools.store_memory(
             entity_id=entity_id,
@@ -221,8 +212,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             core_reason="C" * 25,
             core_exit_condition="D" * 25,
         )
-        self.assertIn("stored successfully", update_res)
-        self.assertNotIn("REJECT_EXACT_DUPLICATE", update_res)
+        self.assertEqual(update_res["status"], "ok")
 
     def test_ephemeral_memory_tool(self):
         store_res = tools.ephemeral_memory(
@@ -239,9 +229,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Single Node",
             tags=["#archive"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
 
         arch_res1 = tools.archive_memory(entity_id=id1, owner_id="user1")
         self.assertIn("successfully archived", arch_res1)
@@ -251,17 +240,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Bulk Node 1",
             tags=["#archive"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res3 = tools.store_memory(
             content="Archive test bulk node 2",
             title="Bulk Node 2",
             tags=["#archive"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id2 = res2.split("ID: ")[1].split()[0]
-        id3 = res3.split("ID: ")[1].split()[0]
+        id2 = res2["data"]["id"]
+        id3 = res3["data"]["id"]
 
         # Test passing stringified list / actual list
         arch_res2 = tools.archive_memory(entity_id=[id2, id3], owner_id="user1")
@@ -273,17 +260,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Source Entity",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for relation",
             title="Target Entity",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
-        id2 = res2.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
@@ -359,17 +344,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Predicate Canon Source",
             tags=["#predicate"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for predicate canonicalization test",
             title="Predicate Canon Target",
             tags=["#predicate"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
-        id2 = res2.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="Depends-On", owner_id="user1"
@@ -397,17 +380,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Alias Substitution Source",
             tags=["#alias"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for seeded alias substitution test",
             title="Alias Substitution Target",
             tags=["#alias"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
-        id2 = res2.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="relates_to", owner_id="user1"
@@ -426,10 +407,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tags=["#memory-type"],
             owner_id="user1",
             memory_type="preference",
-            skip_duplicate_check=True,
         )
-        self.assertIn("stored successfully", res)
-        entity_id = res.split("ID: ")[1].split()[0]
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
 
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
@@ -448,7 +428,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tags=["#memory-type"],
             owner_id="user1",
             memory_type="fact",
-            skip_duplicate_check=True,
         )
         tools.store_memory(
             content="Event-typed content for the memory_type_filter tool test",
@@ -456,7 +435,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tags=["#memory-type"],
             owner_id="user1",
             memory_type="event",
-            skip_duplicate_check=True,
         )
 
         results = tools.search_memory(memory_type_filter="fact", owner_id="user1")
@@ -470,9 +448,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Root Entity",
             tags=["#graph"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0] if "ID: " in res1 else "Root Entity"
+        self.assertEqual(res1["status"], "ok")
+        id1 = res1["data"]["id"]
 
         deps = tools.get_related_memories(entity_id=id1, owner_id="user1")
         self.assertIsInstance(deps, dict)
@@ -489,17 +467,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="PIT MCP Source",
             tags=["#pit"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
         res2 = tools.store_memory(
             content="PIT MCP dependency target content",
             title="PIT MCP Target",
             tags=["#pit"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id2 = res2.split("ID: ")[1].split()[0]
+        id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
@@ -516,17 +492,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="PIT MCP Lineage A",
             tags=["#pit"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        a_id = res3.split("ID: ")[1].split()[0]
+        a_id = res3["data"]["id"]
         res4 = tools.store_memory(
             content="PIT MCP lineage parent B content",
             title="PIT MCP Lineage B",
             tags=["#pit"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        b_id = res4.split("ID: ")[1].split()[0]
+        b_id = res4["data"]["id"]
 
         cons_content = (
             "# PIT MCP Consolidated Lineage\n\n"
@@ -551,17 +525,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Invalidate MCP Source",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for relation invalidation test",
             title="Invalidate MCP Target",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
-        id2 = res2.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
@@ -587,17 +559,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="ValidAt Source",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
         res2 = tools.store_memory(
             content="Target entity for valid_at passthrough",
             title="ValidAt Target",
             tags=["#relation"],
             owner_id="user1",
-            skip_duplicate_check=True,
         )
-        id1 = res1.split("ID: ")[1].split()[0]
-        id2 = res2.split("ID: ")[1].split()[0]
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
 
         custom_valid_at = "2025-02-01T00:00:00+00:00"
         rel_res = tools.manage_relation(
@@ -822,18 +792,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Valid Memory 1",
             tags=["#dismiss"],
             owner_id="a",
-            skip_duplicate_check=True,
         )
-        raw_id1 = mem1.split("ID: ")[1].split()[0]
+        raw_id1 = mem1["data"]["id"]
 
         mem2 = tools.store_memory(
             content="# Valid Test Memory 2\nThis is another long enough markdown content to pass the quality gate.\n- Bullet point 1\n- Bullet point 2",
             title="Valid Memory 2",
             tags=["#dismiss"],
             owner_id="a",
-            skip_duplicate_check=True,
         )
-        raw_id2 = mem2.split("ID: ")[1].split()[0]
+        raw_id2 = mem2["data"]["id"]
 
         res1 = tools.log_event(
             agent_id="a",
@@ -911,9 +879,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Test Res",
             tags=["#events"],
             owner_id="a",
-            skip_duplicate_check=True,
         )
-        raw_id = mem.split("ID: ")[1].split()[0]
+        raw_id = mem["data"]["id"]
 
         res_cr = tools.log_event(
             agent_id="a",
@@ -1131,10 +1098,9 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
-            skip_duplicate_check=True,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1].split()[0]
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def test_retain_via_mcp_tool(self):
         entity_id = self._store_core("MCP Retain Core")
@@ -1217,7 +1183,6 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             tags=["#core-test"],
             owner_id="tester",
             is_core="yes",
-            skip_duplicate_check=True,
         )
         self.assertIsInstance(result, str)
         self.assertTrue(result.startswith("Error"), result)
@@ -1231,9 +1196,8 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
-            skip_duplicate_check=True,
         )
-        self.assertTrue(result.startswith("Knowledge stored successfully"), result)
+        self.assertEqual(result["status"], "ok")
 
 
 if __name__ == "__main__":

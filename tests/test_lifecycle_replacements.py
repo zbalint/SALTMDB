@@ -19,15 +19,15 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
     def _store(self, title="Original lifecycle memory", tags=None):
         result = store_memory(
             title=title,
-            content="A complete and sufficiently descriptive lifecycle memory body.",
+            content=f"A complete and sufficiently descriptive lifecycle memory body for {title}.",
             tags=tags or ["#original"],
             owner_id="lifecycle-tests",
             context_id="lifecycle-context",
             memory_type="decision",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return result.split("ID: ")[1].split()[0]
+        self.assertEqual(result["status"], "ok")
+        return result["data"]["id"]
 
     def _tags(self, entity_id):
         return self.conn.execute(

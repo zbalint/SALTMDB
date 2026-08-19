@@ -1,7 +1,6 @@
 import unittest
 import tempfile
 import os
-import re
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import archive_memory, revise_memory, store_memory
 
@@ -25,12 +24,10 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
             title="Test Unique Memory",
             content="Some unique content to test archived embedding status",
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        match = re.search(r"ID:\s*([a-f0-9\-]+)", res)
-        self.assertIsNotNone(match, f"Could not parse entity ID from store_memory result: {res}")
-        entity_id = match.group(1)
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
 
         # Verify status initially raw
         row = self.conn.execute(
@@ -52,12 +49,10 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
             title="Original Memory Entry",
             content="Original content text block",
             owner_id="test_user",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        match = re.search(r"ID:\s*([a-f0-9\-]+)", res)
-        self.assertIsNotNone(match, f"Could not parse entity ID from store_memory result: {res}")
-        entity_id = match.group(1)
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
 
         # Immutable revision archives the predecessor and creates a new ID.
         result = revise_memory(

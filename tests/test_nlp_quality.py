@@ -25,16 +25,19 @@ class TestTextQualityGate(unittest.TestCase):
         res = memory_service.store_memory(
             content="ok done", title="Short Fluff", owner_id="test_owner"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("below minimum threshold", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "SHORT_LENGTH")
 
     def test_tc_qual_02_fluff_regex_rejection(self):
         """TC-QUAL-02: Conversational fluff response -> REJECT"""
         res = memory_service.store_memory(
             content="modified the file.", title="Conversational Ack", owner_id="test_owner"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("below minimum threshold", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(
+            {error["code"] for error in res["errors"]},
+            {"SHORT_LENGTH", "CONVERSATIONAL_FLUFF"},
+        )
 
     def test_tc_qual_03_shannon_entropy_rejection(self):
         """TC-QUAL-03: Repetitive string (Entropy < 2.5) -> REJECT"""
@@ -42,8 +45,8 @@ class TestTextQualityGate(unittest.TestCase):
         res = memory_service.store_memory(
             content=repetitive_content, title="Repetitive Loop", owner_id="test_owner"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("entropy too low", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "EXTREME_GENERATION_LOOP")
 
     def test_tc_qual_04_high_entropy_warning(self):
         """TC-QUAL-04: High entropy minified Base64 / JSON payload -> WARN status"""
@@ -68,7 +71,7 @@ class TestTextQualityGate(unittest.TestCase):
             owner_id="agent_alpha",
             db_connection=self.conn,
         )
-        self.assertIn("Knowledge stored successfully", first_store)
+        self.assertEqual(first_store["status"], "ok")
 
         second_store = memory_service.store_memory(
             content=valid_markdown,
@@ -76,7 +79,8 @@ class TestTextQualityGate(unittest.TestCase):
             owner_id="agent_alpha",
             db_connection=self.conn,
         )
-        self.assertIn("REJECT_EXACT_DUPLICATE", second_store)
+        self.assertEqual(second_store["status"], "rejected")
+        self.assertEqual(second_store["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
 
     def test_tc_qual_06_technical_markdown_high_quality(self):
         """TC-QUAL-06: Technical Markdown with headers, paths, code fences -> ACCEPT with score >= 0.80"""
@@ -97,7 +101,7 @@ class TestTextQualityGate(unittest.TestCase):
             owner_id="agent_alpha",
             db_connection=self.conn,
         )
-        self.assertIn("Knowledge stored successfully", res)
+        self.assertEqual(res["status"], "ok")
 
         # Inspect database fields
         cursor = self.conn.execute(

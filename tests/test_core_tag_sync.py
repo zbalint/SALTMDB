@@ -33,15 +33,13 @@ class TestCoreTagSync(unittest.TestCase):
             is_core=is_core,
             tags=tags,
             entity_id=entity_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
             **core_kwargs,
         )
         if isinstance(res, dict):
             self.assertEqual(res.get("status"), "ok", f"seed store_memory failed: {res}")
-            return res["data"]["new_id"]
-        self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
-        return res.split("ID: ")[1].split()[0]
+            return res["data"]["id"]
+        self.fail(f"store_memory returned a legacy non-envelope result: {res}")
 
     def _tags_of(self, entity_id):
         rows = self.conn.execute(
@@ -80,7 +78,6 @@ class TestCoreTagSync(unittest.TestCase):
             tags=["#core", "#foo"],
             entity_id=entity_id,
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(rejected["status"], "rejected")

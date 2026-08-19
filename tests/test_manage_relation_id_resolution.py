@@ -16,11 +16,11 @@ def _store(conn, title, content=None, **kw):
         content=content,
         title=title,
         owner_id="owner_a",
-        skip_duplicate_check=True,
         db_connection=conn,
         **kw,
     )
-    return res.split("ID: ")[1].strip()
+    assert res["status"] == "ok"
+    return res["data"]["id"]
 
 
 class TestManageRelationIdResolution(unittest.TestCase):

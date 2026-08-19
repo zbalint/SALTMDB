@@ -19,9 +19,8 @@ Deliberately import-light at module scope: no `saltmdb.domain.services.*` import
 this file, even though `reconcile_detail_relations`/`review_core_memory` need relation_service and
 memory_service.lifecycle at call time. Both of those already import (directly or transitively)
 back into this module's natural callers (memory_service.write, relation_service), so a top-level
-cross-import here would risk exactly the init-time cycle disposition_service.py's docstring
-already documents for its own relation_service/memory_service edges. Every cross-service import
-below is therefore deferred (function-local), keeping this module safely importable from anywhere.
+Every cross-service import below is therefore deferred (function-local), keeping this module safely
+importable from anywhere.
 """
 
 import json

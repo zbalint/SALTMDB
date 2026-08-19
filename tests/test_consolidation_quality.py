@@ -23,23 +23,19 @@ class TestConsolidationQualityGate(unittest.TestCase):
 
     def test_tc_cons_01_fluff_rejection(self):
         """TC-CONS-01: Rejection of low-quality fluff content during consolidation"""
-        # skip_duplicate_check=True: these two fixtures are deliberately near-identical templated
-        # content (this test is about consolidation quality gating, not dedup behavior) and would
-        # otherwise trip Track A's store-time disposition preflight against each other.
+        # These fixtures exercise consolidation quality gating, not duplicate handling.
         p1 = store_memory(
             title="Raw Fact Alpha",
             content="Detailed raw fact content alpha for consolidation testing",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Beta",
             content="Detailed raw fact content beta for consolidation testing",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         res = commit_consolidation(
             parent_ids=[p1, p2],
@@ -63,16 +59,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
             content=parent_content,
             owner_id="agent_c",
             db_connection=self.conn,
-            skip_duplicate_check=True,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         p2 = store_memory(
             title="Memory Arch Spec Support",
             content="A second raw architecture fact used only as a consolidation parent.",
             owner_id="agent_c",
             db_connection=self.conn,
-            skip_duplicate_check=True,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         # Consolidate with identical content as parent_content
         res = commit_consolidation(
@@ -104,14 +98,13 @@ class TestConsolidationQualityGate(unittest.TestCase):
             content="Detailed raw fact content gamma for consolidation testing",
             owner_id="agent_c",
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Gamma Support",
             content="Supporting raw fact content gamma for consolidation testing.",
             owner_id="agent_c",
             db_connection=self.conn,
-            skip_duplicate_check=True,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         # Attempt to consolidate p1 using content that matches the unrelated existing memory
         res = commit_consolidation(
@@ -130,14 +123,13 @@ class TestConsolidationQualityGate(unittest.TestCase):
             content="Detailed raw fact content delta for consolidation testing",
             owner_id="agent_c",
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Delta Support",
             content="Supporting raw fact content delta for consolidation testing.",
             owner_id="agent_c",
             db_connection=self.conn,
-            skip_duplicate_check=True,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         consolidated_md = (
             "# Consolidated System Architecture Overview\n\n"

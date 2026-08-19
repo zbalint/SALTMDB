@@ -46,7 +46,6 @@ def classify_result(result: Any, raised: BaseException | None) -> tuple[str, str
             ) else None
         if isinstance(status, str) and status.upper() in {
             "REJECTED",
-            "REVIEW_STALE",
             "DAEMON_CONNECTION_LOST_DURING_WRITE",
         }:
             return "error", result.get("error_code") or status

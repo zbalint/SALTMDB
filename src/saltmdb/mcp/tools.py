@@ -1,6 +1,7 @@
 from typing import Literal
 import json
 import logging
+import re
 from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
 from saltmdb.daemon import protocol
@@ -21,6 +22,26 @@ class _UnsetRetrievalText(str):
 # than equality) distinguishes an omitted field from an explicit JSON null.  The marker is only an
 # adapter default; it is never sent to the domain service or persisted.
 _RETRIEVAL_TEXT_UNSET = _UnsetRetrievalText("__saltmdb_retrieval_text_omitted__")
+
+
+_YAML_FRONT_MATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(?P<header>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL
+)
+
+
+def _front_matter_identity_fields(content: str) -> tuple[list[str], str]:
+    """Return forbidden identity keys and the body with leading YAML metadata removed."""
+    if not isinstance(content, str):
+        return [], content
+    match = _YAML_FRONT_MATTER_RE.match(content)
+    if match is None:
+        return [], content
+    fields: list[str] = []
+    for line in match.group("header").splitlines():
+        key_match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:", line)
+        if key_match and key_match.group(1).lower() in {"title", "tags"}:
+            fields.append(key_match.group(1).lower())
+    return sorted(set(fields)), content[match.end() :].lstrip("\r\n")
 
 
 def _normalize_list_or_str(val) -> list:
@@ -247,19 +268,9 @@ def merge_tags(
     exact-content-hash duplicate check, so a metadata-only edit (e.g. re-tagging, backfilling
     core_reason/core_exit_condition) doesn't require changing content.
 
-    If check_duplicates_only is True, returns duplicate detection results without writing to the database.
-
-    Store-time disposition (Track A): every call is preflighted before persistence. If
-    evidence-gathering finds no flagged candidates, this behaves exactly as always -- a single
-    call, plain string result. If it finds one or more (a possible duplicate, supersession, or
-    stale-consolidated-node signal), nothing is written; instead this returns a dict with
-    `status: "REVIEW_REQUIRED"`, an opaque `review_token`, and the flagged `candidates`, each with
-    an advisory `suggested_label` (never authoritative -- use your own judgment, including calling
-    it a false alarm) and the `available_dispositions` for it. Resend the identical call with
-    `review_token` and `dispositions` (one `{"candidate_id": ..., "disposition": "distinct" |
-    "supersede" | "consolidate"}` per flagged candidate) to commit. A stale/expired token, or a
-    resend that no longer matches what was previewed, returns `status: "REVIEW_STALE"` instead --
-    call again without `review_token` for a fresh preflight.
+    Exact content-hash duplicates are rejected with the existing entity ID. Near duplicates are
+    stored and returned inline as `duplicate_candidates`, with guidance to call
+    `supersede_memory` or `consolidate_memories` when the relationship is confirmed.
 
     Core-memory bootstrap governance: `is_core=True` marks a memory for injection into every
     future session's bootstrap context -- it is a SCARCE, TEMPORARY mechanism for urgent
@@ -297,18 +308,35 @@ def store_memory(
     entity_id: str | None = None,
     is_core: bool | None = None,
     scope: Literal["private", "shared"] = "shared",
-    check_duplicates_only: bool = False,
-    skip_duplicate_check: bool = False,
-    review_token: str | None = None,
-    dispositions: list | None = None,
     retrieval_text: str | None = _RETRIEVAL_TEXT_UNSET,
     core_reason: str | None = None,
     core_exit_condition: str | None = None,
     core_review_after: str | None = None,
     detail_memory_ids: list | None = None,
 ) -> str | dict:
+    submitted = locals().copy()
     owner_id_ = _effective_owner(owner_id, tool_func=store_memory, submitted=locals())
     tags_ = _normalize_list_or_str(tags)
+    front_matter_fields, body_without_front_matter = _front_matter_identity_fields(content)
+    if front_matter_fields:
+        from saltmdb.utils.corrected_call import build_corrected_call
+        from saltmdb.utils.envelope import error, rejected
+
+        corrected_call = build_corrected_call(
+            store_memory,
+            submitted,
+            {"content": body_without_front_matter},
+        )
+        return rejected(
+            [
+                error(
+                    "IDENTITY_IN_YAML_FRONT_MATTER",
+                    "title and tags belong only in tool parameters; remove them from YAML front matter and retry the corrected call.",
+                    "content",
+                )
+            ],
+            corrected_call=corrected_call,
+        )
     try:
         # Strict tri-state parse (core-memory governance resolved gap #6): an unrecognized value
         # like "yes" or an integer is rejected outright here, at the adapter boundary, rather
@@ -319,9 +347,6 @@ def store_memory(
         return f"Error: {e}"
 
     memory_type_ = memory_type
-    check_duplicates_only_ = check_duplicates_only
-    review_token_ = review_token
-    dispositions_ = dispositions
     retrieval_text_provided = retrieval_text is not _RETRIEVAL_TEXT_UNSET
     retrieval_text_ = retrieval_text if retrieval_text_provided else None
     detail_memory_ids_ = (
@@ -339,11 +364,7 @@ def store_memory(
             "memory_type": memory_type_,
             "title": title,
             "entity_id": entity_id,
-            "skip_duplicate_check": skip_duplicate_check,
             "context_id": context_id,
-            "review_token": review_token_,
-            "dispositions": dispositions_,
-            "check_duplicates_only": check_duplicates_only_,
             "retrieval_text": retrieval_text_,
             "retrieval_text_provided": retrieval_text_provided,
             "core_reason": core_reason,

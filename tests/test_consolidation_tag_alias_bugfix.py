@@ -43,10 +43,10 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             title="Nightly Job Crash Root Cause Bugfix",
             tags=["#bugfix"],
             owner_id="user1",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].strip()
+        self.assertEqual(res1["status"], "ok")
+        id1 = res1["data"]["id"]
 
         # 2. Store a second, genuinely different-looking raw entity tagged #fix (not a
         #    plural/suffix variant of #bugfix, so it lands as its own row -- this exercises
@@ -56,10 +56,10 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             title="Retry Handler Null Check Fix",
             tags=["#fix"],
             owner_id="user1",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id2 = res2.split("ID: ")[1].strip()
+        self.assertEqual(res2["status"], "ok")
+        id2 = res2["data"]["id"]
 
         bugfix_row = self._tag_row("#bugfix")
         fix_row = self._tag_row("#fix")

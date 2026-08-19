@@ -347,38 +347,59 @@ def build_metadata(doc: ParsedDoc, run_id: str) -> dict:
 # --------------------------------------------------------------------------------------------
 
 
+def _classify_store_envelope(result: dict) -> tuple[str, str | None]:
+    status = result.get("status")
+    if status == "ok":
+        data = result.get("data")
+        if isinstance(data, dict) and isinstance(data.get("id"), str):
+            return "stored_clean", None
+        return "other_error", str(result)
+    if status != "rejected":
+        return "other_error", str(result)
+
+    errors = result.get("errors") or []
+    codes = {
+        item.get("code")
+        for item in errors
+        if isinstance(item, dict) and isinstance(item.get("code"), str)
+    }
+    if "REJECT_EXACT_DUPLICATE" in codes:
+        outcome = "exact_duplicate_rejected"
+    elif (
+        any(
+            isinstance(item, dict)
+            and "quality check rejected" in str(item.get("message", "")).lower()
+            for item in errors
+        )
+        or "MEMORY_QUALITY_REJECTED" in codes
+    ):
+        outcome = "quality_rejected"
+    else:
+        outcome = "other_error"
+    return outcome, str(result)
+
+
+def _classify_legacy_store_result(result: str) -> tuple[str, str | None]:
+    if result.startswith("Knowledge stored successfully"):
+        return "stored_clean", None
+    if "REJECT_EXACT_DUPLICATE" in result:
+        return "exact_duplicate_rejected", result
+    if "Memory quality check rejected" in result:
+        return "quality_rejected", result
+    return "other_error", result
+
+
 def classify_store_result(result: str | dict) -> tuple[str, str | None]:
     """Classify store_memory()'s return into a checkpoint outcome. Returns (outcome, error_detail).
 
-    Track A compatibility note (memory-core rework, see
-    scratch/plans/track_a_disposition_detailed.md): store_memory now runs a store-time preflight
-    and returns a dict instead of a string whenever it flags one or more candidates -- the old
-    "[WARNING: Potential duplicate...]" string suffix (and the "stored_with_duplicate_warning"
-    outcome it fed) no longer exists; anything that would have triggered it now surfaces as
-    REVIEW_REQUIRED before persistence instead. This is a minimal compatibility fix (classify the
-    new shapes without crashing) not a redesign of this script's checkpoint/stats semantics --
-    callers that need the old duplicate-warning breakdown must be updated deliberately.
+    Phase 5 store_memory responses use the uniform response envelope. Successful writes carry the
+    entity ID in ``data.id``; deterministic failures carry structured ``errors`` entries. Plain
+    strings remain accepted as a defensive fallback for older validation failures, but all normal
+    success and rejection paths are classified from the envelope.
     """
     if isinstance(result, dict):
-        status = result.get("status")
-        if status == "REVIEW_REQUIRED":
-            return "review_required", None
-        if status == "REVIEW_STALE":
-            return "review_stale", str(result)
-        return "other_error", str(result)
-    if result.startswith("Knowledge stored successfully"):
-        outcome = "stored_clean"
-        detail = None
-    elif "REJECT_EXACT_DUPLICATE" in result:
-        outcome = "exact_duplicate_rejected"
-        detail = result
-    elif "Memory quality check rejected" in result:
-        outcome = "quality_rejected"
-        detail = result
-    else:
-        outcome = "other_error"
-        detail = result
-    return outcome, detail
+        return _classify_store_envelope(result)
+    return _classify_legacy_store_result(result)
 
 
 # --------------------------------------------------------------------------------------------
@@ -537,7 +558,6 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
                         title=title,
                         tags=tags,
                         metadata=metadata,
-                        skip_duplicate_check=False,
                         context_id=None,
                         db_connection=conn,
                         # db_path is NOT redundant with db_connection here: store_memory only
@@ -641,7 +661,12 @@ def _finalize_dataset_stats(stats: dict) -> dict:
     return out
 
 
-def _extract_entity_id(result: str) -> str | None:
+def _extract_entity_id(result: str | dict) -> str | None:
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, dict) and isinstance(data.get("id"), str):
+            return data["id"]
+        return None
     m = re.search(r"ID:\s*([0-9a-fA-F-]{36})", result)
     return m.group(1) if m else None
 

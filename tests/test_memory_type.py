@@ -34,13 +34,12 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
                 title=f"Memory Type Round Trip {mt}",
                 owner_id="tester",
                 memory_type=mt,
-                skip_duplicate_check=True,
                 db_connection=self.conn,
             )
-            self.assertFalse(
-                res.startswith("Error"), f"store_memory failed for memory_type={mt}: {res}"
+            self.assertEqual(
+                res["status"], "ok", f"store_memory failed for memory_type={mt}: {res}"
             )
-            entity_id = res.split("ID: ")[1].strip()
+            entity_id = res["data"]["id"]
             self.assertEqual(self._memory_type_of(entity_id), mt)
 
     def test_invalid_memory_type_returns_error_string_not_exception(self):
@@ -49,7 +48,6 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             title="Invalid Memory Type Entity",
             owner_id="tester",
             memory_type="bogus_type",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertIsInstance(res, str)
@@ -60,11 +58,10 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             content="Content for default memory_type test on a brand-new entity",
             title="Default Memory Type Entity",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertFalse(res.startswith("Error"))
-        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
         self.assertEqual(self._memory_type_of(entity_id), "fact")
 
     def test_update_omitting_memory_type_preserves_existing_value(self):
@@ -73,11 +70,10 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             title="Memory Type Preservation Entity",
             owner_id="tester",
             memory_type="decision",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertFalse(res.startswith("Error"))
-        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
         self.assertEqual(self._memory_type_of(entity_id), "decision")
 
         update_res = store_memory(
@@ -86,10 +82,9 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             title="Memory Type Preservation Entity",
             owner_id="tester",
             memory_type=None,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertFalse(update_res.startswith("Error"))
+        self.assertEqual(update_res["status"], "ok")
         self.assertEqual(
             self._memory_type_of(entity_id),
             "decision",
@@ -102,11 +97,10 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             title="Memory Type Change Entity",
             owner_id="tester",
             memory_type="fact",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertFalse(res.startswith("Error"))
-        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
         self.assertEqual(self._memory_type_of(entity_id), "fact")
 
         update_res = store_memory(
@@ -115,7 +109,6 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             title="Memory Type Change Entity",
             owner_id="tester",
             memory_type="event",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(update_res["status"], "rejected")
@@ -151,12 +144,11 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
             memory_type=memory_type,
             is_core=is_core,
             tags=tags,
-            skip_duplicate_check=True,
             db_connection=self.conn,
             **core_kwargs,
         )
-        self.assertFalse(res.startswith("Error"), f"seed store_memory failed: {res}")
-        return res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok", f"seed store_memory failed: {res}")
+        return res["data"]["id"]
 
     def test_search_memory_type_filter_returns_only_matching(self):
         proc_id = self._store("Procedure Seed Entity Alpha", "procedure")

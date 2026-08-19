@@ -24,10 +24,9 @@ class TestEmbeddingTrigger(unittest.TestCase):
             title="Async Embedding Test Memory",
             content="Content for testing async background embedding generation worker pool",
             owner_id="user1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        entity_id = res.split("ID: ")[1]
+        entity_id = res["data"]["id"]
 
         states = self.conn.execute(
             "SELECT job_kind, state FROM embedding_jobs WHERE entity_id=? ORDER BY job_kind",

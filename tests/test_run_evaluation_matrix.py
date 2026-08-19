@@ -93,7 +93,6 @@ class TestRunMatrixForQueries(unittest.TestCase):
             "asynchronously across all replica nodes in the cluster.",
             title="Distributed Cache Invalidation Protocol",
             owner_id="test",
-            skip_duplicate_check=True,
             db_connection=self.conn,
             db_path=self.db_path,
         )
@@ -106,7 +105,6 @@ class TestRunMatrixForQueries(unittest.TestCase):
             "during a network partition in a distributed system.",
             title="Raft Consensus Leader Election",
             owner_id="test",
-            skip_duplicate_check=True,
             db_connection=self.conn,
             db_path=self.db_path,
         )
@@ -122,13 +120,8 @@ class TestRunMatrixForQueries(unittest.TestCase):
 
     @staticmethod
     def _extract_id(store_result) -> str:
-        # store_memory's return is documented elsewhere in this repo's own benchmark scripts as
-        # containing "Knowledge stored successfully with ID: <uuid>" -- extract it the same way.
-        import re
-
-        m = re.search(r"ID:\s*([0-9a-fA-F-]{36})", store_result)
-        assert m, f"could not extract entity id from store_memory result: {store_result!r}"
-        return m.group(1)
+        assert store_result["status"] == "ok", store_result
+        return store_result["data"]["id"]
 
     def test_smoke_run_finds_the_real_entity(self):
         configs = [
@@ -318,7 +311,9 @@ class TestRunMatrixForQueries(unittest.TestCase):
 
     def test_blind_query_authorization_refuses_before_query_file_read(self):
         query_path = Path(self.temp_dir) / "private-vault" / "queries_blind.json"
-        with patch.object(Path, "read_text", side_effect=AssertionError("query file opened")) as read:
+        with patch.object(
+            Path, "read_text", side_effect=AssertionError("query file opened")
+        ) as read:
             with self.assertRaisesRegex(RuntimeError, "signed --dev-shortlist"):
                 rem.authorize_query_manifest(query_path, "blind")
             read.assert_not_called()

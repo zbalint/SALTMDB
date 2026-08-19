@@ -9,6 +9,9 @@ from saltmdb.config import (
     QG_MIN_TTR,
     QG_CLI_MIN,
     QG_CLI_MAX,
+    QG_PARAGRAPH_BREAK_MIN_LENGTH,
+    QG_HEADING_OR_LIST_MIN_LENGTH,
+    QG_MULTI_HEADING_MIN_LENGTH,
 )
 
 STOP_WORDS = {
@@ -460,150 +463,208 @@ def validate_markdown_structure(text: str) -> dict:
     }
 
 
-def evaluate_memory_quality(content: str, title: str = None) -> dict:  # noqa: C901, PLR0911, PLR0912, PLR0915
-    """
-    Evaluates memory content quality across Tier 1, Tier 2, and Tier 4 quality gates.
-    Returns dict with status ('ACCEPT', 'WARN', 'REJECT'), quality_score (0.0 - 1.0), and quality_flags.
-    """
-    flags = []
-    text = (content or "").strip()
+def _contains_explicit_placeholder(text: str) -> bool:
+    """Return whether *text* is an authoring placeholder rather than a memory body.
 
-    # Tier 1: Boundary & Fluff Scanners
-    if len(text) < QG_MIN_LENGTH:
-        flags.append("SHORT_LENGTH")
-        return {
-            "status": "REJECT",
-            "quality_score": 0.0,
-            "quality_flags": flags,
-            "reason": f"Payload string length ({len(text)} chars) below minimum threshold of {QG_MIN_LENGTH} characters.",
-        }
+    The check intentionally targets explicit template markers and whole-body placeholders.  A
+    normal note mentioning ``TODO`` in passing is not rejected, while a generated ``{{summary}}``
+    or ``[placeholder]`` payload is.
+    """
+    if not text:
+        return False
+    marker = re.compile(
+        r"(?:\{\{[^{}\n]+\}\}|\$\{[^}\n]+\}|<(?:placeholder|todo|tbd|your[- ]?text)>|"
+        r"\[(?:placeholder|todo|tbd|insert[^\]]*)\])",
+        re.IGNORECASE,
+    )
+    if marker.search(text):
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:placeholder|todo|tbd|lorem ipsum|n/?a|none|null|to be determined)[.!]?",
+            text.strip(),
+            re.IGNORECASE,
+        )
+    )
 
-    if FLUFF_PATTERN.match(text):
-        flags.append("CONVERSATIONAL_FLUFF")
-        return {
-            "status": "REJECT",
-            "quality_score": 0.0,
-            "quality_flags": flags,
-            "reason": "Conversational fluff phrase detected.",
-        }
+
+def _is_extreme_generation_loop(text: str, words: list[str], entropy: float) -> bool:
+    """Identify only unmistakable generated repetition as a statistical hard failure.
+
+    Ordinary low-diversity prose is allowed through with a warning.  A short, single-word loop
+    (the common ``test test ...`` failure mode) and long near-identical n-gram loops remain hard
+    failures because they carry no recoverable memory signal.
+    """
+    if len(words) < 12:
+        return False
+    ttr = calculate_ttr(text)
+    if entropy < 2.0 and ttr < 0.20:
+        return True
+    duplicate_3gram = calculate_ngram_duplicate_ratio(text, 3)
+    duplicate_5gram = calculate_ngram_duplicate_ratio(text, 5)
+    return len(words) >= 24 and (duplicate_3gram >= 0.85 or duplicate_5gram >= 0.80)
+
+
+def evaluate_memory_quality(content: str, title: str = None) -> dict:  # noqa: C901, PLR0912, PLR0915
+    """Evaluate content while reporting every blocking and advisory quality finding.
+
+    ``quality_flags`` remains the compatibility view used by persistence and the viewer.  The
+    explicit ``hard_errors`` and ``warnings`` lists make the decision auditable and avoid the old
+    first-failure behavior.  Statistical heuristics are advisory except for unmistakable
+    generation loops; malformed/empty/placeholder bodies and missing long-form structure remain
+    hard failures.
+    """
+    flags: list[str] = []
+    hard_errors: list[str] = []
+    warnings: list[str] = []
+    reasons: list[str] = []
+
+    def add_flag(code: str) -> None:
+        if code not in flags:
+            flags.append(code)
+
+    def add_hard(code: str, reason: str) -> None:
+        add_flag(code)
+        hard_errors.append(code)
+        reasons.append(reason)
+
+    def add_warning(code: str) -> None:
+        add_flag(code)
+        warnings.append(code)
+
+    if content is None:
+        text = ""
+    elif isinstance(content, str):
+        text = content.strip()
+    else:
+        text = str(content).strip()
+        add_hard("INVALID_FORMAT", "Payload content must be a text string.")
+
+    length = len(text)
+    if not text:
+        add_hard("EMPTY_CONTENT", "Payload content is empty.")
+    if length < QG_MIN_LENGTH:
+        add_hard(
+            "SHORT_LENGTH",
+            f"Payload string length ({length} chars) below minimum threshold of {QG_MIN_LENGTH} characters.",
+        )
+    if text and FLUFF_PATTERN.match(text):
+        add_hard("CONVERSATIONAL_FLUFF", "Conversational fluff phrase detected.")
+    if _contains_explicit_placeholder(text):
+        add_hard("EXPLICIT_PLACEHOLDER", "Payload contains an unresolved placeholder.")
 
     symbol_ratio = calculate_symbol_ratio(text)
     if symbol_ratio > QG_MAX_SYMBOL_RATIO:
-        flags.append("HIGH_SYMBOL_RATIO")
-        return {
-            "status": "REJECT",
-            "quality_score": 0.05,
-            "quality_flags": flags,
-            "reason": f"Symbol-to-alpha ratio ({symbol_ratio:.2f}) exceeds threshold of {QG_MAX_SYMBOL_RATIO}.",
-        }
+        add_warning("HIGH_SYMBOL_RATIO")
 
-    tier1_warn = False
-    if len(text) > 8000:
-        flags.append("OVERSIZED_PAYLOAD")
-        tier1_warn = True
+    if length > 8000:
+        add_warning("OVERSIZED_PAYLOAD")
 
-    # Tier 1.5: Markdown Syntax Integrity Verification
     md_res = validate_markdown_structure(text)
     if not md_res["is_valid"]:
-        flags.append(md_res["error_flag"])
-        return {
-            "status": "REJECT",
-            "quality_score": 0.0,
-            "quality_flags": flags,
-            "reason": md_res["reason"],
-        }
-
-    # Tier 2: Information-Theoretic & Sequence Density Filters
-    entropy = calculate_shannon_entropy(text)
-    if entropy < QG_MIN_ENTROPY:
-        flags.append("LOW_ENTROPY")
-        return {
-            "status": "REJECT",
-            "quality_score": 0.10,
-            "quality_flags": flags,
-            "reason": f"Character entropy too low ({entropy:.2f} bits/char) - repetitive text loop detected.",
-        }
-    elif entropy > QG_MAX_ENTROPY:
-        flags.append("HIGH_ENTROPY")
-        tier1_warn = True
+        add_hard(md_res["error_flag"], md_res["reason"])
 
     words = re.findall(r"\b\w+\b", text.lower())
+    entropy = calculate_shannon_entropy(text)
+    extreme_loop = _is_extreme_generation_loop(text, words, entropy)
+    if entropy < QG_MIN_ENTROPY:
+        if extreme_loop:
+            add_hard(
+                "EXTREME_GENERATION_LOOP",
+                f"Character entropy too low ({entropy:.2f} bits/char) and the payload is an extreme repetition loop.",
+            )
+        else:
+            add_warning("LOW_ENTROPY")
+    elif entropy > QG_MAX_ENTROPY:
+        add_warning("HIGH_ENTROPY")
+
     if len(words) >= 20:
         dup_3gram = calculate_ngram_duplicate_ratio(text, 3)
         if dup_3gram > QG_MAX_3GRAM_DUP:
-            flags.append("HIGH_3GRAM_REPETITION")
-            return {
-                "status": "REJECT",
-                "quality_score": 0.10,
-                "quality_flags": flags,
-                "reason": f"High 3-gram sequence repetition detected ({dup_3gram:.1%}).",
-            }
-
+            add_warning("HIGH_3GRAM_REPETITION")
         dup_5gram = calculate_ngram_duplicate_ratio(text, 5)
         if dup_5gram > QG_MAX_5GRAM_DUP:
-            flags.append("HIGH_5GRAM_REPETITION")
-            return {
-                "status": "REJECT",
-                "quality_score": 0.10,
-                "quality_flags": flags,
-                "reason": f"High 5-gram sequence repetition detected ({dup_5gram:.1%}).",
-            }
+            add_warning("HIGH_5GRAM_REPETITION")
 
     if len(words) > 30:
         ttr = calculate_ttr(text)
         if ttr < QG_MIN_TTR:
-            flags.append("LOW_TTR")
-            return {
-                "status": "REJECT",
-                "quality_score": 0.15,
-                "quality_flags": flags,
-                "reason": f"Type-Token Ratio too low ({ttr:.2f}) - boilerplate repetition detected.",
-            }
+            add_warning("LOW_TTR")
 
-    # Extract pure prose content for Readability evaluation
     prose_content = extract_prose_content(text)
     prose_words = re.findall(r"\b[a-zA-Z0-9_-]+\b", prose_content)
-
-    # Coleman-Liau Syntactic Readability Bounds
     if len(prose_words) > 30:
         cli = calculate_coleman_liau_index(prose_content)
         if cli < QG_CLI_MIN or cli > QG_CLI_MAX:
-            flags.append("EXTREME_READABILITY_BOUNDS")
-            return {
-                "status": "REJECT",
-                "quality_score": 0.15,
-                "quality_flags": flags,
-                "reason": f"Coleman-Liau readability index ({cli:.1f}) outside reasonable bounds [{QG_CLI_MIN}, {QG_CLI_MAX}].",
-            }
+            add_warning("EXTREME_READABILITY_BOUNDS")
 
-    # Tier 4: Structural Formatting Scoring
+    has_list = bool(re.search(r"^\s*(?:[\-\*\+]|\d+\.)\s+", text, re.MULTILINE))
+    has_paragraph_break = "\n\n" in text
+    header_count = md_res.get("header_count", 0)
+    if (
+        QG_PARAGRAPH_BREAK_MIN_LENGTH <= length < QG_HEADING_OR_LIST_MIN_LENGTH
+        and not has_paragraph_break
+    ):
+        add_hard(
+            "MISSING_PARAGRAPH_BREAK",
+            f"Payloads from {QG_PARAGRAPH_BREAK_MIN_LENGTH} characters require a paragraph break.",
+        )
+    if length >= QG_HEADING_OR_LIST_MIN_LENGTH and header_count == 0 and not has_list:
+        add_hard(
+            "MISSING_HEADING_OR_LIST",
+            f"Payloads over {QG_HEADING_OR_LIST_MIN_LENGTH} characters require a heading or list.",
+        )
+    if length > QG_MULTI_HEADING_MIN_LENGTH and header_count <= 1:
+        add_hard(
+            "INSUFFICIENT_HEADINGS",
+            f"Payloads over {QG_MULTI_HEADING_MIN_LENGTH} characters require more than one heading.",
+        )
+
     score = 0.50
-    if md_res["header_count"] > 0:
+    if header_count > 0:
         score += 0.15
-        flags.append("HAS_HEADERS")
-
-    if re.search(r"^\s*(?:[\-\*\+]|\d+\.)\s+", text, re.MULTILINE):
+        add_flag("HAS_HEADERS")
+    if has_list:
         score += 0.10
-        flags.append("HAS_LIST")
-
-    # MSDI Structure Density Score
-    msdi = md_res["msdi"]
+        add_flag("HAS_LIST")
+    msdi = md_res.get("msdi", 0.0)
     if msdi >= 0.35:
         score += 0.15
-        flags.append("HIGH_MSDI")
+        add_flag("HIGH_MSDI")
     elif len(words) > 80 and msdi < 0.10:
         score -= 0.15
-        flags.append("MONOLITHIC_TEXT_WALL")
-
-    if md_res["untyped_blocks"] > 0:
+        add_flag("MONOLITHIC_TEXT_WALL")
+    if md_res.get("untyped_blocks", 0) > 0:
         score -= 0.10
-        flags.append("UNANNOTATED_CODE_BLOCKS")
-
-    if md_res["has_header_skip"]:
+        add_flag("UNANNOTATED_CODE_BLOCKS")
+    if md_res.get("has_header_skip", False):
         score -= 0.10
-        flags.append("NON_HIERARCHICAL_HEADERS")
+        add_flag("NON_HIERARCHICAL_HEADERS")
 
     score = max(0.0, min(1.0, round(score, 2)))
-    status = "WARN" if tier1_warn else "ACCEPT"
-
-    return {"status": status, "quality_score": score, "quality_flags": flags, "reason": None}
+    if hard_errors:
+        status = "REJECT"
+        if any(
+            code in hard_errors
+            for code in (
+                "EMPTY_CONTENT",
+                "SHORT_LENGTH",
+                "INVALID_FORMAT",
+                "BROKEN_MARKDOWN_SYNTAX",
+            )
+        ):
+            score = 0.0
+        elif "EXTREME_GENERATION_LOOP" in hard_errors:
+            score = 0.10
+    elif warnings:
+        status = "WARN"
+    else:
+        status = "ACCEPT"
+    return {
+        "status": status,
+        "quality_score": score,
+        "quality_flags": flags,
+        "hard_errors": hard_errors,
+        "warnings": warnings,
+        "reason": " ".join(reasons) if reasons else None,
+    }

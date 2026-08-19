@@ -55,7 +55,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
             title="SALTMDB Cross-Agent Design Purpose",
             owner_id="agent_a",
             scope="shared",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
@@ -79,7 +78,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
             title="agent_a Private Debug Note",
             owner_id="agent_a",
             scope="private",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
@@ -115,7 +113,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
                     content=c,
                     owner_id=owner,
                     entity_id=eid,
-                    skip_duplicate_check=True,
                     db_connection=self.conn,
                 )
                 _seed_ready_embedding(self.conn, eid, t, c)
@@ -152,7 +149,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
             content=c_a,
             owner_id=owner,
             entity_id=eid_a,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         _seed_ready_embedding(self.conn, eid_a, t_a, c_a)
@@ -166,7 +162,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
             content=c_b,
             owner_id=owner,
             entity_id=eid_b,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
@@ -181,7 +176,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
             content=c_c,
             owner_id=owner,
             entity_id=eid_c,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 
@@ -227,7 +221,6 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 title=f"Standard System Memory Item {i:02d}",
                 content=f"Detailed content for standard system memory entity index {i:02d}",
                 owner_id=owner,
-                skip_duplicate_check=True,
                 db_connection=self.conn,
             )
 

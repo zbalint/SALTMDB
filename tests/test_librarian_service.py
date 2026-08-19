@@ -23,19 +23,17 @@ class TestLibrarianService(unittest.TestCase):
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation",
             owner_id="agent1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        id1 = res1.split("ID: ")[1]
+        id1 = res1["data"]["id"]
 
         res2 = store_memory(
             title="Parent Fact B",
             content="Detailed description of Fact B for testing consolidation",
             owner_id="agent1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        id2 = res2.split("ID: ")[1]
+        id2 = res2["data"]["id"]
 
         c_res = commit_consolidation(
             parent_ids=[id1, id2],
@@ -68,10 +66,9 @@ class TestLibrarianService(unittest.TestCase):
             title="Bulk Atomicity Parent A",
             content="Detailed description of a parent fact used for the bulk atomicity regression test",
             owner_id="agent1",
-            skip_duplicate_check=True,
             db_path=self.db_path,
         )
-        id1 = res1.split("ID: ")[1]
+        id1 = res1["data"]["id"]
 
         results = bulk_commit_consolidation(
             consolidations=[

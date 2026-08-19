@@ -462,31 +462,44 @@ class TestDestinationGuard(unittest.TestCase):
 class TestOutcomeClassification(unittest.TestCase):
     def test_classify_store_result(self):
         self.assertEqual(
-            bdt.classify_store_result("Knowledge stored successfully with ID: abc"),
+            bdt.classify_store_result({"status": "ok", "data": {"id": "abc"}, "warnings": []}),
             ("stored_clean", None),
         )
-        # Track A (memory-core rework): the old "[WARNING: Potential duplicate...]" string
-        # suffix / "stored_with_duplicate_warning" outcome no longer exists -- store_memory now
-        # returns a REVIEW_REQUIRED dict before persistence instead of a warned success string.
         self.assertEqual(
-            bdt.classify_store_result({"status": "REVIEW_REQUIRED", "candidates": []})[0],
-            "review_required",
+            bdt.classify_store_result(
+                {
+                    "status": "rejected",
+                    "errors": [
+                        {
+                            "code": "REJECT_EXACT_DUPLICATE",
+                            "message": "An active memory with the exact content hash already exists.",
+                        }
+                    ],
+                    "warnings": [],
+                }
+            )[0],
+            "exact_duplicate_rejected",
         )
         self.assertEqual(
-            bdt.classify_store_result({"status": "REVIEW_STALE", "stale_candidate_ids": []})[0],
-            "review_stale",
+            bdt.classify_store_result(
+                {
+                    "status": "rejected",
+                    "errors": [
+                        {
+                            "code": "MEMORY_QUALITY_REJECTED",
+                            "message": "Memory quality check rejected by MEMORY_QUALITY_REJECTED.",
+                        }
+                    ],
+                    "warnings": [],
+                }
+            )[0],
+            "quality_rejected",
         )
         outcome, detail = bdt.classify_store_result(
-            "Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: x"
+            {"status": "rejected", "errors": [{"code": "OTHER_ERROR", "message": "failed"}]}
         )
-        self.assertEqual(outcome, "exact_duplicate_rejected")
-        self.assertIsNotNone(detail)
-        outcome, _ = bdt.classify_store_result(
-            "Error: Memory quality check rejected (Score: 0.10). Reason: too short"
-        )
-        self.assertEqual(outcome, "quality_rejected")
-        outcome, _ = bdt.classify_store_result("Error: something else entirely")
         self.assertEqual(outcome, "other_error")
+        self.assertIsNotNone(detail)
 
 
 class TestIngestedEntityShape(unittest.TestCase):
@@ -592,17 +605,16 @@ class TestCompletionBarrier(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _store(self, title, content):
-        import re
-
         res = memory_service.store_memory(
             content=content,
             title=title,
             owner_id=bdt.OWNER_ID,
-            skip_duplicate_check=True,
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        return re.search(r"ID:\s*([0-9a-fA-F-]+)", res).group(1)
+        entity_id = bdt._extract_entity_id(res)
+        self.assertIsNotNone(entity_id)
+        return entity_id
 
     def _poll_ready(self, entity_id, tries=50, interval=0.1):
         for _ in range(tries):

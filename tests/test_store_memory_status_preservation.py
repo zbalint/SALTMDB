@@ -43,13 +43,18 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             "SELECT status, valid_to, is_core FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
 
+    @staticmethod
+    def _id(result):
+        return result["data"]["id"]
+
     def test_patching_is_core_on_archived_entity_preserves_status_and_valid_to(self):
         p1 = store_memory(
             title="Archived Candidate",
             content="Content that will be archived and then metadata-patched.",
             owner_id="agent_c",
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )
+        p1 = self._id(p1)
 
         archive_memory(entity_id=p1, owner_id="agent_c", db_connection=self.conn)
         status, valid_to, _ = self._row(p1)
@@ -77,16 +82,16 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             title="Consolidation Source",
             content="Raw source memory that will be folded into a consolidation.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )
+        p1 = self._id(p1)
         p2 = store_memory(
             title="Second Consolidation Source",
             content="A second raw source memory required by the consolidation lifecycle contract.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )
+        p2 = self._id(p2)
 
         res = commit_consolidation(
             parent_ids=[p1, p2],
@@ -121,7 +126,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             content="Original raw content.",
             owner_id="agent_c",
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )
+        p1 = self._id(p1)
 
         result = store_memory(
             entity_id=p1,

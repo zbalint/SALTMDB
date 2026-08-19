@@ -42,7 +42,6 @@ def is_viewer_enabled() -> bool:
 
 # Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
 DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate event
-DEDUP_DUPLICATE_THRESHOLD = 0.85  # >= this -> warn the caller of a likely duplicate
 DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
 
 # Sliding-window chunking for chunk-level embeddings (entity_chunk_embeddings).
@@ -138,6 +137,12 @@ QG_MAX_5GRAM_DUP = 0.20
 QG_MIN_TTR = 0.35
 QG_CLI_MIN = 2.0
 QG_CLI_MAX = 26.0
+# Length tiers used by the mechanical structure gate.  These are deliberately structural
+# tripwires, not prose-quality targets: short notes remain free-form, while longer notes must
+# provide enough visual separation for reliable retrieval and review.
+QG_PARAGRAPH_BREAK_MIN_LENGTH = 500
+QG_HEADING_OR_LIST_MIN_LENGTH = 1500
+QG_MULTI_HEADING_MIN_LENGTH = 4000
 
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"
@@ -151,9 +156,8 @@ LIBRARIAN_TRIGGER_COOLDOWN_S = (
     300  # promoted from a hardcoded 300 literal in librarian_service.py's trigger_librarian()
 )
 
-# Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py,
-# relation_service.py:commit_consolidation, and, since Track A, disposition_service.py's
-# consolidate-disposition path). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory
+# Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py and
+# relation_service.py:commit_consolidation). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory
 # `5c09effa`. Locked from scripts/benchmarking/benchmark_cohesion_threshold.py's real
 # bge-small-en-v1.5 MIN-pairwise-cosine measurements over hand-crafted positive (genuinely related
 # fragment groups) and negative (the confirmed `6a8fec3d` 37-way-omnibus and `3deae748`
@@ -162,24 +166,8 @@ COHESION_MIN_PAIRWISE_THRESHOLD = 0.6547
 COHESION_OVERRIDE_MIN_LENGTH = 20  # mirrors QG_MIN_LENGTH's "not a throwaway string" floor
 
 # Cap on how many entities a single commit_consolidation-family call may archive as parents in one
-# commit. Track A (see scratch/plans/track_a_disposition_detailed.md §3) enforces this as new
-# server-side gate logic in disposition_service.py's consolidate-disposition path -- previously
-# just a Librarian request-size splitting policy for the now-retired `consolidate_vector_clusters`,
-# not an enforced cap on `commit_consolidation` itself.
+# commit. This is enforced by relation_service's consolidation path.
 MAX_CONSOLIDATION_REQUEST_SIZE = 8
-
-# Track A store-time disposition rewrite (see scratch/plans/track_a_disposition_detailed.md §1).
-# Worst-case cap on how many flagged candidates a single store_memory preflight returns in one
-# REVIEW_REQUIRED response -- each candidate already cleared the strict multi-signal bar, so
-# exceeding this should be rare; truncates to the top N by similarity_score and logs a
-# review_candidates_truncated event rather than silently dropping the rest. Policy choice, not
-# benchmarked.
-MAX_REVIEW_CANDIDATES = 5
-# How long a REVIEW_REQUIRED review_token stays valid before a commit call must re-preflight.
-# Generous for an LLM tool-call round trip (typically seconds) while bounding the staleness
-# window the token's fingerprint/revalidation logic has to reason about. Policy choice, not
-# benchmarked.
-REVIEW_TOKEN_TTL_SECONDS = 900
 
 # Memory-core rework Phase 5 -- manage_relation governance gate (see
 # plans/structured-finding-matsumoto.md and SALTMDB memory `5c09effa`/`6490fe88`).

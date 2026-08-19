@@ -392,12 +392,8 @@ class CoreGovernanceDbTestBase(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _store_core(self, title, content=None, **kwargs):
-        # skip_duplicate_check=True by default: these fixtures deliberately reuse a near-
-        # identical templated content shape across titles (this test module is about core
-        # governance, not Track A disposition), which would otherwise trip the store-time
-        # duplicate/supersession preflight and return a REVIEW_REQUIRED dict instead of a
-        # plain string.
-        kwargs.setdefault("skip_duplicate_check", True)
+        # Fixtures use distinct content so core-governance tests remain independent of duplicate
+        # handling.
         res = store_memory(
             title=title,
             content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
@@ -411,7 +407,6 @@ class CoreGovernanceDbTestBase(unittest.TestCase):
         return res
 
     def _store_normal(self, title, content=None, **kwargs):
-        kwargs.setdefault("skip_duplicate_check", True)
         return store_memory(
             title=title,
             content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
@@ -453,8 +448,8 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
 
     def test_valid_core_succeeds_and_persists_lifecycle_fields(self):
         res = self._store_core("Valid Core Memory")
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        entity_id = res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        entity_id = res["data"]["id"]
         row = self.conn.execute(
             "SELECT is_core, core_reason, core_exit_condition, core_review_after FROM entities "
             "WHERE id = ?",
@@ -478,11 +473,11 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
 
     def test_content_over_2500_chars_rejected(self):
         res = self._store_core("Oversized Core", content="x" * (CORE_MAX_CONTENT_CHARS + 1))
-        self.assertTrue(res.startswith("Error"), res)
+        self.assertEqual(res["status"], "rejected")
 
     def test_omitting_lifecycle_fields_on_update_preserves_existing(self):
         res = self._store_core("Preserve On Update")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
 
         res2 = store_memory(
             entity_id=entity_id,
@@ -492,7 +487,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(res2.startswith("Knowledge stored successfully"), res2)
+        self.assertEqual(res2["status"], "ok")
         row = self.conn.execute(
             "SELECT core_reason, core_exit_condition FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
@@ -512,7 +507,7 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
     def test_sixth_core_rejected(self):
         for i in range(CORE_MAX_ACTIVE):
             res = self._store_core(f"Core Number {i}", content=f"Distinct content body number {i}.")
-            self.assertTrue(res.startswith("Knowledge stored successfully"), res)
+            self.assertEqual(res["status"], "ok")
 
         rejected = self._store_core("Core Number Six", content="Distinct content body number six.")
         self.assertIsInstance(rejected, dict)
@@ -551,12 +546,12 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
         ids = []
         for i in range(CORE_MAX_ACTIVE):
             res = self._store_core(f"Archivable Core {i}", content=f"Distinct content body {i}.")
-            ids.append(res.split("ID: ")[1].strip())
+            ids.append(res["data"]["id"])
         archive_memory(entity_id=ids[0], db_connection=self.conn)
 
         # Now only CORE_MAX_ACTIVE - 1 active cores exist -- a new one should be admitted.
         res = self._store_core("Replacement Core", content="Distinct replacement content body.")
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
+        self.assertEqual(res["status"], "ok")
 
     def test_explicit_entity_id_does_not_bypass_capacity(self):
         for i in range(CORE_MAX_ACTIVE):
@@ -575,14 +570,13 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
         self.assertIsInstance(rejected, dict)
         self.assertEqual(rejected["status"], "REJECTED")
 
-    def test_skip_duplicate_check_does_not_bypass_capacity(self):
+    def test_duplicate_policy_does_not_bypass_capacity(self):
         for i in range(CORE_MAX_ACTIVE):
             self._store_core(f"Skip Dup Core {i}", content=f"Distinct content body {i}.")
 
         rejected = self._store_core(
             "Skip Dup Bypass Attempt",
             content="Distinct content body bypass.",
-            skip_duplicate_check=True,
         )
         self.assertIsInstance(rejected, dict)
         self.assertEqual(rejected["status"], "REJECTED")
@@ -600,7 +594,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
 
     def test_private_detail_rejected(self):
         detail_res = self._store_normal("Private Detail Candidate", scope="private")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         res = self._store_core(
             "Core With Private Detail",
             content=f"References Private Detail Candidate ({detail_id}) as a detail.",
@@ -610,7 +604,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
 
     def test_core_detail_rejected(self):
         detail_res = self._store_core("Core Detail Candidate")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         res = self._store_core(
             "Core With Core Detail",
             content=f"References Core Detail Candidate ({detail_id}) as a detail.",
@@ -620,7 +614,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
 
     def test_missing_title_and_uuid_mention_rejected(self):
         detail_res = self._store_normal("Real Detail Memory")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         res = self._store_core(
             "Core Missing Mention",
             content="This content never mentions the detail by title or UUID.",
@@ -630,14 +624,14 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
 
     def test_valid_detail_creates_elaborates_on_edge(self):
         detail_res = self._store_normal("Genuine Detail Memory")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core With Valid Detail",
             content=f"See Genuine Detail Memory ({detail_id}) for full rationale and evidence.",
             detail_memory_ids=[detail_id],
         )
-        self.assertTrue(core_res.startswith("Knowledge stored successfully"), core_res)
-        core_id = core_res.split("ID: ")[1].strip()
+        self.assertEqual(core_res["status"], "ok")
+        core_id = core_res["data"]["id"]
 
         rel = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
@@ -650,7 +644,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         detail_ids = []
         for i in range(4):
             r = self._store_normal(f"Detail Memory {i}")
-            detail_ids.append(r.split("ID: ")[1].strip())
+            detail_ids.append(r["data"]["id"])
         content = "Mentions " + " ".join(
             f"Detail Memory {i} ({did})" for i, did in enumerate(detail_ids)
         )
@@ -668,13 +662,13 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             "kept as a separate linked memory so the core itself stays short."
         )
         detail_res = self._store_normal("Retained Reference Detail", content=detail_content)
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core Retaining Detail Reference",
             content=f"See Retained Reference Detail ({detail_id}): {detail_content}",
             detail_memory_ids=[detail_id],
         )
-        core_id = core_res.split("ID: ")[1].strip()
+        core_id = core_res["data"]["id"]
 
         updated = store_memory(
             entity_id=core_id,
@@ -684,7 +678,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(updated.startswith("Knowledge stored successfully"), updated)
+        self.assertEqual(updated["status"], "ok")
         row = self.conn.execute(
             "SELECT core_detail_memory_ids FROM entities WHERE id = ?", (core_id,)
         ).fetchone()
@@ -696,13 +690,13 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             "kept as a separate linked memory so the core itself stays short."
         )
         detail_res = self._store_normal("Dropped Reference Detail", content=detail_content)
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core Dropping Detail Reference",
             content=f"See Dropped Reference Detail ({detail_id}): {detail_content}",
             detail_memory_ids=[detail_id],
         )
-        core_id = core_res.split("ID: ")[1].strip()
+        core_id = core_res["data"]["id"]
 
         rejected = store_memory(
             entity_id=core_id,
@@ -727,13 +721,13 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             "a separate linked memory so the core itself stays short."
         )
         detail_res = self._store_normal("Detail Later Made Private", content=detail_content)
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core With Detail That Turns Private",
             content=f"See Detail Later Made Private ({detail_id}): {detail_content}",
             detail_memory_ids=[detail_id],
         )
-        core_id = core_res.split("ID: ")[1].strip()
+        core_id = core_res["data"]["id"]
 
         # Simulate the detail changing state concurrently, out from under the omitted
         # detail_memory_ids preservation -- must be caught by the AUTHORITATIVE in-transaction
@@ -754,9 +748,9 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.relation_service import store_relation
 
         core_res = self._store_core("Manage Relation Guard Core")
-        core_id = core_res.split("ID: ")[1].strip()
+        core_id = core_res["data"]["id"]
         detail_res = self._store_normal("Manage Relation Guard Detail")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
 
         res = store_relation(
             source_id=detail_id,
@@ -790,7 +784,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
 
     def test_preserved_too_short_reason_rejected(self):
         res = self._store_core("Malformed Preserved Reason Short")
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_reason(core_id, "short")
 
         rejected = store_memory(
@@ -815,7 +809,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
 
     def test_preserved_too_long_reason_rejected(self):
         res = self._store_core("Malformed Preserved Reason Long")
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_reason(core_id, "A" * (CORE_REASON_MAX_CHARS + 1))
 
         rejected = store_memory(
@@ -831,7 +825,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
 
     def test_preserved_invalid_exit_condition_rejected(self):
         res = self._store_core("Malformed Preserved Exit Condition")
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_exit_condition(core_id, "short")
 
         rejected = store_memory(
@@ -851,7 +845,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
 
     def test_preserved_malformed_review_after_rejected(self):
         res = self._store_core("Malformed Preserved Review After")
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_review_after(core_id, "not-a-timestamp")
 
         rejected = store_memory(
@@ -879,7 +873,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             "Overdue Valid Review After Preserved",
             content="A reasonably long content body that will be shortened below.",
         )
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_review_after(core_id, past)
 
         allowed = store_memory(
@@ -890,7 +884,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
         row = self.conn.execute(
             "SELECT core_review_after FROM entities WHERE id = ?", (core_id,)
         ).fetchone()
@@ -898,7 +892,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
 
     def test_supplying_corrected_reason_with_non_expanding_repair_succeeds(self):
         res = self._store_core("Corrected Reason Non Expanding Repair")
-        core_id = res.split("ID: ")[1].strip()
+        core_id = res["data"]["id"]
         self._corrupt_reason(core_id, "short")
 
         repaired = store_memory(
@@ -910,7 +904,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             core_reason="A freshly supplied, valid core reason that repairs the corrupted value.",
             db_connection=self.conn,
         )
-        self.assertTrue(repaired.startswith("Knowledge stored successfully"), repaired)
+        self.assertEqual(repaired["status"], "ok")
         row = self.conn.execute(
             "SELECT core_reason FROM entities WHERE id = ?", (core_id,)
         ).fetchone()
@@ -928,7 +922,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
 
     def test_new_core_blocked_while_another_is_overdue(self):
         res = self._store_core("Overdue Blocker Core")
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = self._store_core("New Core While Overdue")
@@ -939,7 +933,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.memory_service import archive_memory
 
         res = self._store_core("Overdue Self Archive Core")
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         archived = archive_memory(entity_id=overdue_id, db_connection=self.conn)
@@ -953,7 +947,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Overdue Enlarge Target", content="Short but quality-gate-legal content body."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = store_memory(
@@ -976,7 +970,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             "Overdue Self Shrink Target",
             content="A reasonably long content body that will be shortened below.",
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         allowed = store_memory(
@@ -987,19 +981,19 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
 
     def test_non_expanding_edit_allowed_while_another_core_is_overdue(self):
         # Both cores must exist BEFORE either is made overdue -- creating a brand new core while
         # another is already overdue is itself correctly blocked (test_new_core_blocked_while_
         # another_is_overdue), so that ordering would never reach the case under test here.
         overdue_res = self._store_core("Other Overdue Core")
-        overdue_id = overdue_res.split("ID: ")[1].strip()
+        overdue_id = overdue_res["data"]["id"]
         target_res = self._store_core(
             "Non Expanding Edit Target",
             content="A reasonably long content body here that will be shortened.",
         )
-        target_id = target_res.split("ID: ")[1].strip()
+        target_id = target_res["data"]["id"]
         self._make_overdue(overdue_id)
 
         allowed = store_memory(
@@ -1010,7 +1004,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
 
     def test_title_only_rendered_growth_of_overdue_core_rejected(self):
         # Follow-up review finding #1: enforce_overdue_boundary must compare the complete
@@ -1020,7 +1014,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Short Title", content="A reasonably long content body that stays exactly this size."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = store_memory(
@@ -1029,7 +1023,6 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(blocked["status"], "rejected")
@@ -1040,7 +1033,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Reason Growth Target", content="A reasonably long content body that stays fixed."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = store_memory(
@@ -1050,7 +1043,6 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             owner_id="tester",
             is_core=True,
             core_reason="A" * (CORE_REASON_MIN_CHARS + 40),
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertTrue(blocked.startswith("Error"), blocked)
@@ -1061,7 +1053,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Exit Growth Target", content="A reasonably long content body that stays fixed."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = store_memory(
@@ -1071,7 +1063,6 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             owner_id="tester",
             is_core=True,
             core_exit_condition="B" * (CORE_EXIT_MIN_CHARS + 40),
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertTrue(blocked.startswith("Error"), blocked)
@@ -1084,7 +1075,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Equal Rendered Target", content="A reasonably long content body that stays fixed."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         self.assertEqual(len(REASON), CORE_REASON_MIN_CHARS)
@@ -1095,10 +1086,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             owner_id="tester",
             is_core=True,
             core_reason="Z" * CORE_REASON_MIN_CHARS,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
 
     def test_rendered_delta_decided_by_total_not_isolated_field(self):
         # A longer title fully offset by enough content shrinkage must succeed -- the boundary
@@ -1110,7 +1100,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
                 "shortened substantially while still clearing the quality gate on the update."
             ),
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         allowed = store_memory(
@@ -1119,7 +1109,6 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             content="Much shorter but still quality-legal replacement body.",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(allowed["status"], "rejected")
@@ -1130,12 +1119,12 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         # OTHER core is overdue, an edit to a DIFFERENT, non-overdue target core is still bound
         # by the same rendered-delta rule (not just a content-length rule).
         overdue_res = self._store_core("Other Overdue Core Blocker")
-        overdue_id = overdue_res.split("ID: ")[1].strip()
+        overdue_id = overdue_res["data"]["id"]
         target_res = self._store_core(
             "Rendered Growth Target While Other Overdue",
             content="A reasonably long content body that stays exactly this size.",
         )
-        target_id = target_res.split("ID: ")[1].strip()
+        target_id = target_res["data"]["id"]
         self._make_overdue(overdue_id)
 
         blocked = store_memory(
@@ -1147,7 +1136,6 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(blocked["status"], "rejected")
@@ -1157,7 +1145,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Overdue Shrink Target", content="A reasonably long content body here."
         )
-        overdue_id = res.split("ID: ")[1].strip()
+        overdue_id = res["data"]["id"]
         self._make_overdue(overdue_id)
 
         allowed = store_memory(
@@ -1168,7 +1156,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             is_core=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
 
 
 class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
@@ -1196,7 +1184,7 @@ class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
 
     def test_existing_entity_omitted_type_preserves_persisted_type(self):
         res = self._store_core("Effective Type Preserve Source", memory_type="decision")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self.assertEqual(
             cgs.resolve_effective_memory_type(
                 self.conn, entity_id=entity_id, requested_memory_type=None
@@ -1206,7 +1194,7 @@ class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
 
     def test_existing_entity_explicit_type_overrides_persisted_type(self):
         res = self._store_core("Effective Type Override Source", memory_type="decision")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self.assertEqual(
             cgs.resolve_effective_memory_type(
                 self.conn, entity_id=entity_id, requested_memory_type="event"
@@ -1216,7 +1204,7 @@ class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
 
     def test_legacy_null_type_falls_back_to_fact(self):
         res = self._store_core("Effective Type Legacy Null Source")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self.conn.execute("UPDATE entities SET memory_type = NULL WHERE id = ?", (entity_id,))
         self.assertEqual(
             cgs.resolve_effective_memory_type(
@@ -1263,8 +1251,8 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         title = f"Type Preserve Overdue Target {memory_type}"
         content = f"A reasonably long content body distinct for the {memory_type} case."
         res = self._store_core(title, content=content, memory_type=memory_type)
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        target_id = res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        target_id = res["data"]["id"]
         self._make_overdue(target_id)
 
         blocked = store_memory(
@@ -1273,7 +1261,6 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content=content,
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(blocked["status"], "rejected")
@@ -1311,7 +1298,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             memory_type="preference",
         )
-        target_id = res.split("ID: ")[1].strip()
+        target_id = res["data"]["id"]
         self._make_overdue(target_id)
 
         allowed = store_memory(
@@ -1320,10 +1307,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
         row = self.conn.execute(
             "SELECT memory_type FROM entities WHERE id = ?", (target_id,)
         ).fetchone()
@@ -1338,7 +1324,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             memory_type="fact",
         )
-        target_id = res.split("ID: ")[1].strip()
+        target_id = res["data"]["id"]
         self._make_overdue(target_id)
 
         # Growing the rendered contribution while ALSO explicitly changing to a longer type
@@ -1351,7 +1337,6 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             memory_type="preference",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(blocked["status"], "rejected")
@@ -1369,7 +1354,6 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             memory_type="preference",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertEqual(allowed["status"], "rejected")
@@ -1417,8 +1401,8 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
                 core_reason=reason_500,
                 core_exit_condition=exit_500,
             )
-            self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-            filler_id = res.split("ID: ")[1].strip()
+            self.assertEqual(res["status"], "ok")
+            filler_id = res["data"]["id"]
             filler_ids.append(filler_id)
             # Raw SQL, matching this suite's established `_make_overdue` pattern: pushes each
             # filler to exactly the content length the boundary math requires without routing
@@ -1438,14 +1422,14 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             core_exit_condition=exit_500,
             memory_type="preference",
         )
-        self.assertTrue(target_res.startswith("Knowledge stored successfully"), target_res)
-        target_id = target_res.split("ID: ")[1].strip()
+        self.assertEqual(target_res["status"], "ok")
+        target_id = target_res["data"]["id"]
 
         before_row = self.conn.execute(
             "SELECT full_content, memory_type FROM entities WHERE id = ?", (target_id,)
         ).fetchone()
 
-        update_content = passage[:945]
+        update_content = "# Capacity Update\n\n" + passage[:926]
         self.assertEqual(len(update_content), 945)
         rejected = store_memory(
             entity_id=target_id,
@@ -1453,7 +1437,6 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content=update_content,
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         self.assertIsInstance(rejected, dict)
@@ -1475,7 +1458,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             memory_type="procedure",
         )
-        target_id = res.split("ID: ")[1].strip()
+        target_id = res["data"]["id"]
 
         allowed = store_memory(
             entity_id=target_id,
@@ -1483,10 +1466,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             content="A reasonably long content body that stays exactly this size.",
             owner_id="tester",
             is_core=True,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(allowed.startswith("Knowledge stored successfully"), allowed)
+        self.assertEqual(allowed["status"], "ok")
 
         committed_rows = cgs.load_active_cores(self.conn)
         committed_row = next(r for r in committed_rows if r["id"] == target_id)
@@ -1526,7 +1508,7 @@ class TestBootstrapDigestFailClosed(CoreGovernanceDbTestBase):
     def test_malformed_active_core_fails_closed(self):
         marker = "UNIQUE_FULL_CONTENT_MARKER_MUST_NOT_LEAK"
         res = self._store_core("Digest Core Malformed", content=f"{marker} body text here.")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         # Corrupt the row directly to simulate an invariant violation the write path itself
         # would never produce -- exactly the "any later invalid state is corruption" scenario
         # bootstrap must fail closed on.
@@ -1541,7 +1523,7 @@ class TestBootstrapDigestFailClosed(CoreGovernanceDbTestBase):
 
     def test_overdue_core_alone_does_not_fail_closed(self):
         res = self._store_core("Digest Overdue Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         self.conn.execute(
             "UPDATE entities SET core_review_after = ? WHERE id = ?", (past, entity_id)
@@ -1553,7 +1535,7 @@ class TestBootstrapDigestFailClosed(CoreGovernanceDbTestBase):
     def test_overdue_core_ordered_first(self):
         self._store_core("Not Overdue Core", content="First core's body content text.")
         r2 = self._store_core("Overdue Core", content="Second core's body content text.")
-        overdue_id = r2.split("ID: ")[1].strip()
+        overdue_id = r2["data"]["id"]
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         self.conn.execute(
             "UPDATE entities SET core_review_after = ? WHERE id = ?", (past, overdue_id)
@@ -1576,7 +1558,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
 
     def test_malformed_json_fails_closed(self):
         res = self._store_core("Core Malformed Detail JSON")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self._corrupt_detail_ids(entity_id, "{not valid json")
         digest = cgs.render_bootstrap_response(self.conn)
         self.assertIn("<core-bootstrap-error>", digest)
@@ -1584,7 +1566,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
 
     def test_too_many_detail_ids_fails_closed(self):
         res = self._store_core("Core Too Many Detail Ids")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         fake_ids = [f"1111111{i}-1111-1111-1111-111111111111" for i in range(4)]
         self._corrupt_detail_ids(entity_id, json.dumps(fake_ids))
         digest = cgs.render_bootstrap_response(self.conn)
@@ -1592,14 +1574,14 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
 
     def test_non_uuid_detail_id_fails_closed(self):
         res = self._store_core("Core Bad Detail Id Shape")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self._corrupt_detail_ids(entity_id, json.dumps(["not-a-uuid"]))
         digest = cgs.render_bootstrap_response(self.conn)
         self.assertIn("<core-bootstrap-error>", digest)
 
     def test_missing_referenced_entity_fails_closed(self):
         res = self._store_core("Core Missing Detail Entity")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         fake_uuid = "44444444-4444-4444-4444-444444444444"
         self._corrupt_detail_ids(entity_id, json.dumps([fake_uuid]))
         digest = cgs.render_bootstrap_response(self.conn)
@@ -1613,20 +1595,20 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
             "as a separate linked memory so the core itself stays short."
         )
         detail_res = self._store_normal("Detail Later Promoted To Core", content=detail_content)
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core With Detail Later Promoted",
             content=f"See Detail Later Promoted To Core ({detail_id}): {detail_content}",
             detail_memory_ids=[detail_id],
         )
-        self.assertTrue(core_res.startswith("Knowledge stored successfully"), core_res)
+        self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET is_core = 1 WHERE id = ?", (detail_id,))
         digest = cgs.render_bootstrap_response(self.conn)
         self.assertIn("<core-bootstrap-error>", digest)
 
     def test_declared_detail_made_private_fails_closed(self):
         detail_res = self._store_normal("Detail Later Made Private For Bootstrap")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core With Detail Later Made Private",
             content=(
@@ -1635,16 +1617,16 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
             ),
             detail_memory_ids=[detail_id],
         )
-        self.assertTrue(core_res.startswith("Knowledge stored successfully"), core_res)
+        self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET scope = 'private' WHERE id = ?", (detail_id,))
         digest = cgs.render_bootstrap_response(self.conn)
         self.assertIn("<core-bootstrap-error>", digest)
 
     def test_declared_detail_missing_title_or_uuid_mention_fails_closed(self):
         res = self._store_core("Core Detail Mention Later Broken")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         detail_res = self._store_normal("Standalone Detail For Mention Test")
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         # Bypass write-time validation directly -- simulates the core's content being rewritten
         # in a way store_memory's own path would never allow (that path is covered by finding #4
         # regression tests instead), leaving a stale declaration bootstrap must catch.
@@ -1661,13 +1643,13 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
             "as a separate linked memory so the core itself stays short."
         )
         detail_res = self._store_normal("Archived Valid Detail", content=detail_content)
-        detail_id = detail_res.split("ID: ")[1].strip()
+        detail_id = detail_res["data"]["id"]
         core_res = self._store_core(
             "Core With Archived Detail",
             content=f"See Archived Valid Detail ({detail_id}): {detail_content}",
             detail_memory_ids=[detail_id],
         )
-        self.assertTrue(core_res.startswith("Knowledge stored successfully"), core_res)
+        self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET status = 'archived' WHERE id = ?", (detail_id,))
 
         digest = cgs.render_bootstrap_response(self.conn)
@@ -1679,7 +1661,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Core Detail Violation Content Leak Check", content=f"{marker} body."
         )
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         self._corrupt_detail_ids(entity_id, "{not valid json")
         digest = cgs.render_bootstrap_response(self.conn)
         self.assertIn("<core-bootstrap-error>", digest)
@@ -1691,7 +1673,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_retain_extends_review_date_without_changing_content(self):
         res = self._store_core("Retain Target Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         original_content = self.conn.execute(
             "SELECT full_content FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()[0]
@@ -1714,7 +1696,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_retain_requires_future_timestamp(self):
         res = self._store_core("Retain Past Timestamp Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         result = cgs.review_core_memory(
             self.conn,
@@ -1728,7 +1710,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_retain_against_non_core_rejected(self):
         res = self._store_normal("Non Core Retain Target")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         result = cgs.review_core_memory(
             self.conn,
             entity_id=entity_id,
@@ -1740,7 +1722,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_demote_turns_core_into_searchable_normal_memory(self):
         res = self._store_core("Demote Target Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
 
         result = cgs.review_core_memory(
             self.conn,
@@ -1767,7 +1749,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_demote_is_idempotent_noop(self):
         res = self._store_core("Double Demote Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         cgs.review_core_memory(
             self.conn,
             entity_id=entity_id,
@@ -1788,7 +1770,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.memory_service import fetch_memory_chunk
 
         res = self._store_core("Archive Target Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
 
         result = cgs.review_core_memory(
             self.conn,
@@ -1805,7 +1787,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_reviewer_identity_independent_of_entity_owner(self):
         res = self._store_core("Owner Mismatch Core", owner_id="original_owner")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
 
         # archive_memory's public ownership guard would reject a mismatched owner_id; the
         # review path must NOT inherit that restriction (reviewer identity, not an ownership
@@ -1823,7 +1805,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         # Resolved review finding #3: review_core_memory(outcome='archive') must not become a
         # second, ownership-neutral general-purpose archive API for every ordinary memory.
         res = self._store_normal("Ordinary Active Memory", owner_id="alice")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
 
         result = cgs.review_core_memory(
             self.conn,
@@ -1841,7 +1823,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.memory_service import archive_memory
 
         res = self._store_core("Former Core Already Archived")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         # Archive it OUTSIDE review_core_memory first (archive_memory never touches is_core, so
         # the row stays is_core=1, status='archived' -- a genuinely former core).
         archive_memory(entity_id=entity_id, db_connection=self.conn)
@@ -1859,7 +1841,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.memory_service import archive_memory
 
         res = self._store_normal("Never Core Already Archived")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         archive_memory(entity_id=entity_id, db_connection=self.conn)
 
         result = cgs.review_core_memory(
@@ -1878,7 +1860,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         from saltmdb.domain.services.memory_service import archive_memory
 
         res = self._store_normal("Public Guard Untouched Entity", owner_id="original_owner")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         result = archive_memory(
             entity_id=entity_id, owner_id="someone_else", db_connection=self.conn
         )
@@ -1886,7 +1868,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_demote_and_archive_reject_supplied_core_review_after(self):
         res = self._store_core("Reject Review After Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         result = cgs.review_core_memory(
             self.conn,
@@ -1900,7 +1882,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
 
     def test_invalid_outcome_rejected(self):
         res = self._store_core("Invalid Outcome Core")
-        entity_id = res.split("ID: ")[1].strip()
+        entity_id = res["data"]["id"]
         result = cgs.review_core_memory(
             self.conn,
             entity_id=entity_id,

@@ -130,7 +130,9 @@ class TestViewerBrowseAndHybridSearch(unittest.TestCase):
 
     @patch("saltmdb.viewer.routes.memory_service.search_memory")
     def test_search_delegates_to_broad_hybrid_service(self, search_memory_mock):
-        search_memory_mock.return_value = [{"id": "hybrid-hit", "title": "Hybrid hit", "score": 0.42}]
+        search_memory_mock.return_value = [
+            {"id": "hybrid-hit", "title": "Hybrid hit", "score": 0.42}
+        ]
         handler = self._handler()
         captured = self._capture(handler)
         handler.get_search({"q": ["meaningful query"]})
@@ -172,15 +174,18 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         handler.send_json = fake_send_json
         return captured
 
+    @staticmethod
+    def _memory_id(result):
+        return result["data"]["id"]
+
     def _mk(self, title, owner_id="viewer_tester"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id=owner_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return self._memory_id(res)
 
     def _consolidate_two(self, title_a, title_b, cons_title, marker):
         a = self._mk(title_a)
@@ -284,7 +289,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         )
 
     def test_get_entities_is_core_filter(self):
-        core_id = (
+        core_id = self._memory_id(
             store_memory(
                 content="Core architectural fact memory content",
                 title="Core Architecture Fact",
@@ -292,24 +297,18 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
                 is_core=True,
                 core_reason="Test fixture core reason for the viewer is_core filter regression test.",
                 core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
-                skip_duplicate_check=True,
                 db_connection=self.conn,
             )
-            .split("ID: ")[1]
-            .strip()
         )
 
-        non_core_id = (
+        non_core_id = self._memory_id(
             store_memory(
                 content="Non-core ephemeral detail content",
                 title="Non Core Detail",
                 owner_id="viewer_tester",
                 is_core=False,
-                skip_duplicate_check=True,
                 db_connection=self.conn,
             )
-            .split("ID: ")[1]
-            .strip()
         )
 
         handler = self._handler()
@@ -372,11 +371,10 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
                 owner_id="viewer_tester",
                 is_core=is_core,
                 memory_type=memory_type,
-                skip_duplicate_check=True,
                 db_connection=self.conn,
                 **core_kwargs,
             )
-            return result.split("ID: ")[1].strip()
+            return self._memory_id(result)
 
         matching_ids = {
             create_entity("Core Decision One", True, "decision"),
@@ -425,7 +423,6 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             is_core=True,
             core_reason="Test fixture core reason for the viewer search is_core filter regression test.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
 

@@ -64,19 +64,18 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1]
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def _store_plain(self, title, content):
         res = store_memory(
             title=title,
             content=content,
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1]
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def test_omitted_is_core_with_active_core_parent_is_rejected(self):
         core_parent = self._store_core_parent(
@@ -90,7 +89,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             content="An ordinary non-core fact used alongside the core rule.",
             owner_id="agent_c",
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         res = commit_consolidation(
             parent_ids=[core_parent, plain_parent],
@@ -111,23 +110,19 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         self.assertEqual(row[0], "raw")
 
     def test_non_core_parents_stay_non_core_when_is_core_omitted(self):
-        # skip_duplicate_check=True: these two fixtures are deliberately near-identical
-        # templated content (this test is about is_core inheritance, not dedup behavior) and
-        # would otherwise trip Track A's store-time disposition preflight against each other.
+        # These fixtures exercise is_core inheritance, not duplicate handling.
         p1 = store_memory(
             title="Plain Fact One",
             content="An ordinary non-core fact, part one.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
         p2 = store_memory(
             title="Plain Fact Two",
             content="An ordinary non-core fact, part two.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         res = commit_consolidation(
             parent_ids=[p1, p2],
@@ -149,9 +144,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             title="Plain Explicit Core Partner",
             content="An ordinary partner for the explicit core lifecycle test.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         rejected = commit_consolidation(
             parent_ids=[core_parent, plain_parent],
@@ -188,9 +182,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             title="Plain Demotion Partner",
             content="An ordinary partner for the explicit core demotion test.",
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
-        ).split("ID: ")[1]
+        )["data"]["id"]
 
         res = commit_consolidation(
             parent_ids=[core_parent, plain_parent],
@@ -281,22 +274,20 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             is_core=True,
             core_reason="Test fixture core reason for consolidation-overdue regression coverage.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def _store_plain(self, title, content):
         res = store_memory(
             title=title,
             content=content,
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def _make_overdue(self, entity_id):
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
@@ -516,11 +507,10 @@ class TestConsolidationToctou(unittest.TestCase):
             title=title,
             content=content,
             owner_id="agent_c",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Knowledge stored successfully"), res)
-        return res.split("ID: ")[1].strip()
+        self.assertEqual(res["status"], "ok")
+        return res["data"]["id"]
 
     def _consolidated_count(self):
         return self.conn.execute(

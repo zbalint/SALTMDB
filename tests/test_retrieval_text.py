@@ -52,7 +52,6 @@ class RetrievalTextTests(unittest.TestCase):
             "owner_id": "retrieval-owner",
             "db_connection": self.conn,
             "db_path": self.db_path,
-            "skip_duplicate_check": True,
         }
         if entity_id is not None:
             args["entity_id"] = entity_id
@@ -62,8 +61,8 @@ class RetrievalTextTests(unittest.TestCase):
         return store_memory(**args)
 
     @staticmethod
-    def _id(result: str) -> str:
-        return result.split("ID: ", 1)[1].strip()
+    def _id(result: dict) -> str:
+        return result["data"]["id"]
 
     def test_tri_state_normalization_redaction_cap_and_hash(self):
         secret = "sk_test_" + ("a" * 20)
@@ -78,7 +77,7 @@ class RetrievalTextTests(unittest.TestCase):
         self.assertTrue(content_hash)
 
         preserved = self._store(entity_id=entity_id)
-        self.assertIn("stored successfully", preserved)
+        self.assertEqual(preserved["status"], "ok")
         self.assertEqual(
             self.conn.execute(
                 "SELECT retrieval_text FROM entities WHERE id=?", (entity_id,)
@@ -311,22 +310,18 @@ class RetrievalTextTests(unittest.TestCase):
                 retrieval_text="sqlite-only candidate",
                 db_connection=conn,
                 db_path=path,
-                skip_duplicate_check=True,
             )
             entity_id = self._id(result)
-            self.assertIn(
-                "stored successfully",
-                store_memory(
-                    content="A sufficiently descriptive SQLite-only body for testing.",
-                    title="SQLite Only Retrieval",
-                    owner_id="sqlite-owner",
-                    entity_id=entity_id,
-                    retrieval_text="updated candidate",
-                    db_connection=conn,
-                    db_path=path,
-                    skip_duplicate_check=True,
-                ),
+            updated = store_memory(
+                content="A sufficiently descriptive SQLite-only body for testing.",
+                title="SQLite Only Retrieval",
+                owner_id="sqlite-owner",
+                entity_id=entity_id,
+                retrieval_text="updated candidate",
+                db_connection=conn,
+                db_path=path,
             )
+            self.assertEqual(updated["status"], "ok")
             from saltmdb.domain.services.memory_service import archive_memory
 
             self.assertIn(

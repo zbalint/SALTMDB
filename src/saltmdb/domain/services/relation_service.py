@@ -986,12 +986,9 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     computation before its write transaction opens, while every item still routes through this
     same single code path.
 
-    `metadata`/`memory_type` (Track A, see scratch/plans/track_a_disposition_detailed.md): added
-    so disposition_service.py's consolidate-disposition path can carry a proposed write's
-    metadata/memory_type through into the consolidated entity instead of silently dropping them
-    (this function previously had no columns for either) -- both default None/unset, matching
-    every existing caller's behavior exactly (memory_type still resolves to 'fact' via the same
-    COALESCE the plain store path uses).
+    `metadata`/`memory_type` are carried through into the consolidated entity instead of being
+    silently dropped (both default None/unset, matching existing callers; memory_type still
+    resolves to 'fact' via the same COALESCE the plain store path uses).
 
     Core-memory governance (see core_governance_service.py): `is_core` is NEVER inherited from
     parents. If any resolved parent is currently an active core (is_core=1, status != 'archived')

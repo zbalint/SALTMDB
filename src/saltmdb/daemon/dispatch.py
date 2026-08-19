@@ -126,14 +126,6 @@ def _required_list(kw: dict[str, Any], key: str) -> list[Any]:
 
 
 def _dispatch_store_memory(**kw):
-    if kw.get("check_duplicates_only"):
-        return memory_service.check_duplicate_memories(
-            title=kw.get("title"),
-            content=kw.get("content"),
-            owner_id=kw.get("owner_id"),
-            tags=kw.get("tags"),
-            context_id=kw.get("context_id"),
-        )
     retrieval_text_provided = kw.get("retrieval_text_provided", "retrieval_text" in kw)
     return memory_service.store_memory(
         content=kw.get("content"),
@@ -150,10 +142,7 @@ def _dispatch_store_memory(**kw):
         novelty=kw.get("novelty"),
         actionability=kw.get("actionability"),
         metadata=kw.get("metadata"),
-        skip_duplicate_check=_optional_bool(kw, "skip_duplicate_check", False),
         context_id=kw.get("context_id"),
-        review_token=kw.get("review_token"),
-        dispositions=kw.get("dispositions"),
         retrieval_text=(
             kw.get("retrieval_text")
             if retrieval_text_provided

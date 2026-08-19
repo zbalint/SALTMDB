@@ -4,6 +4,7 @@ import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
+from saltmdb.utils import nlp
 
 
 class TestNGramAndMarkdownQuality(unittest.TestCase):
@@ -19,26 +20,23 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_tc_ngram_01_phrase_loop_rejection(self):
-        """TC-NGRAM-01: Catch phrase sequence loops (3-gram repetition > 0.30) that pass character entropy"""
+    def test_tc_ngram_01_phrase_loop_warning(self):
+        """TC-NGRAM-01: Phrase sequence loops are advisory, not a hard rejection."""
         phrase_block = "apple banana cherry date elderberry fig grape honeydew kiwi lemon mango nectarine orange papaya quince raspberry strawberry tangerine ucli vanilla watermelon xigua yuzu"
         # Repeating the phrase block 3 times maintains character entropy ~4.35 bits/char but creates ~66% 3-gram repetition
         repetitive_text = f"# Sequence Loop Test\n\n{phrase_block} {phrase_block} {phrase_block}"
-        res = memory_service.store_memory(
-            content=repetitive_text, title="Sequence Loop Test", owner_id="test_agent"
-        )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("3-gram sequence repetition detected", res)
+        res = nlp.evaluate_memory_quality(repetitive_text)
+        self.assertEqual(res["status"], "WARN")
+        self.assertIn("HIGH_3GRAM_REPETITION", res["warnings"])
 
-    def test_tc_ngram_02_low_ttr_rejection(self):
-        """TC-NGRAM-02: Rejection of low TTR (< 0.35) for boilerplate text"""
+    def test_tc_ngram_02_low_ttr_warning(self):
+        """TC-NGRAM-02: Low TTR (< 0.35) is advisory, not a hard rejection."""
         # Create a phrase using alternating pairs of words so 3-grams remain unique but overall vocabulary is small
         words_list = ["alpha", "beta", "alpha", "gamma", "beta", "gamma", "delta", "alpha"] * 5
         low_ttr_text = " ".join(words_list)
-        res = memory_service.store_memory(
-            content=f"# Low TTR Test\n\n{low_ttr_text}", title="Low TTR Test", owner_id="test_agent"
-        )
-        self.assertIn("Error: Memory quality check rejected", res)
+        res = nlp.evaluate_memory_quality(f"# Low TTR Test\n\n{low_ttr_text}")
+        self.assertEqual(res["status"], "WARN")
+        self.assertIn("LOW_TTR", res["warnings"])
 
     def test_tc_markdown_01_unclosed_code_fence_rejection(self):
         """TC-MARKDOWN-01: Rejection of unclosed triple backtick code fences"""
@@ -53,8 +51,8 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         res = memory_service.store_memory(
             content=unclosed_markdown, title="Unclosed Fence Test", owner_id="test_agent"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("Unclosed Markdown code block detected", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
 
     def test_tc_markdown_02_malformed_table_rejection(self):
         """TC-MARKDOWN-02: Rejection of malformed Markdown table rows"""
@@ -66,8 +64,8 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         res = memory_service.store_memory(
             content=malformed_table, title="Broken Table Test", owner_id="test_agent"
         )
-        self.assertIn("Error: Memory quality check rejected", res)
-        self.assertIn("Malformed Markdown table row detected", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
 
     def test_tc_markdown_03_high_msdi_score_boost(self):
         """TC-MARKDOWN-03: High MSDI (>= 0.35) and annotated code blocks receive score boost and HIGH_MSDI flag"""
@@ -89,7 +87,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             owner_id="test_agent",
             db_connection=self.conn,
         )
-        self.assertIn("Knowledge stored successfully", res)
+        self.assertEqual(res["status"], "ok")
 
         cursor = self.conn.execute(
             "SELECT quality_score, quality_status, quality_flags FROM entities WHERE title = ?",

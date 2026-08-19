@@ -8,6 +8,7 @@ import pytest
 
 from saltmdb.daemon.dispatch import _dispatch_export_corpus_snapshot
 from saltmdb.mcp import tools
+from saltmdb.mcp.identity import SESSION_IDENTITY
 
 
 def test_dispatch_snapshot_applies_read_only_defaults_and_forwards_cursor():
@@ -40,10 +41,10 @@ def test_mcp_snapshot_wrapper_resolves_aliases_without_sql_access():
     try:
         result = tools.export_corpus_snapshot(
             owner_id="snapshot-owner",
-            limit=4,
-            after_id="entity-003",
-            snapshot_id="b" * 64,
-            include_archived_entities=True,
+            page_size=4,
+            cursor="entity-003",
+            snapshot_hash="b" * 64,
+            include_archived=True,
         )
     finally:
         tools._set_backend_for_test(previous)
@@ -67,9 +68,10 @@ def test_dispatch_snapshot_requires_owner_id():
 
 
 def test_mcp_snapshot_wrapper_requires_owner_id():
+    SESSION_IDENTITY.reset()
     previous = tools._set_backend_for_test(MagicMock())
     try:
-        with pytest.raises(ValueError, match="owner_id is mandatory"):
+        with pytest.raises(ValueError, match="owner_id is required"):
             tools.export_corpus_snapshot(owner_id=None, page_size=2)
     finally:
         tools._set_backend_for_test(previous)

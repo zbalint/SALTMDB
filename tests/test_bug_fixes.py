@@ -80,7 +80,6 @@ class TestBugFixes(unittest.TestCase):
             scope="shared",
             title="Memory B",
             db_path=self.db_path,
-            skip_duplicate_check=True,
         )
 
         res_or = search_memory(
@@ -106,7 +105,7 @@ class TestBugFixes(unittest.TestCase):
         res1 = store_memory(
             shared_text, owner_id="AgentA", scope="shared", title="Policy", db_path=self.db_path
         )
-        self.assertIn("Knowledge stored successfully", res1)
+        self.assertEqual(res1["status"], "ok")
 
         res2 = store_memory(
             shared_text,
@@ -115,7 +114,8 @@ class TestBugFixes(unittest.TestCase):
             title="Policy Copy",
             db_path=self.db_path,
         )
-        self.assertIn("REJECT_EXACT_DUPLICATE", res2)
+        self.assertEqual(res2["status"], "rejected")
+        self.assertEqual(res2["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
 
     def test_is_core_flag_persistence(self):
         """Fix Verification: Ensure is_core=True sets is_core=1, and updating without specifying is_core preserves is_core=1."""
@@ -132,7 +132,7 @@ class TestBugFixes(unittest.TestCase):
             core_reason="Test fixture core reason for the is_core flag persistence regression test.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
         )
-        self.assertIn("Knowledge stored successfully", res)
+        self.assertEqual(res["status"], "ok")
 
         conn = sqlite3.connect(self.db_path)
         row = conn.execute(
@@ -151,9 +151,8 @@ class TestBugFixes(unittest.TestCase):
             scope="shared",
             title="Core Guideline",
             db_path=self.db_path,
-            skip_duplicate_check=True,
         )
-        self.assertIn("Knowledge stored successfully", res_update)
+        self.assertEqual(res_update["status"], "ok")
 
         row_updated = conn.execute(
             "SELECT is_core FROM entities WHERE id = ?", (entity_id,)

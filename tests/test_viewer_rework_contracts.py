@@ -132,7 +132,6 @@ class TestViewerReworkContracts(unittest.TestCase):
             content="Viewer rework contract test memory with sufficient useful content.",
             title="Viewer Contract Memory",
             owner_id="viewer_test",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         state = _DaemonState(self.db_path, "test", True)
@@ -220,22 +219,47 @@ class TestViewerReworkContracts(unittest.TestCase):
         shell = get_frontend_html()
         self.assertIn('id="connection-indicator"', shell)
         for expected in (
-            "All statuses", "All types", "Page ${data.page} of ${data.total_pages", "renderGraph",
-            "normalizeGraph", "edge.source", "edge.target", "malformed relations could not be rendered",
-            "No active relations for this memory", "source?.title || edge.source",
+            "All statuses",
+            "All types",
+            "Page ${data.page} of ${data.total_pages",
+            "renderGraph",
+            "normalizeGraph",
+            "edge.source",
+            "edge.target",
+            "malformed relations could not be rendered",
+            "No active relations for this memory",
+            "source?.title || edge.source",
             "button('Apply filters', 'primary', undefined, 'submit')",
             "const resetFilters = button('Reset filters'",
             "state.explorerPreset = {}; state.explorerPage = 1; render();",
-            "button('Explore graph', 'primary', undefined, 'submit')", "type = 'button'",
-            "focusRelationshipInput", "modalInvoker", "aria-busy", "Copy ID", "Browse / audit list",
-            "Hybrid retrieval query", "/api/search?q=", "Keyword match in title and memory text",
-            "date_field", "date_from", "date_to", "View details", "Browse this context",
-            "memoryCell", "metadata-panel", "['Pending', embeddingData.pending, 'pending']",
-            "['Failed', embeddingData.failed, 'failed']", "const formatBytes = (value) =>",
-            "formatBytes(data.database.files.db_bytes)", "const units = ['B', 'KB', 'MB', 'GB', 'TB']",
-            "const formatTimestamp = (value, fallback = '—') =>", "timeZoneName: 'short'",
-            "formatTimestamp(data.created_at)", "formatTimestamp(data.updated_at)",
-            "formatTimestamp(data.last_accessed_at)", "formatTimestamp(data.valid_from)",
+            "button('Explore graph', 'primary', undefined, 'submit')",
+            "type = 'button'",
+            "focusRelationshipInput",
+            "modalInvoker",
+            "aria-busy",
+            "Copy ID",
+            "Browse / audit list",
+            "Hybrid retrieval query",
+            "/api/search?q=",
+            "Keyword match in title and memory text",
+            "date_field",
+            "date_from",
+            "date_to",
+            "View details",
+            "Browse this context",
+            "memoryCell",
+            "metadata-panel",
+            "['Pending', embeddingData.pending, 'pending']",
+            "['Failed', embeddingData.failed, 'failed']",
+            "const formatBytes = (value) =>",
+            "formatBytes(data.database.files.db_bytes)",
+            "const units = ['B', 'KB', 'MB', 'GB', 'TB']",
+            "const formatTimestamp = (value, fallback = '—') =>",
+            "timeZoneName: 'short'",
+            "formatTimestamp(data.created_at)",
+            "formatTimestamp(data.updated_at)",
+            "formatTimestamp(data.last_accessed_at)",
+            "formatTimestamp(data.valid_from)",
         ):
             self.assertIn(expected, script)
         self.assertNotIn("source_id", script)
@@ -246,11 +270,18 @@ class TestViewerReworkContracts(unittest.TestCase):
         )
         self.assertNotIn("New data may be available", script)
         for expected in (
-            "--lifecycle-raw", "--lifecycle-consolidated", "--lifecycle-archived", "--state-ready",
-            "--state-pending", "--state-failed", "--state-warning",
+            "--lifecycle-raw",
+            "--lifecycle-consolidated",
+            "--lifecycle-archived",
+            "--state-ready",
+            "--state-pending",
+            "--state-failed",
+            "--state-warning",
             ".metric-card.pending { border-top-color: var(--state-pending); }",
             ".metric-card.failed { border-top-color: var(--state-failed); }",
-            ".row-button { display: block; width: 100%", "max-height: 95dvh", "text-align: left",
+            ".row-button { display: block; width: 100%",
+            "max-height: 95dvh",
+            "text-align: left",
             ".predicate-pill",
         ):
             self.assertIn(expected, stylesheet)
@@ -269,7 +300,9 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("core.wrap", script)
         self.assertIn("if (core.element.checked) params.set('is_core', 'true');", script)
         self.assertNotIn("params.set('is_core', 'false')", script)
-        self.assertIn("state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1;", script)
+        self.assertIn(
+            "state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1;", script
+        )
         self.assertIn("currentParams = new URLSearchParams(params)", script)
         self.assertIn("Core-memory filtering is available.", script)
 
@@ -283,7 +316,13 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("pair.append(node('dt', label), node('dd', value));", helper.group("body"))
         self.assertEqual(helper.group("body").count("node('dt'"), 1)
         self.assertEqual(helper.group("body").count("node('dd'"), 1)
-        self.assertIn("metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));", script)
-        self.assertIn("customFacts.append(factPair(key, typeof value === 'string' ? value : JSON.stringify(value)))", script)
+        self.assertIn(
+            "metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));",
+            script,
+        )
+        self.assertIn(
+            "customFacts.append(factPair(key, typeof value === 'string' ? value : JSON.stringify(value)))",
+            script,
+        )
         self.assertIn("facts.append(factPair(label, value))", script)
         self.assertIn(".checkbox-field input { width: 1rem; min-width: 1rem;", stylesheet)

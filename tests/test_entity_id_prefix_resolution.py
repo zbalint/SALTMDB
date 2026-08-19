@@ -15,7 +15,7 @@ def _store(conn, title, content=None, **kw):
 
     content defaults to a title-derived string so distinct calls get distinct content_hash
     values -- store_memory resolves to an existing row by content_hash regardless of
-    skip_duplicate_check, so identical default content across calls would silently upsert
+    legacy duplicate-bypass options, so identical content now exercises exact-duplicate rejection
     onto the same entity instead of creating separate ones.
     """
     if content is None:
@@ -24,11 +24,11 @@ def _store(conn, title, content=None, **kw):
         content=content,
         title=title,
         owner_id="owner_a",
-        skip_duplicate_check=True,
         db_connection=conn,
         **kw,
     )
-    return res.split("ID: ")[1].strip()
+    assert res["status"] == "ok"
+    return res["data"]["id"]
 
 
 class TestEntityIdPrefixResolution(unittest.TestCase):

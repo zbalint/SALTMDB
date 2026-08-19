@@ -1,30 +1,70 @@
-"""Write path (create/update) for memory_service: entity resolution and persistence.
-
-Pure code-motion extraction (see refactor plan). The two deferred (in-function)
-imports of disposition_service and librarian_service below are preserved verbatim,
-including their comments -- they exist to avoid a real init-time circular import
-(memory_service -> disposition_service -> relation_service -> memory_service, and
-memory_service -> librarian_service -> memory_service).
-"""
+"""Write path (create/update) for memory_service: entity resolution and persistence."""
 
 import json
 import re
 import sqlite3
 import uuid
+from difflib import SequenceMatcher
 from datetime import datetime, UTC
-from typing import Any, Literal
+from typing import Literal
 
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
-from saltmdb.utils.text import extract_title_and_snippet, compute_content_hash
+from saltmdb.utils.text import compute_content_hash
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
-from saltmdb.utils.envelope import error as envelope_error, rejected
+from saltmdb.utils.envelope import error as envelope_error, rejected, ok as envelope_ok, warning
 from saltmdb.domain.services import core_governance_service
 
 from . import tags as tag_ops
 from . import validation
 from ._shared import logger, RETRIEVAL_TEXT_UNSET
+
+
+def _normalized_tag_key(tag_name: str) -> str:
+    return re.sub(r"[-_\s]+", "", (tag_name or "").lower().lstrip("#"))
+
+
+def _effective_tag_report(
+    conn, entity_id: str, submitted_tags: list | None
+) -> tuple[list[str], list[dict]]:
+    """Return canonical stored tags and advisory near-miss normalizations."""
+    effective_tags = [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT t.name
+            FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+            WHERE et.entity_id = ?
+            ORDER BY t.name
+            """,
+            (entity_id,),
+        ).fetchall()
+        if row[0] != "#core"
+        or any(_normalized_tag_key(tag) == "core" for tag in (submitted_tags or []))
+    ]
+    effective_by_key = {_normalized_tag_key(tag): tag for tag in effective_tags}
+    near_misses: list[dict] = []
+    for submitted in submitted_tags or []:
+        if not isinstance(submitted, str) or not submitted.strip():
+            continue
+        submitted_key = _normalized_tag_key(submitted)
+        if submitted_key in effective_by_key:
+            continue
+        candidate = max(
+            effective_tags,
+            key=lambda tag: SequenceMatcher(None, submitted_key, _normalized_tag_key(tag)).ratio(),
+            default=None,
+        )
+        if candidate is None:
+            continue
+        score = SequenceMatcher(None, submitted_key, _normalized_tag_key(candidate)).ratio()
+        plural_match = submitted_key.rstrip("s") == _normalized_tag_key(candidate).rstrip("s")
+        if plural_match or score >= 0.8:
+            near_misses.append(
+                {"submitted": submitted, "effective": candidate, "similarity": round(score, 3)}
+            )
+    return effective_tags, near_misses
 
 
 def _legacy_update_guard(  # noqa: C901, PLR0912
@@ -144,23 +184,29 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
 
 def _resolve_existing_entity_id(
     conn, entity_id: str | None, title: str, owner_id: str, scope: str, content_hash: str
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, dict | None]:
     """Resolves what entity id a `store_memory` call will target, before persistence.
 
-    Returns (resolved_entity_id, error_message). error_message is only ever set for an exact
-    content-hash collision (REJECT_EXACT_DUPLICATE) -- callers must return it immediately, same as
-    always. resolved_entity_id is None for a fresh insert (no explicit entity_id, no hash
+    Returns (resolved_entity_id, error_envelope). error_envelope is only ever set for an exact
+    content-hash collision -- callers must return it immediately before any write. resolved_entity_id
+    is None for a fresh insert (no explicit entity_id, no hash
     collision, no same-title match); non-None means either the caller's own explicit entity_id, or
     a same-title/owner/scope temporal-upsert match.
 
-    Track A (memory-core rework, see scratch/plans/track_a_disposition_detailed.md §0/§3):
-    extracted out of `store_memory`'s body so `disposition_service.evaluate_store_preflight`/
-    `commit_disposed_write` can determine the identical resolved target without duplicating this
-    SQL, and so the exact same resolution can be re-run at both preflight and commit time for the
-    review-token binding check.
+    Exact content-hash collisions are deterministic hard failures.  Same-title matches remain
+    administrative updates, while near-duplicate similarity is advisory and is evaluated only
+    after a fresh entity has been persisted.
     """
+    explicit_fresh_id = False
     if entity_id:
-        return entity_id, None
+        existing_row = conn.execute("SELECT id FROM entities WHERE id = ?", (entity_id,)).fetchone()
+        if existing_row:
+            # Existing explicit targets are administrative updates; identical content is allowed
+            # so metadata/core lifecycle fields can be repaired without creating a new version.
+            return entity_id, None
+        # A caller-supplied ID that does not exist is still a create.  It must not bypass the
+        # deterministic exact-hash guard merely because the ID was supplied.
+        explicit_fresh_id = True
     try:
         row = conn.execute(
             """
@@ -170,12 +216,19 @@ def _resolve_existing_entity_id(
             (content_hash, owner_id),
         ).fetchone()
         if row:
-            return (
-                None,
-                f"Error: REJECT_EXACT_DUPLICATE - Memory with exact content hash already exists with ID: {row[0]}",
+            existing_id = row[0]
+            duplicate_error = envelope_error(
+                "REJECT_EXACT_DUPLICATE",
+                "An active memory with the exact content hash already exists; use its existing ID "
+                f"{existing_id} or revise/supersede it instead of storing a duplicate.",
+                "content",
             )
+            duplicate_error["detail"] = {"existing_entity_id": existing_id}
+            return None, rejected([duplicate_error])
     except sqlite3.Error as exc:
         logger.debug("Exact content-hash lookup unavailable; continuing with title lookup: %s", exc)
+    if explicit_fresh_id:
+        return entity_id, None
     try:
         row = conn.execute(
             """
@@ -194,11 +247,8 @@ def _resolve_existing_entity_id(
 def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, PLR0912, PLR0915
     """Persists `proposed` as a plain raw entity (a temporal upsert if `resolved_entity_id` names
     an already-existing row, otherwise a fresh insert) -- the same insert/tag/`#core`-sync logic
-    `store_memory` has always run, factored out so `disposition_service.commit_disposed_write`'s
-    no-`consolidate`-disposition path reuses it rather than duplicating it (Track A, see
-    scratch/plans/track_a_disposition_detailed.md §0/§3). Must run inside the caller's own write
-    transaction. Returns (entity_id, was_existing) -- `was_existing` gates the "[Tip: ...]" suffix
-    the same way the pre-Track-A code's local `existing` variable did.
+    Must run inside the caller's own write transaction. Returns (entity_id, was_existing) --
+    `was_existing` gates the "[Tip: ...]" suffix.
     """
     was_existing_entity = bool(proposed.get("resolved_entity_id"))
     entity_id = proposed.get("resolved_entity_id") or str(uuid.uuid4())
@@ -518,14 +568,11 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     novelty: int = None,
     actionability: int = None,
     metadata: dict = None,
-    skip_duplicate_check: bool = False,
     context_id: str = None,
     db_connection=None,
     db_path: str = None,
     coordinator=None,
     *,
-    review_token: str | None = None,
-    dispositions: list | None = None,
     retrieval_text: str | None | object = RETRIEVAL_TEXT_UNSET,
     core_reason: str | None = None,
     core_exit_condition: str | None = None,
@@ -534,21 +581,10 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
-    Track A (memory-core rework, see scratch/plans/track_a_disposition_detailed.md): every call
-    runs a side-effect-free preflight before persistence. If evidence-gathering finds no flagged
-    candidates, this behaves exactly as before -- a single call, same string return. If it finds
-    one or more (a possible duplicate, supersession, or stale-consolidated-node signal), nothing
-    is persisted; instead this returns a `REVIEW_REQUIRED` dict carrying an opaque `review_token`
-    and the flagged candidates, each with an advisory (never authoritative) `suggested_label` and
-    the disposition options available for it. Resend the identical call with `review_token` and
-    `dispositions` (`[{"candidate_id": ..., "disposition": "distinct"|"supersede"|"consolidate"},
-    ...]`, one entry per flagged candidate) to commit. A stale/expired token or a proposed write
-    that no longer matches what was previewed returns `REVIEW_STALE` instead of persisting
-    anything -- call again without `review_token` to get a fresh preflight.
-
-    `skip_duplicate_check=True` bypasses the preflight entirely (same as before Track A), same as
-    an explicit `entity_id` or a same-title/owner/scope match already resolving this call to an
-    existing entity -- in both cases this is a direct write, not a create-or-flag decision.
+    Exact content-hash duplicates are rejected before any write and identify the existing entity.
+    Fresh near duplicates are persisted normally; the success response includes inline candidate
+    IDs/titles/similarity scores and directs callers to `supersede_memory` or
+    `consolidate_memories` when they determine the knowledge should be replaced or merged.
 
     Core-memory governance (see core_governance_service.py): `is_core=True` requires `scope=
     "shared"`, `core_reason`/`core_exit_condition` (each 20-500 characters), and admits a hard
@@ -613,9 +649,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         else:
             normalized_retrieval_text = None
 
-        if not title:
-            title, _ = extract_title_and_snippet(redacted_content)
-        else:
+        if title:
             title = redact_secrets(title)
 
         if not title or not title.strip():
@@ -637,7 +671,24 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
         quality_res = evaluate_memory_quality(redacted_content, title)
         if quality_res["status"] == "REJECT":
-            return f"Error: Memory quality check rejected (Score: {quality_res['quality_score']:.2f}). Reason: {quality_res['reason']}"
+            return rejected(
+                [
+                    envelope_error(
+                        code,
+                        f"Memory quality check rejected by {code}.",
+                        "content",
+                    )
+                    for code in (quality_res.get("hard_errors") or ["MEMORY_QUALITY_REJECTED"])
+                ],
+                warnings=[
+                    warning(
+                        "QUALITY_WARNING",
+                        f"Advisory quality finding: {code}.",
+                        {"rule": code},
+                    )
+                    for code in quality_res.get("warnings", [])
+                ],
+            )
 
         content_hash = compute_content_hash(redacted_content)
         quality_score = quality_res["quality_score"]
@@ -706,128 +757,142 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "_skip_scd_history": frozen_current is not None,
         }
 
-        # Deferred import: disposition_service imports relation_service, which imports this very
-        # module (memory_service) at ITS OWN top level -- a top-level import here would create a
-        # real init-time cycle. Matches this function's other deferred imports below.
-        from saltmdb.domain.services import disposition_service
-
-        effective_db_path = db_path or get_db_path()
-
-        if review_token:
-            try:
-                result = disposition_service.commit_disposed_write(
-                    conn, proposed, review_token, dispositions or [], effective_db_path
-                )
-            except core_governance_service.CoreGovernanceRejected as e:
-                return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
-            if isinstance(result, dict):
-                return result  # REVIEW_STALE or REJECTED
-            if isinstance(result, str) and result.startswith("Error"):
-                return result
-            entity_id_out = result.split("ID: ")[-1].strip()
-            res_msg = result
-        else:
-            # Side-effect-free advisory pre-check (plan order steps 2-6): capacity/lifecycle
-            # validation precedes Track A's duplicate/supersession preflight, so an agent
-            # rebalances core capacity BEFORE spending a round trip on disposition review. This
-            # is advisory, not the safety boundary -- _store_raw_entity re-runs the identical
-            # resolution AUTHORITATIVELY inside the write transaction (step 7/8) and raises
-            # CoreGovernanceRejected on a concurrent-state mismatch, caught below.
-            try:
-                core_state_preview = core_governance_service.resolve_store_core_state(
+        # Capacity/lifecycle validation remains side-effect free and authoritative persistence
+        # still happens inside the write transaction. Similarity is deliberately advisory only.
+        try:
+            core_state_preview = core_governance_service.resolve_store_core_state(
+                conn,
+                entity_id=resolved_entity_id,
+                is_core_requested=core_governance_service.parse_is_core(is_core),
+                content=redacted_content,
+                scope=scope,
+                core_reason=core_reason,
+                core_exit_condition=core_exit_condition,
+                core_review_after=core_review_after,
+                detail_memory_ids=detail_memory_ids,
+            )
+            preview_target_will_be_active = True
+            if resolved_entity_id:
+                status_row = conn.execute(
+                    "SELECT status FROM entities WHERE id = ?", (resolved_entity_id,)
+                ).fetchone()
+                preview_target_will_be_active = status_row is None or status_row[0] != "archived"
+            effective_memory_type_preview = core_governance_service.resolve_effective_memory_type(
+                conn, entity_id=resolved_entity_id, requested_memory_type=memory_type
+            )
+            prospective_entry_preview = {
+                "id": resolved_entity_id or str(uuid.uuid4()),
+                "title": title,
+                "memory_type": effective_memory_type_preview,
+                "core_reason": core_state_preview["core_reason"],
+                "core_exit_condition": core_state_preview["core_exit_condition"],
+                "core_review_after": core_state_preview["core_review_after"],
+                "full_content": redacted_content,
+                "owner_id": owner_id,
+            }
+            if preview_target_will_be_active:
+                core_governance_service.enforce_overdue_boundary(
                     conn,
                     entity_id=resolved_entity_id,
-                    is_core_requested=core_governance_service.parse_is_core(is_core),
-                    content=redacted_content,
-                    scope=scope,
-                    core_reason=core_reason,
-                    core_exit_condition=core_exit_condition,
-                    core_review_after=core_review_after,
-                    detail_memory_ids=detail_memory_ids,
+                    effective_is_core=core_state_preview["is_core"],
+                    is_new_core=core_state_preview["is_new_core"],
+                    review_after_changed=core_state_preview["review_after_changed"],
+                    prospective_entry=prospective_entry_preview,
                 )
-                # See the matching comment in _store_raw_entity: an existing ARCHIVED target
-                # stays archived after a plain store_memory write and never becomes bootstrap-
-                # visible, so it must not count against capacity or the overdue boundary.
-                preview_target_will_be_active = True
-                if resolved_entity_id:
-                    status_row = conn.execute(
-                        "SELECT status FROM entities WHERE id = ?", (resolved_entity_id,)
-                    ).fetchone()
-                    # See the matching comment in _store_raw_entity: None means an explicit,
-                    # not-yet-existing entity_id -- still a fresh, active insert.
-                    preview_target_will_be_active = (
-                        status_row is None or status_row[0] != "archived"
-                    )
-                effective_memory_type_preview = (
-                    core_governance_service.resolve_effective_memory_type(
-                        conn,
-                        entity_id=resolved_entity_id,
-                        requested_memory_type=memory_type,
-                    )
+        except ValueError as e:
+            return f"Error: {e}"
+
+        if core_state_preview["is_core"] and preview_target_will_be_active:
+            rejection = core_governance_service.check_capacity_admission(
+                conn,
+                exclude_ids=[resolved_entity_id] if resolved_entity_id else [],
+                new_entry=prospective_entry_preview,
+            )
+            if rejection is not None:
+                return rejection
+
+        def _write(c):
+            return _store_raw_entity(c, proposed)
+
+        try:
+            entity_id_out, was_existing = write_transaction_retrying(conn, _write)
+        except core_governance_service.CoreGovernanceRejected as e:
+            return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
+        res_msg = f"Knowledge stored successfully with ID: {entity_id_out}"
+        if not was_existing and tags:
+            res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"
+
+        # Near duplicates are warnings, never a write gate.  Keep this probe after persistence so
+        # callers receive the candidate IDs alongside the newly-created memory even when they do
+        # not follow the guidance.
+        duplicate_candidates: list[dict] = []
+        if not was_existing:
+            from .duplicates import check_duplicate_memories
+
+            duplicate_result = check_duplicate_memories(
+                title=title,
+                content=redacted_content,
+                owner_id=owner_id,
+                tags=tags,
+                context_id=context_id,
+                exclude_ids=[entity_id_out],
+                db_connection=conn,
+                db_path=db_path,
+            )
+            duplicate_candidates = duplicate_result.get("potential_duplicates") or []
+
+        effective_tags, tag_near_misses = _effective_tag_report(conn, entity_id_out, tags)
+        response_warnings = [
+            warning(
+                "QUALITY_WARNING",
+                f"Memory stored with advisory quality finding: {quality_code}.",
+                {"rule": quality_code},
+            )
+            for quality_code in quality_res.get("warnings", [])
+        ]
+        response_warnings.extend(
+            warning(
+                "TAG_NEAR_MISS",
+                f"Submitted tag {item['submitted']} resolved near {item['effective']}.",
+                item,
+            )
+            for item in tag_near_misses
+        )
+        if duplicate_candidates:
+            response_warnings.append(
+                warning(
+                    "NEAR_DUPLICATE",
+                    "Memory stored; review duplicate_candidates and use supersede_memory for one replacement or consolidate_memories to merge several.",
+                    {
+                        "duplicate_candidates": duplicate_candidates,
+                        "guidance": {
+                            "single": "supersede_memory",
+                            "several": "consolidate_memories",
+                        },
+                    },
                 )
-                prospective_entry_preview = {
-                    "id": resolved_entity_id or str(uuid.uuid4()),
-                    "title": title,
-                    "memory_type": effective_memory_type_preview,
-                    "core_reason": core_state_preview["core_reason"],
-                    "core_exit_condition": core_state_preview["core_exit_condition"],
-                    "core_review_after": core_state_preview["core_review_after"],
-                    "full_content": redacted_content,
-                    "owner_id": owner_id,
-                }
-                if preview_target_will_be_active:
-                    core_governance_service.enforce_overdue_boundary(
-                        conn,
-                        entity_id=resolved_entity_id,
-                        effective_is_core=core_state_preview["is_core"],
-                        is_new_core=core_state_preview["is_new_core"],
-                        review_after_changed=core_state_preview["review_after_changed"],
-                        prospective_entry=prospective_entry_preview,
-                    )
-            except ValueError as e:
-                return f"Error: {e}"
-
-            if core_state_preview["is_core"] and preview_target_will_be_active:
-                rejection = core_governance_service.check_capacity_admission(
-                    conn,
-                    exclude_ids=[resolved_entity_id] if resolved_entity_id else [],
-                    new_entry=prospective_entry_preview,
-                )
-                if rejection is not None:
-                    return rejection
-
-            # Gated identically to the pre-Track-A dup-check: skipped whenever this call already
-            # resolves to an existing entity (explicit entity_id OR a same-title/owner/scope
-            # upsert match -- resolved_entity_id covers both) or the caller opted out, exactly
-            # matching store_memory's original `if not entity_id and not skip_duplicate_check`
-            # gate, which was itself checked AFTER entity_id could have been mutated by the
-            # same-title match.
-            if resolved_entity_id or skip_duplicate_check:
-                preflight: dict[str, Any] = {"candidates": []}
-            else:
-                preflight = disposition_service.evaluate_store_preflight(
-                    conn, proposed, effective_db_path
-                )
-
-            if preflight["candidates"]:
-                return disposition_service.build_review_required_response(proposed, preflight)
-
-            def _write(c):
-                return _store_raw_entity(c, proposed)
-
-            try:
-                entity_id_out, was_existing = write_transaction_retrying(conn, _write)
-            except core_governance_service.CoreGovernanceRejected as e:
-                return e.payload if isinstance(e.payload, dict) else f"Error: {e.payload}"
-            res_msg = f"Knowledge stored successfully with ID: {entity_id_out}"
-            if not was_existing and tags:
-                res_msg += " [Tip: consider calling manage_relation to link this to related entities/concepts you just stored.]"
+            )
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
         trigger_librarian(db_path=db_path, coordinator=coordinator)
 
-        return res_msg
+        return envelope_ok(
+            {
+                "id": entity_id_out,
+                "message": res_msg,
+                "submitted_tags": list(tags or []),
+                "effective_tags": effective_tags,
+                "duplicate_candidates": duplicate_candidates,
+            },
+            warnings=response_warnings,
+            effective={
+                "owner_id": owner_id,
+                "context_id": context_id,
+                "scope": scope,
+                "memory_type": effective_memory_type_preview,
+            },
+        )
     except Exception as e:
         logger.error("Error storing knowledge: %s", e)
         return f"Error storing knowledge: {e}"

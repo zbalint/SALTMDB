@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 import json
+import re
 from datetime import datetime, UTC
 from unittest.mock import patch
 
@@ -59,6 +60,14 @@ def _cons_content(marker: str) -> str:
     )
 
 
+def _memory_id(result) -> str:
+    if isinstance(result, dict):
+        return result["data"]["id"]
+    match = re.search(r"ID:\s*([a-f0-9-]+)", result)
+    assert match, f"Could not parse entity ID from result: {result!r}"
+    return match.group(1)
+
+
 class TestRelationsUniqueIndexSchema(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -96,10 +105,9 @@ class TestRelationsUniqueIndexSchema(unittest.TestCase):
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id="idx_tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return _memory_id(res)
 
     def test_expired_and_active_row_for_identical_tuple_both_insert(self):
         src = self._mk_entity("Partial Idx Src")
@@ -265,18 +273,16 @@ class TestStoreRelationDedup(unittest.TestCase):
             content="Source entity content for relation dedup tests",
             title="Relation Dedup Source",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for relation dedup tests",
             title="Relation Dedup Target",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        self.id1 = res1.split("ID: ")[1].strip()
-        self.id2 = res2.split("ID: ")[1].strip()
+        self.id1 = _memory_id(res1)
+        self.id2 = _memory_id(res2)
 
     def tearDown(self):
         self.conn.close()
@@ -302,7 +308,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         )
         self.assertIn("successfully stored", res1)
         self.assertFalse(res1.startswith("Error"))
-        id_in_res1 = res1.split("ID: ")[1].rstrip(")").strip()
+        id_in_res1 = _memory_id(res1)
 
         res2 = store_relation(
             source_id=self.id1,
@@ -312,7 +318,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         )
         self.assertIn("already exists", res2)
         self.assertFalse(res2.startswith("Error"))
-        id_in_res2 = res2.split("ID: ")[1].rstrip(")").strip()
+        id_in_res2 = _memory_id(res2)
 
         self.assertEqual(
             id_in_res1,
@@ -389,7 +395,7 @@ class TestStoreRelationDedup(unittest.TestCase):
             db_connection=self.conn,
         )
         self.assertIn("successfully stored", active_res)
-        active_id = active_res.split("ID: ")[1].rstrip(")").strip()
+        active_id = _memory_id(active_res)
         self.assertNotEqual(active_id, expired_id)
 
         dup_res = store_relation(
@@ -399,7 +405,7 @@ class TestStoreRelationDedup(unittest.TestCase):
             db_connection=self.conn,
         )
         self.assertIn("already exists", dup_res)
-        reported_id = dup_res.split("ID: ")[1].rstrip(")").strip()
+        reported_id = _memory_id(dup_res)
         self.assertEqual(
             reported_id,
             active_id,
@@ -525,18 +531,16 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             content="Source entity content for degenerate predicate test",
             title="Degenerate Predicate Source",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for degenerate predicate test",
             title="Degenerate Predicate Target",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = _memory_id(res1)
+        id2 = _memory_id(res2)
 
         result = store_relation(
             source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
@@ -568,18 +572,16 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             content="Source entity content for alias surfacing test",
             title="Alias Surfacing Source",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for alias surfacing test",
             title="Alias Surfacing Target",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = _memory_id(res1)
+        id2 = _memory_id(res2)
 
         result = store_relation(
             source_id=id1, target_id=id2, predicate="relates_to", db_connection=self.conn
@@ -600,18 +602,16 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             content="Source entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Source",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Target",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = _memory_id(res1)
+        id2 = _memory_id(res2)
 
         result = store_relation(
             source_id=id1, target_id=id2, predicate="Depends-On", db_connection=self.conn
@@ -627,18 +627,16 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
             content="Source entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Source",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Target",
             owner_id="tester",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        id1 = res1.split("ID: ")[1].strip()
-        id2 = res2.split("ID: ")[1].strip()
+        id1 = _memory_id(res1)
+        id2 = _memory_id(res2)
 
         store_relation(source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn)
         result = invalidate_relation(
@@ -774,10 +772,9 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id=owner_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return _memory_id(res)
 
     def _active_relations(self, source_id=None, target_id=None, predicate=None):
         clauses, params = ["valid_to IS NULL"], []
@@ -919,7 +916,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res1)
-        c1 = res1.split("ID: ")[1].strip()
+        c1 = _memory_id(res1)
 
         c1_to_a = self.conn.execute(
             "SELECT id FROM relations WHERE source_id=? AND target_id=? AND predicate='consolidated_from'",
@@ -1058,10 +1055,9 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id=owner_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return _memory_id(res)
 
     def test_lineage_chain_and_no_parent_ids_key(self):
         a = self._mk("Lineage A")
@@ -1074,7 +1070,7 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        c1 = res1.split("ID: ")[1].strip()
+        c1 = _memory_id(res1)
         result = analyze_lineage(entity_id=c1, db_connection=self.conn)
         self.assertNotIn("error", result)
         ancestors = result["ancestors"]
@@ -1156,10 +1152,9 @@ class TestPhase3LineageGraph(unittest.TestCase):
             content=f"Graph lineage content for {title}",
             title=title,
             owner_id="phase3_graph",
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return result.split("ID: ")[1].strip()
+        return _memory_id(result)
 
     def _edge(self, source_id, target_id, predicate, *, valid_from=None, valid_at=None):
         now = datetime.now(UTC).isoformat()
@@ -1274,10 +1269,9 @@ class TestRelationPointInTime(unittest.TestCase):
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id=owner_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return _memory_id(res)
 
     def _now(self):
         return datetime.now(UTC).isoformat()
@@ -1409,7 +1403,7 @@ class TestRelationPointInTime(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        c_id = res.split("ID: ")[1].strip()
+        c_id = _memory_id(res)
 
         historical = analyze_dependencies(
             root_entity_id=p1, point_in_time=pit_before_consolidation, db_connection=self.conn
@@ -1452,7 +1446,7 @@ class TestRelationPointInTime(unittest.TestCase):
             owner_id="agent_c",
             db_connection=self.conn,
         )
-        c1 = res.split("ID: ")[1].strip()
+        c1 = _memory_id(res)
 
         historical = analyze_lineage(
             entity_id=c1, point_in_time=pit_before, db_connection=self.conn
@@ -1537,10 +1531,9 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
             content=f"Raw content body for entity {title}",
             title=title,
             owner_id=owner_id,
-            skip_duplicate_check=True,
             db_connection=self.conn,
         )
-        return res.split("ID: ")[1].strip()
+        return _memory_id(res)
 
     def test_entity_whose_only_relation_is_expired_is_flagged_orphan(self):
         e1 = self._mk("Orphan E1")
