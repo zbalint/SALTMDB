@@ -158,10 +158,12 @@ same set as a required `lint` job (`.github/workflows/python-tests.yml`) alongsi
 of it — each needs its own reviewed change):
 * 17 `try/except: pass` + 2 `try/except: continue` sites (`bandit` B110/B112, baselined) — audit
   against §2.1 rule #14.
-* `mcp/tools.py`'s `scope`/`tag_operator` MCP-tool parameters accept any string from the wire and
-  are passed to internal functions typed as a narrower `Literal`; `store_memory`'s `scope` *is*
-  runtime-validated, but `commit_consolidation`'s is not (an invalid value would be written to
-  the DB as-is). Both are marked `# type: ignore[arg-type]` in `mcp/tools.py`, not fixed.
+* `mcp/tools.py`'s `scope` MCP-tool parameter accepts any string from the wire and is passed to
+  internal functions typed as a narrower `Literal`; `store_memory`'s `scope` *is*
+  runtime-validated, but `consolidate_memories`'s is not (an invalid value would be written to
+  the DB as-is), marked `# type: ignore[arg-type]` in `mcp/tools.py`, not fixed. (This finding's
+  original `tag_operator` half is now moot post-agent-API-redesign: `tag_operator` is no longer
+  an MCP-tool parameter on `search_memory` at all, only an internal domain-layer one.)
 * 50 pre-existing `ruff` complexity findings (`C901`/`PLR0912`/`PLR0915`/`PLR0911`), noqa'd as a
   baseline — candidates for a dedicated refactor pass, not a drive-by fix.
 
