@@ -41,7 +41,6 @@ READ_TOOLS = frozenset(
         "get_lineage",
         "get_related_memories",
         "get_events",
-        "export_corpus_snapshot",
         # Internal-only (no public MCP tool): returns the already-rendered core-memory bootstrap
         # digest via core_governance_service.render_bootstrap_response. Read-only -- classified
         # here so the RPC mid-call-failure contract (client.py) retries it like any other read.

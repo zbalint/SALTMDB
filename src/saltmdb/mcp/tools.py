@@ -6,10 +6,9 @@ from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
 from saltmdb.daemon import protocol
 
-# ephemeral_service is the sole domain.services import remaining in this module (see
-# ephemeral_memory below): EPHEMERAL_CONN never touches the persistent DB, so ephemeral_memory
-# never goes over RPC and stays adapter-local, exactly as before Track B.
-from saltmdb.domain.services import ephemeral_service, core_governance_service
+# core_governance_service.parse_is_core is a pure/stateless helper (no DB access), safe to call
+# from the adapter process directly -- same category as saltmdb.utils.corrected_call/envelope.
+from saltmdb.domain.services import core_governance_service
 
 logger = logging.getLogger(__name__)
 
@@ -434,23 +433,6 @@ def search_memory(
             "include_related": include_related if include_related is not None else True,
         },
     )
-
-
-@mcp.tool()
-def ephemeral_memory(
-    action: Literal["get", "store"] = "get", key: str | None = None, value: str | None = None
-) -> str:
-    """Manages volatile in-memory secret storage (get or store)."""
-
-    # Deliberately NOT routed through _backend_or_raise() -- EPHEMERAL_CONN is a separate
-    # in-memory-only sqlite3 connection that never touches the persistent DB, so this tool was
-    # never in scope for the DB-access-boundary invariant to begin with. Routing it through the
-    # daemon would silently turn per-agent-process-isolated volatile secrets into a cross-agent-
-    # shared store (Codex Track-B plan-review round-2 finding) -- calling ephemeral_service
-    # directly, in-process, exactly as before Track B, preserves today's isolation exactly.
-    if action == "store" or value is not None:
-        return ephemeral_service.store_ephemeral_memory(key=key or "", value=value or "")
-    return ephemeral_service.get_ephemeral_memory(key=key or "")
 
 
 @mcp.tool()
@@ -923,33 +905,6 @@ def get_events(
             "order": order,
             "limit": limit if limit is not None else 20,
             "offset": offset if offset is not None else 0,
-        },
-    )
-
-
-@mcp.tool()
-def export_corpus_snapshot(
-    owner_id: str | None = None,
-    page_size: int | None = None,
-    cursor: str | None = None,
-    snapshot_hash: str | None = None,
-    include_archived: bool = False,
-) -> dict:
-    """Exports authoritative entity pages for an immutable evaluation corpus snapshot.
-
-    The first call omits cursor/snapshot_hash.  Subsequent calls pass both values returned by the
-    previous page; a changed production corpus or schema fails closed instead of mixing pages.
-    The service owns the SQLite read transaction and benchmark callers must not query SQL.
-    """
-    owner_id_ = _effective_owner(owner_id, tool_func=export_corpus_snapshot, submitted=locals())
-    return _backend_or_raise().call(
-        "export_corpus_snapshot",
-        {
-            "owner_id": owner_id_,
-            "page_size": page_size,
-            "cursor": cursor,
-            "snapshot_hash": snapshot_hash,
-            "include_archived": include_archived,
         },
     )
 

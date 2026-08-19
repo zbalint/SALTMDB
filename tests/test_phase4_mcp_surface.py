@@ -28,15 +28,16 @@ class TestPhase4McpSurface(unittest.TestCase):
 
     def test_lifecycle_tools_are_typed_and_old_name_is_not_public(self):
         # Phase 4 adds two lifecycle intents and renames consolidation one-for-one.
-        # dismiss_event was removed in Phase 6; ephemeral_memory remains until its planned
-        # Phase 7 removal.
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 18)
+        # dismiss_event was removed in Phase 6; ephemeral_memory and export_corpus_snapshot were
+        # removed in Phase 7 (18 -> 16, the plan's §2 target of exactly 16 MCP tools).
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 16)
         self.assertIn("revise_memory", tools.mcp._tool_manager._tools)
         self.assertIn("supersede_memory", tools.mcp._tool_manager._tools)
         self.assertIn("consolidate_memories", tools.mcp._tool_manager._tools)
         self.assertNotIn("commit_consolidation", tools.mcp._tool_manager._tools)
         self.assertNotIn("dismiss_event", tools.mcp._tool_manager._tools)
-        self.assertIn("ephemeral_memory", tools.mcp._tool_manager._tools)
+        self.assertNotIn("ephemeral_memory", tools.mcp._tool_manager._tools)
+        self.assertNotIn("export_corpus_snapshot", tools.mcp._tool_manager._tools)
         for function in (tools.revise_memory, tools.supersede_memory):
             params = list(inspect.signature(function).parameters)
             self.assertEqual(params[:5], ["entity_id", "title", "content", "tags", "reason"])

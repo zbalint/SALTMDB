@@ -214,15 +214,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         self.assertEqual(update_res["status"], "ok")
 
-    def test_ephemeral_memory_tool(self):
-        store_res = tools.ephemeral_memory(
-            action="store", key="secret_token", value="super_secret_123"
-        )
-        self.assertIn("stored successfully", store_res)
-
-        get_res = tools.ephemeral_memory(action="get", key="secret_token")
-        self.assertEqual(get_res, "super_secret_123")
-
     def test_polymorphic_archive_memory(self):
         res1 = tools.store_memory(
             content="Archive test single node",
@@ -783,8 +774,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            18,
-            f"MCP server tool count must be exactly 18 after Phase 6 (dismiss_event removed), "
+            16,
+            f"MCP server tool count must be exactly 16 after Phase 7 (ephemeral_memory and "
+            f"export_corpus_snapshot removed, following Phase 6's dismiss_event removal), "
             f"got {registered_count}",
         )
 

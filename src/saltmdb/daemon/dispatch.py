@@ -20,7 +20,6 @@ import logging
 
 from saltmdb.domain.services import (
     core_governance_service,
-    corpus_snapshot_service,
     event_service,
     librarian_service,
     memory_service,
@@ -372,17 +371,6 @@ def _dispatch_get_events(**kw):
     )
 
 
-def _dispatch_export_corpus_snapshot(**kw):
-    """Export one read-only, provenance-bound authoritative corpus page."""
-    return corpus_snapshot_service.export_corpus_snapshot_page(
-        owner_id=_required_str(kw, "owner_id"),
-        page_size=_optional_int(kw, "page_size", corpus_snapshot_service.DEFAULT_PAGE_SIZE),
-        cursor=kw.get("cursor"),
-        snapshot_hash=kw.get("snapshot_hash"),
-        include_archived=_optional_bool(kw, "include_archived", False),
-    )
-
-
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
@@ -401,7 +389,6 @@ DISPATCH_TABLE = {
     "get_lineage": _dispatch_get_lineage,
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
-    "export_corpus_snapshot": _dispatch_export_corpus_snapshot,
     "review_core_memory": _dispatch_review_core_memory,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
 }

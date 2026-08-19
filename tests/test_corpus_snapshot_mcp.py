@@ -1,77 +1,114 @@
-"""MCP/daemon boundary tests for the read-only corpus snapshot export."""
+"""CLI boundary tests for the read-only corpus snapshot export (agent API redesign plan §5.12,
+Phase 7 item 29: export_corpus_snapshot moved off MCP entirely -- no tool, no dispatch entry,
+no protocol classification. saltmdb.cli.cmd_export_corpus_snapshot is the sole surface now,
+reached only through argparse (--owner-id is argparse-required, not hand-validated)."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import json
+from unittest.mock import patch
 
 import pytest
 
-from saltmdb.daemon.dispatch import _dispatch_export_corpus_snapshot
+from saltmdb import cli
+from saltmdb.daemon import dispatch, protocol
+from saltmdb.domain.services.corpus_snapshot_service import SnapshotChangedError
 from saltmdb.mcp import tools
-from saltmdb.mcp.identity import SESSION_IDENTITY
 
 
-def test_dispatch_snapshot_applies_read_only_defaults_and_forwards_cursor():
+def _parse(argv):
+    return cli.build_parser().parse_args(argv)
+
+
+def _page(entities, *, entity_count, has_more, next_cursor):
+    return {
+        "entities": entities,
+        "entity_count": entity_count,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "snapshot_hash": "a" * 64,
+        "owner_id": "snapshot-owner",
+    }
+
+
+def test_export_corpus_snapshot_is_not_a_registered_mcp_tool():
+    assert "export_corpus_snapshot" not in tools.mcp._tool_manager._tools
+    assert not hasattr(tools, "export_corpus_snapshot")
+
+
+def test_export_corpus_snapshot_is_not_in_dispatch_table_or_protocol():
+    assert "export_corpus_snapshot" not in dispatch.DISPATCH_TABLE
+    assert "export_corpus_snapshot" not in protocol.READ_TOOLS
+    assert not hasattr(dispatch, "_dispatch_export_corpus_snapshot")
+
+
+def test_cli_export_requires_owner_id_via_argparse():
+    with pytest.raises(SystemExit) as exc:
+        _parse(["export-corpus-snapshot"])
+    assert exc.value.code == 2
+
+
+def test_cli_export_merges_pages_into_one_complete_document(capsys):
+    pages = [
+        _page([{"id": "e1"}, {"id": "e2"}], entity_count=3, has_more=True, next_cursor="e2"),
+        _page([{"id": "e3"}], entity_count=3, has_more=False, next_cursor=None),
+    ]
+    args = _parse(["export-corpus-snapshot", "--owner-id", "snapshot-owner", "--page-size", "2"])
     with patch(
-        "saltmdb.daemon.dispatch.corpus_snapshot_service.export_corpus_snapshot_page",
-        return_value={"snapshot_hash": "a" * 64},
-    ) as export:
-        result = _dispatch_export_corpus_snapshot(
-            owner_id="snapshot-owner",
-            page_size=7,
-            cursor="entity-006",
-            snapshot_hash="a" * 64,
-            include_archived=True,
-        )
+        "saltmdb.domain.services.corpus_snapshot_service.iter_corpus_snapshot_pages",
+        return_value=iter(pages),
+    ) as fn:
+        rc = cli.cmd_export_corpus_snapshot(args)
+    assert rc == 0
+    call_kwargs = fn.call_args.kwargs
+    assert call_kwargs["owner_id"] == "snapshot-owner"
+    assert call_kwargs["page_size"] == 2
+    assert call_kwargs["include_archived"] is False
+    out = json.loads(capsys.readouterr().out)
+    assert out["entity_count"] == 3
+    assert [e["id"] for e in out["entities"]] == ["e1", "e2", "e3"]
+    assert out["has_more"] is False
+    assert out["next_cursor"] is None
 
-    assert result == {"snapshot_hash": "a" * 64}
-    export.assert_called_once_with(
-        owner_id="snapshot-owner",
-        page_size=7,
-        cursor="entity-006",
-        snapshot_hash="a" * 64,
-        include_archived=True,
+
+def test_cli_export_writes_to_out_file_when_given(tmp_path, capsys):
+    pages = [_page([{"id": "e1"}], entity_count=1, has_more=False, next_cursor=None)]
+    out_path = tmp_path / "nested" / "snapshot.json"
+    args = _parse(
+        ["export-corpus-snapshot", "--owner-id", "snapshot-owner", "--out", str(out_path)]
     )
+    with patch(
+        "saltmdb.domain.services.corpus_snapshot_service.iter_corpus_snapshot_pages",
+        return_value=iter(pages),
+    ):
+        rc = cli.cmd_export_corpus_snapshot(args)
+    assert rc == 0
+    assert capsys.readouterr().out == ""  # nothing printed when --out is given
+    written = json.loads(out_path.read_text())
+    assert written["entity_count"] == 1
+    assert written["entities"] == [{"id": "e1"}]
 
 
-def test_mcp_snapshot_wrapper_resolves_aliases_without_sql_access():
-    backend = MagicMock()
-    backend.call.return_value = {"entities": [], "snapshot_hash": "b" * 64}
-    previous = tools._set_backend_for_test(backend)
-    try:
-        result = tools.export_corpus_snapshot(
-            owner_id="snapshot-owner",
-            page_size=4,
-            cursor="entity-003",
-            snapshot_hash="b" * 64,
-            include_archived=True,
-        )
-    finally:
-        tools._set_backend_for_test(previous)
-
-    assert result == {"entities": [], "snapshot_hash": "b" * 64}
-    backend.call.assert_called_once_with(
-        "export_corpus_snapshot",
-        {
-            "owner_id": "snapshot-owner",
-            "page_size": 4,
-            "cursor": "entity-003",
-            "snapshot_hash": "b" * 64,
-            "include_archived": True,
-        },
-    )
+def test_cli_export_reports_snapshot_changed_error(capsys):
+    args = _parse(["export-corpus-snapshot", "--owner-id", "snapshot-owner"])
+    with patch(
+        "saltmdb.domain.services.corpus_snapshot_service.iter_corpus_snapshot_pages",
+        side_effect=SnapshotChangedError("corpus changed mid-export"),
+    ):
+        rc = cli.cmd_export_corpus_snapshot(args)
+    assert rc == 1
+    assert "corpus changed mid-export" in capsys.readouterr().err
 
 
-def test_dispatch_snapshot_requires_owner_id():
-    with pytest.raises(ValueError, match="owner_id is required"):
-        _dispatch_export_corpus_snapshot(page_size=2)
-
-
-def test_mcp_snapshot_wrapper_requires_owner_id():
-    SESSION_IDENTITY.reset()
-    previous = tools._set_backend_for_test(MagicMock())
-    try:
-        with pytest.raises(ValueError, match="owner_id is required"):
-            tools.export_corpus_snapshot(owner_id=None, page_size=2)
-    finally:
-        tools._set_backend_for_test(previous)
+def test_cli_export_detects_entity_count_mismatch(capsys):
+    # A page whose reported entity_count disagrees with what was actually merged must fail
+    # closed rather than silently emitting an inconsistent snapshot.
+    pages = [_page([{"id": "e1"}], entity_count=99, has_more=False, next_cursor=None)]
+    args = _parse(["export-corpus-snapshot", "--owner-id", "snapshot-owner"])
+    with patch(
+        "saltmdb.domain.services.corpus_snapshot_service.iter_corpus_snapshot_pages",
+        return_value=iter(pages),
+    ):
+        rc = cli.cmd_export_corpus_snapshot(args)
+    assert rc == 1
+    assert "entity_count" in capsys.readouterr().err

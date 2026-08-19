@@ -25,9 +25,10 @@ class TestPhase3McpSurface(unittest.TestCase):
         SESSION_IDENTITY.reset()
 
     def test_tool_count_and_registration(self):
-        # Phase 6 removed dismiss_event (19 -> 18); see test_mcp_tools.py's
+        # Phase 6 removed dismiss_event (19 -> 18); Phase 7 removed ephemeral_memory and
+        # export_corpus_snapshot (18 -> 16, the plan's §2 target). See test_mcp_tools.py's
         # test_mcp_tool_count_regression_guard for the authoritative count guard.
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 18)
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 16)
         self.assertIn("get_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("get_lineage", dispatch.DISPATCH_TABLE)
         self.assertIn("get_related_memories", dispatch.DISPATCH_TABLE)
