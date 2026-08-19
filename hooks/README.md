@@ -75,9 +75,11 @@ every body is fully shared).
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
 | [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude-Code-only event; script itself is portable) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `claude -p` or `codex exec` since a bare script has no MCP tool context of its own. |
+| [`saltmdb-skill-review-sweep.py`](saltmdb-skill-review-sweep.py) | Manual / cron only (no lifecycle event) | Mining and diagnosis sweep for skill/hook improvements. Shells out to `claude -p` or `codex exec` to perform a 5-step telemetry review (mine, diagnose, pair-check, propose, gate). Never auto-applies file edits; outputs proposals as gated memories for human review. |
 
-**Explicit non-goal**: no hook here nudges or automates `consolidate_memories`. Deciding which
-memories are cohesive enough to merge stays a deliberate agent judgment call.
+**Explicit non-goals**:
+- No hook here nudges or automates `consolidate_memories`. Deciding which memories are cohesive enough to merge stays a deliberate agent judgment call.
+- The skill-review sweep (`saltmdb-skill-review-sweep.py`) never auto-applies a file edit either — output is always a review-gated memory proposal.
 
 ---
 

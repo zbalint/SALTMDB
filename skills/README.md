@@ -18,6 +18,7 @@ at the moments that matter; skills teach the *why/when*. Neither replaces the ot
 | Skill | Covers |
 | :--- | :--- |
 | [`saltmdb-usage/`](saltmdb-usage/) | Title/memory-quality standards, effective `search_memory` mode usage, the full operational lifecycle (bootstrap/logging/wrap-up/consolidation), and the `retrieval_outcome` telemetry event convention. |
+| [`saltmdb-skill-review/`](saltmdb-skill-review/) | Reviewing accumulated failure and retrieval telemetry, diagnosing recurring patterns, and proposing surgical text improvements to skills and hooks (review-gated, never auto-applied). |
 
 ## Installing
 

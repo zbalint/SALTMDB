@@ -15,8 +15,9 @@ carrying the exact same sweep prompt.
 
 import os
 import shutil
-import subprocess
 import sys
+
+from _saltmdb_hook_common import run_quiet
 
 SWEEP_PROMPT = (
     "You are the SALTMDB pre-compaction sweep hook. The current session's conversation "
@@ -33,25 +34,12 @@ SWEEP_PROMPT = (
 TIMEOUT_SECS = int(os.environ.get("SALTMDB_PRECOMPACT_TIMEOUT", "60"))
 
 
-def run_quiet(cmd: list[str]) -> bool:
-    try:
-        subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=TIMEOUT_SECS,
-            check=False,
-        )
-        return True
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 def main() -> None:
     if shutil.which("claude"):
-        if run_quiet(["claude", "-p", SWEEP_PROMPT]):
+        if run_quiet(["claude", "-p", SWEEP_PROMPT], TIMEOUT_SECS):
             return
     if shutil.which("codex"):
-        if run_quiet(["codex", "exec", SWEEP_PROMPT]):
+        if run_quiet(["codex", "exec", SWEEP_PROMPT], TIMEOUT_SECS):
             return
     # No headless CLI-based agent available on PATH -- nothing this script can do without one
     # (storing memories requires an agent's own MCP tool context, not raw SQL). Fail silent/open.

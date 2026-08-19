@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -184,3 +185,16 @@ def clear_state(*state_files: Path) -> None:
             f.unlink()
         except OSError:
             pass
+
+
+def run_quiet(cmd: list[str], timeout_secs: int) -> bool:
+    try:
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=timeout_secs,
+            check=False,
+        )
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
