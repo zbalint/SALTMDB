@@ -696,6 +696,8 @@ def get_memory(
                 resolved_id,
             )
 
+        from . import tags as tag_ops
+
         lineage = _memory_lineage(resolved_id, conn, max_depth=max_depth)
         data = {
             "id": row[0],
@@ -717,6 +719,7 @@ def get_memory(
             "quality_score": row[16],
             "quality_status": row[17],
             "quality_flags": row[18],
+            "tags": tag_ops.list_entity_tags(conn, resolved_id),
             "lineage": lineage,
         }
         return envelope_ok(data)

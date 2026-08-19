@@ -39,6 +39,30 @@ class TestGetMemory(unittest.TestCase):
         self.assertIn("Full body", result["data"]["content"])
         self.assertEqual(result["data"]["lineage"], {"ancestors": [], "descendants": []})
 
+    def _attach_tag(self, entity_id, tag_name):
+        tag_id = f"tag-{tag_name.lstrip('#')}"
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tags (id, name, normalized_name) VALUES (?, ?, ?)",
+            (tag_id, tag_name, tag_name.lstrip("#")),
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+            (entity_id, tag_id),
+        )
+        self.conn.commit()
+
+    def test_returns_entity_tags_excluding_core_marker(self):
+        entity_id = "11112222-1234-1234-1234-123456789abc"
+        self._insert(entity_id, "Tagged memory")
+        self._attach_tag(entity_id, "#cadet")
+        self._attach_tag(entity_id, "#bug")
+        self._attach_tag(entity_id, "#core")
+
+        result = get_memory(entity_id=entity_id, db_connection=self.conn)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["data"]["tags"], ["#bug", "#cadet"])
+
     def test_returns_archived_entity_without_redirecting(self):
         archived = "abcdefab-1234-1234-1234-123456789abc"
         successor = "fedcba98-1234-1234-1234-123456789abc"

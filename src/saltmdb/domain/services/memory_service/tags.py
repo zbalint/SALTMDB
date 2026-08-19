@@ -27,6 +27,29 @@ def normalize_tag_name(tag_name: str) -> str:
     return name
 
 
+def list_entity_tags(conn, entity_id: str, *, include_core: bool = False) -> list[str]:
+    """Returns the canonical tag names attached to `entity_id`, sorted.
+
+    Excludes the internal '#core' bookkeeping tag by default -- is_core is already surfaced
+    as its own boolean field on every read path, so callers who just want an entity's
+    user-facing tags shouldn't see it duplicated here. Pass include_core=True to see it
+    anyway (e.g. diagnostics). This is the single read-side counterpart to the write-side
+    tag lookups duplicated inline in write.py's _effective_tag_report/_legacy_update_guard --
+    those stay as-is (already tested, entangled with near-miss/diff logic specific to each),
+    this is for callers that just want "what tags does this entity have right now".
+    """
+    rows = conn.execute(
+        """
+        SELECT t.name
+        FROM entity_tags et JOIN tags t ON t.id = et.tag_id
+        WHERE et.entity_id = ?
+        ORDER BY t.name
+        """,
+        (entity_id,),
+    ).fetchall()
+    return [row[0] for row in rows if include_core or row[0] != "#core"]
+
+
 def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | None:
     """Single source of truth for tag write-time resolution.
 
