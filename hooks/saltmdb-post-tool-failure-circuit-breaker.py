@@ -11,6 +11,12 @@ nudge instead of relying on the agent remembering it mid-loop.
 Best-effort by design: transcript line matching, not a structured event-log query (a hook script
 only sees the transcript, not the SALTMDB events table) -- a heuristic near-window fingerprint
 match, not a guaranteed-precise one.
+
+Also clears the retrieval-outcome-pending flag (see
+_saltmdb_hook_common.retrieval_outcome_flag_path) on a log_event(event_type="retrieval_outcome")
+call -- the other half of the flag set by saltmdb-post-tool-response-nudges.py on a search_memory
+call, checked by saltmdb-stop-retrieval-outcome-gate.py at Stop. This branch needs no transcript
+read at all: tool_input is already structured JSON on PostToolUse regardless of harness.
 """
 
 import json
@@ -19,7 +25,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _saltmdb_hook_common import emit, get_field, read_stdin_json  # noqa: E402
+from _saltmdb_hook_common import (  # noqa: E402
+    clear_state,
+    emit,
+    get_field,
+    read_stdin_json,
+    retrieval_outcome_flag_path,
+)
 
 ISSUE_PATTERN = re.compile(r'"event_type"\s*:\s*"issue"')
 EVENT_TYPE_PATTERN = re.compile(r'"event_type"\s*:\s*"([^"]*)"')
@@ -32,15 +44,20 @@ def main() -> None:
     if not tool_name.endswith("log_event"):
         return
 
+    # json.dumps, not str(): tool_input is a parsed dict at this point, and str() on a dict uses
+    # Python repr (single quotes), which the JSON-shaped regexes below wouldn't match.
+    tool_input = data.get("tool_input") or data.get("toolInput") or data.get("input") or data
+    input_text = json.dumps(tool_input)
+    event_match = EVENT_TYPE_PATTERN.search(input_text)
+    if event_match and event_match.group(1) == "retrieval_outcome":
+        session_id = get_field(data, "session_id", "sessionId") or "unknown"
+        clear_state(retrieval_outcome_flag_path(session_id))
+        return
+
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
     if not transcript_path or not Path(transcript_path).is_file():
         return
 
-    tool_input = data.get("tool_input") or data.get("toolInput") or data.get("input") or data
-    # json.dumps, not str(): tool_input is a parsed dict at this point, and str() on a dict uses
-    # Python repr (single quotes), which the JSON-shaped regexes below wouldn't match.
-    input_text = json.dumps(tool_input)
-    event_match = EVENT_TYPE_PATTERN.search(input_text)
     error_match = ERROR_CODE_PATTERN.search(input_text)
     if not event_match or event_match.group(1) != "issue":
         return

@@ -42,6 +42,11 @@ NO_LESSON_SENTINEL = "saltmdb-no-lesson-this-turn"
 STAGE2_PROMPT_SENTINEL = "saltmdb-stop-critique-stage2-prompt"
 STORE_MEMORY_PATTERN = re.compile(r'"name"\s*:\s*"[^"]*store_memory"')
 USER_TURN_PATTERN = re.compile(r'"type"\s*:\s*"user"')
+# A transcript line tagged "type":"user" can be either a genuine human prompt OR a tool_result
+# fed back to the model (confirmed for Claude Code's transcript format) -- exclude the latter so
+# the turn-boundary scan below doesn't collapse to "since the last tool call" instead of "since
+# the last real user prompt" (see memory 74a3b9a2 for the confirmed live bug this caused).
+TOOL_RESULT_ECHO_PATTERN = re.compile(r'"tool_use_id"|"tool_call_id"')
 
 
 def emit_block(reason: str) -> None:
@@ -67,7 +72,7 @@ def find_last_user_line(transcript_path: str) -> int | None:
         return None
     last = None
     for i, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
-        if USER_TURN_PATTERN.search(line):
+        if USER_TURN_PATTERN.search(line) and not TOOL_RESULT_ECHO_PATTERN.search(line):
             last = i
     return last
 

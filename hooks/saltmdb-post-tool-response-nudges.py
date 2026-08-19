@@ -17,6 +17,12 @@ independently gated below.
   3. Empty-strict-result nudge: search_memory(mode="strict") returned [] -- a valid abstention,
      not an error, but nothing prompts trying broad mode or confirming genuinely new territory.
 
+Also sets the retrieval-outcome-pending flag (see _saltmdb_hook_common.retrieval_outcome_flag_path)
+on every search_memory call, for saltmdb-stop-retrieval-outcome-gate.py to check at Stop --
+cleared by saltmdb-post-tool-failure-circuit-breaker.py on a matching log_event(retrieval_outcome)
+call. Structured PostToolUse tool_name/tool_input tracking, not transcript scanning -- see that
+gate script's docstring for why.
+
 Agent-agnostic output: non-blocking in all three cases (a nudge, not a gate) -- a PostToolUse
 hook has already-committed side effects to react to, not a decision to gate.
 """
@@ -27,7 +33,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _saltmdb_hook_common import emit, get_field, read_stdin_json  # noqa: E402
+from _saltmdb_hook_common import (  # noqa: E402
+    emit,
+    get_field,
+    read_stdin_json,
+    retrieval_outcome_flag_path,
+    write_count,
+)
 
 MANAGE_RELATION_PATTERN = "manage_relation"
 STORE_MEMORY_PATTERN = "store_memory"
@@ -83,7 +95,12 @@ def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> Non
         )
 
 
-def handle_search_memory(data: dict, resp_text: str) -> None:
+def handle_search_memory(data: dict, resp_text: str, session_id: str) -> None:
+    # Pending flag first, unconditionally -- the empty-strict-result nudge below is allowed to
+    # exit early via emit_nudge(), and the flag must be set regardless of whether that nudge
+    # fires.
+    write_count(retrieval_outcome_flag_path(session_id), 1)
+
     input_text = json.dumps(data)
     if (
         '"mode"' in input_text
@@ -102,12 +119,13 @@ def main() -> None:
     data = read_stdin_json()
     tool_name = get_field(data, "tool_name", "toolName", "tool", "name")
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
+    session_id = get_field(data, "session_id", "sessionId") or "unknown"
     resp_text = response_text(data)
 
     if tool_name.endswith("store_memory"):
         handle_store_memory(data, resp_text, transcript_path)
     elif tool_name.endswith("search_memory"):
-        handle_search_memory(data, resp_text)
+        handle_search_memory(data, resp_text, session_id)
 
 
 if __name__ == "__main__":

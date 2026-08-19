@@ -134,6 +134,23 @@ def state_dir() -> Path:
     return d
 
 
+def retrieval_outcome_flag_path(session_id: str) -> Path:
+    """Shared state-file path for the search_memory -> retrieval_outcome pending flag: written by
+    saltmdb-post-tool-response-nudges.py (on a search_memory call), cleared by
+    saltmdb-post-tool-failure-circuit-breaker.py (on a log_event(retrieval_outcome) call) or by
+    saltmdb-stop-retrieval-outcome-gate.py itself (once nudged), and read by the latter at Stop.
+    Centralized here so the three scripts can't drift on the filename formula.
+
+    This flag-file design deliberately replaces transcript-text turn-boundary scanning for this
+    check: PostToolUse hooks receive tool_name/tool_input as structured JSON regardless of
+    harness, so tracking state this way needs no assumption about what a given harness's
+    transcript JSONL shape looks like (the assumption that caused a confirmed live bug -- see
+    memory 74a3b9a2 -- when the old implementation tried to find "the last real user prompt line"
+    by scanning for a bare `"type":"user"` substring, which also matches tool-result echo lines).
+    """
+    return state_dir() / f"retrieval-outcome-pending-{session_id}.flag"
+
+
 def prune_stale_state(glob_pattern: str, max_age_days: int = 2) -> None:
     """Best-effort cleanup of stale per-session state files older than max_age_days."""
     import time
