@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-session-start-bootstrap.py",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-session-start-bootstrap.ps1",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-pre-tool-search-gate.py",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-pre-tool-search-gate.ps1",
+        "timeoutSec": 15
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-stop-critique-gate.py",
+        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-stop-critique-gate.ps1",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

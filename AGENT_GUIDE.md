@@ -175,6 +175,12 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 
 ## 3. Best Practices: Titles, Detailed Memories & Effective Feature Usage
 
+> [!TIP]
+> This section (plus §4's Operational Lifecycle) is also shipped as a portable, harness-agnostic
+> skill — [`skills/saltmdb-usage/`](skills/saltmdb-usage/) — for agents/harnesses
+> that load skills on demand instead of being told to read this whole file. If the two drift,
+> this file is authoritative.
+
 ### A. Formulating High-Quality Titles
 - **Descriptive & Canonical**: Use specific, unique titles (e.g., `SALTMDB Hybrid Vector Search Architecture & RRF Scoring` instead of generic `Search` or `Notes`).
 - **Entity Resolution Friendly**: SALTMDB tools (`manage_relation`, `get_memory`, `archive_memory`, `get_lineage`, `get_related_memories`, `consolidate_memories`, `revise_memory`, `supersede_memory`) auto-resolve entity IDs from titles. Distinct titles allow direct tool chaining without needing UUID lookups! (`search_memory` itself no longer takes an `entity_id` — use `get_memory` for direct lookups.)
@@ -197,6 +203,20 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
   - Use `mode="strict"` when you specifically need superseded matches resolved to their live successor and low-confidence results dropped rather than returned; use `mode="history"` to see superseded candidates explicitly tagged (`is_superseded: true`) instead of hidden; default `mode="broad"` for ordinary retrieval.
 - **Smart Tool Chaining**: `manage_relation` accepts status output strings directly (e.g., `source_id="Knowledge stored successfully with ID: <uuid>"`) or exact entity titles without manual regex parsing.
 - **Lossless Cognitive Consolidation (`consolidate_memories`)**: Rephrase and synthesize multiple raw memories into a single consolidated memory. If an individual raw memory is already comprehensive and self-contained, call `consolidate_memories` with a single parent ID to promote it directly — `title` and `content` are still mandatory in this case (the tool rejects a call with `parent_ids` alone), so pass the source's own title/content verbatim if no rewording is needed. Source nodes are soft-archived (`status='archived'`) and auto-linked via `consolidated_from` lineage edges, keeping full ancestry auditable via `get_lineage(direction='ancestors')`.
+
+### D. Retrieval-Outcome Telemetry
+
+There is no built-in mechanism today that measures whether `search_memory` results actually
+helped in real sessions — only individual observation, which isn't verifiable or aggregable. The
+convention: after acting on a `search_memory` result, call `log_event(event_type="retrieval_outcome",
+content="<memory_id>: used|irrelevant|insufficient -- <why>")`. This needs no new tool or schema
+— `event_type` is a free-form string and `get_events` already filters by it. It stays **pure
+observation**: it must never automatically feed ranking, decay, or memory authority — a popular
+memory can still be wrong, and a rarely-used one can still be essential. If a
+`saltmdb-stop-retrieval-outcome-gate.py`-style hook (see §7) is installed, it nudges this
+automatically after a turn that called `search_memory`; without one, it's a manual habit like
+`log_event` itself. Skip it when no search happened that turn — don't skip it because the result
+was negative; "irrelevant"/"insufficient" is exactly the useful signal.
 
 ---
 
@@ -332,11 +352,11 @@ This section is for **you, the agent**, not just the human reading this file. If
 
 ## 7. Session Automation via Lifecycle Hooks
 
-Session lifecycle hooks allow your AI host harness (such as **Claude Code**, **Antigravity CLI (`agy`)**, or **GitHub Copilot CLI**) to automatically trigger SALTMDB operations at specific session lifecycle events—such as session start, pre-tool execution, context compaction, and post-turn completion.
+Session lifecycle hooks allow your AI host harness (such as **Claude Code**, **Antigravity CLI (`agy`)**, or **GitHub Copilot CLI**) to automatically trigger SALTMDB operations at specific session lifecycle events—such as session start, pre-tool execution, post-tool response inspection, context compaction, turn completion, and session end.
 
-Using hooks eliminates manual prompt bootstrapping, enforces pre-action memory searches ("Think Before You Leap"), prevents context loss during transcript compaction, and ensures post-action quality self-critique.
+Using hooks eliminates manual prompt bootstrapping, enforces pre-action memory searches ("Think Before You Leap"), reacts to tool *responses* (not just tool names) for duplicate/unlinked-memory/empty-result nudges and a repeated-failure circuit breaker, prevents context loss during transcript compaction, ensures post-action quality self-critique with a reflection-to-memory closer, enforces the retrieval-outcome telemetry convention, and reminds about session wrap-up.
 
-All production reference hook scripts and harness configuration examples are provided in the [`examples/hooks/`](examples/hooks/) directory.
+Every `saltmdb-*.py` script body is fully agent-agnostic — the same script is registered from all three harnesses' configs; only the registration snippet differs. See [`hooks/README.md`](hooks/README.md) for the full inventory, naming convention, and design principle. All shipped, ready-to-use hook scripts and harness configuration templates live in the [`hooks/`](hooks/) directory.
 
 ---
 
@@ -345,30 +365,38 @@ All production reference hook scripts and harness configuration examples are pro
 Claude Code supports lifecycle hooks configured in your global settings file (`~/.claude/settings.json` or `%USERPROFILE%\.claude\settings.json`).
 
 #### Reference Files:
-- **Configuration Template**: [`examples/hooks/claude-settings-example.json`](examples/hooks/claude-settings-example.json)
-- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh)
-- **Pre-Action Search Gate Script**: [`examples/hooks/saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh)
-- **Stop Self-Critique Gate Script**: [`examples/hooks/saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh)
+- **Configuration Template**: [`hooks/claude-settings-example.json`](hooks/claude-settings-example.json)
+- **Session Start Script**: [`hooks/saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py)
+- **Pre-Tool Search Gate Script**: [`hooks/saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py)
+- **Post-Tool Response Nudges Script**: [`hooks/saltmdb-post-tool-response-nudges.py`](hooks/saltmdb-post-tool-response-nudges.py)
+- **Post-Tool Failure Circuit-Breaker Script**: [`hooks/saltmdb-post-tool-failure-circuit-breaker.py`](hooks/saltmdb-post-tool-failure-circuit-breaker.py)
+- **Stop Self-Critique Gate Script**: [`hooks/saltmdb-stop-critique-gate.py`](hooks/saltmdb-stop-critique-gate.py)
+- **Stop Retrieval-Outcome Gate Script**: [`hooks/saltmdb-stop-retrieval-outcome-gate.py`](hooks/saltmdb-stop-retrieval-outcome-gate.py)
+- **Session-End Wrap-Up Reminder Script**: [`hooks/saltmdb-session-end-wrapup-reminder.py`](hooks/saltmdb-session-end-wrapup-reminder.py)
+- **Pre-Compact Sweep Script (standalone)**: [`hooks/saltmdb-pre-compact-sweep.py`](hooks/saltmdb-pre-compact-sweep.py)
 
 #### Overview of Hooks:
-1. **`SessionStart`**: Triggers [`saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh), which invokes `saltmdb-cli bootstrap-digest` (no arguments) to auto-inject the canonical core-memory digest into context — global and core-only, no project-keyword search.
-2. **`PreToolUse`**: Triggers [`saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call is recorded in the transcript.
-3. **`PreCompact`**: Inlines a background agent prompt to sweep and persist unrecorded decisions, bug fixes, or rules before conversation transcript compaction.
-4. **`Stop`**: Triggers [`saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh) to require a 2-question quality self-reflection before completing turns that modified files.
+1. **`SessionStart`**: Triggers [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py), which invokes `saltmdb-cli bootstrap-digest` (no arguments) to auto-inject the canonical core-memory digest into context — global and core-only, no project-keyword search — plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`).
+2. **`PreToolUse`**: Triggers [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call is recorded in the transcript.
+3. **`PostToolUse`**: Triggers [`saltmdb-post-tool-response-nudges.py`](hooks/saltmdb-post-tool-response-nudges.py) on `store_memory`/`search_memory` (unacted duplicate candidates, unlinked memories, empty strict results) and [`saltmdb-post-tool-failure-circuit-breaker.py`](hooks/saltmdb-post-tool-failure-circuit-breaker.py) on `log_event` (repeated-failure fingerprinting per CLAUDE.md rule 2).
+4. **`PreCompact`**: Inlines a background agent prompt to sweep and persist unrecorded decisions, bug fixes, or rules before conversation transcript compaction (a standalone script version also exists for manual/cron use — see above).
+5. **`Stop`**: Triggers [`saltmdb-stop-critique-gate.py`](hooks/saltmdb-stop-critique-gate.py) (2-question self-reflection, then requires it become a `store_memory` call or an explicit opt-out) and [`saltmdb-stop-retrieval-outcome-gate.py`](hooks/saltmdb-stop-retrieval-outcome-gate.py) (requires a `retrieval_outcome` event after any `search_memory` call this turn).
+6. **`SessionEnd`**: Triggers [`saltmdb-session-end-wrapup-reminder.py`](hooks/saltmdb-session-end-wrapup-reminder.py), a one-shot reminder to check `get_events` for anything durable still only in the ephemeral event ledger.
 
 ---
 
 ### B. Google Antigravity CLI (`agy`) Hooks Integration
 
-Antigravity CLI supports execution lifecycle hooks configured in workspace or global settings (`~/.gemini/antigravity-cli/settings.json`).
+Antigravity CLI supports execution lifecycle hooks configured in workspace or global settings (`~/.gemini/antigravity-cli/settings.json`). Antigravity's own hook event set today only covers `PreInvocation`/`PreToolUse` (no confirmed `PostToolUse`/`Stop`/`SessionEnd`/`PreCompact` equivalent) — the config below only wires what's confirmed to exist, per this project's own agent-agnostic design principle ("a harness just doesn't register a hook it has no event for").
 
 #### Reference Files:
-- **Configuration Template**: [`examples/hooks/antigravity-settings-example.json`](examples/hooks/antigravity-settings-example.json)
-- **Pre-Tool Action Gate**: [`examples/hooks/saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh)
+- **Configuration Template**: [`hooks/antigravity-settings-example.json`](hooks/antigravity-settings-example.json)
+- **Session Start Script**: [`hooks/saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py)
+- **Pre-Tool Search Gate**: [`hooks/saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py)
 
 #### Overview of Hooks:
-- **`PreInvocation`**: Invokes `saltmdb-cli bootstrap-digest` to pre-load the canonical core-memory digest prior to initial prompt processing.
-- **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-action-gate.sh`](examples/hooks/saltmdb-pre-action-gate.sh) to ensure prior memory searches.
+- **`PreInvocation`**: Invokes [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to pre-load the canonical core-memory digest prior to initial prompt processing.
+- **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) to ensure prior memory searches.
 
 ---
 
@@ -377,16 +405,18 @@ Antigravity CLI supports execution lifecycle hooks configured in workspace or gl
 GitHub Copilot CLI supports custom hooks defined in `.github/hooks/*.json` in your project repository or globally in `~/.copilot/hooks/hooks.json` (Unix) / `%USERPROFILE%\.copilot\hooks\hooks.json` (Windows).
 
 #### Reference Files:
-- **Configuration Specification**: [`examples/hooks/copilot-hooks-example.json`](examples/hooks/copilot-hooks-example.json)
-- **Session Start Script**: [`examples/hooks/saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh)
-- **Pre-Tool Interceptor Script**: [`examples/hooks/saltmdb-copilot-pre-tool.sh`](examples/hooks/saltmdb-copilot-pre-tool.sh)
+- **Configuration Specification**: [`hooks/copilot-hooks-example.json`](hooks/copilot-hooks-example.json)
+- **Session Start Script**: [`hooks/saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py)
+- **Pre-Tool Search Gate Script**: [`hooks/saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py)
+- **Stop Self-Critique Gate Script**: [`hooks/saltmdb-stop-critique-gate.py`](hooks/saltmdb-stop-critique-gate.py)
 
 #### Overview & Permission Decision Protocol:
-- **`sessionStart`**: Runs [`saltmdb-session-bootstrap.sh`](examples/hooks/saltmdb-session-bootstrap.sh) to output the canonical core-memory digest on session init.
-- **`preToolUse`**: Runs [`saltmdb-copilot-pre-tool.sh`](examples/hooks/saltmdb-copilot-pre-tool.sh). Reads tool context on `stdin` and writes JSON permission decisions on `stdout`:
-  - Allowed: `{"permissionDecision": "allow"}`
-  - Denied: `{"permissionDecision": "deny", "permissionDecisionReason": "..."}`
-- **`agentStop`**: Triggers [`saltmdb-self-critique-gate.sh`](examples/hooks/saltmdb-self-critique-gate.sh) for post-turn reflection.
+- **`sessionStart`**: Runs [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to output the canonical core-memory digest on session init.
+- **`preToolUse`**: Runs [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) — the same script Claude Code and Antigravity use. Reads tool context on `stdin`, does its own read-only-tool check internally (Copilot's `preToolUse` fires unfiltered, unlike the other two harnesses' matcher-scoped registration), and writes JSON permission decisions on `stdout`:
+  - Allowed: `{"permissionDecision": "allow", ...}`
+  - Denied: `{"permissionDecision": "deny", "permissionDecisionReason": "...", ...}`
+  - This replaces the former separate `saltmdb-copilot-pre-tool.py`, which reimplemented the same decision logic independently (drift risk) instead of sharing it.
+- **`agentStop`**: Triggers [`saltmdb-stop-critique-gate.py`](hooks/saltmdb-stop-critique-gate.py) for post-turn reflection. **Fixed bug**: this was previously wired to a script that only emitted Claude Code's `{"decision":"block"}` schema, which `agentStop` has no documented support for — likely non-functional as shipped. The script now emits `permissionDecision`/`permissionDecisionReason` redundantly alongside `decision`/`reason`, so it should work here too (still worth confirming empirically against a real Copilot CLI session).
 
 
 

@@ -208,5 +208,5 @@ Lifecycle hooks automate:
 - **Google Antigravity CLI (`agy`):** Configure `PreInvocation` and `PreToolUse` hooks in `~/.gemini/antigravity-cli/settings.json`.
 - **GitHub Copilot CLI:** Add `.github/hooks/saltmdb.json` or `~/.copilot/hooks/saltmdb.json` using the `preToolUse` permission JSON protocol (`{"permissionDecision": "allow" | "deny"}`).
 
-👉 **For complete script source listings and JSON configurations, check the [`examples/hooks/`](examples/hooks/) directory and refer to [AGENT_GUIDE.md §7 (Session Automation via Lifecycle Hooks)](AGENT_GUIDE.md#7-session-automation-via-lifecycle-hooks)**.
+👉 **For complete script source listings and JSON configurations, check the [`hooks/`](hooks/) directory and refer to [AGENT_GUIDE.md §7 (Session Automation via Lifecycle Hooks)](AGENT_GUIDE.md#7-session-automation-via-lifecycle-hooks)**.
 
