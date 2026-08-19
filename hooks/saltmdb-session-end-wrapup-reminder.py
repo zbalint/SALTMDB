@@ -30,12 +30,11 @@ REASON = (
 
 
 def main() -> None:
-    emit(
-        {
-            "systemMessage": REASON,
-            "hookSpecificOutput": {"hookEventName": "SessionEnd", "additionalContext": REASON},
-        }
-    )
+    # SessionEnd has no next model turn to receive context into, so only the top-level
+    # systemMessage field is valid here -- hookSpecificOutput.additionalContext is documented
+    # for PreToolUse/UserPromptSubmit/PostToolUse/PostToolBatch/Stop/SubagentStop only and fails
+    # schema validation for SessionEnd.
+    emit({"systemMessage": REASON})
 
 
 if __name__ == "__main__":
