@@ -123,9 +123,7 @@ PINNED_MODELS: tuple[PinnedModel, ...] = (
         resolved_revision="92d97331f1f4b6a366c1f161354b9f3390cc219f",
         model_files=("onnx/model.onnx",),
         expected_model_file_sha256={
-            "onnx/model.onnx": (
-                "76ff1f78394d5b05876aa5af3a0172ca3390fa86dc0065bf342cc3e9bb696d60"
-            ),
+            "onnx/model.onnx": ("76ff1f78394d5b05876aa5af3a0172ca3390fa86dc0065bf342cc3e9bb696d60"),
         },
         expected_selected_total_bytes=548_267_786,
     ),
@@ -135,9 +133,7 @@ PINNED_MODELS: tuple[PinnedModel, ...] = (
         resolved_revision="459a733e015d7c72b678de3611fc444a7853168a",
         model_files=("onnx/model.onnx",),
         expected_model_file_sha256={
-            "onnx/model.onnx": (
-                "f345c41919f5398da5aa3c300faed6ad58d93f96c0a2d990bc82e7012f64b6c8"
-            ),
+            "onnx/model.onnx": ("f345c41919f5398da5aa3c300faed6ad58d93f96c0a2d990bc82e7012f64b6c8"),
         },
         expected_selected_total_bytes=548_075_475,
     ),
@@ -147,9 +143,7 @@ PINNED_MODELS: tuple[PinnedModel, ...] = (
         resolved_revision="e9b6763023c676ca8431644204f50c2b100d9aab",
         model_files=("onnx/model.onnx",),
         expected_model_file_sha256={
-            "onnx/model.onnx": (
-                "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
-            ),
+            "onnx/model.onnx": ("147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"),
         },
         expected_selected_total_bytes=548_026_095,
     ),
@@ -159,9 +153,7 @@ PINNED_MODELS: tuple[PinnedModel, ...] = (
         resolved_revision="b33106f585b9ce46904ad7443a3b52b7a63e231c",
         model_files=("onnx/model.onnx",),
         expected_model_file_sha256={
-            "onnx/model.onnx": (
-                "adb53ed475faa339bfad3bd2bdb7e6a30b4f47280ade9811f81bef7953f9ab77"
-            ),
+            "onnx/model.onnx": ("adb53ed475faa339bfad3bd2bdb7e6a30b4f47280ade9811f81bef7953f9ab77"),
         },
         expected_selected_total_bytes=1_337_568_292,
     ),
@@ -172,9 +164,7 @@ PINNED_MODELS: tuple[PinnedModel, ...] = (
         model_files=("model.onnx", "model.onnx_data"),
         expected_model_file_sha256={
             "model.onnx": "1c09780c907c8a91a77a6ab1fd231f79e090d2907ca431223703dfebeed3d36c",
-            "model.onnx_data": (
-                "0cf1883fee81c63819a44e2ba0efa51d4043d9759685a4ebebbde97e0623d15c"
-            ),
+            "model.onnx_data": ("0cf1883fee81c63819a44e2ba0efa51d4043d9759685a4ebebbde97e0623d15c"),
         },
         expected_selected_total_bytes=2_252_994_762,
     ),
@@ -396,8 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     materialized_root = args.materialized_root or repo_root / "scratch" / "models" / args.run_id
     lock_output_dir = (
-        args.lock_output_dir
-        or repo_root / "scratch" / "eval_results" / args.run_id / "model_locks"
+        args.lock_output_dir or repo_root / "scratch" / "eval_results" / args.run_id / "model_locks"
     )
     selected = (
         tuple(pinned_model_by_id(model_id) for model_id in args.models)

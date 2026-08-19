@@ -62,7 +62,9 @@ def _build_corpus_manifest(entity_ids: tuple[str, ...] = ("ent-0001",)) -> dict[
     )
 
 
-def _build_flat_slots(facet_targets: dict[str, dict[str, int]] = bqs.FACET_TARGETS) -> list[dict[str, Any]]:
+def _build_flat_slots(
+    facet_targets: dict[str, dict[str, int]] = bqs.FACET_TARGETS,
+) -> list[dict[str, Any]]:
     """Build exactly 1200 minimal assigned-slot rows, one unique family/no sources per row.
 
     Only the fields ``build_query_slot_assignments`` reads are populated -- this is a fixture for
@@ -182,7 +184,9 @@ def test_commit_hash_field_rejects_unknown_commit(monkeypatch: pytest.MonkeyPatc
 
 def test_derive_query_slots_hash_happy_path(tmp_path: Path) -> None:
     manifest = _build_corpus_manifest()
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     result = bbs.derive_query_slots_hash(slots_path, assignments_path, manifest)
     assignments = bs.validate_query_slot_assignments(json.loads(assignments_path.read_text()))
     assert result == assignments["artifact_fingerprint"]
@@ -194,14 +198,18 @@ def test_derive_query_slots_hash_rejects_corpus_hash_mismatch(tmp_path: Path) ->
     other_manifest = _build_corpus_manifest(entity_ids=("ent-0002",))
     assert manifest["corpus_root_hash"] != other_manifest["corpus_root_hash"]
     # Slots sidecar is bound to `manifest`'s hash, but we validate against `other_manifest`.
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     with pytest.raises(bbs.BakeoffSpecBuildError, match="corpus_root_hash"):
         bbs.derive_query_slots_hash(slots_path, assignments_path, other_manifest)
 
 
 def test_derive_query_slots_hash_rejects_tampered_slots_sidecar(tmp_path: Path) -> None:
     manifest = _build_corpus_manifest()
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     slots_doc = json.loads(slots_path.read_text())
     slots_doc["slots"][0]["topic_family_id"] = "tampered-family"
     slots_path.write_text(json.dumps(slots_doc, ensure_ascii=False))
@@ -211,7 +219,9 @@ def test_derive_query_slots_hash_rejects_tampered_slots_sidecar(tmp_path: Path) 
 
 def test_derive_query_slots_hash_rejects_assignments_not_matching_slots(tmp_path: Path) -> None:
     manifest = _build_corpus_manifest()
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     # Re-sign a QuerySlotAssignments over a different (but still valid) slot set.
     other_slots = _build_flat_slots()
     other_slots[0]["topic_family_id"] = "different-family-000"
@@ -251,7 +261,10 @@ def test_load_contenders_builds_expected_ids_from_synthetic_fixture(
     by_id = {item["contender_id"]: item for item in specs}
     assert by_id["dense:fake/dense-a:entity"]["kind"] == "dense"
     assert by_id["dense:fake/dense-a:entity"]["channel"] == "entity"
-    assert by_id["dense:fake/dense-a:entity"]["model_lock_source_repository"] == "repo-for-fake__dense-a"
+    assert (
+        by_id["dense:fake/dense-a:entity"]["model_lock_source_repository"]
+        == "repo-for-fake__dense-a"
+    )
     assert by_id["late_interaction:fake/late-a:entity"]["kind"] == "late_interaction"
     assert by_id["lexical:bm25"]["model_lock_source_repository"] is None
     assert by_id["lexical:bm25"]["kind"] == "lexical"
@@ -297,9 +310,24 @@ def test_load_contenders_rejects_unsupported_candidate_kind(
 
 def test_derive_configuration_hash_is_deterministic_and_order_independent() -> None:
     specs = [
-        {"contender_id": "dense:a:entity", "kind": "dense", "channel": "entity", "model_lock_source_repository": "r-a"},
-        {"contender_id": "dense:b:entity", "kind": "dense", "channel": "entity", "model_lock_source_repository": "r-b"},
-        {"contender_id": "lexical:bm25", "kind": "lexical", "channel": "bm25_plus_current_head", "model_lock_source_repository": None},
+        {
+            "contender_id": "dense:a:entity",
+            "kind": "dense",
+            "channel": "entity",
+            "model_lock_source_repository": "r-a",
+        },
+        {
+            "contender_id": "dense:b:entity",
+            "kind": "dense",
+            "channel": "entity",
+            "model_lock_source_repository": "r-b",
+        },
+        {
+            "contender_id": "lexical:bm25",
+            "kind": "lexical",
+            "channel": "bm25_plus_current_head",
+            "model_lock_source_repository": None,
+        },
     ]
     grids = {"retrieval_cell_variant": ["single_pinned_configuration"]}
     first = bbs.derive_configuration_hash(specs, grids)
@@ -310,11 +338,21 @@ def test_derive_configuration_hash_is_deterministic_and_order_independent() -> N
 
 def test_derive_configuration_hash_changes_with_contender_set() -> None:
     base_specs = [
-        {"contender_id": "dense:a:entity", "kind": "dense", "channel": "entity", "model_lock_source_repository": "r-a"},
+        {
+            "contender_id": "dense:a:entity",
+            "kind": "dense",
+            "channel": "entity",
+            "model_lock_source_repository": "r-a",
+        },
     ]
     grids = {"retrieval_cell_variant": ["single_pinned_configuration"]}
     extended_specs = base_specs + [
-        {"contender_id": "lexical:bm25", "kind": "lexical", "channel": "bm25_plus_current_head", "model_lock_source_repository": None},
+        {
+            "contender_id": "lexical:bm25",
+            "kind": "lexical",
+            "channel": "bm25_plus_current_head",
+            "model_lock_source_repository": None,
+        },
     ]
     assert bbs.derive_configuration_hash(base_specs, grids) != bbs.derive_configuration_hash(
         extended_specs, grids
@@ -369,7 +407,9 @@ def test_build_bakeoff_spec_end_to_end_is_accepted_by_validate_bakeoff_spec(
     manifest = _build_corpus_manifest()
     manifest_path = tmp_path / "corpus_representation_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False))
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     model_locks_dir = _write_fake_model_locks(tmp_path)
 
     spec = bbs.build_bakeoff_spec(
@@ -413,7 +453,9 @@ def test_build_bakeoff_spec_rejects_invalid_run_id(
     manifest = _build_corpus_manifest()
     manifest_path = tmp_path / "corpus_representation_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False))
-    slots_path, assignments_path = _write_query_slot_fixtures(tmp_path, manifest["corpus_root_hash"])
+    slots_path, assignments_path = _write_query_slot_fixtures(
+        tmp_path, manifest["corpus_root_hash"]
+    )
     model_locks_dir = _write_fake_model_locks(tmp_path)
 
     with pytest.raises(bbs.BakeoffSpecBuildError, match="run_id"):

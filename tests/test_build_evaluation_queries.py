@@ -115,7 +115,12 @@ class TestBuildEvaluationQueries(unittest.TestCase):
         second = _slot(2, family="mixed")
         second["category"] = "paraphrase"
         with self.assertRaises(ValueError):
-            beq.assign_slots([first, second], 1, 1, category_targets={"dev": {"exact_title": 1}, "blind": {"exact_title": 1}})
+            beq.assign_slots(
+                [first, second],
+                1,
+                1,
+                category_targets={"dev": {"exact_title": 1}, "blind": {"exact_title": 1}},
+            )
 
 
 if __name__ == "__main__":

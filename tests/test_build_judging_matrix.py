@@ -353,7 +353,9 @@ def test_load_bundles_rejects_spec_fingerprint_mismatch(tmp_path: Path) -> None:
     runs_dir = tmp_path / "retrieval_runs"
     runs_dir.mkdir()
     bundle = _build_bundle(
-        spec_fingerprint="wrong-fingerprint" + "0" * 47, cell=_dense_cell(), results=_dense_results()
+        spec_fingerprint="wrong-fingerprint" + "0" * 47,
+        cell=_dense_cell(),
+        results=_dense_results(),
     )
     _write(runs_dir / "dense.json", bundle)
     spec = {"artifact_fingerprint": SPEC_FINGERPRINT, "contenders": ["dense:fake/dense-a:entity"]}
@@ -440,8 +442,13 @@ def test_build_pools_rejects_pooled_entity_missing_from_entity_text() -> None:
             spec_fingerprint=SPEC_FINGERPRINT, cell=_dense_cell(), results=_dense_results()
         )
     }
-    queries = [{"id": "eval-0001", "source_entity_ids": []}, {"id": "eval-0002", "source_entity_ids": []}]
-    with pytest.raises(bjm.JudgingMatrixBuildError, match="not present in the hash-verified corpus export"):
+    queries = [
+        {"id": "eval-0001", "source_entity_ids": []},
+        {"id": "eval-0002", "source_entity_ids": []},
+    ]
+    with pytest.raises(
+        bjm.JudgingMatrixBuildError, match="not present in the hash-verified corpus export"
+    ):
         bjm.build_pools(queries, bundles, entity_text)
 
 
@@ -459,7 +466,9 @@ def test_build_pools_rejects_source_entity_id_missing_from_entity_text() -> None
         {"id": "eval-0001", "source_entity_ids": ["ent-9999"]},
         {"id": "eval-0002", "source_entity_ids": []},
     ]
-    with pytest.raises(bjm.JudgingMatrixBuildError, match="not present in the hash-verified corpus export"):
+    with pytest.raises(
+        bjm.JudgingMatrixBuildError, match="not present in the hash-verified corpus export"
+    ):
         bjm.build_pools(queries, bundles, entity_text)
 
 
@@ -546,8 +555,18 @@ def test_build_judge_packets_accepts_produced_matrix(tmp_path: Path) -> None:
     bundles = bjm.load_bundles(runs_dir, spec)
 
     queries = [
-        {"id": "eval-0001", "query": "What grows in the orchard?", "split": "dev", "source_entity_ids": ["ent-0002"]},
-        {"id": "eval-0002", "query": "Tell me about cherries.", "split": "dev", "source_entity_ids": []},
+        {
+            "id": "eval-0001",
+            "query": "What grows in the orchard?",
+            "split": "dev",
+            "source_entity_ids": ["ent-0002"],
+        },
+        {
+            "id": "eval-0002",
+            "query": "Tell me about cherries.",
+            "split": "dev",
+            "source_entity_ids": [],
+        },
     ]
     pools = bjm.build_pools(queries, bundles, entity_text, pool_top_n=20)
     matrix = bs.sign_artifact(
@@ -576,44 +595,81 @@ def test_build_judge_packets_accepts_produced_matrix(tmp_path: Path) -> None:
 # -------------------------------------------------------------------------------------------
 
 
-def _blind_gateway_setup(tmp_path: Path, *, query_count: int = 800, split: str = "blind") -> tuple[dict[str, Any], dict[str, Any], bytes]:
+def _blind_gateway_setup(
+    tmp_path: Path, *, query_count: int = 800, split: str = "blind"
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     winner_id = "late_interaction:answerdotai/answerai-colbert-small-v1:entity"
     spec = {"artifact_fingerprint": "a" * 64, "contenders": [winner_id, "lexical:bm25"]}
     winner = bs.sign_artifact("DevelopmentWinner", {"pipeline": {"contender_id": winner_id}})
     queries = {
         "queries": [
-            {"id": f"blind-{i:04d}", "split": split, "topic_family_id": f"family-{i % 4}", "query": "sealed text"}
+            {
+                "id": f"blind-{i:04d}",
+                "split": split,
+                "topic_family_id": f"family-{i % 4}",
+                "query": "sealed text",
+            }
             for i in range(query_count)
         ]
     }
     return spec, winner, json.dumps(queries).encode()
 
 
-def _patch_blind_gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, payload: bytes, spec: dict[str, Any], winner: dict[str, Any]) -> None:
+def _patch_blind_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: bytes,
+    spec: dict[str, Any],
+    winner: dict[str, Any],
+) -> None:
     _write(tmp_path / "spec.json", spec)
     _write(tmp_path / "winner.json", winner)
     for name in ("manifest.json", "corpus.json", "export.json", "unlock.json", "receipt.json"):
         _write(tmp_path / name, {})
     monkeypatch.setattr(bjm, "validate_bakeoff_spec", lambda value: spec)
     monkeypatch.setattr(bjm, "validate_development_winner", lambda value, supplied_spec: value)
-    monkeypatch.setattr(bjm, "validate_corpus_manifest", lambda value: {"corpus_root_hash": "b" * 64})
-    monkeypatch.setattr(bjm, "load_frozen_entity_text", lambda export, manifest: {"ent": {"title": "T", "body": "B"}})
-    monkeypatch.setattr(bjm, "load_bundles", lambda directory, value, expected_contenders=None: {name: {} for name in expected_contenders or []})
-    monkeypatch.setattr(bjm, "build_pools", lambda queries, bundles, entity_text, pool_top_n=20: {
-        query["id"]: {"ent": {"title": "T", "full_content": "B", "ground_truth_forced_include": False}}
-        for query in queries
-    })
+    monkeypatch.setattr(
+        bjm, "validate_corpus_manifest", lambda value: {"corpus_root_hash": "b" * 64}
+    )
+    monkeypatch.setattr(
+        bjm,
+        "load_frozen_entity_text",
+        lambda export, manifest: {"ent": {"title": "T", "body": "B"}},
+    )
+    monkeypatch.setattr(
+        bjm,
+        "load_bundles",
+        lambda directory, value, expected_contenders=None: {
+            name: {} for name in expected_contenders or []
+        },
+    )
+    monkeypatch.setattr(
+        bjm,
+        "build_pools",
+        lambda queries, bundles, entity_text, pool_top_n=20: {
+            query["id"]: {
+                "ent": {"title": "T", "full_content": "B", "ground_truth_forced_include": False}
+            }
+            for query in queries
+        },
+    )
     monkeypatch.setattr(bs, "authorize_blind_file", lambda *args, **kwargs: payload)
 
 
-def test_build_blind_judging_matrix_is_authorized_and_opaque(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_build_blind_judging_matrix_is_authorized_and_opaque(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     spec, winner, payload = _blind_gateway_setup(tmp_path)
     _patch_blind_gateway(monkeypatch, tmp_path, payload, spec, winner)
     matrix = bjm.build_blind_judging_matrix(
-        spec_path=tmp_path / "spec.json", retrieval_runs_dir=tmp_path / "runs",
-        corpus_manifest_path=tmp_path / "manifest.json", corpus_export_path=tmp_path / "export.json",
-        queries_blind_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-        winner_path=tmp_path / "winner.json", unlock_path=tmp_path / "unlock.json",
+        spec_path=tmp_path / "spec.json",
+        retrieval_runs_dir=tmp_path / "runs",
+        corpus_manifest_path=tmp_path / "manifest.json",
+        corpus_export_path=tmp_path / "export.json",
+        queries_blind_path=tmp_path / "sealed.json",
+        vault_dir=tmp_path,
+        winner_path=tmp_path / "winner.json",
+        unlock_path=tmp_path / "unlock.json",
         manifest_receipt_path=tmp_path / "receipt.json",
     )
     assert bs.validate_signed_artifact(matrix, kind="JudgingMatrix")["query_count"] == 800
@@ -632,10 +688,14 @@ def test_build_blind_judging_matrix_rejects_invalid_manifest(
     _patch_blind_gateway(monkeypatch, tmp_path, payload, spec, winner)
     with pytest.raises(bjm.JudgingMatrixBuildError, match=error):
         bjm.build_blind_judging_matrix(
-            spec_path=tmp_path / "spec.json", retrieval_runs_dir=tmp_path / "runs",
-            corpus_manifest_path=tmp_path / "manifest.json", corpus_export_path=tmp_path / "export.json",
-            queries_blind_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-            winner_path=tmp_path / "winner.json", unlock_path=tmp_path / "unlock.json",
+            spec_path=tmp_path / "spec.json",
+            retrieval_runs_dir=tmp_path / "runs",
+            corpus_manifest_path=tmp_path / "manifest.json",
+            corpus_export_path=tmp_path / "export.json",
+            queries_blind_path=tmp_path / "sealed.json",
+            vault_dir=tmp_path,
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
             manifest_receipt_path=tmp_path / "receipt.json",
         )
 
@@ -647,14 +707,30 @@ def test_build_blind_judging_matrix_propagates_invalid_bundle_or_corpus(
     spec, winner, payload = _blind_gateway_setup(tmp_path)
     _patch_blind_gateway(monkeypatch, tmp_path, payload, spec, winner)
     if failure == "bundle":
-        monkeypatch.setattr(bjm, "load_bundles", lambda *args, **kwargs: (_ for _ in ()).throw(bjm.JudgingMatrixBuildError("invalid blind bundle")))
+        monkeypatch.setattr(
+            bjm,
+            "load_bundles",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                bjm.JudgingMatrixBuildError("invalid blind bundle")
+            ),
+        )
     else:
-        monkeypatch.setattr(bjm, "load_frozen_entity_text", lambda *args: (_ for _ in ()).throw(bjm.JudgingMatrixBuildError("invalid corpus export")))
+        monkeypatch.setattr(
+            bjm,
+            "load_frozen_entity_text",
+            lambda *args: (_ for _ in ()).throw(
+                bjm.JudgingMatrixBuildError("invalid corpus export")
+            ),
+        )
     with pytest.raises(bjm.JudgingMatrixBuildError, match="invalid"):
         bjm.build_blind_judging_matrix(
-            spec_path=tmp_path / "spec.json", retrieval_runs_dir=tmp_path / "runs",
-            corpus_manifest_path=tmp_path / "manifest.json", corpus_export_path=tmp_path / "export.json",
-            queries_blind_path=tmp_path / "sealed.json", vault_dir=tmp_path,
-            winner_path=tmp_path / "winner.json", unlock_path=tmp_path / "unlock.json",
+            spec_path=tmp_path / "spec.json",
+            retrieval_runs_dir=tmp_path / "runs",
+            corpus_manifest_path=tmp_path / "manifest.json",
+            corpus_export_path=tmp_path / "export.json",
+            queries_blind_path=tmp_path / "sealed.json",
+            vault_dir=tmp_path,
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
             manifest_receipt_path=tmp_path / "receipt.json",
         )

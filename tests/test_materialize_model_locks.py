@@ -94,7 +94,9 @@ def _fake_downloader_factory(model_bytes: dict[str, bytes], plant_symlinked_cach
     return _downloader
 
 
-def _test_pinned_model(model_bytes: bytes, *, logical_model_id="BAAI/bge-small-en-v1.5") -> PinnedModel:
+def _test_pinned_model(
+    model_bytes: bytes, *, logical_model_id="BAAI/bge-small-en-v1.5"
+) -> PinnedModel:
     return PinnedModel(
         logical_model_id=logical_model_id,
         source_repository="Qdrant/bge-small-en-v1.5-onnx-Q",

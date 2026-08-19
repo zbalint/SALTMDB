@@ -61,7 +61,9 @@ class ModelFile:
         normalized = _validate_relative_inventory_path(self.path)
         object.__setattr__(self, "path", normalized)
         if not isinstance(self.sha256, str) or len(self.sha256) != _SHA256_LENGTH:
-            raise ModelLockError(f"model file {self.path!r} sha256 must be 64 hexadecimal characters")
+            raise ModelLockError(
+                f"model file {self.path!r} sha256 must be 64 hexadecimal characters"
+            )
         if any(character not in "0123456789abcdef" for character in self.sha256):
             raise ModelLockError(f"model file {self.path!r} sha256 must be lowercase hexadecimal")
         if not isinstance(self.size_bytes, int) or isinstance(self.size_bytes, bool):
@@ -115,7 +117,9 @@ class ModelLock:
                         )
                     )
                 except KeyError as exc:
-                    raise ModelLockError(f"model file inventory is missing {exc.args[0]!r}") from exc
+                    raise ModelLockError(
+                        f"model file inventory is missing {exc.args[0]!r}"
+                    ) from exc
             else:
                 raise ModelLockError("model file inventory entries must be ModelFile or mappings")
         if not entries:
@@ -257,7 +261,9 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_model_lock(lock: ModelLock, cache_path: str | os.PathLike[str] | None = None) -> VerifiedInventory:
+def verify_model_lock(
+    lock: ModelLock, cache_path: str | os.PathLike[str] | None = None
+) -> VerifiedInventory:
     """Verify every file below ``cache_path`` against ``lock`` and return checked evidence.
 
     The comparison is exact: no expected file may be missing and no local file may be unexpected.
@@ -327,7 +333,9 @@ def _render_once(value: str, prefix: str, field_name: str) -> str:
     return prefix + value
 
 
-def _as_matrix(raw: object, *, field_name: str, expected_count: int | None = None) -> list[np.ndarray]:
+def _as_matrix(
+    raw: object, *, field_name: str, expected_count: int | None = None
+) -> list[np.ndarray]:
     """Coerce one backend batch into independent numpy arrays without accepting scalars."""
     if isinstance(raw, np.ndarray):
         if raw.ndim == 1:
@@ -414,7 +422,9 @@ def _l2_normalize_dense_vector(vector: np.ndarray, *, field_name: str) -> np.nda
     return vector / norm
 
 
-def _validate_dense_vector(vector: np.ndarray, spec: EmbeddingSpec, *, field_name: str) -> np.ndarray:
+def _validate_dense_vector(
+    vector: np.ndarray, spec: EmbeddingSpec, *, field_name: str
+) -> np.ndarray:
     if vector.ndim != 1 or vector.shape[0] != spec.dimension:
         raise BackendContractError(
             f"{field_name} dimension mismatch: expected ({spec.dimension},), observed {vector.shape}"
@@ -423,8 +433,10 @@ def _validate_dense_vector(vector: np.ndarray, spec: EmbeddingSpec, *, field_nam
         raise BackendContractError(f"{field_name} contains non-finite values")
     if spec.normalization == "l2":
         norm = float(np.linalg.norm(vector))
-        if not np.isfinite(norm) or norm <= 0.0 or not np.isclose(
-            norm, 1.0, rtol=_L2_TOLERANCE, atol=_L2_TOLERANCE
+        if (
+            not np.isfinite(norm)
+            or norm <= 0.0
+            or not np.isclose(norm, 1.0, rtol=_L2_TOLERANCE, atol=_L2_TOLERANCE)
         ):
             raise BackendContractError(
                 f"{field_name} violates l2 normalization: observed norm {norm:.8g}"
@@ -432,7 +444,9 @@ def _validate_dense_vector(vector: np.ndarray, spec: EmbeddingSpec, *, field_nam
     return np.array(vector, dtype=np.float32, copy=True)
 
 
-def _validate_late_matrix(matrix: np.ndarray, spec: EmbeddingSpec, *, field_name: str) -> np.ndarray:
+def _validate_late_matrix(
+    matrix: np.ndarray, spec: EmbeddingSpec, *, field_name: str
+) -> np.ndarray:
     if matrix.ndim != 2 or matrix.shape[1] != spec.dimension or matrix.shape[0] <= 0:
         raise BackendContractError(
             f"{field_name} token matrix must have shape (tokens, {spec.dimension}), observed {matrix.shape}"
@@ -441,8 +455,10 @@ def _validate_late_matrix(matrix: np.ndarray, spec: EmbeddingSpec, *, field_name
         raise BackendContractError(f"{field_name} contains non-finite values")
     if spec.normalization == "l2":
         norms = np.linalg.norm(matrix, axis=1)
-        if not np.isfinite(norms).all() or (norms <= 0.0).any() or not np.allclose(
-            norms, 1.0, rtol=_L2_TOLERANCE, atol=_L2_TOLERANCE
+        if (
+            not np.isfinite(norms).all()
+            or (norms <= 0.0).any()
+            or not np.allclose(norms, 1.0, rtol=_L2_TOLERANCE, atol=_L2_TOLERANCE)
         ):
             raise BackendContractError(f"{field_name} violates per-token l2 normalization")
     return np.array(matrix, dtype=np.float32, copy=True)
@@ -698,14 +714,14 @@ class LateInteractionEmbeddingAdapter:
             model_name=spec.model_id,
             cache_path=model_lock.cache_path,
         )
-        if not hasattr(backend, "passage_embed") or not callable(
-            getattr(backend, "passage_embed")
-        ):
+        if not hasattr(backend, "passage_embed") or not callable(getattr(backend, "passage_embed")):
             raise BackendContractError(
                 "late-interaction backend must expose callable passage_embed(documents)"
             )
         if not hasattr(backend, "query_embed") or not callable(getattr(backend, "query_embed")):
-            raise BackendContractError("late-interaction backend must expose callable query_embed(query)")
+            raise BackendContractError(
+                "late-interaction backend must expose callable query_embed(query)"
+            )
         self._backend = cast(LateInteractionBackend, backend)
 
     @property
@@ -755,7 +771,9 @@ class LateInteractionEmbeddingAdapter:
         return maxsim(query_tokens, document_tokens, reduction=self.reduction)
 
     def score(self, query: str, document: str) -> float:
-        return maxsim(self.embed_query(query), self.embed_document(document), reduction=self.reduction)
+        return maxsim(
+            self.embed_query(query), self.embed_document(document), reduction=self.reduction
+        )
 
     embed = embed_documents
     query_embed = embed_query

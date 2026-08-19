@@ -442,9 +442,11 @@ class BakeoffOrchestrator:
                 raise OrchestrationError("receipt predecessor link is broken")
             if index["run_id"] not in (None, value.get("run_id")):
                 raise OrchestrationError("receipt run ID mismatch")
-            if sequence >= len(checkpoint_history) or value.get("checkpoint_fingerprint") != checkpoint_history[
-                sequence
-            ]["artifact_fingerprint"]:
+            if (
+                sequence >= len(checkpoint_history)
+                or value.get("checkpoint_fingerprint")
+                != checkpoint_history[sequence]["artifact_fingerprint"]
+            ):
                 raise OrchestrationError("receipt checkpoint history link is broken")
             previous = value["artifact_fingerprint"]
             receipts.append(value)
@@ -531,14 +533,14 @@ class BakeoffOrchestrator:
                 }
                 if any(not isinstance(artifact, Mapping) for artifact in evidence_map.values()):
                     raise OrchestrationError("evidence entries must be signed artifact objects")
-                by_kind = {str(artifact.get("kind")): artifact for artifact in evidence_map.values()}
+                by_kind = {
+                    str(artifact.get("kind")): artifact for artifact in evidence_map.values()
+                }
                 if len(by_kind) != len(evidence_map) or set(by_kind) != required_kinds:
                     raise OrchestrationError(
                         "terminal transition requires the complete custody evidence chain"
                     )
-                terminal_winner = validate_development_winner(
-                    by_kind["DevelopmentWinner"], spec
-                )
+                terminal_winner = validate_development_winner(by_kind["DevelopmentWinner"], spec)
                 terminal_unlock = validate_blind_unlock(
                     by_kind["BlindUnlock"], spec, terminal_winner
                 )
@@ -557,7 +559,10 @@ class BakeoffOrchestrator:
                 for name, artifact in evidence_map.items():
                     if not isinstance(artifact, Mapping):
                         raise OrchestrationError("evidence entries must be signed artifact objects")
-                    if state is RunState.BLIND_UNLOCKED and artifact.get("kind") == "DevelopmentWinner":
+                    if (
+                        state is RunState.BLIND_UNLOCKED
+                        and artifact.get("kind") == "DevelopmentWinner"
+                    ):
                         validated[str(name)] = validate_development_winner(artifact, spec)
                     else:
                         validated[str(name)] = _validate_transition_artifact(

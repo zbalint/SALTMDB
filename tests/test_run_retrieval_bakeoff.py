@@ -241,7 +241,11 @@ def test_execute_dense_cell_explicit_batch_size_threads_kwarg(tmp_path, monkeypa
 
 def test_execute_late_cell_default_batch_size_omits_build_kwarg(tmp_path, monkeypatch):
     _cache, _lock, manifest, export, spec = artifacts(tmp_path)
-    lock = adapter_model_lock(late_lock_artifact(tmp_path / "late_cache"), tmp_path / "late_cache", kind="late_interaction")
+    lock = adapter_model_lock(
+        late_lock_artifact(tmp_path / "late_cache"),
+        tmp_path / "late_cache",
+        kind="late_interaction",
+    )
     documents = load_frozen_documents(export, manifest, "entity")
 
     calls: list[dict] = []
@@ -268,7 +272,11 @@ def test_execute_late_cell_default_batch_size_omits_build_kwarg(tmp_path, monkey
 
 def test_execute_late_cell_explicit_batch_size_threads_kwarg(tmp_path, monkeypatch):
     _cache, _lock, manifest, export, spec = artifacts(tmp_path)
-    lock = adapter_model_lock(late_lock_artifact(tmp_path / "late_cache"), tmp_path / "late_cache", kind="late_interaction")
+    lock = adapter_model_lock(
+        late_lock_artifact(tmp_path / "late_cache"),
+        tmp_path / "late_cache",
+        kind="late_interaction",
+    )
     documents = load_frozen_documents(export, manifest, "entity")
 
     calls: list[dict] = []
