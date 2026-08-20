@@ -262,6 +262,27 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
             if existing_edge:
                 return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
 
+            # C-fix (cold-start agent-experience review, Issue C): detect whether this call is a
+            # manual repoint -- same source + a single-active-target-invariant predicate, but a
+            # different existing active target (e.g. re-linking an elaborates_on edge after the
+            # old target was superseded) -- so the stale edge can be invalidated once the new one
+            # is confirmed about to be created. Scoped to RELATION_GATE_STRONG_PREDICATES: the
+            # other agent-selectable predicates (related_to, depends_on, part_of, etc.) are
+            # legitimately many-to-many, and auto-invalidating on any new same-source/same-
+            # predicate call there would silently destroy a valid second edge, not fix a repoint.
+            # Detection only happens here (cheap, no write); the actual invalidation is deferred
+            # until every gate below has already passed, immediately alongside the INSERT --
+            # invalidating here instead would silently destroy a live edge even when a later gate
+            # (D3/D4) rejects the new one, since gate rejections `return` rather than `raise` and
+            # write_transaction commits on any normal return, not only a raised exception.
+            repoint_stale_edge_id = None
+            if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
+                repoint_row = conn.execute(
+                    "SELECT id FROM relations WHERE source_id = ? AND predicate = ? AND target_id != ? AND valid_to IS NULL",
+                    (resolved_source, canonical_predicate, resolved_target),
+                ).fetchone()
+                repoint_stale_edge_id = repoint_row[0] if repoint_row else None
+
             # D1b (core-memory governance, resolved gap #1): a NEW elaborates_on edge into an
             # active core is governed exclusively by that core's own core_detail_memory_ids
             # declaration -- reject any other path from creating one. Checked after the no-op
@@ -376,6 +397,16 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                     raise RuntimeError(
                         f"Failed to record relation gate override audit event: {audit_result}"
                     )
+
+            # C-fix (continued): every gate above has now passed without an early return, so the
+            # new edge is confirmed about to be created below -- safe to invalidate the stale
+            # repoint target now, in the same transaction. See the detection comment above for
+            # why this must happen here and not earlier.
+            if repoint_stale_edge_id:
+                conn.execute(
+                    "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+                    (now, now, repoint_stale_edge_id),
+                )
 
             effective_valid_at = valid_at or now
             cursor = conn.execute(

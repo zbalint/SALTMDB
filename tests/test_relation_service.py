@@ -345,12 +345,49 @@ class TestStoreRelationDedup(unittest.TestCase):
             owner_id="tester",
             db_connection=self.conn,
         )
+        res3 = store_memory(
+            content="Second target entity content for relation repoint tests",
+            title="Relation Dedup Repoint Target",
+            owner_id="tester",
+            db_connection=self.conn,
+        )
         self.id1 = _memory_id(res1)
         self.id2 = _memory_id(res2)
+        self.id3 = _memory_id(res3)
 
     def tearDown(self):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _relation_row(self, source_id, target_id, predicate):
+        return self.conn.execute(
+            "SELECT id, valid_to, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
+            (source_id, target_id, predicate),
+        ).fetchone()
+
+    def _mk_vector_entity(self, title: str, vector: list, status: str = "raw") -> str:
+        """Same pattern as TestCommitConsolidationCohesionGate._mk_vector_entity: a bare
+        entities row plus a single matching entity_chunk_embeddings row, bypassing
+        store_memory's async chunk-embed trigger so this test controls the centroid directly
+        (needed to force a deterministic, real -- not unresolved-centroid -- gate rejection)."""
+        entity_id = str(uuid.uuid4())
+        content_hash = f"hash-{entity_id}"
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities"
+            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            " full_content, content_hash)"
+            " VALUES (?, ?, ?, ?, 'tester', ?, ?, ?, ?)",
+            (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings"
+            "(id, entity_id, embedding, chunk_index, char_start, char_end, content_hash)"
+            " VALUES (?, ?, ?, 0, 0, 10, ?)",
+            (f"{entity_id}::0", entity_id, sqlite_vec.serialize_float32(vector), content_hash),
+        )
+        self.conn.commit()
+        return entity_id
 
     def _relation_count(self, source_id, target_id, predicate=None):
         if predicate:
@@ -477,6 +514,98 @@ class TestStoreRelationDedup(unittest.TestCase):
             "the already-exists no-op message must reference the ACTIVE row's ID, not the expired one",
         )
         self.assertNotEqual(reported_id, expired_id)
+
+    def test_repoint_same_source_predicate_different_target_invalidates_old_edge(self):
+        # Cold-start agent-experience review, Issue C: manually repointing a
+        # RELATION_GATE_STRONG_PREDICATES edge (same source + predicate, new target) must
+        # invalidate the old target's edge, not leave it as permanent duplicate graph debt.
+        first = store_relation(
+            source_id=self.id1,
+            target_id=self.id2,
+            predicate="elaborates_on",
+            override_justification="unresolved-centroid test fixtures, deliberate override for coverage",
+            db_connection=self.conn,
+        )
+        self.assertTrue(first.startswith("Relation successfully stored"), first)
+
+        repoint = store_relation(
+            source_id=self.id1,
+            target_id=self.id3,
+            predicate="elaborates_on",
+            override_justification="unresolved-centroid test fixtures, deliberate override for coverage",
+            db_connection=self.conn,
+        )
+        self.assertTrue(repoint.startswith("Relation successfully stored"), repoint)
+
+        old_row = self._relation_row(self.id1, self.id2, "elaborates_on")
+        new_row = self._relation_row(self.id1, self.id3, "elaborates_on")
+        self.assertIsNotNone(old_row)
+        self.assertIsNotNone(new_row)
+        self.assertIsNotNone(old_row[1], "old edge's valid_to must be set (invalidated)")
+        self.assertIsNotNone(old_row[2], "old edge's invalid_at must be set (invalidated)")
+        self.assertIsNone(new_row[1], "new edge must remain active (valid_to IS NULL)")
+        self.assertIsNone(new_row[2], "new edge must remain active (invalid_at IS NULL)")
+
+    def test_repoint_not_auto_invalidated_for_many_to_many_scoped_predicate(self):
+        # related_to is NOT in RELATION_GATE_STRONG_PREDICATES -- it's legitimately many-to-many,
+        # so a second same-source/same-predicate edge to a different target must NOT invalidate
+        # the first; both are independently valid relations, not a repoint.
+        first = store_relation(
+            source_id=self.id1,
+            target_id=self.id2,
+            predicate="related_to",
+            db_connection=self.conn,
+        )
+        self.assertTrue(first.startswith("Relation successfully stored"), first)
+
+        second = store_relation(
+            source_id=self.id1,
+            target_id=self.id3,
+            predicate="related_to",
+            db_connection=self.conn,
+        )
+        self.assertTrue(second.startswith("Relation successfully stored"), second)
+
+        row1 = self._relation_row(self.id1, self.id2, "related_to")
+        row2 = self._relation_row(self.id1, self.id3, "related_to")
+        self.assertIsNone(row1[1], "many-to-many predicate: first edge must remain active")
+        self.assertIsNone(row2[1], "many-to-many predicate: second edge must remain active")
+
+    def test_repoint_rejected_by_gate_leaves_old_edge_untouched(self):
+        # Regression test for the data-loss ordering bug caught during adversarial plan review:
+        # if the new edge's gate check rejects, the OLD edge must be left completely untouched --
+        # the invalidate step must never fire before every gate has already passed. Uses
+        # controlled axis-aligned vectors (not the plain setUp entities) so the rejection is a
+        # real, deterministic REJECT_LOW_RELATION_SIMILARITY rather than relying on incidental
+        # embedding-timing behavior of plain store_memory-created entities.
+        source = self._mk_vector_entity("Repoint Gate Source", _axis_vector(0))
+        old_target = self._mk_vector_entity("Repoint Gate Old Target", _axis_vector(0))  # sim=1.0
+        new_target = self._mk_vector_entity(
+            "Repoint Gate New Target", _axis_vector(1)
+        )  # orthogonal -> sim=0.0
+
+        first = store_relation(
+            source_id=source,
+            target_id=old_target,
+            predicate="elaborates_on",
+            db_connection=self.conn,
+        )
+        self.assertTrue(first.startswith("Relation successfully stored"), first)
+
+        rejected = store_relation(
+            source_id=source,
+            target_id=new_target,
+            predicate="elaborates_on",
+            db_connection=self.conn,  # no override_justification -> gate must reject
+        )
+        self.assertTrue(rejected.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), rejected)
+
+        old_row = self._relation_row(source, old_target, "elaborates_on")
+        new_row = self._relation_row(source, new_target, "elaborates_on")
+        self.assertIsNotNone(old_row)
+        self.assertIsNone(old_row[1], "rejected repoint must NOT invalidate the old edge")
+        self.assertIsNone(old_row[2], "rejected repoint must NOT invalidate the old edge")
+        self.assertIsNone(new_row, "rejected repoint must not create a new edge either")
 
 
 class TestResolveOrCreatePredicate(unittest.TestCase):
