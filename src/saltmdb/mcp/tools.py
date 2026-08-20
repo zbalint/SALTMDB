@@ -281,8 +281,11 @@ def merge_tags(
 
     entity_id (optional) targets an existing memory directly for an update -- when supplied it
     takes precedence over the automatic same-title/owner/scope match and bypasses the
-    exact-content-hash duplicate check, so a metadata-only edit (e.g. re-tagging, backfilling
-    core_reason/core_exit_condition) doesn't require changing content.
+    exact-content-hash duplicate check, so a metadata-only edit (e.g. updating metadata, re-tagging,
+    backfilling core_reason/core_exit_condition) doesn't require changing content. Submitted
+    metadata keys are shallow-merged into the existing stored metadata object (existing keys not
+    mentioned in the new call, like a possible future search_aliases or project_id key, are
+    preserved, not wiped).
 
     Exact content-hash duplicates are rejected with the existing entity ID. Near duplicates are
     stored and returned inline as `duplicate_candidates`, with guidance to call
@@ -322,6 +325,7 @@ def store_memory(
     owner_id: str | None = None,
     context_id: str | None = None,
     entity_id: str | None = None,
+    metadata: dict | None = None,
     is_core: bool | None = None,
     scope: Literal["private", "shared"] = "shared",
     retrieval_text: str | None = _RETRIEVAL_TEXT_UNSET,
@@ -381,6 +385,7 @@ def store_memory(
             "title": title,
             "entity_id": entity_id,
             "context_id": context_id,
+            "metadata": metadata,
             "retrieval_text": retrieval_text_,
             "retrieval_text_provided": retrieval_text_provided,
             "core_reason": core_reason,
@@ -396,7 +401,10 @@ def store_memory(
 
     Search by query, tags, context, memory type, or core status. `mode="strict"` resolves
     superseded matches and applies relevance abstention; `mode="history"` keeps matched history
-    visible and labels superseded results; `mode="broad"` preserves ordinary retrieval.
+    visible and labels superseded results; `mode="broad"` preserves ordinary retrieval. Each result
+    item may include an optional `drift_flag` field, present only when a drift sweep flagged the
+    memory; this field is advisory-only and never auto-corrected -- an agent seeing it should
+    re-verify the citation itself, not blindly trust either the flag or the original claim.
 
     Explicit-ID retrieval is provided by the dedicated get_memory tool. Experimental ranking and benchmark controls remain
     available through internal services/evaluation tooling, but are intentionally absent here.

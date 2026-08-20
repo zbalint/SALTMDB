@@ -12,6 +12,7 @@ lines into smaller pieces) is explicitly NOT attempted in this pass -- tracked a
 deferred follow-up work, see the refactor plan's section 3.
 """
 
+import json
 from typing import Any, Literal
 
 from saltmdb.config import get_db_path, STRICT_OVERFETCH_CANDIDATE_CAP
@@ -929,6 +930,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 rel_c,
                 fts_snippet_raw,
             ) = r
+            drift_flag = None
+            if meta:
+                try:
+                    meta_dict = json.loads(meta)
+                    if isinstance(meta_dict, dict):
+                        drift_flag = meta_dict.get("drift_flag")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
             if fts_snippet_raw:
                 snippet = fts_snippet_raw
             else:
@@ -953,6 +963,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 item["cross_encoder_score"] = round(cross_encoder_scores_map[eid], 6)
             if mode == "history" and eid in superseded_ids:
                 item["is_superseded"] = True
+            if drift_flag:
+                item["drift_flag"] = drift_flag
 
             results.append(item)
 

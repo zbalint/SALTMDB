@@ -182,6 +182,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         rc, report = self._run()
         self.assertEqual(rc, 0)
         self.assertEqual(report["entities"]["total"], 0)
+        self.assertEqual(report["flagged_stale"]["count"], 0)
         self.assertEqual(report["orphaned_memories"]["total_orphans"], 0)
         self.assertEqual(report["overdue_core_reviews"]["count"], 0)
         self.assertEqual(report["predicate_drift"]["drifted_active_edge_count"], 0)
@@ -192,14 +193,17 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.assertEqual(report["tag_fragmentation"]["alias_tags"], 0)
         self.assertEqual(report["telemetry"]["total_calls"], 0)
 
-    def _mk_entity(self, title, *, is_core=False, core_review_after=None, status="raw"):
+    def _mk_entity(
+        self, title, *, is_core=False, core_review_after=None, status="raw", metadata=None
+    ):
         entity_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
+        metadata_str = json.dumps(metadata) if metadata else None
         self.conn.execute(
             "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
             "scope, is_core, status, title, full_content, valid_from, core_reason, "
-            "core_exit_condition, core_review_after) VALUES "
-            "(?, ?, ?, ?, 'tester', 'shared', ?, ?, ?, 'body content here', ?, ?, ?, ?)",
+            "core_exit_condition, core_review_after, metadata) VALUES "
+            "(?, ?, ?, ?, 'tester', 'shared', ?, ?, ?, 'body content here', ?, ?, ?, ?, ?)",
             (
                 entity_id,
                 now,
@@ -212,9 +216,27 @@ class TestCorpusHealthCli(unittest.TestCase):
                 "reason " * 5 if is_core else None,
                 "exit " * 5 if is_core else None,
                 core_review_after,
+                metadata_str,
             ),
         )
         return entity_id
+
+    def test_flagged_stale_count_includes_active_excludes_archived(self):
+        self._mk_entity(
+            "Active Flagged",
+            metadata={"drift_flag": {"reason": "changed"}},
+            status="raw",
+        )
+        self._mk_entity(
+            "Archived Flagged",
+            metadata={"drift_flag": {"reason": "changed"}},
+            status="archived",
+        )
+        self.conn.commit()
+
+        rc, report = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(report["flagged_stale"]["count"], 1)
 
     def test_reports_orphans_overdue_cores_and_predicate_drift(self):
         orphan_id = self._mk_entity("Orphan")

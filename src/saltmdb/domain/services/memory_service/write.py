@@ -84,9 +84,10 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
 
     This applies to explicit IDs and implicit same-title/owner/scope resolutions alike. The second
     return value is a set of canonical frozen values to feed the administrative-only update path.
-    It prevents omitted/default fields (notably ``scope=shared`` and metadata=None) from being
+    It prevents omitted/default fields (notably ``scope=shared``) from being
     written back over an existing version while still allowing lifecycle/core/retrieval fields to
-    change in place.
+    change in place. Metadata is intentionally excluded from the frozen-field check, same
+    treatment as is_core/weight/core_reason.
     """
     if not resolved_entity_id:
         return None, None
@@ -135,19 +136,6 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
         changes.append("memory_type")
     if context_id is not None and context_id != current["context_id"]:
         changes.append("context_id")
-    if metadata is not None:
-        try:
-            requested_metadata = json.dumps(metadata, sort_keys=True)
-            current_metadata = (
-                json.dumps(json.loads(current["metadata"]), sort_keys=True)
-                if current["metadata"]
-                else None
-            )
-        except (TypeError, json.JSONDecodeError):
-            requested_metadata = json.dumps(metadata)
-            current_metadata = current["metadata"]
-        if requested_metadata != current_metadata:
-            changes.append("metadata")
     if tags is not None:
         requested_tags = {
             tag_ops.normalize_tag_name(tag).lower()
@@ -346,7 +334,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     is_core_val = 1 if core_state["is_core"] else 0
 
     cursor = conn.execute(
-        "SELECT created_at, owner_id, valid_from, title, full_content, content_hash "
+        "SELECT created_at, owner_id, valid_from, title, full_content, content_hash, metadata "
         "FROM entities WHERE id = ?",
         (entity_id,),
     )
@@ -354,7 +342,15 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     existing_retrieval_text = None
     existing_retrieval_hash = None
     if existing:
-        created_at, owner, valid_from, prior_title, prior_content, prior_content_hash = existing
+        (
+            created_at,
+            owner,
+            valid_from,
+            prior_title,
+            prior_content,
+            prior_content_hash,
+            prior_metadata,
+        ) = existing
         base_source_changed = (
             prior_title != title
             or prior_content != redacted_content
@@ -388,7 +384,23 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     if tags is not None:
         conn.execute("DELETE FROM entity_tags WHERE entity_id = ?", (entity_id,))
 
-    metadata_str = json.dumps(metadata) if metadata is not None else None
+    if existing:
+        current_metadata_dict = {}
+        if prior_metadata:
+            try:
+                parsed_meta = json.loads(prior_metadata)
+                if isinstance(parsed_meta, dict):
+                    current_metadata_dict = parsed_meta
+            except (json.JSONDecodeError, TypeError):
+                current_metadata_dict = {}
+        if metadata is not None:
+            submitted_metadata_dict = metadata if isinstance(metadata, dict) else {}
+            merged_meta = {**current_metadata_dict, **submitted_metadata_dict}
+            metadata_str = json.dumps(merged_meta)
+        else:
+            metadata_str = prior_metadata
+    else:
+        metadata_str = json.dumps(metadata) if metadata is not None else None
     if existing:
         if retrieval_text_provided:
             final_retrieval_text = requested_retrieval_text

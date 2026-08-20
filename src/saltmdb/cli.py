@@ -173,6 +173,9 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
     avg_latency_row = conn.execute(
         "SELECT AVG(latency_ms) FROM tool_call_telemetry WHERE timestamp >= ?", (telemetry_since,)
     ).fetchone()
+    flagged_stale_count = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE status != 'archived' AND json_extract(metadata, '$.drift_flag') IS NOT NULL"
+    ).fetchone()[0]
 
     return {
         "entities": {
@@ -181,6 +184,14 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
             "archived": entity_counts.get("archived", 0),
             "core": core_count,
             "total": sum(entity_counts.values()),
+        },
+        "flagged_stale": {
+            "note": (
+                "entities carrying a non-null metadata.drift_flag (set only by the manual/cron "
+                "hooks/saltmdb-checkable-fact-drift-sweep.py sweep) -- advisory only, never "
+                "auto-corrected; archived entities are excluded since they are never retrieved."
+            ),
+            "count": flagged_stale_count,
         },
         "orphaned_memories": orphans,
         "overdue_core_reviews": {

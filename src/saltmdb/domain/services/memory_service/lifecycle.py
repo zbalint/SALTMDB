@@ -310,7 +310,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 [
                     envelope_error(
                         "INACTIVE_TARGET",
-                        f"Memory '{resolved_id}' is inactive ({target[0]}). Fetch an active successor and inspect it before retrying; no replacement was created.",
+                        f"Memory '{resolved_id}' is inactive ({target[0]}). Fetch an active successor and inspect it before retrying; no replacement was created. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
                         "entity_id",
                     )
                 ],
@@ -405,7 +405,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         [
                             envelope_error(
                                 "INACTIVE_TARGET",
-                                f"Memory '{resolved_id}' became inactive ({current[0]}) before replacement; retry against an active successor.",
+                                f"Memory '{resolved_id}' became inactive ({current[0]}) before replacement; retry against an active successor. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
                                 "entity_id",
                             )
                         ],

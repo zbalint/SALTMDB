@@ -76,10 +76,12 @@ every body is fully shared).
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
 | [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude-Code-only event; script itself is portable) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `claude -p` or `codex exec` since a bare script has no MCP tool context of its own. |
 | [`saltmdb-skill-review-sweep.py`](saltmdb-skill-review-sweep.py) | Manual / cron only (no lifecycle event) | Mining and diagnosis sweep for skill/hook improvements. Shells out to `claude -p` or `codex exec` to perform a 5-step telemetry review (mine, diagnose, pair-check, propose, gate). Never auto-applies file edits; outputs proposals as gated memories for human review. |
+| [`saltmdb-checkable-fact-drift-sweep.py`](saltmdb-checkable-fact-drift-sweep.py) | Manual / cron only (no lifecycle event) | Periodic sweep verifying checkable fact memories against live repository source code to flag stale citations. Never auto-corrects or edits content; flags surface via `search_memory`'s `drift_flag` field. |
 
 **Explicit non-goals**:
 - No hook here nudges or automates `consolidate_memories`. Deciding which memories are cohesive enough to merge stays a deliberate agent judgment call.
 - The skill-review sweep (`saltmdb-skill-review-sweep.py`) never auto-applies a file edit either — output is always a review-gated memory proposal.
+- The checkable-fact drift sweep (`saltmdb-checkable-fact-drift-sweep.py`) never edits a flagged memory's title/content/tags and never calls lifecycle tools (e.g. `consolidate_memories`, `revise_memory`, `supersede_memory`) — flagging is metadata-only and non-destructive.
 
 ---
 

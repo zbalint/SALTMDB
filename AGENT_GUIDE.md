@@ -335,6 +335,22 @@ In both cases: the target must be active (an already-archived/superseded `entity
 
 `store_memory` still accepts an explicit `entity_id` — but only for a genuinely **administrative-only** update, never a content change. Internally (`_legacy_update_guard` in `src/saltmdb/domain/services/memory_service/write.py`), any attempt to change a frozen field (`title`, `content`, `tags`, `owner_id`, `scope`, `memory_type`, `context_id`) through this path is rejected outright (`IMMUTABLE_MEMORY`, naming `revise_memory`/`supersede_memory` as the correct tool) — this applies whether the target is resolved via an explicit `entity_id` or an implicit same-title/owner/scope match, so there is no way to sneak a content change through the old upsert path. What genuinely remains updatable in place, on the *same* `entity_id`, with no new entity created: `is_core`, `core_reason`/`core_exit_condition`/`core_review_after`/`detail_memory_ids`, `weight`, `retrieval_text`, and non-identity `metadata`. Because these administrative-only fields are governance/lifecycle metadata rather than the memory's actual knowledge content, this path does **not** create an `<entity_id>_h_<suffix>` history snapshot anymore either — there is nothing content-wise to snapshot, since the guard already guaranteed content is unchanged. (Pre-existing `_h_` rows from before this redesign still exist in the database and remain fully readable; see `MIGRATION.md` for how they were reconciled into the lineage graph.)
 
+### Correcting an inactive (consolidated/archived) memory
+
+`revise_memory`/`supersede_memory`/`consolidate_memories` all require an active (`status='raw'`)
+target/parent — attempting any of them against a `consolidated` or `archived` memory is a hard
+`INACTIVE_TARGET`/`INACTIVE_PARENT` rejection with zero side effects. For a single stale fact on
+an otherwise-fine consolidated memory, do not try to revive it through one of those tools. Instead:
+1. `store_memory` a small, self-contained new memory carrying just the corrected information.
+2. `manage_relation(predicate="corrects", source_id=<new memory>, target_id=<stale memory>)` —
+   `corrects` is an ordinary agent-selectable predicate (not gated by the embedding-similarity
+   governance check that applies to `elaborates_on`/`resolves`/`supersedes`), so this works even
+   when the new memory's content differs substantially from the stale one's.
+
+No `consolidate_memories` call is needed for a single correction. `search_memory(mode="strict")`
+already demotes a memory that is the target of a currently-valid `corrects` edge below its
+corrector automatically — no extra step is needed to make the correction take retrieval priority.
+
 ---
 
 ---

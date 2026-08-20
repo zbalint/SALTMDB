@@ -156,5 +156,30 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
         )
 
 
+    def test_inactive_target_message_includes_corrects_guidance(self):
+        old_id = self._store()
+        revise_memory(
+            entity_id=old_id,
+            title="First lifecycle successor",
+            tags=["#first"],
+            content="A complete and sufficiently descriptive first successor body.",
+            reason="First correction.",
+            db_connection=self.conn,
+        )
+
+        rejected = supersede_memory(
+            entity_id=old_id,
+            title="Should not be written",
+            tags=["#bad"],
+            content="This replacement must not be persisted.",
+            reason="The target is inactive.",
+            db_connection=self.conn,
+        )
+
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "INACTIVE_TARGET")
+        self.assertIn("predicate='corrects'", rejected["errors"][0]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

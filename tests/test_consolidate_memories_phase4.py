@@ -153,6 +153,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
             db_connection=self.conn,
         )
         self.assertEqual(inactive["errors"][0]["code"], "INACTIVE_PARENT")
+        self.assertIn("predicate='corrects'", inactive["errors"][0]["message"])
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) FROM entities WHERE status = 'archived'").fetchone()[
                 0

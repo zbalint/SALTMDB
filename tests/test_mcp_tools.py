@@ -185,6 +185,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("entity_id", params)
         self.assertIs(params["entity_id"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
+    def test_store_memory_metadata_is_explicit_parameter(self):
+        """MCP wrapper regression: metadata must be an explicit named parameter so FastMCP's
+        auto-generated JSON Schema declares it over the real MCP wire protocol."""
+        import inspect
+
+        params = inspect.signature(tools.store_memory).parameters
+        self.assertIn("metadata", params)
+        self.assertIs(params["metadata"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
     def test_store_memory_entity_id_bypasses_exact_duplicate_on_metadata_only_update(self):
         """Behavioral counterpart to the schema test above: an explicit entity_id alone (no
         explicit entity_id must let a metadata-only edit -- content byte-identical, only

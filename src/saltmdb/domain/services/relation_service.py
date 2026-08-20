@@ -945,7 +945,8 @@ def _resolve_and_validate_parent_ids(
                 "code": "INACTIVE_PARENT",
                 "message": (
                     f"parent '{entity_id}' is inactive (status='{row[0]}'); inspect its "
-                    "successor with get_lineage(direction='descendants') before retrying."
+                    "successor with get_lineage(direction='descendants') before retrying. "
+                    f"To correct stale/wrong information on an inactive (consolidated/archived) memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{entity_id}') -- no consolidate_memories call is needed for a single correction."
                 ),
             }
         resolved.append(entity_id)

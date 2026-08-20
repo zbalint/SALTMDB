@@ -134,6 +134,14 @@ redundant/overlapping raw memories yourself while searching.
    both.
 3. Source memories are soft-archived and auto-linked via lineage edges — nothing is destroyed;
    full ancestry stays auditable via `get_lineage`.
+4. `revise_memory`/`supersede_memory`/`consolidate_memories` all hard-reject a target/parent
+   whose `status` isn't `'raw'` (`INACTIVE_TARGET`/`INACTIVE_PARENT`, zero side effects). To fix
+   a stale fact on an otherwise-fine consolidated memory without reviving it: `store_memory` a
+   small, self-contained correction, then `manage_relation(predicate="corrects", source_id=<new>,
+   target_id=<stale>)`. `corrects` is an ordinary agent-selectable predicate not subject to the
+   embedding-similarity governance gate, so it works even when content differs substantially.
+   `search_memory(mode="strict")` already ranks the corrector above the corrected memory
+   automatically — no `consolidate_memories` call is needed for a single correction.
 
 **Explicit non-goal**: don't automate or hook-pressure the decision of *which* memories are
 cohesive enough to consolidate — that judgment call stays deliberately manual.
