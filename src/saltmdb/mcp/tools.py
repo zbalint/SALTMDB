@@ -203,6 +203,9 @@ def log_event(
 
     `session_id` is not a parameter here either -- the adapter auto-populates it from the host
     harness's own session id (an opaque, advisory pointer; see get_events' docstring).
+
+    `owner_id` is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=log_event, submitted=locals())
     from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -315,6 +318,9 @@ def merge_tags(
     each detail memory to this core -- `None` preserves the current declaration, `[]` clears it.
     A core must stay directly actionable on its own even if a weaker agent never follows a detail
     link; move rationale/chronology/evidence into the linked detail memories instead.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
 )
 def store_memory(
@@ -408,6 +414,9 @@ def store_memory(
 
     Explicit-ID retrieval is provided by the dedicated get_memory tool. Experimental ranking and benchmark controls remain
     available through internal services/evaluation tooling, but are intentionally absent here.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
 )
 def search_memory(
@@ -450,6 +459,9 @@ def archive_memory(
     """Explicitly archives (retires) one or multiple long-term memories.
 
     Accepts entity_id as a single string ID OR a list of string IDs.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=archive_memory, submitted=locals())
     raw_target = entity_id
@@ -575,6 +587,9 @@ def manage_relation(
     rejected (`REJECT_CORE_ELABORATES_ON`) -- only that core's own `detail_memory_ids`
     declaration (via `store_memory`/`consolidate_memories`) may create one. Re-submitting an
     edge that already exists stays an idempotent no-op regardless.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     submitted = locals().copy()
     owner_id_ = _effective_owner(owner_id, tool_func=manage_relation, submitted=locals())
@@ -703,6 +718,9 @@ def consolidate_memories(
     `detail_memory_ids`) to keep the result core, or `is_core=False` to let it become an ordinary
     memory. The same capacity caps and detail-relation rules as `store_memory` apply. For the
     bulk shape, put every `core_*`/`detail_memory_ids` field on each individual item.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=consolidate_memories, submitted=locals())
     consolidations_ = consolidations
@@ -786,6 +804,9 @@ def revise_memory(
     new entity links to it with ``revises``. An inactive target is a hard failure: inspect the
     reported successor before retrying. ``owner_id``, ``context_id``, ``scope``, ``memory_type``,
     are inherited when omitted and may be changed deliberately when supplied.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=revise_memory, submitted=locals())
     return _backend_or_raise().call(
@@ -821,6 +842,9 @@ def supersede_memory(
     The predecessor remains byte-identical and is linked with ``supersedes``. An inactive target
     is never silently redirected; the error reports known active successors and lineage. Optional
     administrative fields are inherited unless explicitly supplied.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=supersede_memory, submitted=locals())
     return _backend_or_raise().call(
@@ -845,6 +869,9 @@ def get_memory(entity_id: str, owner_id: str | None = None) -> dict:
 
     Explicit retrieval includes archived memories and returns the memory's status and lineage;
     an archived ID is never silently redirected to a successor.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=get_memory, submitted=locals())
     return _backend_or_raise().call("get_memory", {"entity_id": entity_id, "owner_id": owner_id_})
@@ -861,6 +888,9 @@ def get_lineage(
 
     ``ancestors`` shows where an entity came from; ``descendants`` shows what it became.
     Archived nodes remain visible so historical provenance is never hidden.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=get_lineage, submitted=locals())
     return _backend_or_raise().call(
@@ -876,7 +906,11 @@ def get_lineage(
 
 @mcp.tool()
 def get_related_memories(entity_id: str, max_depth: int = 5, owner_id: str | None = None) -> dict:
-    """Traverses semantic relations from one memory for up to ``max_depth`` hops."""
+    """Traverses semantic relations from one memory for up to ``max_depth`` hops.
+
+    owner_id is required on this tool's very first call within a session (it binds the session
+    identity); later calls in the same session may omit it once bound.
+    """
     owner_id_ = _effective_owner(owner_id, tool_func=get_related_memories, submitted=locals())
     return _backend_or_raise().call(
         "get_related_memories",

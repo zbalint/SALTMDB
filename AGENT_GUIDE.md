@@ -74,6 +74,10 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
      operator instructs otherwise. Worker subagents use their own fixed role id (e.g. `agent_docs`,
      `agent_qa`). Never stamp the human operator's own name/identity as `owner_id` — that string is
      reserved for referring to them as content/provenance context, not as an agent's own author tag.
+   * `owner_id` is required on the **first** MCP tool call of the session — omitting it there is a
+     hard failure (`owner_id is required on the first MCP tool call; retry with an agent identity`).
+     It binds the session's identity for every tool that reads/writes ownership; later calls in the
+     same session may omit it once bound.
 
 1. **Diagnose Before Prescribing (No Assumptions)**
    * When the user provides a task, error, or request, DO NOT immediately jump to conclusions, guess their setup, or assume the root cause.

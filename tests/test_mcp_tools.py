@@ -846,6 +846,36 @@ class TestMCPToolsWrapper(unittest.TestCase):
             f"got {registered_count}",
         )
 
+    def test_owner_id_first_call_requirement_documented_on_every_ownership_bearing_tool(self):
+        """Cold-start agent-experience review, Issue D: the owner_id-required-on-first-call
+        behavior (_effective_owner) was previously undiscoverable from any tool's exposed
+        description -- only from hitting the runtime error once. Confirm every tool that calls
+        _effective_owner now documents it in its actual MCP-exposed description text (read via
+        the real Tool registry, not tools.py's raw docstring, since store_memory/search_memory/
+        manage_relation/consolidate_memories set description via @mcp.tool(description=...)
+        rather than a plain docstring -- the two differ)."""
+        ownership_bearing_tools = [
+            "log_event",
+            "store_memory",
+            "search_memory",
+            "archive_memory",
+            "manage_relation",
+            "consolidate_memories",
+            "revise_memory",
+            "supersede_memory",
+            "get_memory",
+            "get_lineage",
+            "get_related_memories",
+        ]
+        registered = tools.mcp._tool_manager._tools
+        for name in ownership_bearing_tools:
+            description = registered[name].description or ""
+            self.assertIn(
+                "first call within a session",
+                description,
+                f"{name}'s exposed description must document the owner_id first-call requirement",
+            )
+
 
 class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
     """Live-verification regression (2026-08-19): every prior test called
