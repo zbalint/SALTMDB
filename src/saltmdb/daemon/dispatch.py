@@ -85,6 +85,15 @@ def _optional_mode(kw: dict[str, Any]) -> Literal["strict", "broad", "history"]:
     return value
 
 
+def _optional_direction(kw: dict[str, Any]) -> Literal["outbound", "inbound", "both"]:
+    value = kw.get("direction")
+    if value is None:
+        return "both"
+    if value not in {"outbound", "inbound", "both"}:
+        raise ValueError("direction must be 'outbound', 'inbound', or 'both'")
+    return value
+
+
 def _required_str(kw: dict[str, Any], key: str) -> str:
     value = kw.get(key)
     if not isinstance(value, str) or not value:
@@ -357,10 +366,13 @@ def _dispatch_get_lineage(**kw):
 def _dispatch_get_related_memories(**kw):
     entity_id = _required_str(kw, "entity_id")
     max_depth = _optional_int(kw, "max_depth", 5)
+    direction = _optional_direction(kw)
     get_related = getattr(relation_service, "get_related_memories", None)
     if get_related is not None:
-        return get_related(entity_id=entity_id, max_depth=max_depth)
-    return relation_service.analyze_dependencies(root_entity_id=entity_id, max_depth=max_depth)
+        return get_related(entity_id=entity_id, max_depth=max_depth, direction=direction)
+    return relation_service.analyze_dependencies(
+        root_entity_id=entity_id, max_depth=max_depth, direction=direction
+    )
 
 
 def _dispatch_get_events(**kw):

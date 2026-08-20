@@ -906,8 +906,19 @@ def get_lineage(
 
 
 @mcp.tool()
-def get_related_memories(entity_id: str, max_depth: int = 5, owner_id: str | None = None) -> dict:
+def get_related_memories(
+    entity_id: str,
+    max_depth: int = 5,
+    direction: Literal["outbound", "inbound", "both"] = "both",
+    owner_id: str | None = None,
+) -> dict:
     """Traverses semantic relations from one memory for up to ``max_depth`` hops.
+
+    direction="both" (default) walks outbound and inbound edges independently and merges the
+    results -- an entity that is only ever a relation's *target* now surfaces those relations
+    too, instead of always reporting zero. This is a union of two single-direction traversals,
+    not a true mixed-direction graph walk: pass direction="outbound" for the original
+    downstream-only behavior, or direction="inbound" for upstream-only.
 
     owner_id is required on this tool's very first call within a session (it binds the session
     identity); later calls in the same session may omit it once bound.
@@ -915,7 +926,12 @@ def get_related_memories(entity_id: str, max_depth: int = 5, owner_id: str | Non
     owner_id_ = _effective_owner(owner_id, tool_func=get_related_memories, submitted=locals())
     return _backend_or_raise().call(
         "get_related_memories",
-        {"entity_id": entity_id, "max_depth": max_depth, "owner_id": owner_id_},
+        {
+            "entity_id": entity_id,
+            "max_depth": max_depth,
+            "direction": direction,
+            "owner_id": owner_id_,
+        },
     )
 
 

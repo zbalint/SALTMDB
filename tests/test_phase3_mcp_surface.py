@@ -49,7 +49,7 @@ class TestPhase3McpSurface(unittest.TestCase):
         )
         self.assertEqual(
             list(inspect.signature(tools.get_related_memories).parameters),
-            ["entity_id", "max_depth", "owner_id"],
+            ["entity_id", "max_depth", "direction", "owner_id"],
         )
 
     def test_graph_tools_forward_normalized_calls(self):

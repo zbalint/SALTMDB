@@ -540,14 +540,79 @@ def invalidate_relation(  # noqa: C901
             close_connection(conn)
 
 
+def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
+    """Builds the recursive-CTE query for one traversal direction. Parametrized purely by
+    string substitution of which endpoint anchors/recurses/guards -- for direction="outbound"
+    this produces text byte-identical to the query this function replaces, so that path is a
+    pure refactor with zero behavior change. "inbound" is the direction-reversed mirror: anchor
+    on r.target_id (edges pointing INTO the root) instead of r.source_id, recurse by matching
+    each new edge's target_id against the previous hop's source_id, and guard/accumulate the
+    path using the newly-*discovered* node id at each step (r.source_id for inbound, since
+    that's the node being walked toward moving away from root) -- not always r.target_id, which
+    would silently check/record the wrong endpoint for inbound-discovered rows (a correctness
+    bug in a first draft of this fix, caught before landing: it would let the cycle guard miss
+    real cycles reached via the inbound arm)."""
+    if direction == "outbound":
+        anchor_where = "r.source_id = ?"
+        recursive_join = "r.source_id = dt.target_id"
+        newly_reached = "r.target_id"
+    else:
+        anchor_where = "r.target_id = ?"
+        recursive_join = "r.target_id = dt.source_id"
+        newly_reached = "r.source_id"
+    return f"""
+    WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
+        SELECT r.id, r.source_id, r.target_id, r.predicate, 1, r.source_id || '->' || {newly_reached}
+        FROM relations r
+        WHERE {anchor_where} AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+          AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+          AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+
+        UNION ALL
+
+        SELECT r.id, r.source_id, r.target_id, r.predicate, dt.depth + 1, dt.path || '->' || {newly_reached}
+        FROM relations r
+        JOIN dependency_tree dt ON {recursive_join}
+        WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+          AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+          AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+          AND dt.path NOT LIKE '%' || {newly_reached} || '%'
+    )
+    SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
+    FROM dependency_tree dt
+    JOIN entities e1 ON dt.source_id = e1.id
+    JOIN entities e2 ON dt.target_id = e2.id
+    ORDER BY dt.depth ASC;
+    """
+
+
 def analyze_dependencies(
     root_entity_id: str = None,
     max_depth: int = 5,
     point_in_time: str = None,
+    direction: Literal["outbound", "inbound", "both"] = "outbound",
     db_connection=None,
     db_path: str = None,
 ) -> dict:
-    """Recursively traces downstream relational paths using SQL CTEs."""
+    """Recursively traces relational paths using SQL CTEs.
+
+    direction="outbound" (default, unchanged behavior): downstream walk, following each edge's
+    source_id -> target_id starting from the root -- this is the original, sole behavior before
+    this parameter existed. direction="inbound": upstream walk, following edges backward
+    (target_id -> source_id); an entity that is only ever a relation's *target* -- previously
+    always reporting zero dependencies regardless of real inbound edges (cold-start review Issue
+    B) -- now surfaces them. direction="both" runs the outbound and inbound queries
+    independently (each keeping its own, already-correct single-direction cycle guard
+    untouched) and unions/dedupes the results in Python. This is deliberately NOT a single
+    unified mixed-direction graph traversal: a true zigzag path that changes direction mid-walk
+    (e.g. A->B, C->B, C->D reached starting from A) is out of scope here -- the existing
+    string-LIKE path cycle guard (already a documented source of one real prior bug in this
+    file's supersession-chain resolution, see memory_service/ranking.py's own module docs) would
+    need a harder redesign (tracking visited-node identity rather than a direction-specific path
+    string) to do that safely, and isn't needed to fix the verified bug this option addresses.
+    """
     if not root_entity_id:
         return {"error": "root_entity_id is mandatory"}
 
@@ -575,34 +640,21 @@ def analyze_dependencies(
             else {"id": root_id, "title": "Root", "status": "raw"}
         )
 
-        query = """
-        WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
-            SELECT r.id, r.source_id, r.target_id, r.predicate, 1, r.source_id || '->' || r.target_id
-            FROM relations r
-            WHERE r.source_id = ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
-              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
-              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-              AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
-
-            UNION ALL
-
-            SELECT r.id, r.source_id, r.target_id, r.predicate, dt.depth + 1, dt.path || '->' || r.target_id
-            FROM relations r
-            JOIN dependency_tree dt ON r.source_id = dt.target_id
-            WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
-              AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
-              AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-              AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
-              AND dt.path NOT LIKE '%' || r.target_id || '%'
+        directions_to_run: tuple[Literal["outbound", "inbound"], ...] = (
+            ("outbound", "inbound") if direction == "both" else (direction,)
         )
-        SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
-        FROM dependency_tree dt
-        JOIN entities e1 ON dt.source_id = e1.id
-        JOIN entities e2 ON dt.target_id = e2.id
-        ORDER BY dt.depth ASC;
-        """
-        cursor = conn.execute(query, (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit))
-        rows = cursor.fetchall()
+        tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]] = []
+        for d in directions_to_run:
+            cursor = conn.execute(
+                _dependency_cte_sql(d), (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit)
+            )
+            tagged_rows.extend((d, row) for row in cursor.fetchall())
+        # Global shallowest-first ordering across both directions' independently-ordered result
+        # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
+        # direction's query happened to find a convergently-reachable relation first (matches
+        # the single-query ORDER BY dt.depth ASC invariant the pre-existing dedup comment below
+        # already documents for the outbound-only case).
+        tagged_rows.sort(key=lambda item: item[1][6])  # row[6] == depth
 
         nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
         seen_nodes = {root_id}
@@ -611,15 +663,21 @@ def analyze_dependencies(
         # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
         edges = []
         seen_edges = set()
-        for rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path in rows:
-            if tgt_id not in seen_nodes:
-                nodes.append({"id": tgt_id, "title": tgt_title, "depth": depth})
-                seen_nodes.add(tgt_id)
+        for d, (rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path) in tagged_rows:
+            # The node newly discovered by this hop is the target for an outbound row, but the
+            # *source* for an inbound row -- inbound walks backward along each edge, so the node
+            # moving away from root is the edge's source, not its target.
+            reached_id, reached_title = (
+                (tgt_id, tgt_title) if d == "outbound" else (src_id, src_title)
+            )
+            if reached_id not in seen_nodes:
+                nodes.append({"id": reached_id, "title": reached_title, "depth": depth})
+                seen_nodes.add(reached_id)
 
             # Multiple converging paths in a diamond-shaped graph can revisit the same
             # relation once per incoming path (the CTE's cycle guard only stops a single
             # path from looping, not distinct paths reconverging). Dedupe on the relation's
-            # own id, keeping the first (shallowest, per ORDER BY dt.depth ASC) occurrence.
+            # own id, keeping the first (shallowest, per the sort above) occurrence.
             if rel_id in seen_edges:
                 continue
             seen_edges.add(rel_id)
@@ -882,14 +940,23 @@ def get_related_memories(
     entity_id: str = None,
     max_depth: int = 5,
     point_in_time: str = None,
+    direction: Literal["outbound", "inbound", "both"] = "both",
     db_connection=None,
     db_path: str = None,
 ) -> dict:
-    """Named graph API for semantic neighbours, backed by ``analyze_dependencies``."""
+    """Named graph API for semantic neighbours, backed by ``analyze_dependencies``.
+
+    Defaults to direction="both" (unlike analyze_dependencies' own outbound-only default) --
+    this tool's name and its own docstring promise general relation lookup, not a directed
+    downstream-only dependency walk, and an entity that is only ever a relation's target
+    previously always reported zero related memories regardless of real inbound edges. See
+    analyze_dependencies' docstring for exactly what "both" does and does not cover.
+    """
     result = analyze_dependencies(
         root_entity_id=entity_id,
         max_depth=max_depth,
         point_in_time=point_in_time,
+        direction=direction,
         db_connection=db_connection,
         db_path=db_path,
     )

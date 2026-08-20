@@ -1596,6 +1596,97 @@ class TestRelationPointInTime(unittest.TestCase):
         self.assertEqual(len(result["edges"]), 4, "diamond has exactly 4 distinct relations")
         self.assertEqual(result["total_dependencies_found"], 4)
 
+    def test_analyze_dependencies_direction_defaults_to_outbound_unchanged(self):
+        # Cold-start review Issue B: analyze_dependencies' own default must stay outbound-only,
+        # byte-for-byte the same behavior as before direction existed -- only get_related_memories
+        # (the higher-level, agent-facing tool) gets the new both-directions default.
+        a = self._mk("Outbound Default A")
+        b = self._mk("Outbound Default B")
+        store_relation(source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn)
+
+        from_source = analyze_dependencies(root_entity_id=a, db_connection=self.conn)
+        self.assertEqual(from_source["total_dependencies_found"], 1)
+
+        from_target = analyze_dependencies(root_entity_id=b, db_connection=self.conn)
+        self.assertEqual(
+            from_target["total_dependencies_found"],
+            0,
+            "unchanged default: an entity that is only ever a relation's target must still "
+            "report zero dependencies when direction is omitted",
+        )
+
+    def test_analyze_dependencies_direction_inbound_surfaces_target_only_entity(self):
+        # The verified bug: an entity that is only ever a relation's target previously always
+        # reported zero dependencies via analyze_dependencies, regardless of real inbound edges.
+        a = self._mk("Inbound Fix A")
+        b = self._mk("Inbound Fix B")
+        store_relation(source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn)
+
+        result = analyze_dependencies(root_entity_id=b, direction="inbound", db_connection=self.conn)
+        self.assertEqual(result["total_dependencies_found"], 1)
+        edge = result["edges"][0]
+        self.assertEqual(edge["source_id"], a)
+        self.assertEqual(edge["target_id"], b)
+        node_ids = {n["id"] for n in result["dependencies"]}
+        self.assertEqual(node_ids, {a, b})
+
+    def test_analyze_dependencies_direction_both_unions_outbound_and_inbound(self):
+        # root has one outbound edge (root -> downstream) and is also the target of one inbound
+        # edge (upstream -> root) -- direction="both" must surface both, not just one.
+        upstream = self._mk("Both Union Upstream")
+        root = self._mk("Both Union Root")
+        downstream = self._mk("Both Union Downstream")
+        store_relation(
+            source_id=upstream, target_id=root, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=root, target_id=downstream, predicate="depends_on", db_connection=self.conn
+        )
+
+        result = analyze_dependencies(
+            root_entity_id=root, direction="both", db_connection=self.conn
+        )
+        self.assertEqual(result["total_dependencies_found"], 2)
+        node_ids = {n["id"] for n in result["dependencies"]}
+        self.assertEqual(node_ids, {upstream, root, downstream})
+
+    def test_analyze_dependencies_direction_both_mixed_direction_cycle_terminates_safely(self):
+        # Regression test flagged by adversarial plan review: direction="both" runs two
+        # independent single-direction traversals, each keeping its own untouched cycle guard.
+        # A cycle reachable by mixing directions (root -> a outbound, then a -> root inbound,
+        # i.e. the same a<->root pair linked both ways) must not cause runaway recursion or a
+        # crash in either guard, even though neither guard is aware of the other's traversal.
+        root = self._mk("Mixed Cycle Root")
+        a = self._mk("Mixed Cycle A")
+        store_relation(source_id=root, target_id=a, predicate="depends_on", db_connection=self.conn)
+        store_relation(source_id=a, target_id=root, predicate="depends_on", db_connection=self.conn)
+
+        result = analyze_dependencies(
+            root_entity_id=root, direction="both", max_depth=10, db_connection=self.conn
+        )
+        self.assertNotIn("error", result)
+        node_ids = {n["id"] for n in result["dependencies"]}
+        self.assertEqual(node_ids, {root, a})
+        # Both edges are real, distinct relation rows (root->a and a->root) -- both must be
+        # reported, and each exactly once (no duplicate/runaway rows from either guard).
+        self.assertEqual(result["total_dependencies_found"], 2)
+
+    def test_get_related_memories_default_direction_surfaces_target_only_entity(self):
+        # Repro of the original cold-start report's exact observed symptom, at the
+        # get_related_memories tool level: entity B was only ever a relation's target and
+        # get_related_memories(entity_id=B) always reported zero relations, indistinguishable
+        # from "this entity has no relations." Now defaults to direction="both".
+        a = self._mk("Tool-Level Inbound Fix A")
+        b = self._mk("Tool-Level Inbound Fix B")
+        store_relation(
+            source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
+        )
+
+        result = get_related_memories(entity_id=b, db_connection=self.conn)
+        self.assertEqual(result["total_related_found"], 1)
+        related_ids = {n["id"] for n in result["related_memories"]}
+        self.assertEqual(related_ids, {a, b})
+
     def test_analyze_dependencies_preserves_truthful_edge_history_without_repointing(self):
         p1 = self._mk("PIT Cons P1")
         p2 = self._mk("PIT Cons P2")
