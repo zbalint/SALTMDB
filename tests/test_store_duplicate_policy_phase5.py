@@ -81,6 +81,14 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         self.assertIn("title", candidates[0])
         self.assertIn("similarity_score", candidates[0])
         self.assertEqual(warning["detail"]["guidance"]["single"], "supersede_memory")
+        self.assertEqual(warning["detail"]["guidance"]["several"], "consolidate_memories")
+        # Cold-start review Issue E: duplicate_candidates guidance previously only offered
+        # supersede_memory/consolidate_memories, omitting the empirically common third
+        # resolution (related but not actually redundant -- link, don't merge/replace).
+        self.assertEqual(
+            warning["detail"]["guidance"]["related_not_redundant"], "manage_relation"
+        )
+        self.assertIn("manage_relation", warning["message"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 2)
 
     def test_fresh_explicit_id_is_preserved_but_cannot_bypass_exact_duplicate_guard(self):

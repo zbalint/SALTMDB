@@ -60,9 +60,10 @@ not here).
 - Before storing a large knowledge block, run a quick `search_memory` first. `store_memory`
   itself still catches an exact content-hash duplicate (hard rejection, returns the existing ID)
   and flags a near-duplicate inline as `duplicate_candidates` — treat that as your cue to call
-  `supersede_memory` (one candidate should simply replace another) or `consolidate_memories`
-  (several overlapping candidates should merge), not just something to glance at and continue
-  past.
+  `supersede_memory` (one candidate should simply replace another), `consolidate_memories`
+  (several overlapping candidates should merge), or `manage_relation` (related but genuinely
+  distinct — near-duplicate flagging has a known false-positive rate on shared domain vocabulary
+  or a shared title-template convention) — not just something to glance at and continue past.
 - Proactively link every durable memory to its meaningful context — search for the
   decision/plan/issue/evidence it relates to and create a `manage_relation` edge with the
   correct canonical predicate and direction. An unlinked memory is only acceptable when no

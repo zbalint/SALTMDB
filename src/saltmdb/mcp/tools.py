@@ -292,7 +292,8 @@ def merge_tags(
 
     Exact content-hash duplicates are rejected with the existing entity ID. Near duplicates are
     stored and returned inline as `duplicate_candidates`, with guidance to call
-    `supersede_memory` or `consolidate_memories` when the relationship is confirmed.
+    `supersede_memory` or `consolidate_memories` when the relationship is confirmed, or
+    `manage_relation` to link them when related but not actually redundant.
 
     Core-memory bootstrap governance: `is_core=True` marks a memory for injection into every
     future session's bootstrap context -- it is a SCARCE, TEMPORARY mechanism for urgent

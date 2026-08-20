@@ -874,12 +874,15 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             response_warnings.append(
                 warning(
                     "NEAR_DUPLICATE",
-                    "Memory stored; review duplicate_candidates and use supersede_memory for one replacement or consolidate_memories to merge several.",
+                    "Memory stored; review duplicate_candidates and use supersede_memory for one "
+                    "replacement, consolidate_memories to merge several, or manage_relation to "
+                    "link them if related but not redundant.",
                     {
                         "duplicate_candidates": duplicate_candidates,
                         "guidance": {
                             "single": "supersede_memory",
                             "several": "consolidate_memories",
+                            "related_not_redundant": "manage_relation",
                         },
                     },
                 )
