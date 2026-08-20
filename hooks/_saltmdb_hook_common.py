@@ -129,6 +129,30 @@ def emit(payload: dict) -> None:
     sys.stdout.write("\n")
 
 
+def stop_block_payload(data: dict, reason: str) -> dict:
+    """Builds a blocking Stop response for the invoking harness.
+
+    Codex validates Stop output with ``additionalProperties: false`` and accepts only its
+    Stop-specific keys. Its input uniquely supplies both ``turn_id`` and ``model``; when those
+    fields are present, emit the minimal Claude-compatible ``decision``/``reason`` pair that is
+    also valid under Codex's strict schema. Other harnesses keep the redundant compatibility
+    fields used by the existing Claude Code/Copilot registrations.
+    """
+    if data.get("turn_id") and data.get("model"):
+        return {"decision": "block", "reason": reason}
+    return {
+        "decision": "block",
+        "reason": reason,
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        },
+    }
+
+
 def state_dir() -> Path:
     d = Path.home() / ".claude" / "hooks" / ".state"
     d.mkdir(parents=True, exist_ok=True)

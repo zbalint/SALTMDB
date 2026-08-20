@@ -33,6 +33,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     read_stdin_json,
     read_transcript_from_line,
     state_dir,
+    stop_block_payload,
     write_count,
 )
 
@@ -49,20 +50,8 @@ USER_TURN_PATTERN = re.compile(r'"type"\s*:\s*"user"')
 TOOL_RESULT_ECHO_PATTERN = re.compile(r'"tool_use_id"|"tool_call_id"')
 
 
-def emit_block(reason: str) -> None:
-    emit(
-        {
-            "decision": "block",
-            "reason": reason,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            },
-        }
-    )
+def emit_block(data: dict, reason: str) -> None:
+    emit(stop_block_payload(data, reason))
     sys.exit(0)
 
 
@@ -128,11 +117,12 @@ def main() -> None:
             sys.exit(0)
         write_count(count_state, count + 1)
         emit_block(
+            data,
             f"<!-- {PROMPT_SENTINEL} --> Before finishing, answer two questions about the work "
             "you just did this turn: (1) What are you least confident about in what you just "
             "did? (2) What's the biggest thing about this you probably haven't thought to ask? "
             f"Begin your reply with the exact line <!-- {MARKER} --> (so this check does not "
-            "re-trigger), then answer both questions concisely."
+            "re-trigger), then answer both questions concisely.",
         )
 
     # Stage 1 satisfied. Stage 2: did the reflection turn into a stored memory, or an explicit
@@ -161,11 +151,12 @@ def main() -> None:
     write_count(stage2_state, 1)
 
     emit_block(
+        data,
         f"<!-- {STAGE2_PROMPT_SENTINEL} --> You just answered the self-critique questions. If "
         "that reflection surfaced a genuine, durable lesson (a bug root cause, a rule worth "
         "remembering, a constraint you didn't know before), call store_memory for it now -- a "
         "reflection that isn't captured just evaporates. If nothing durable came out of it, say "
-        f"so explicitly by including the exact line <!-- {NO_LESSON_SENTINEL} --> in your reply."
+        f"so explicitly by including the exact line <!-- {NO_LESSON_SENTINEL} --> in your reply.",
     )
 
 

@@ -39,6 +39,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     read_count,
     read_stdin_json,
     retrieval_outcome_flag_path,
+    stop_block_payload,
     write_count,
 )
 
@@ -68,19 +69,7 @@ def main() -> None:
         'content="<memory_id>: used|irrelevant|insufficient -- <why>") for the results you '
         "acted on (or didn't)."
     )
-    emit(
-        {
-            "decision": "block",
-            "reason": reason,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            },
-        }
-    )
+    emit(stop_block_payload(data, reason))
 
 
 if __name__ == "__main__":
