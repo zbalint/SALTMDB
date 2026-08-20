@@ -5,6 +5,7 @@ import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 from saltmdb.utils import nlp, text
+from saltmdb.config import QG_OVERSIZED_PAYLOAD_THRESHOLD
 
 
 class TestTextQualityGate(unittest.TestCase):
@@ -55,6 +56,34 @@ class TestTextQualityGate(unittest.TestCase):
         res = nlp.evaluate_memory_quality(high_entropy_str)
         self.assertEqual(res["status"], "WARN")
         self.assertIn("HIGH_ENTROPY", res["quality_flags"])
+
+    def test_oversized_payload_warning_uses_named_threshold_constant(self):
+        """Cold-start review Issue F: OVERSIZED_PAYLOAD's threshold moved from a bare inline
+        literal to a named config.QG_OVERSIZED_PAYLOAD_THRESHOLD constant -- confirm the warning
+        still fires at exactly the same length, unchanged behavior, now driven by the constant."""
+        # Well-structured content (multiple headings past the 4000-char tier, list items, no
+        # repetition/entropy issues) so only OVERSIZED_PAYLOAD is expected to fire, not the
+        # unrelated structural hard-fails.
+        section = (
+            "## Section Heading\n\n"
+            "This is a structured paragraph of explanatory prose describing part of a larger "
+            "architecture document, written to be well above the entropy floor and below the "
+            "duplication ceiling so no unrelated quality flag fires here.\n\n"
+            "- A first list item with concrete detail\n"
+            "- A second list item with different concrete detail\n\n"
+        )
+        repeats = QG_OVERSIZED_PAYLOAD_THRESHOLD // len(section) + 2  # margin, then trim exactly
+        just_under = "# Doc\n\n" + section * repeats
+        just_under = just_under[: QG_OVERSIZED_PAYLOAD_THRESHOLD - 1]
+        just_over = just_under + "x" * 2
+
+        self.assertLessEqual(len(just_under), QG_OVERSIZED_PAYLOAD_THRESHOLD)
+        res_under = nlp.evaluate_memory_quality(just_under)
+        self.assertNotIn("OVERSIZED_PAYLOAD", res_under.get("quality_flags", []))
+
+        self.assertGreater(len(just_over), QG_OVERSIZED_PAYLOAD_THRESHOLD)
+        res_over = nlp.evaluate_memory_quality(just_over)
+        self.assertIn("OVERSIZED_PAYLOAD", res_over.get("quality_flags", []))
 
     def test_tc_qual_05_exact_sha256_hash_collision(self):
         """TC-QUAL-05: Exact match of existing memory -> REJECT_EXACT_DUPLICATE"""

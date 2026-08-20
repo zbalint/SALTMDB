@@ -143,6 +143,10 @@ QG_CLI_MAX = 26.0
 QG_PARAGRAPH_BREAK_MIN_LENGTH = 500
 QG_HEADING_OR_LIST_MIN_LENGTH = 1500
 QG_MULTI_HEADING_MIN_LENGTH = 4000
+# Advisory-only (never blocks a write) -- flags a payload long enough that an agent following
+# saltmdb-usage's "write rich, comprehensive memories" guidance may legitimately exceed this,
+# see AGENT_GUIDE.md/skills/saltmdb-usage/SKILL.md for the explicit "safe to ignore" note.
+QG_OVERSIZED_PAYLOAD_THRESHOLD = 8000
 
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"

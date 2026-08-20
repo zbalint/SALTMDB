@@ -43,7 +43,10 @@ not here).
 
 - Write rich, structured Markdown: headings, context, code snippets, trade-offs, exact steps.
   Avoid vague one-line facts — capture *why* a decision was made and what alternatives were
-  rejected, not just the outcome, so a future session doesn't re-explore a dead end.
+  rejected, not just the outcome, so a future session doesn't re-explore a dead end. Following
+  this guidance on a genuinely comprehensive memory can trip the `OVERSIZED_PAYLOAD` warning —
+  that check is advisory-only (never blocks the write); it's expected and safe to ignore for
+  legitimately comprehensive content, not a signal to trim.
 - Tag discipline: run `search_tags(query)` before inventing a new tag, to avoid fragmenting the
   same concept across near-duplicate tags.
 - `is_core=true` is a scarce, temporary bootstrap-delivery mechanism (hard cap: a handful active

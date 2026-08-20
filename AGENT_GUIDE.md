@@ -187,7 +187,7 @@ You are connected to SALTMDB, a local-first memory database. You must actively i
 - **Domain-Clear Prefixing**: When applicable, prefix titles by domain or component (e.g., `[Viewer UI] Bento Grid & Force Graph Layout`, `[Auth] OAuth2 Refresh Token Strategy`).
 
 ### B. Crafting Quality Detailed Memories
-- **Self-Contained & Actionable Markdown**: Write rich, structured Markdown with clear headings (`#`, `##`), context descriptions, code snippets, trade-offs, and exact steps. Avoid vague 1-line facts.
+- **Self-Contained & Actionable Markdown**: Write rich, structured Markdown with clear headings (`#`, `##`), context descriptions, code snippets, trade-offs, and exact steps. Avoid vague 1-line facts. Following this on a genuinely comprehensive memory can trip the advisory-only `OVERSIZED_PAYLOAD` warning (never blocks the write, see § 2's `store_memory` entry) — that's expected and safe to ignore for legitimately comprehensive content, not a cue to trim.
 - **Tag Discipline & Consolidation**:
   - Always include relevant folksonomy tags (e.g., `#core`, `#architecture`, `#fix`, `#performance`, `#ui-ux`).
   - Use `search_tags(query)` before creating new tags to prevent tag fragmentation.

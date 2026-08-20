@@ -12,6 +12,7 @@ from saltmdb.config import (
     QG_PARAGRAPH_BREAK_MIN_LENGTH,
     QG_HEADING_OR_LIST_MIN_LENGTH,
     QG_MULTI_HEADING_MIN_LENGTH,
+    QG_OVERSIZED_PAYLOAD_THRESHOLD,
 )
 
 STOP_WORDS = {
@@ -557,7 +558,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:  # noqa: C
     if symbol_ratio > QG_MAX_SYMBOL_RATIO:
         add_warning("HIGH_SYMBOL_RATIO")
 
-    if length > 8000:
+    if length > QG_OVERSIZED_PAYLOAD_THRESHOLD:
         add_warning("OVERSIZED_PAYLOAD")
 
     md_res = validate_markdown_structure(text)
