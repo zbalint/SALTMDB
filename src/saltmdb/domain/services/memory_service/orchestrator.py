@@ -891,21 +891,33 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         if include_related and rows:
             all_eids = [r[0] for r in rows]
             placeholders_r = ",".join("?" for _ in all_eids)
+            # Two unambiguous, direction-explicit selects (unioned) rather than one OR-join:
+            # an OR-join (`ON (r.target_id = e.id OR r.source_id = e.id)`) matches an anchor
+            # entity against itself whenever both endpoints of a relation are on the current
+            # result page, and previously relied on `e.id NOT IN (all_eids)` to discard that
+            # self-match -- which also silently discarded the case we actually want (two
+            # co-resident page entities correctly showing each other as related). Each half of
+            # this union resolves deterministically to the *other* endpoint, so co-resident
+            # partners are now surfaced correctly and a self-match can never occur.
             batch_rel_cursor = conn.execute(
                 f"""
-                SELECT r.source_id, r.target_id, r.predicate, e.id, e.title
+                SELECT r.source_id AS anchor, r.predicate, e.id, e.title
                 FROM relations r
-                JOIN entities e ON (r.target_id = e.id OR r.source_id = e.id)
-                WHERE (r.source_id IN ({placeholders_r}) OR r.target_id IN ({placeholders_r}))
-                  AND e.id NOT IN ({placeholders_r})
+                JOIN entities e ON e.id = r.target_id
+                WHERE r.source_id IN ({placeholders_r})
+                  AND e.status != 'archived'
+                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
+                UNION ALL
+                SELECT r.target_id AS anchor, r.predicate, e.id, e.title
+                FROM relations r
+                JOIN entities e ON e.id = r.source_id
+                WHERE r.target_id IN ({placeholders_r})
                   AND e.status != 'archived'
                   AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
             """,
-                all_eids * 3,
+                all_eids * 2,
             )
-            for bsrc, btgt, bpred, beid, betitle in batch_rel_cursor.fetchall():
-                anchor = bsrc if bsrc in all_eids else btgt
-                related_map.setdefault(anchor, [])[:5]
+            for anchor, bpred, beid, betitle in batch_rel_cursor.fetchall():
                 if len(related_map.get(anchor, [])) < 5:
                     related_map.setdefault(anchor, []).append(
                         {"predicate": bpred, "id": beid, "title": betitle}

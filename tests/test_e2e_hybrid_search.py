@@ -64,6 +64,61 @@ class TestE2EHybridSearch(unittest.TestCase):
         self.assertGreater(top["score"], 0.0)
         self.assertIn("related_entities", top)
 
+    def test_related_entities_shows_co_resident_partners_without_self_match(self):
+        # Regression test for the co-resident relation-partner visibility bug: two mutually
+        # related memories that both land on the same result page must each show the other in
+        # `related_entities`, and neither may ever list itself (the failure mode a naive fix --
+        # simply dropping the old NOT IN exclusion without restructuring the query -- would have
+        # introduced, via the OR-join's self-match).
+        res1 = store_memory(
+            title="Co-Resident Partner A",
+            content="First half of a co-resident relation pair used to test related_entities visibility",
+            tags=["#coresidenttest"],
+            owner_id="user1",
+            context_id="ctx_coresident",
+            db_path=self.db_path,
+        )
+        id1 = res1["data"]["id"]
+
+        res2 = store_memory(
+            title="Co-Resident Partner B",
+            content="Second half of a co-resident relation pair used to test related_entities visibility",
+            tags=["#coresidenttest"],
+            owner_id="user1",
+            context_id="ctx_coresident",
+            db_path=self.db_path,
+        )
+        id2 = res2["data"]["id"]
+
+        store_relation(
+            source_id=id1, target_id=id2, predicate="related_to", db_connection=self.conn
+        )
+
+        from saltmdb.domain.services.embedding_service import process_embedding_jobs_sync
+
+        process_embedding_jobs_sync(self.conn)
+
+        results = search_memory(
+            query_keywords="co-resident relation pair related_entities visibility",
+            owner_id="user1",
+            context_id="ctx_coresident",
+            include_related=True,
+            db_path=self.db_path,
+        )
+
+        result_ids = {r["id"] for r in results}
+        self.assertIn(id1, result_ids)
+        self.assertIn(id2, result_ids)
+
+        by_id = {r["id"]: r for r in results}
+        related_ids_1 = {r["id"] for r in by_id[id1]["related_entities"]}
+        related_ids_2 = {r["id"] for r in by_id[id2]["related_entities"]}
+
+        self.assertIn(id2, related_ids_1, "id1 should show co-resident partner id2 as related")
+        self.assertIn(id1, related_ids_2, "id2 should show co-resident partner id1 as related")
+        self.assertNotIn(id1, related_ids_1, "id1's related_entities must never contain itself")
+        self.assertNotIn(id2, related_ids_2, "id2's related_entities must never contain itself")
+
     def test_explain_mode(self):
         store_memory(
             title="Explain Test",
