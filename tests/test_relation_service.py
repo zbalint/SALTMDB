@@ -1622,7 +1622,9 @@ class TestRelationPointInTime(unittest.TestCase):
         b = self._mk("Inbound Fix B")
         store_relation(source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn)
 
-        result = analyze_dependencies(root_entity_id=b, direction="inbound", db_connection=self.conn)
+        result = analyze_dependencies(
+            root_entity_id=b, direction="inbound", db_connection=self.conn
+        )
         self.assertEqual(result["total_dependencies_found"], 1)
         edge = result["edges"][0]
         self.assertEqual(edge["source_id"], a)
@@ -1678,9 +1680,7 @@ class TestRelationPointInTime(unittest.TestCase):
         # from "this entity has no relations." Now defaults to direction="both".
         a = self._mk("Tool-Level Inbound Fix A")
         b = self._mk("Tool-Level Inbound Fix B")
-        store_relation(
-            source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
-        )
+        store_relation(source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn)
 
         result = get_related_memories(entity_id=b, db_connection=self.conn)
         self.assertEqual(result["total_related_found"], 1)

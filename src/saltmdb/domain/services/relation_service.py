@@ -663,7 +663,16 @@ def analyze_dependencies(
         # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
         edges = []
         seen_edges = set()
-        for d, (rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path) in tagged_rows:
+        for d, (
+            rel_id,
+            src_id,
+            src_title,
+            tgt_id,
+            tgt_title,
+            pred,
+            depth,
+            _raw_path,
+        ) in tagged_rows:
             # The node newly discovered by this hop is the target for an outbound row, but the
             # *source* for an inbound row -- inbound walks backward along each edge, so the node
             # moving away from root is the edge's source, not its target.

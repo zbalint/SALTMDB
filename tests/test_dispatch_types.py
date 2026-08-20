@@ -62,9 +62,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     )
     def test_get_related_memories_forwards_explicit_direction(self, related):
         _dispatch_get_related_memories(entity_id="entity-id", max_depth=3, direction="outbound")
-        related.assert_called_once_with(
-            entity_id="entity-id", max_depth=3, direction="outbound"
-        )
+        related.assert_called_once_with(entity_id="entity-id", max_depth=3, direction="outbound")
 
 
 if __name__ == "__main__":

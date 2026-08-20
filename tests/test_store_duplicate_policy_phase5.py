@@ -85,9 +85,7 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         # Cold-start review Issue E: duplicate_candidates guidance previously only offered
         # supersede_memory/consolidate_memories, omitting the empirically common third
         # resolution (related but not actually redundant -- link, don't merge/replace).
-        self.assertEqual(
-            warning["detail"]["guidance"]["related_not_redundant"], "manage_relation"
-        )
+        self.assertEqual(warning["detail"]["guidance"]["related_not_redundant"], "manage_relation")
         self.assertIn("manage_relation", warning["message"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 2)
 
