@@ -225,6 +225,7 @@ $env:SALTMDB_DB_PATH = "C:\custom_path\memory.db"
 | `SALTMDB_VIEWER_ENABLED` | `true` | Set to `false` to disable the backend daemon's in-process viewer thread. |
 | `SALTMDB_DISABLE_LIBRARIAN` | _(unset)_ | Set to any value to suppress all Librarian maintenance-pass triggers (runs in-daemon as of Track B; no longer a separate subprocess). |
 | `SALTMDB_TEST_MODE` | _(unset)_ | Set to any value in test environments to suppress Librarian maintenance-pass triggers. |
+| `SALTMDB_HOST_SESSION_ID` | _(unset)_ | Optional, best-effort: an opaque session identifier from the calling harness, threaded through to `log_event`'s `session_id` field (advisory-only, never validated — a stale or mismatched value is not an error). Nothing in SALTMDB itself sets this; it must be exported into the MCP server's own process environment by whatever launches it. See §3's example for wiring it from Claude Code specifically. Any harness with its own stable session identifier can export the same variable the same way; harnesses without one simply leave it unset and `session_id` stays `null`, same as today. |
 
 ### 3. Registering with MCP Clients
 MCP clients do not inherit your shell's PATH — always use the **full path** to your Python executable. Find it first:
@@ -245,6 +246,8 @@ Then add to your MCP client configuration file:
   }
 }
 ```
+
+**Optional, Claude Code specific:** if your Claude Code version injects its own session identifier into an MCP server's subprocess environment (check `env | grep -i claude` from within a running session, or your version's release notes — this is version-gated and the exact variable name has changed across releases), you can thread it through to SALTMDB's `session_id` audit field by adding a third `env` entry referencing it, e.g. `"SALTMDB_HOST_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"` (substitute whatever variable your installed version actually sets). This is best-effort and purely advisory — confirm your client's config syntax actually substitutes a variable the harness itself injects (as opposed to only your own shell's ambient environment at the time the client was launched) before relying on it. Any other harness with its own stable session identifier can export `SALTMDB_HOST_SESSION_ID` the same way.
 
 See [INSTALL.md](INSTALL.md) for platform-specific examples and troubleshooting.
 
