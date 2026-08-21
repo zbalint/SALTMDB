@@ -293,52 +293,6 @@ class TestCrossEncoderControls(_DbFixture):
         self.assertIn("MATCHING CHUNK", texts["chunked"])
         self.assertIn("STALE FALLBACK", texts["stale"])
 
-    @unittest.skip(
-        "candidate/search-ce-final-reranker forces use_cross_encoder=True and "
-        "force_cross_encoder=True unconditionally -- the normal-vs-forced comparison this test "
-        "makes is meaningless on this branch since both calls now behave identically."
-    )
-    def test_force_cross_encoder_bypasses_only_gap_gate(self):
-        for eid in ("winner", "loser"):
-            self.entity(eid)
-
-        def fts_row(eid):
-            return (eid, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=([fts_row("winner")], False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=[("winner", 0.1), ("loser", 0.5)],
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.ranking._build_cross_encoder_candidate_texts",
-                return_value={"winner": "winner", "loser": "loser"},
-            ),
-            patch(
-                "saltmdb.domain.services.reranker_service.is_cross_encoder_enabled",
-                return_value=True,
-            ),
-            patch(
-                "saltmdb.domain.services.reranker_service.score_pairs", return_value=[0.0, 2.0]
-            ) as score,
-        ):
-            normal = search_memory(
-                query_keywords="gap", use_cross_encoder=True, db_path=self.db_path
-            )
-            forced = search_memory(
-                query_keywords="gap",
-                use_cross_encoder=True,
-                force_cross_encoder=True,
-                db_path=self.db_path,
-            )
-        self.assertEqual([item["id"] for item in normal], ["winner", "loser"])
-        self.assertEqual([item["id"] for item in forced], ["loser", "winner"])
-        score.assert_called_once()
-
     def test_malformed_and_nonfinite_scores_preserve_order(self):
         model = MagicMock()
         model.rerank.return_value = [float("nan")]
@@ -353,13 +307,10 @@ class TestSearchOptionPropagation(unittest.TestCase):
     def test_benchmark_forwards_runtime_controls(self):
         config = {
             "mode": "broad",
-            "rerank_by_topic": False,
             "prefer_durable_types": False,
             "demote_superseded": False,
-            "use_cross_encoder": True,
             "cross_encoder_candidate_cap": 20,
             "cross_encoder_text_cap_chars": 2000,
-            "force_cross_encoder": True,
             "use_chunk_candidates": True,
             "oversampling_multiplier": 12,
             "candidate_window": 60,
@@ -380,7 +331,6 @@ class TestSearchOptionPropagation(unittest.TestCase):
         self.assertTrue(call["collapse_supersedes_families"])
         self.assertEqual(call["cross_encoder_candidate_cap"], 20)
         self.assertEqual(call["cross_encoder_text_cap_chars"], 2000)
-        self.assertTrue(call["force_cross_encoder"])
 
     def test_daemon_dispatch_forwards_all_new_controls(self):
         with patch(
@@ -393,10 +343,8 @@ class TestSearchOptionPropagation(unittest.TestCase):
                 candidate_window=40,
                 chunk_weight=1.5,
                 collapse_supersedes_families=True,
-                use_cross_encoder=True,
                 cross_encoder_candidate_cap=15,
                 cross_encoder_text_cap_chars=2000,
-                force_cross_encoder=True,
                 return_diagnostics=True,
             )
         call = search.call_args.kwargs
@@ -406,7 +354,6 @@ class TestSearchOptionPropagation(unittest.TestCase):
         self.assertTrue(call["collapse_supersedes_families"])
         self.assertEqual(call["cross_encoder_candidate_cap"], 15)
         self.assertEqual(call["cross_encoder_text_cap_chars"], 2000)
-        self.assertTrue(call["force_cross_encoder"])
         self.assertTrue(call["return_diagnostics"])
 
 

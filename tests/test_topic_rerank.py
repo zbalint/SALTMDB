@@ -241,8 +241,8 @@ class TestRerankCandidatesByTopic(unittest.TestCase):
 
 
 class TestSearchMemoryRerankRobustness(unittest.TestCase):
-    """search_memory(rerank_by_topic=...) integration-level robustness: backward compatibility,
-    the missing-chunk-rows fallback tier, and graceful degradation. Real model/real async pool
+    """search_memory integration-level robustness: backward compatibility, the
+    missing-chunk-rows fallback tier, and graceful degradation. Real model/real async pool
     (no mocking) -- these test the pipeline wiring, not the scoring math (covered above)."""
 
     def setUp(self):
@@ -301,7 +301,6 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
 
         results = search_memory(
             query_keywords="fallback tier chunk rows deleted",
-            rerank_by_topic=True,
             db_path=self.db_path,
         )
         self.assertNotIn("error", results[0] if results else {})
@@ -324,7 +323,6 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
         with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
             results = search_memory(
                 query_keywords="semantic disabled degrade test",
-                rerank_by_topic=True,
                 db_path=self.db_path,
             )
 
@@ -431,108 +429,19 @@ class TestRrfGapConfident(unittest.TestCase):
         self.assertFalse(_rrf_gap_confident(rrf_score_map, {"a", "b"}, {"a", "b"}))
 
 
-class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
-    """Controlled-seam integration test (Codex review): patches the FTS/semantic channels and
-    rerank_candidates_by_topic directly so the RRF gap is exactly deterministic, rather than
-    relying on real embedding output to land on a precise decisive-vs-ambiguous margin. Proves
-    both paths exactly: a decisive dual-channel winner skips rerank_candidates_by_topic entirely;
-    an ambiguous (single-channel-per-candidate) result still calls it."""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.temp_dir, "test.db")
-        self.conn = init_db(self.db_path)
-
-    def tearDown(self):
-        self.conn.close()
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def _store(self, title: str, content: str) -> str:
-        res = store_memory(
-            title=title,
-            content=content,
-            owner_id="test_user",
-            db_path=self.db_path,
-        )
-        return _extract_id(res)
-
-    def test_decisive_dual_channel_winner_skips_rerank(self):
-        entity_a = self._store("Gap Gate Decisive A", "First entity for the gap gate seam test.")
-        entity_b = self._store("Gap Gate Decisive B", "Second entity for the gap gate seam test.")
-
-        # Both channels agree entity_a is rank 0 -> RRF ratio 2.0, dual-channel top1.
-        fts_rows = [(entity_a, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)]
-        semantic_rows = [(entity_a, 0.1), (entity_b, 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic"
-            ) as mock_rerank,
-        ):
-            results = search_memory(
-                query_keywords="gap gate seam test",
-                rerank_by_topic=True,
-                db_path=self.db_path,
-            )
-
-        mock_rerank.assert_not_called()
-        self.assertNotIn("error", results[0] if results else {})
-        for item in results:
-            self.assertNotIn("topic_score", item)
-
-    @unittest.skip(
-        "candidate/search-ce-final-reranker forces rerank_by_topic=False unconditionally -- "
-        "rerank_candidates_by_topic is never called on this branch regardless of the "
-        "caller-passed rerank_by_topic=True this test relies on."
-    )
-    def test_ambiguous_single_channel_result_still_reranks(self):
-        entity_a = self._store("Gap Gate Ambiguous A", "First entity for the ambiguous seam test.")
-        entity_b = self._store("Gap Gate Ambiguous B", "Second entity for the ambiguous seam test.")
-
-        # entity_a matched by FTS only, entity_b matched by semantic only -> RRF tie, ratio 1.0.
-        fts_rows = [(entity_a, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)]
-        semantic_rows = [(entity_b, 0.1)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.rerank_candidates_by_topic",
-                return_value={
-                    entity_a: {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
-                    entity_b: {"topic_score": 0.1, "semantic_verdict": "DIFFERENT_TOPICS"},
-                },
-            ) as mock_rerank,
-        ):
-            results = search_memory(
-                query_keywords="ambiguous seam test",
-                rerank_by_topic=True,
-                db_path=self.db_path,
-            )
-
-        mock_rerank.assert_called_once()
-        self.assertNotIn("error", results[0] if results else {})
-
-
 class TestRrfGapGateSmoke(unittest.TestCase):
     """Lightweight real-model smoke coverage only (Codex review: real-model tests are retained as
-    smoke coverage, not the primary correctness proof for the gate -- see
-    TestRrfGapGateSearchMemorySeam above for that). Just confirms rerank_by_topic=True doesn't
-    crash and returns sane results against a real (if tiny) corpus."""
+    smoke coverage, not the primary correctness proof for the gate, which lives in
+    TestRrfGapConfident above). Just confirms search_memory doesn't crash and returns sane
+    results against a real (if tiny) corpus.
+
+    A prior controlled-seam class (TestRrfGapGateSearchMemorySeam) used to sit here, proving the
+    gap gate conditionally skipped the caller-facing rerank_by_topic Stage-2 path. Removed: that
+    flag no longer exists (candidate/search-ce-final-reranker, merged d1655d2, made the
+    cross-encoder the unconditional Stage-2 reranker instead), so both its test methods had become
+    vacuous -- one already unittest.skip-marked, the other trivially true in broad mode regardless
+    of the gap gate's outcome (rerank_candidates_by_topic is never reached via that path in broad
+    mode any more)."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -559,9 +468,7 @@ class TestRrfGapGateSmoke(unittest.TestCase):
 
         process_embedding_jobs_sync(self.conn)
 
-        results = search_memory(
-            query_keywords="gap gate smoke test", rerank_by_topic=True, db_path=self.db_path
-        )
+        results = search_memory(query_keywords="gap gate smoke test", db_path=self.db_path)
         self.assertTrue(isinstance(results, list))
         self.assertNotIn("error", results[0] if results else {})
 

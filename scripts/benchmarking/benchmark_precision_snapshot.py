@@ -381,7 +381,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--top-n", type=int, default=5, help="Result window passed to search_memory (default 5)."
     )
-    parser.add_argument("--rerank-by-topic", action="store_true")
     # BooleanOptionalAction (not store_true) with default=None: an unspecified
     # --prefer-durable-types/--demote-superseded must mean "don't pass this kwarg at all" so
     # search_memory's own signature default (True as of v0.1.0-alpha.70) applies -- store_true's
@@ -399,7 +398,6 @@ if __name__ == "__main__":
     flags = {
         k: v
         for k, v in {
-            "rerank_by_topic": args.rerank_by_topic,
             "prefer_durable_types": args.prefer_durable_types,
             "demote_superseded": args.demote_superseded,
         }.items()

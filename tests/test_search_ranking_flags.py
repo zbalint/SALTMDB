@@ -265,9 +265,11 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
 
 
 class TestUseCrossEncoderSeam(unittest.TestCase):
-    """Controlled-seam tests for roadmap ba2cf66f P1#7's use_cross_encoder flag -- same style as
-    TestPart2SearchMemorySeam above. reranker_service.score_pairs is mocked throughout (a fake
-    runner, per the design memo's own explicit test list) -- no real model load."""
+    """Controlled-seam tests for the mandatory, always-on cross-encoder Stage-2 reranker
+    (roadmap ba2cf66f P1#7, made unconditional by candidate/search-ce-final-reranker, merged
+    d1655d2) -- same style as TestPart2SearchMemorySeam above. reranker_service.score_pairs is
+    mocked throughout (a fake runner, per the design memo's own explicit test list) -- no real
+    model load."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -298,38 +300,6 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
     def _fts_row(self, entity_id: str) -> tuple:
         return (entity_id, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
 
-    @unittest.skip(
-        "candidate/search-ce-final-reranker forces use_cross_encoder=True unconditionally "
-        "(this branch's fixed policy, not a caller-visible flag) -- the default-False-means-off "
-        "premise this test checks no longer applies on this branch."
-    )
-    def test_default_false_leaves_ordering_unchanged_even_with_model_configured(self):
-        # SALTMDB_RERANKER_MODEL is set in setUp -- proves the FLAG, not just env-var presence,
-        # gates the behavior.
-        self._insert_entity("a_entity")
-        self._insert_entity("b_entity")
-        fts_rows = [self._fts_row("a_entity"), self._fts_row("b_entity")]
-        semantic_rows = [("a_entity", 0.1), ("b_entity", 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
-        ):
-            results = search_memory(
-                query_keywords="cross encoder default seam", db_path=self.db_path
-            )
-
-        self.assertEqual([r["id"] for r in results], ["a_entity", "b_entity"])
-        mock_score.assert_not_called()
-        self.assertNotIn("cross_encoder_score", results[0])
-
     def test_true_reorders_by_score(self):
         self._insert_entity("a_entity")
         self._insert_entity("b_entity")
@@ -353,7 +323,6 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         ):
             results = search_memory(
                 query_keywords="cross encoder reorder seam",
-                use_cross_encoder=True,
                 db_path=self.db_path,
             )
 
@@ -394,7 +363,6 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         ):
             results = search_memory(
                 query_keywords="cross encoder cap seam",
-                use_cross_encoder=True,
                 limit=num_entities,
                 db_path=self.db_path,
             )
@@ -430,7 +398,6 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         ):
             results = search_memory(
                 query_keywords="cross encoder fallback seam",
-                use_cross_encoder=True,
                 db_path=self.db_path,
             )
 
@@ -438,100 +405,10 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertNotIn("cross_encoder_score", results[0])
 
-    @unittest.skip(
-        "candidate/search-ce-final-reranker forces force_cross_encoder=True unconditionally, "
-        "which bypasses the gap gate by design -- this branch's whole premise is that CE gets "
-        "the final say on every query, not just ambiguous ones."
-    )
-    def test_gap_confident_skips_cross_encoder_entirely(self):
-        # Dual-channel, decisive-margin top1 -- exact fixture shape as
-        # TestRrfGapGateSearchMemorySeam.test_decisive_dual_channel_winner_skips_rerank in
-        # test_topic_rerank.py: winner_entity is the ONLY fts_rows entry (rank 0, its only
-        # channel-of-record) and also rank 0 in semantic_rows -> RRF ratio ~2.03 vs loser_entity's
-        # single (semantic-only, rank 1) appearance. Both Stage-2 mechanisms share this gate.
-        self._insert_entity("winner_entity")
-        self._insert_entity("loser_entity")
-        fts_rows = [self._fts_row("winner_entity")]
-        semantic_rows = [("winner_entity", 0.1), ("loser_entity", 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score,
-        ):
-            results = search_memory(
-                query_keywords="gap confident cross encoder seam",
-                use_cross_encoder=True,
-                db_path=self.db_path,
-            )
-
-        self.assertEqual([r["id"] for r in results], ["winner_entity", "loser_entity"])
-        mock_score.assert_not_called()
-
-    @unittest.skip(
-        "candidate/search-ce-final-reranker forces rerank_by_topic=False unconditionally (this "
-        "branch tests CE alone, not CE-on-top-of-topic-rerank) -- topic_score is never computed "
-        "here regardless of the caller-passed rerank_by_topic=True this test relies on."
-    )
-    def test_both_flags_cross_encoder_takes_final_ordering_precedence(self):
-        self._insert_entity("event_entity", "event")
-        self._insert_entity("decision_entity", "decision")
-        fts_rows = [self._fts_row("event_entity"), self._fts_row("decision_entity")]
-        semantic_rows = [("event_entity", 0.1), ("decision_entity", 0.5)]
-
-        with (
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._run_fts_search",
-                return_value=(fts_rows, False),
-            ),
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives.semantic_search",
-                return_value=semantic_rows,
-            ),
-            # topic rerank would put decision_entity first via a low RERANK_SAME_TOPIC_THRESHOLD
-            # comparison -- irrelevant here since it's not mocked to reorder; what matters is
-            # cross-encoder's own explicit reorder wins as the FINAL order regardless.
-            patch(
-                "saltmdb.domain.services.memory_service.search_primitives._score_topics_with_fallback",
-                return_value={
-                    "event_entity": {"topic_score": 0.9, "semantic_verdict": "SAME_SPECIFIC_TOPIC"},
-                    "decision_entity": {
-                        "topic_score": 0.1,
-                        "semantic_verdict": "DIFFERENT_TOPICS",
-                    },
-                },
-            ),
-            patch(
-                "saltmdb.domain.services.reranker_service.score_pairs",
-                return_value=[-5.0, 5.0],  # reverses topic rerank's own order
-            ),
-        ):
-            results = search_memory(
-                query_keywords="both flags cross encoder precedence seam",
-                rerank_by_topic=True,
-                use_cross_encoder=True,
-                db_path=self.db_path,
-            )
-
-        # topic rerank alone would rank event_entity first (higher topic_score); cross-encoder
-        # runs second and its reorder wins.
-        self.assertEqual([r["id"] for r in results], ["decision_entity", "event_entity"])
-        by_id = {r["id"]: r for r in results}
-        # topic_score stays attached alongside cross_encoder_score -- cross-encoder never erases it.
-        self.assertIn("topic_score", by_id["event_entity"])
-        self.assertIn("cross_encoder_score", by_id["event_entity"])
-
     def test_explain_mode_never_calls_score_pairs(self):
         with patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score:
             search_memory(
                 query_keywords="explain mode seam",
-                use_cross_encoder=True,
                 explain_mode=True,
                 db_path=self.db_path,
             )
@@ -539,7 +416,7 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
 
     def test_empty_query_never_calls_score_pairs(self):
         with patch("saltmdb.domain.services.reranker_service.score_pairs") as mock_score:
-            search_memory(query_keywords="", use_cross_encoder=True, db_path=self.db_path)
+            search_memory(query_keywords="", db_path=self.db_path)
         mock_score.assert_not_called()
 
 

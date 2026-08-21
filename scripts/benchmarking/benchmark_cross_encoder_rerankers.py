@@ -27,12 +27,14 @@ latency, RAM, disk/download cost, packaging complexity"):
    candidates," not the full widened pool; an `expected_entity_id` that falls outside that capped
    prefix is recorded as a miss for BOTH the cross-encoder and the RRF-baseline comparison on that
    query, not silently excluded.
-3. Regression check on the REAL `search_memory(mode="strict")` gate (negative set only): compares
-   abstain-vs-non-abstain outcome and, for non-empty cases, the SET of accepted entity ids against
-   the `use_cross_encoder=False` baseline -- NOT a byte-identical-results assertion (cross-encoder
-   reordering plus the new `cross_encoder_score` field legitimately change item order/fields on the
-   `non_empty`-expected categories in this file even when the gate's own decision doesn't). A
-   mismatch here is a correctness regression, not a benchmark finding -- exits nonzero.
+3. RETIRED: this used to be a regression check on the REAL `search_memory(mode="strict")` gate
+   (negative set only), comparing abstain-vs-non-abstain outcome and, for non-empty cases, the SET
+   of accepted entity ids against a `use_cross_encoder=False` baseline. candidate/
+   search-ce-final-reranker (merged d1655d2) made the cross-encoder the unconditional, always-on
+   Stage-2 reranker and retired the `use_cross_encoder` param entirely -- there is no more
+   CE-off baseline to compare against through the real function, so this check is now a
+   documented no-op (see `run_model_benchmark`'s `regressions` variable below) rather than two
+   now-identical calls silently reporting "0 regressions".
 4. Warm p50/p95 latency: N repeated `score_pairs` calls at `CROSS_ENCODER_MAX_CANDIDATES`
    candidates per call.
 5. RSS delta (stdlib `resource`, no new dependency) and on-disk model size (from
@@ -80,7 +82,6 @@ from saltmdb.domain.services import reranker_service
 from saltmdb.domain.services.memory_service import (
     _run_fts_search,
     reciprocal_rank_fusion,
-    search_memory,
     semantic_search,
 )
 from saltmdb.utils.text import sanitize_fts_query
@@ -279,36 +280,15 @@ def benchmark_model(  # noqa: PLR0915 -- linear measurement sequence, splitting 
     # the one real false-positive this surfaced during implementation (a held_out case's accepted
     # set differing only due to top-5 windowing, not an actual gate-decision change) -- once fixed
     # at the source, no held_out-specific exemption is needed or sound.
-    regressions = []
-    for case in negative_cases:
-        baseline = search_memory(
-            query_keywords=case["query"],
-            db_path=db_path,
-            mode="strict",
-            use_cross_encoder=False,
-            include_related=False,
-            limit=RERANK_CANDIDATE_POOL_SIZE,
-        )
-        with_ce = search_memory(
-            query_keywords=case["query"],
-            db_path=db_path,
-            mode="strict",
-            use_cross_encoder=True,
-            include_related=False,
-            limit=RERANK_CANDIDATE_POOL_SIZE,
-        )
-        baseline_ids = {r["id"] for r in baseline} if isinstance(baseline, list) else None
-        with_ce_ids = {r["id"] for r in with_ce} if isinstance(with_ce, list) else None
-        outcome_match = bool(baseline_ids) == bool(with_ce_ids)
-        id_set_match = baseline_ids == with_ce_ids
-        if not (outcome_match and id_set_match):
-            regressions.append(
-                {
-                    "id": case["id"],
-                    "baseline_ids": sorted(baseline_ids or []),
-                    "with_cross_encoder_ids": sorted(with_ce_ids or []),
-                }
-            )
+    # This comparison is now structurally impossible to run: candidate/search-ce-final-reranker
+    # (merged d1655d2) made the cross-encoder the unconditional, always-on Stage-2 reranker, and
+    # search_memory no longer accepts use_cross_encoder at all -- there is no more "baseline"
+    # (CE-off) call to compare a "with_ce" call against through the real function. Left as an
+    # explicit empty skip rather than two now-identical calls silently reporting "0 regressions"
+    # (which would misreport a moot comparison as a passed one). This benchmark is a confirmed
+    # dead end for the search-accuracy work (superseded by the branch-per-approach method), not
+    # re-run -- see SALTMDB memory `43260d27` and handover `d159be47`.
+    regressions: list[dict] = []
 
     # --- Warm latency ---
     warm_pool = positive_cases[0]["query"] if positive_cases else "warm latency probe query"

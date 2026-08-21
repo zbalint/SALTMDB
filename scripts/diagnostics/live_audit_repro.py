@@ -301,6 +301,17 @@ def run_one_call(
 
     call_kwargs = dict(kwargs)
     call_kwargs["db_path"] = snapshot_path
+    # rerank_by_topic/use_cross_encoder/force_cross_encoder are no longer accepted by
+    # search_memory (candidate/search-ce-final-reranker, merged d1655d2, made the cross-encoder
+    # the unconditional Stage-2 reranker and retired the caller-facing rerank_by_topic
+    # full-override) -- some RECOVERED_CALLS entries carry rerank_by_topic verbatim from the
+    # original 2026-08-08 transcript (never edit that frozen record itself). Strip defensively
+    # here so a replay records real reconstructed evidence instead of a TypeError; this harness
+    # already predates today's ranking pipeline shape (its "reconstructed" reordering assumes the
+    # OLD non-forced behavior), so treat any replay as historical-approximation only regardless.
+    call_kwargs.pop("rerank_by_topic", None)
+    call_kwargs.pop("use_cross_encoder", None)
+    call_kwargs.pop("force_cross_encoder", None)
 
     with ExitStack() as stack:
         for p in patches:

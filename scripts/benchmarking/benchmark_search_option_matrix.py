@@ -205,16 +205,21 @@ def _build_configs() -> list[dict]:
 
 
 def _timed_search(db_path: str, cfg: dict, query: str, limit: int) -> tuple[list | dict, float]:
+    # NOTE: cfg still carries rerank_by_topic/use_cross_encoder keys (see _build_configs --
+    # deliberately unchanged so eval_configs.py's signed 24-config manifest / config_fingerprint
+    # keep their exact historical shape), but search_memory no longer accepts either as a param
+    # (candidate/search-ce-final-reranker made the cross-encoder the unconditional Stage-2
+    # reranker; the caller-facing rerank_by_topic full-override is retired) -- this benchmark is a
+    # confirmed dead end (superseded by the branch-per-approach method), not re-run, so this is
+    # just enough to keep the script importable/callable, not a claim it's still meaningful to run.
     t0 = time.perf_counter()
     result = search_memory(
         query_keywords=query,
         db_path=db_path,
         limit=limit,
         mode=cfg["mode"],
-        rerank_by_topic=cfg["rerank_by_topic"],
         prefer_durable_types=cfg["prefer_durable_types"],
         demote_superseded=cfg["demote_superseded"],
-        use_cross_encoder=cfg["use_cross_encoder"],
         include_related=False,
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

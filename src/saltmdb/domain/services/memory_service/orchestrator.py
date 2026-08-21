@@ -36,13 +36,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     tag_operator: Literal["AND", "OR"] = "AND",
     cursor: str = None,
     include_related: bool = True,
-    rerank_by_topic: bool = False,
     prefer_durable_types: bool = False,
     demote_superseded: bool = False,
-    use_cross_encoder: bool = False,
     cross_encoder_candidate_cap: int | None = None,
     cross_encoder_text_cap_chars: int | None = None,
-    force_cross_encoder: bool = False,
     use_chunk_candidates: bool = False,
     oversampling_multiplier: int | None = None,
     candidate_window: int | None = None,
@@ -69,22 +66,17 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     function's own semantic-search gate below -- `check_duplicate_memories`'s separate
     `is_semantic_search_enabled()` call site is unrelated and unaffected.
 
-    use_cross_encoder (opt-in, default False; roadmap `ba2cf66f` P1#7, design `1fddc04a`/
-    `8115fa4a`): an independent Stage-2 reordering alternative to `rerank_by_topic`, NOT a
-    dependency of it -- either flag alone triggers pool widening and shares the same
-    `_rrf_gap_confident` gap-gate (a decisive, dual-channel-corroborated hybrid winner skips BOTH
-    Stage-2 mechanisms, not just the topic one). Scores the widened pool with an optional ONNX
+    Cross-encoder reranking (roadmap `ba2cf66f` P1#7, design `1fddc04a`/`8115fa4a`) is the
+    unconditional, always-on Stage-2 final reranker -- not a caller-facing opt-in. It triggers pool
+    widening and shares the `_rrf_gap_confident` gap-gate (a decisive, dual-channel-corroborated
+    hybrid winner skips Stage-2 entirely). Scores the widened pool with an optional ONNX
     cross-encoder (`reranker_service.score_pairs`, feature-flagged via `SALTMDB_RERANKER_MODEL`,
-    no PyTorch runtime) and full-overrides ordering by score, same shape as `rerank_by_topic`'s own
-    full-override reorder. If BOTH flags are set and neither is gap-gated off, cross-encoder runs
-    SECOND and its ordering wins (it's the more precise, more expensive stage) -- `topic_score`
-    still stays attached to the result item alongside `cross_encoder_score`, cross-encoder never
-    erases it. Deterministic fallback: disabled feature, unsupported/missing model, or any runner
-    failure leaves `ranked_pool_` exactly as it was before this stage -- no exception, no widened
-    result count. Cross-encoder scores are attached to `accept_or_abstain`'s evidence dict as an
-    inert `cross_encoder_score` field this release -- they do NOT affect the accept/reject decision
-    yet (that requires its own future, separately-calibrated gate rule, not an uncalibrated one
-    invented here).
+    no PyTorch runtime) and full-overrides ordering by score. Deterministic fallback: disabled
+    feature, unsupported/missing model, or any runner failure leaves `ranked_pool_` exactly as it
+    was before this stage -- no exception, no widened result count. Cross-encoder scores are
+    attached to `accept_or_abstain`'s evidence dict as an inert `cross_encoder_score` field this
+    release -- they do NOT affect the accept/reject decision yet (that requires its own future,
+    separately-calibrated gate rule, not an uncalibrated one invented here).
 
     mode (opt-in, default "broad" -- today's exact pre-existing behavior, unchanged): Part C of
     plans/scalable-strolling-stallman.md (SALTMDB memory `9c199005`).
@@ -94,8 +86,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
       multi-hop-revalidated `supersedes` successor (Part A); every surviving candidate must then
       independently clear a calibrated relevance-abstention gate (Part B) or is dropped. An empty
       result (`[]`) is a normal, successful outcome for a query with no sufficiently-grounded
-      match -- not an error. Widens the candidate pool the same way rerank_by_topic/
-      prefer_durable_types/demote_superseded already do, and retries with a larger pool (up to
+      match -- not an error. Widens the candidate pool the same way the mandatory cross-encoder
+      stage/prefer_durable_types/demote_superseded already do, and retries with a larger pool (up to
       STRICT_OVERFETCH_CANDIDATE_CAP) when resolution/dedup/the gate shrink the post-policy pool
       below what `offset`+`limit` needs (Part C2 -- pagination continuity across a rejection,
       substitution, or many-to-one dedup collapse). Additionally, unconditionally and regardless
@@ -119,18 +111,14 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
         mode = "broad"
 
-    # candidate/search-ce-final-reranker (branch-per-approach round, mirrors the dedup
-    # CE-final-judge pattern): the cross-encoder becomes the unconditional, always-on final
-    # reranker for this branch, REPLACING the RRF blend as the caller-visible default --
-    # not a new opt-in layered on top. force_cross_encoder=True also bypasses
-    # _rrf_gap_confident (see below), so CE gets the final say on every query, not just
-    # ambiguous ones. rerank_by_topic is forced off so this branch tests CE alone, not
-    # CE-on-top-of-topic-rerank. score_pairs() returning None (disabled/error/malformed)
-    # still leaves ranked_pool_ exactly as RRF produced it -- the existing exception-only
-    # fallback below is untouched, same shape as the dedup round's cosine-as-fallback.
-    use_cross_encoder = True
-    force_cross_encoder = True
-    rerank_by_topic = False
+    # candidate/search-ce-final-reranker (merged d1655d2): the cross-encoder is the
+    # unconditional, always-on final reranker, REPLACING the RRF blend as the caller-visible
+    # default -- not a caller opt-in. It also bypasses _rrf_gap_confident (see below), so CE
+    # gets the final say on every query, not just ambiguous ones. The topic-rerank full-override
+    # path (formerly the caller-facing rerank_by_topic flag) is permanently retired in favor of
+    # CE alone. score_pairs() returning None (disabled/error/malformed) still leaves
+    # ranked_pool_ exactly as RRF produced it -- the existing exception-only fallback below is
+    # untouched, same shape as the dedup round's cosine-as-fallback.
 
     chunk_oversampling, chunk_window, configured_chunk_weight = (
         validation._validate_chunk_candidate_controls(
@@ -142,7 +130,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     ce_candidate_cap, ce_text_cap = validation._validate_cross_encoder_controls(
         cross_encoder_candidate_cap,
         cross_encoder_text_cap_chars,
-        enabled=use_cross_encoder,
+        enabled=True,
     )
     configured_retrieval_fts_weight, configured_retrieval_vector_weight = (
         validation._validate_retrieval_text_controls(
@@ -172,8 +160,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             "executed": False,
         },
         "cross_encoder": {
-            "requested": bool(use_cross_encoder),
-            "forced": bool(force_cross_encoder),
+            "requested": True,
+            "forced": True,
             "candidate_cap": ce_candidate_cap,
             "text_cap_chars": ce_text_cap,
             "executed": False,
@@ -287,12 +275,6 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
 
         if explain_mode:
-            if rerank_by_topic:
-                logger.debug("rerank_by_topic ignored: explain_mode takes precedence.")
-            if use_cross_encoder:
-                logger.debug("use_cross_encoder ignored: explain_mode takes precedence.")
-            if force_cross_encoder:
-                logger.debug("force_cross_encoder ignored: explain_mode takes precedence.")
             if mode != "broad":
                 logger.debug("mode=%r ignored: explain_mode takes precedence.", mode)
             terms = sanitized_query.split() if sanitized_query else []
@@ -327,13 +309,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             return explain_result
 
         rows: list[Any] = []
-        # Populated only when rerank_by_topic actually runs (Part B); left empty on every other
-        # path, including rerank_by_topic=True requests that get gated off below -- the result-
-        # item assembly loop attaches topic_score/semantic_verdict only for ids present here, so
-        # an empty map here is exactly what keeps unreranked results free of those keys.
-        topic_scores_map: dict[str, dict] = {}
-        # Same empty-unless-actually-scored shape as topic_scores_map above, for use_cross_encoder
-        # (roadmap ba2cf66f P1#7).
+        # topic_score/semantic_verdict are never exposed in result items -- the topic-rerank
+        # full-override path is retired (see the docstring/forcing-block comments above), and
+        # mode="strict"'s own on-demand topic scoring (below) is relevance-gate evidence only,
+        # never surfaced to the caller.
         cross_encoder_scores_map: dict[str, float] = {}
         # Populated only under mode="history" -- ids in the final pool that are the target of a
         # currently-valid `supersedes` edge, tagged (not hidden/reordered) in the result item.
@@ -350,8 +329,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     """One full FTS+semantic+RRF-fuse+[resolve+substitute]+[rerank]+[gate]+
                     [ranking-flags] pass at a given candidate_window size (Part C pipeline
                     ordering: RRF fusion -> gap-gate check off the ORIGINAL un-substituted sets ->
-                    chain-resolution/substitution (mode="strict") -> [rerank_by_topic, if
-                    requested and not gap-confident] -> accept_or_abstain filter over the full
+                    chain-resolution/substitution (mode="strict") -> cross-encoder rerank
+                    (unconditional, bypasses the gap gate) -> accept_or_abstain filter over the full
                     widened pool (mode="strict"), before offset/limit slicing -> mark superseded
                     (mode="history") -> prefer_durable_types -> demote_superseded). Returns the
                     final ordered candidate id list (not yet offset/limit-sliced) plus enough
@@ -525,80 +504,53 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     topic_scores_map_: dict[str, dict] = {}
                     cross_encoder_scores_map_: dict[str, float] = {}
                     if rrf_map:
-                        # Part 1 gap gate (SALTMDB memory 870a1d4e): skip Stage 2 entirely when
-                        # hybrid search already has a decisive, dual-channel-corroborated winner.
-                        # Deliberately checked against the pre-substitution fts_ids_/semantic_ids_
-                        # sets (a resolved head's own channel membership is a separate, Part B
-                        # evidence question, not this gate's). Shared by BOTH Stage-2 mechanisms
-                        # (rerank_by_topic and use_cross_encoder, roadmap ba2cf66f P1#7) -- the
-                        # gate's premise ("hybrid already has a decisive winner, Stage-2 has
-                        # nothing to add") doesn't depend on which Stage-2 implementation would
-                        # have run.
+                        # Part 1 gap gate (SALTMDB memory 870a1d4e): originally could skip Stage 2
+                        # entirely when hybrid search already had a decisive, dual-channel-
+                        # corroborated winner. The cross-encoder stage below now runs
+                        # unconditionally (force_cross_encoder is permanently on, see the
+                        # forcing-block comment near the top of this function), so this gate no
+                        # longer skips any execution -- it's kept only for the observability debug
+                        # log below. Deliberately checked against the pre-substitution
+                        # fts_ids_/semantic_ids_ sets (a resolved head's own channel membership is
+                        # a separate, Part B evidence question, not this gate's).
                         # The v1 gap gate deliberately ignores chunk-only evidence.  It uses a
                         # legacy two-channel map so adding a chunk candidate can never make a
                         # previously ambiguous FTS/entity-vector query appear decisive.
                         gap_rrf_map = search_primitives.reciprocal_rank_fusion(
                             fts_rows_, semantic_rows_, candidate_window
                         )
-                        gap_confident = (
-                            rerank_by_topic or use_cross_encoder
-                        ) and ranking._rrf_gap_confident(gap_rrf_map, fts_ids_, semantic_ids_)
+                        gap_confident = ranking._rrf_gap_confident(
+                            gap_rrf_map, fts_ids_, semantic_ids_
+                        )
                         if gap_confident:
                             logger.debug(
-                                "Stage-2 rerank skipped: RRF top1/top2 gap already decisive "
-                                "(dual-channel top1, ratio >= RERANK_GAP_SKIP_RATIO)."
+                                "Stage-2 rerank gap already decisive (dual-channel top1, ratio >= "
+                                "RERANK_GAP_SKIP_RATIO), but cross-encoder still runs (forced)."
                             )
-                            if use_cross_encoder and not force_cross_encoder:
-                                diagnostics["cross_encoder"]["reason"] = "gap_gate"
-                        if rerank_by_topic and not gap_confident:
-                            # Full widened pool, not yet offset/limit-sliced -- Stage 2 reranks
-                            # the whole candidate_window, then offset/limit slices the reranked
-                            # order.
-                            pool_ids = list(rrf_map.keys())
+                        ranked_pool_ = list(rrf_map.keys())
+                        if mode == "strict":
+                            # accept_or_abstain's DIRECT semantic-only rule (Part B) needs a
+                            # calibrated topic_verdict, not a raw distance (see its own
+                            # docstring for why a distance/margin cutoff was tried and
+                            # empirically rejected) -- compute it on demand, WITHOUT reordering
+                            # the pool, and only for candidates that actually need it: those
+                            # lacking a genuine FTS AND-match (fts_and_ids_, NOT the broader
+                            # fts_ids_ -- H1 fix). An OR-fallback-only candidate IS included here
+                            # and DOES get a semantic_verdict computed, so accept_or_abstain's
+                            # in_fts_or_only rule can actually be satisfied; only true-AND/
+                            # dual-channel candidates already have a sufficient DIRECT signal and
+                            # skip this lookup, keeping the added cost bounded.
+                            ungrounded_ids = [
+                                eid for eid in ranked_pool_ if eid not in fts_and_ids_
+                            ]
                             topic_scores_map_ = search_primitives._score_topics_with_fallback(
-                                query_keywords, pool_ids, db_path
+                                query_keywords, ungrounded_ids, db_path
                             )
-                            # Full-override semantics (per spec): reranked order is sorted purely
-                            # by topic_score, replacing RRF order for Stage 2 -- not a blend.
-                            ranked_pool_ = sorted(
-                                pool_ids, key=lambda eid: -topic_scores_map_[eid]["topic_score"]
-                            )
-                        else:
-                            ranked_pool_ = list(rrf_map.keys())
-                            if mode == "strict":
-                                # accept_or_abstain's DIRECT semantic-only rule (Part B) needs a
-                                # calibrated topic_verdict, not a raw distance (see its own
-                                # docstring for why a distance/margin cutoff was tried and
-                                # empirically rejected) -- compute it on demand, WITHOUT
-                                # reordering the pool (full-pool reordering is rerank_by_topic's
-                                # own separate opt-in, untouched here), and only for candidates
-                                # that actually need it: those lacking a genuine FTS AND-match
-                                # (fts_and_ids_, NOT the broader fts_ids_ -- H1 fix). An
-                                # OR-fallback-only candidate IS included here and DOES get a
-                                # semantic_verdict computed, so accept_or_abstain's in_fts_or_only
-                                # rule can actually be satisfied; only true-AND/dual-channel
-                                # candidates already have a sufficient DIRECT signal and skip this
-                                # lookup, keeping the added cost bounded.
-                                ungrounded_ids = [
-                                    eid for eid in ranked_pool_ if eid not in fts_and_ids_
-                                ]
-                                topic_scores_map_ = search_primitives._score_topics_with_fallback(
-                                    query_keywords, ungrounded_ids, db_path
-                                )
 
-                        if (
-                            use_cross_encoder
-                            and (not gap_confident or force_cross_encoder)
-                            and ranked_pool_
-                        ):
-                            # Independent Stage-2 alternative to rerank_by_topic (roadmap
-                            # ba2cf66f P1#7) -- NOT a dependency of it. If rerank_by_topic already
-                            # reordered ranked_pool_ above this pass, cross-encoder runs on top of
-                            # that order and its own reorder wins (last-write-wins on final
-                            # position): it's the more precise, more expensive stage, so a caller
-                            # opting into both gets its final say on ordering. topic_score stays
-                            # attached to the result item regardless -- cross-encoder never erases
-                            # it, it only adds cross_encoder_score alongside it.
+                        if ranked_pool_:
+                            # The cross-encoder is the unconditional, always-on Stage-2 final
+                            # reranker (see the forcing-block comment near the top of this
+                            # function) -- it runs regardless of gap_confident.
                             from saltmdb.domain.services import reranker_service
 
                             ce_scores = None
@@ -740,37 +692,27 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     return {
                         "ordered_ids": ranked_pool_,
                         "fts_rows": fts_rows_,
-                        "topic_scores_map": topic_scores_map_,
                         "cross_encoder_scores_map": cross_encoder_scores_map_,
                         "superseded_ids": superseded_ids_,
                         "exhausted": exhausted_,
                         # Post-substitution RRF fusion scores (Part A dedup-merge already applied
                         # by _substitute_resolved_heads when mode="strict") -- used for the result
                         # item's own "score" field below, same as before this refactor: the
-                        # assembled item's score is always the RRF fusion score, even when
-                        # rerank_by_topic's topic_score reordered `ordered_ids` (topic_score is
+                        # assembled item's score is always the RRF fusion score, even when the
+                        # cross-encoder stage reordered `ordered_ids` (cross_encoder_score is
                         # attached separately, it never replaces this field).
                         "rrf_score_map": rrf_map,
                         "chunk_diagnostics": chunk_diagnostics_,
                     }
 
-                if (
-                    rerank_by_topic
-                    or use_cross_encoder
-                    or prefer_durable_types
-                    or demote_superseded
-                    or mode == "strict"
-                ):
-                    # Widen the pool for rerank_by_topic, use_cross_encoder (roadmap ba2cf66f
-                    # P1#7), Part 2's two independently-togglable ranking flags, AND mode="strict" (Part B
-                    # pool-widening requirement) -- otherwise there's nothing meaningful to
-                    # reorder/resolve/gate within (a plain search's pool is just offset+limit,
-                    # often smaller than what's worth considering).
-                    from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
+                # Widen the pool: the cross-encoder is unconditionally always on (see the
+                # forcing-block comment near the top of this function), so this branch is now
+                # always taken -- there's nothing meaningful to reorder/resolve/gate within
+                # otherwise (a plain search's pool is just offset+limit, often smaller than
+                # what's worth considering).
+                from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
 
-                    base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
-                else:
-                    base_window = offset + limit
+                base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
 
                 if mode == "strict":
                     # Part C2 pagination redesign: resolution/dedup/the relevance gate can all
@@ -821,7 +763,6 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     pool_result = _compute_pool(base_window)
 
                 fts_rows = pool_result["fts_rows"]
-                topic_scores_map = pool_result["topic_scores_map"]
                 cross_encoder_scores_map = pool_result["cross_encoder_scores_map"]
                 superseded_ids = pool_result["superseded_ids"]
                 rrf_score_map = pool_result["rrf_score_map"]
@@ -869,12 +810,6 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     "query_keywords to browse via tags/filters only."
                 )
         else:
-            if rerank_by_topic:
-                logger.debug("rerank_by_topic ignored: query_keywords is empty.")
-            if use_cross_encoder:
-                logger.debug("use_cross_encoder ignored: query_keywords is empty.")
-            if force_cross_encoder:
-                logger.debug("force_cross_encoder ignored: query_keywords is empty.")
             sql = f"""
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
@@ -981,10 +916,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             }
             if include_related:
                 item["related_entities"] = related_map.get(eid, [])
-            if rerank_by_topic and eid in topic_scores_map:
-                item["topic_score"] = round(topic_scores_map[eid]["topic_score"], 6)
-                item["semantic_verdict"] = topic_scores_map[eid]["semantic_verdict"]
-            if use_cross_encoder and eid in cross_encoder_scores_map:
+            if eid in cross_encoder_scores_map:
                 item["cross_encoder_score"] = round(cross_encoder_scores_map[eid], 6)
             if mode == "history" and eid in superseded_ids:
                 item["is_superseded"] = True

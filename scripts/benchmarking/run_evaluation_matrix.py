@@ -283,6 +283,13 @@ def run_one_config(
     latter case) OR a strict-mode abstention (a real, structurally-identical empty list -- not
     distinguished from "no results" here, matching how every sibling benchmark script in this
     directory already treats mode="strict"'s abstention as an ordinary empty result)."""
+    # NOTE: config still carries rerank_by_topic/use_cross_encoder/force_cross_encoder keys (the
+    # signed eval_configs.py/benchmark_search_option_matrix.py config shape is deliberately left
+    # unchanged), but search_memory no longer accepts any of the three (candidate/
+    # search-ce-final-reranker made the cross-encoder the unconditional Stage-2 reranker; the
+    # caller-facing rerank_by_topic full-override is retired) -- this harness is a confirmed dead
+    # end (superseded by the branch-per-approach method), not re-run, so this is just enough to
+    # keep the script importable/callable, not a claim it's still meaningful to run.
     t0 = time.perf_counter()
     try:
         result = search_memory(
@@ -291,13 +298,10 @@ def run_one_config(
             db_connection=conn,
             limit=limit,
             mode=config["mode"],
-            rerank_by_topic=config["rerank_by_topic"],
             prefer_durable_types=config["prefer_durable_types"],
             demote_superseded=config["demote_superseded"],
-            use_cross_encoder=config["use_cross_encoder"],
             cross_encoder_candidate_cap=config.get("cross_encoder_candidate_cap"),
             cross_encoder_text_cap_chars=config.get("cross_encoder_text_cap_chars"),
-            force_cross_encoder=config.get("force_cross_encoder", False),
             use_chunk_candidates=config.get("use_chunk_candidates", False),
             oversampling_multiplier=config.get("oversampling_multiplier"),
             candidate_window=config.get("candidate_window"),

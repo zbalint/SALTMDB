@@ -61,9 +61,12 @@ DEDUP_CROSS_ENCODER_THRESHOLD = 4.0
 CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 200
 
-# Cross-chunk topic reranking (search_memory's rerank_by_topic, see
-# src/saltmdb/domain/services/memory_service/search_primitives.py:rerank_candidates_by_topic). Separate RERANK_*
-# prefix from DEDUP_* above -- different subsystem/phase, independently tunable. Threshold values
+# Cross-chunk topic scoring (search_memory's mode="strict" relevance-gate evidence, see
+# src/saltmdb/domain/services/memory_service/search_primitives.py:_score_topics_with_fallback --
+# the caller-facing rerank_by_topic full-override flag this pool size was originally sized for is
+# retired; RERANK_CANDIDATE_POOL_SIZE now sizes Stage-2 pool widening for the mandatory
+# cross-encoder stage instead). Separate RERANK_* prefix from DEDUP_* above -- different
+# subsystem/phase, independently tunable. Threshold values
 # locked from scripts/benchmarking/benchmark_rerank_thresholds.py's real bge-small-en-v1.5
 # Mean(Max(cosine_similarity)) measurements over hand-labeled same-topic/related-theme/unrelated
 # triplets (see SALTMDB memory `4b178f4b`) -- do not re-tune without new benchmark evidence.
@@ -93,8 +96,11 @@ RETRIEVAL_TEXT_RRF_WEIGHT_OPTIONS = (0.5, 1.0, 1.5)
 RETRIEVAL_TEXT_DEFAULT_FTS_WEIGHT = 1.0
 RETRIEVAL_TEXT_DEFAULT_VECTOR_WEIGHT = 1.0
 
-# Confidence gate on rerank_by_topic itself (search_memory's _rrf_gap_confident, see
-# memory_service/ranking.py). A structurally different axis from the two RERANK_* thresholds above: those
+# Confidence gate on Stage-2 reranking (search_memory's _rrf_gap_confident, see
+# memory_service/ranking.py) -- observability-only now that the cross-encoder stage runs
+# unconditionally (see orchestrator.py's forcing-block comment), but the threshold itself is
+# still real: it drives the "decisive winner" debug log. A structurally different axis from the
+# two RERANK_* thresholds above: those
 # score topic *purity* via raw cosine similarity, this scores hybrid-search *confidence* via
 # fused RRF rank-position scores (see reciprocal_rank_fusion, k=60) -- do not alias to either.
 # Locked from scripts/benchmarking/benchmark_rerank_gap_gate.py's real live-corpus run (SALTMDB
@@ -243,9 +249,11 @@ SUPERSESSION_CHAIN_MAX_DEPTH = 10
 # pathological queries, not benchmarked.
 STRICT_OVERFETCH_CANDIDATE_CAP = 200
 
-# Cross-encoder reranking (search_memory's use_cross_encoder, see
+# Cross-encoder reranking (search_memory's mandatory, always-on Stage-2 final reranker as of
+# candidate/search-ce-final-reranker, merged d1655d2 -- originally benchmarked as the opt-in
+# use_cross_encoder flag, now the unconditional default; see
 # src/saltmdb/domain/services/reranker_service.py). Roadmap ba2cf66f P1#7 / design memos
-# 1fddc04a/8115fa4a: benchmark an optional ONNX-only Stage-2 pairwise reranker, no PyTorch, no new
+# 1fddc04a/8115fa4a: an ONNX-only Stage-2 pairwise reranker, no PyTorch, no new
 # dependency (fastembed is already pinned and already wraps ONNX Runtime for the bi-encoder).
 
 
