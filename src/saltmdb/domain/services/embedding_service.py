@@ -701,6 +701,40 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return results
 
 
+# BGE (BAAI/bge-small-en-v1.5, the model get_model() loads) is an asymmetric embedding model:
+# it was trained with a query-side instruction prefix that document-side text never gets, and
+# omitting it on the query side leaves retrieval quality on the table. embed_text/embed_texts
+# above are used for BOTH document- and query-side embedding today; embed_query_text/
+# embed_query_texts exist so every QUERY-side call site can opt into the prefix while every
+# document-side call site (embed_entity_async, compute_entity_chunk_embeddings) stays on the
+# plain functions unchanged. See candidate/search-bge-query-prefix's design record for the
+# retest rationale (memory 254c28f8 / f73cf633).
+_BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+
+def embed_query_text(text: str) -> list[float]:
+    """Encode a QUERY string, prefixed for BGE's asymmetric query/document training.
+
+    Preserves embed_text's empty/whitespace-string contract (returns [0.0]*384 without ever
+    prefixing or embedding an empty query) so callers can't observe a behavior difference on
+    that edge case between embed_text and this function.
+    """
+    if not text or not text.strip():
+        return [0.0] * 384
+    return embed_text(_BGE_QUERY_PREFIX + text)
+
+
+def embed_query_texts(texts: list[str]) -> list[list[float]]:
+    """Batch form of embed_query_text -- see embed_texts for the batching/empty-slot contract.
+
+    Only non-empty entries get the BGE query prefix prepended before batching; empty/whitespace
+    entries are left as "" so embed_texts' own empty-slot handling still returns [0.0]*384 for
+    them without ever prefixing an empty string.
+    """
+    prefixed = [_BGE_QUERY_PREFIX + t if t and t.strip() else t for t in texts]
+    return embed_texts(prefixed)
+
+
 def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[dict]:
     """Chunk full_content and batch-embed each chunk. Pure, no DB I/O.
 

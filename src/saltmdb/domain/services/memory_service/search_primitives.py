@@ -199,7 +199,7 @@ def retrieval_vector_search(
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        query_vector = embedding_service.embed_text(query)
+        query_vector = embedding_service.embed_query_text(query)
         knn_k = limit + offset
         # vec0 rejects ordinary WHERE predicates on auxiliary columns in its KNN query.  Keep
         # this first read pure MATCH+k, then synchronously reapply hash/job/status/caller filters
@@ -268,7 +268,7 @@ def semantic_search(
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
 
-        query_vector = embedding_service.embed_text(query)
+        query_vector = embedding_service.embed_query_text(query)
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
         # vec0's `MATCH ... AND k = N` is its KNN execution path.  Calling
         # vec_distance_cosine() in ORDER BY forces a full scan of every embedding and made
@@ -334,7 +334,7 @@ def chunk_candidate_search(
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        query_vector = embedding_service.embed_text(query)
+        query_vector = embedding_service.embed_query_text(query)
         # MATCH + k is vec0's indexed KNN execution path.  vec0 rejects ordinary WHERE/JOIN
         # constraints in a KNN query (``illegal WHERE constraint``), so the indexed read must be
         # a pure vector lookup.  Freshness/status/caller filters are reapplied immediately below
@@ -488,7 +488,7 @@ def rerank_candidates_by_topic(
         query_chunks = chunk_text(query_text or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
         if not query_chunks:
             query_chunks = [{"text": query_text or ""}]
-        query_vectors = embedding_service.embed_texts([c["text"] for c in query_chunks])
+        query_vectors = embedding_service.embed_query_texts([c["text"] for c in query_chunks])
         if not query_vectors:
             return {}
 
@@ -553,7 +553,7 @@ def _score_topics_with_fallback(query_text: str, ids: list[str], db_path: str) -
         from saltmdb.config import RERANK_BROAD_THEME_THRESHOLD
         from saltmdb.domain.services import embedding_service
 
-        fallback_vec = embedding_service.embed_text(query_text)
+        fallback_vec = embedding_service.embed_query_text(query_text)
         fallback = _batch_semantic_similarities(missing_ids, fallback_vec, db_path)
         for eid in missing_ids:
             fscore = fallback.get(eid, 0.0)
