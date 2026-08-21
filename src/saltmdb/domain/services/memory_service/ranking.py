@@ -306,7 +306,7 @@ def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
         import sqlite_vec
         from saltmdb.domain.services import embedding_service
 
-        query_vector = embedding_service.embed_text(query_text)
+        query_vector = embedding_service.embed_query_text(query_text)
         chunk_conn = get_connection(db_path)
         chunk_conn.enable_load_extension(True)
         sqlite_vec.load(chunk_conn)
