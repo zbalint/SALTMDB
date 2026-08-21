@@ -119,6 +119,19 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
         mode = "broad"
 
+    # candidate/search-ce-final-reranker (branch-per-approach round, mirrors the dedup
+    # CE-final-judge pattern): the cross-encoder becomes the unconditional, always-on final
+    # reranker for this branch, REPLACING the RRF blend as the caller-visible default --
+    # not a new opt-in layered on top. force_cross_encoder=True also bypasses
+    # _rrf_gap_confident (see below), so CE gets the final say on every query, not just
+    # ambiguous ones. rerank_by_topic is forced off so this branch tests CE alone, not
+    # CE-on-top-of-topic-rerank. score_pairs() returning None (disabled/error/malformed)
+    # still leaves ranked_pool_ exactly as RRF produced it -- the existing exception-only
+    # fallback below is untouched, same shape as the dedup round's cosine-as-fallback.
+    use_cross_encoder = True
+    force_cross_encoder = True
+    rerank_by_topic = False
+
     chunk_oversampling, chunk_window, configured_chunk_weight = (
         validation._validate_chunk_candidate_controls(
             use_chunk_candidates, oversampling_multiplier, candidate_window, chunk_weight

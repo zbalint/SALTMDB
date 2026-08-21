@@ -298,6 +298,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
     def _fts_row(self, entity_id: str) -> tuple:
         return (entity_id, "t", "c", 1, 0, 0, "", "", "u", "s", "{}", None, "fact", 0, None)
 
+    @unittest.skip(
+        "candidate/search-ce-final-reranker forces use_cross_encoder=True unconditionally "
+        "(this branch's fixed policy, not a caller-visible flag) -- the default-False-means-off "
+        "premise this test checks no longer applies on this branch."
+    )
     def test_default_false_leaves_ordering_unchanged_even_with_model_configured(self):
         # SALTMDB_RERANKER_MODEL is set in setUp -- proves the FLAG, not just env-var presence,
         # gates the behavior.
@@ -433,6 +438,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertNotIn("cross_encoder_score", results[0])
 
+    @unittest.skip(
+        "candidate/search-ce-final-reranker forces force_cross_encoder=True unconditionally, "
+        "which bypasses the gap gate by design -- this branch's whole premise is that CE gets "
+        "the final say on every query, not just ambiguous ones."
+    )
     def test_gap_confident_skips_cross_encoder_entirely(self):
         # Dual-channel, decisive-margin top1 -- exact fixture shape as
         # TestRrfGapGateSearchMemorySeam.test_decisive_dual_channel_winner_skips_rerank in
@@ -464,6 +474,11 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
         self.assertEqual([r["id"] for r in results], ["winner_entity", "loser_entity"])
         mock_score.assert_not_called()
 
+    @unittest.skip(
+        "candidate/search-ce-final-reranker forces rerank_by_topic=False unconditionally (this "
+        "branch tests CE alone, not CE-on-top-of-topic-rerank) -- topic_score is never computed "
+        "here regardless of the caller-passed rerank_by_topic=True this test relies on."
+    )
     def test_both_flags_cross_encoder_takes_final_ordering_precedence(self):
         self._insert_entity("event_entity", "event")
         self._insert_entity("decision_entity", "decision")

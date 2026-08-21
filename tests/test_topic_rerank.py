@@ -488,6 +488,11 @@ class TestRrfGapGateSearchMemorySeam(unittest.TestCase):
         for item in results:
             self.assertNotIn("topic_score", item)
 
+    @unittest.skip(
+        "candidate/search-ce-final-reranker forces rerank_by_topic=False unconditionally -- "
+        "rerank_candidates_by_topic is never called on this branch regardless of the "
+        "caller-passed rerank_by_topic=True this test relies on."
+    )
     def test_ambiguous_single_channel_result_still_reranks(self):
         entity_a = self._store("Gap Gate Ambiguous A", "First entity for the ambiguous seam test.")
         entity_b = self._store("Gap Gate Ambiguous B", "Second entity for the ambiguous seam test.")

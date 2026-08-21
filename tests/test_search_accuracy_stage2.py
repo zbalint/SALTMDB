@@ -293,6 +293,11 @@ class TestCrossEncoderControls(_DbFixture):
         self.assertIn("MATCHING CHUNK", texts["chunked"])
         self.assertIn("STALE FALLBACK", texts["stale"])
 
+    @unittest.skip(
+        "candidate/search-ce-final-reranker forces use_cross_encoder=True and "
+        "force_cross_encoder=True unconditionally -- the normal-vs-forced comparison this test "
+        "makes is meaningless on this branch since both calls now behave identically."
+    )
     def test_force_cross_encoder_bypasses_only_gap_gate(self):
         for eid in ("winner", "loser"):
             self.entity(eid)
