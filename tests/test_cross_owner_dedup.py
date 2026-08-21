@@ -131,8 +131,8 @@ class TestCrossOwnerDedup(unittest.TestCase):
 
         self.assertNotIn("error", dup_check)
         self.assertTrue(dup_check.get("duplicate_found"))
-        # embed_text must be called at most once (for query text itself)
-        self.assertEqual(mock_embed.call_count, 1)
+        # The cross-encoder final judge replaces the embedding decision path entirely.
+        self.assertEqual(mock_embed.call_count, 0)
 
     def test_dedup_check_mixed_embedding_readiness(self):
         """Correctness with mixed embedding readiness: candidate A (ready vector, >=0.75), B (lexical fallback), C (dissimilar excluded)."""
