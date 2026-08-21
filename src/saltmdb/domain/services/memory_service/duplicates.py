@@ -4,10 +4,21 @@ Pure code-motion extraction (see refactor plan).
 """
 
 import sqlite3
+import math
 from typing import Any
 
-from saltmdb.config import get_db_path, DEDUP_SUPERSESSION_THRESHOLD, DEDUP_LEXICAL_THRESHOLD
+from saltmdb.config import (
+    CROSS_ENCODER_MAX_CHARS,
+    CROSS_ENCODER_MAX_QUERY_CHARS,
+    DEDUP_CROSS_ENCODER_MAX_CANDIDATES,
+    DEDUP_CROSS_ENCODER_MODEL,
+    DEDUP_CROSS_ENCODER_THRESHOLD,
+    DEDUP_LEXICAL_THRESHOLD,
+    DEDUP_SUPERSESSION_THRESHOLD,
+    get_db_path,
+)
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+from saltmdb.domain.services import reranker_service
 from saltmdb.utils.nlp import word_sim
 
 from . import lifecycle, search_primitives
@@ -90,60 +101,99 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
             )
             fts_candidates = cursor.fetchall()
 
-        from saltmdb.config import is_semantic_search_enabled
+        try:
+            capped_query = input_text[:CROSS_ENCODER_MAX_QUERY_CHARS]
+            capped_candidate_texts = [
+                f"{etitle} {econtent}"[:CROSS_ENCODER_MAX_CHARS]
+                for _, etitle, econtent, _, _ in fts_candidates[:DEDUP_CROSS_ENCODER_MAX_CANDIDATES]
+            ]
+            model = reranker_service.get_model(DEDUP_CROSS_ENCODER_MODEL)
+            ce_scores = list(model.rerank(capped_query, capped_candidate_texts))
+            if len(ce_scores) != len(capped_candidate_texts) or not all(
+                isinstance(score, (int, float))
+                and not isinstance(score, bool)
+                and math.isfinite(score)
+                for score in ce_scores
+            ):
+                raise ValueError("cross-encoder returned malformed scores")
 
-        use_semantic = is_semantic_search_enabled()
-
-        query_vector = None
-        if use_semantic:
-            try:
-                from saltmdb.domain.services import embedding_service
-
-                query_vector = embedding_service.embed_text(input_text)
-            except Exception as ex:
-                logger.warning("Could not generate query embedding for duplicate check: %s", ex)
-
-        semantic_sims: dict = {}
-        if use_semantic and query_vector is not None and fts_candidates:
-            semantic_sims = search_primitives._batch_semantic_similarities(
-                [row[0] for row in fts_candidates], query_vector, effective_db_path
+            for (eid, etitle, _, eowner, escope), score in zip(
+                fts_candidates[:DEDUP_CROSS_ENCODER_MAX_CANDIDATES], ce_scores
+            ):
+                if score >= DEDUP_CROSS_ENCODER_THRESHOLD:
+                    duplicates.append(
+                        {
+                            "id": eid,
+                            "title": etitle,
+                            "owner_id": eowner,
+                            "scope": escope,
+                            "similarity_score": round(score, 3),
+                        }
+                    )
+        except Exception as ex:
+            logger.warning(
+                "Cross-encoder duplicate judging failed (model=%s); falling back to the "
+                "existing cosine/lexical logic: %s",
+                DEDUP_CROSS_ENCODER_MODEL,
+                ex,
             )
 
-        for eid, etitle, econtent, eowner, escope in fts_candidates:
-            existing_text = f"{etitle} {econtent}"
-            if eid in semantic_sims:
-                sim = semantic_sims[eid]
-                min_threshold = DEDUP_SUPERSESSION_THRESHOLD
-            elif use_semantic and query_vector is not None:
+            from saltmdb.config import is_semantic_search_enabled
+
+            use_semantic = is_semantic_search_enabled()
+
+            query_vector = None
+            if use_semantic:
                 try:
                     from saltmdb.domain.services import embedding_service
-                    import numpy as np
 
-                    cand_vec = embedding_service.embed_text(existing_text)
-                    dot_product = np.dot(query_vector, cand_vec)
-                    norm_a = np.linalg.norm(query_vector)
-                    norm_b = np.linalg.norm(cand_vec)
-                    sim = (
-                        float(dot_product / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
-                    )
+                    query_vector = embedding_service.embed_text(input_text)
+                except Exception as ex:
+                    logger.warning("Could not generate query embedding for duplicate check: %s", ex)
+
+            semantic_sims: dict = {}
+            if use_semantic and query_vector is not None and fts_candidates:
+                semantic_sims = search_primitives._batch_semantic_similarities(
+                    [row[0] for row in fts_candidates], query_vector, effective_db_path
+                )
+
+            for eid, etitle, econtent, eowner, escope in fts_candidates:
+                existing_text = f"{etitle} {econtent}"
+                if eid in semantic_sims:
+                    sim = semantic_sims[eid]
                     min_threshold = DEDUP_SUPERSESSION_THRESHOLD
-                except Exception:
+                elif use_semantic and query_vector is not None:
+                    try:
+                        from saltmdb.domain.services import embedding_service
+                        import numpy as np
+
+                        cand_vec = embedding_service.embed_text(existing_text)
+                        dot_product = np.dot(query_vector, cand_vec)
+                        norm_a = np.linalg.norm(query_vector)
+                        norm_b = np.linalg.norm(cand_vec)
+                        sim = (
+                            float(dot_product / (norm_a * norm_b))
+                            if norm_a > 0 and norm_b > 0
+                            else 0.0
+                        )
+                        min_threshold = DEDUP_SUPERSESSION_THRESHOLD
+                    except Exception:
+                        sim = word_sim(input_text, existing_text)
+                        min_threshold = DEDUP_LEXICAL_THRESHOLD
+                else:
                     sim = word_sim(input_text, existing_text)
                     min_threshold = DEDUP_LEXICAL_THRESHOLD
-            else:
-                sim = word_sim(input_text, existing_text)
-                min_threshold = DEDUP_LEXICAL_THRESHOLD
 
-            if sim >= min_threshold:
-                duplicates.append(
-                    {
-                        "id": eid,
-                        "title": etitle,
-                        "owner_id": eowner,
-                        "scope": escope,
-                        "similarity_score": round(sim, 3),
-                    }
-                )
+                if sim >= min_threshold:
+                    duplicates.append(
+                        {
+                            "id": eid,
+                            "title": etitle,
+                            "owner_id": eowner,
+                            "scope": escope,
+                            "similarity_score": round(sim, 3),
+                        }
+                    )
 
         duplicates.sort(key=lambda x: x["similarity_score"], reverse=True)
         return {"duplicate_found": len(duplicates) > 0, "potential_duplicates": duplicates}

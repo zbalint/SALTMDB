@@ -43,6 +43,17 @@ def is_viewer_enabled() -> bool:
 # Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
 DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate event
 DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
+# Dedup cross-encoder final-judge candidate.  This is deliberately separate from the
+# search-time, opt-in CROSS_ENCODER_* settings below.
+DEDUP_CROSS_ENCODER_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+DEDUP_CROSS_ENCODER_MAX_CANDIDATES = 30  # matches the FTS duplicate pre-filter LIMIT 30
+# Raw CE logit >= this counts as a duplicate candidate. Set from a single eyeball banding
+# pass over candidate_results.json (2026-08-21, see SALTMDB memory `710882a0` follow-up):
+# scores >=6.2 were ~100% genuine near-duplicates in sample, 5.0-6.2 ~50%, 4.0-5.0 ~35-45%,
+# 3.0-4.0 ~10%, below 3.0 near-zero. 4.0 trades away most of the low-precision zone while
+# keeping recall for duplicates that aren't literal spec-revision-chain matches. Not a
+# labeled/calibrated value -- revisit with real labels before treating this as final.
+DEDUP_CROSS_ENCODER_THRESHOLD = 4.0
 
 # Sliding-window chunking for chunk-level embeddings (entity_chunk_embeddings).
 # Empirically settled across 3 benchmark rounds (see scripts/benchmarking/) -- do not re-tune
