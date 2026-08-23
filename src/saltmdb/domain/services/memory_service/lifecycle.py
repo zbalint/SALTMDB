@@ -484,11 +484,13 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             from saltmdb.domain.services.embedding_service import (
                 cancel_embedding_jobs_for_entity,
                 cancel_retrieval_embedding_jobs_for_entity,
+                clear_embedding_vectors_for_entity,
                 enqueue_embedding_jobs_for_entity,
                 enqueue_retrieval_embedding_job_for_entity,
             )
 
             cancel_embedding_jobs_for_entity(c, resolved_id)
+            clear_embedding_vectors_for_entity(c, resolved_id)
             cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
             enqueue_embedding_jobs_for_entity(c, new_id, new_title, new_content, content_hash)
             enqueue_retrieval_embedding_job_for_entity(
@@ -845,9 +847,11 @@ def _archive_entity_unchecked(conn, resolved_id: str) -> None:
     from saltmdb.domain.services.embedding_service import (
         cancel_embedding_jobs_for_entity,
         cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
     )
 
     cancel_embedding_jobs_for_entity(conn, resolved_id)
+    clear_embedding_vectors_for_entity(conn, resolved_id)
     cancel_retrieval_embedding_jobs_for_entity(conn, resolved_id, clear_vector=True)
 
 

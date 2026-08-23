@@ -238,6 +238,24 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(report["flagged_stale"]["count"], 1)
 
+    def test_core_count_excludes_archived_former_cores(self):
+        self._mk_entity(
+            "Archived Former Core",
+            is_core=True,
+            core_review_after="2020-01-01T00:00:00+00:00",
+            status="archived",
+        )
+        self._mk_entity(
+            "Active Core",
+            is_core=True,
+            core_review_after="2099-01-01T00:00:00+00:00",
+        )
+        self.conn.commit()
+
+        rc, report = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(report["entities"]["core"], 1)
+
     def test_reports_orphans_overdue_cores_and_predicate_drift(self):
         orphan_id = self._mk_entity("Orphan")
         overdue_core_id = self._mk_entity(

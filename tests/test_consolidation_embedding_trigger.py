@@ -39,6 +39,19 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         self.assertEqual(res2["status"], "ok")
         id2 = res2["data"]["id"]
 
+        zero_vector = b"\x00" * (384 * 4)
+        for entity_id in (id1, id2):
+            self.conn.execute(
+                "INSERT INTO entity_embeddings (entity_id,embedding) VALUES (?,?)",
+                (entity_id, zero_vector),
+            )
+            self.conn.execute(
+                "INSERT INTO entity_chunk_embeddings "
+                "(id,entity_id,embedding,chunk_index,char_start,char_end,content_hash) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"{entity_id}::0", entity_id, zero_vector, 0, 0, 4, "hash"),
+            )
+
         # Deliberately pass only db_connection (no db_path), matching how
         # bulk_commit_consolidation and other callers invoke this function.
         c_res = commit_consolidation(
@@ -57,6 +70,19 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
             (consolidated_id,),
         ).fetchall()
         self.assertEqual(states, [("chunk", "queued"), ("entity", "queued")])
+        for entity_id in (id1, id2):
+            self.assertEqual(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM entity_embeddings WHERE entity_id=?", (entity_id,)
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id=?", (entity_id,)
+                ).fetchone()[0],
+                0,
+            )
 
 
 if __name__ == "__main__":

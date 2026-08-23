@@ -29,6 +29,18 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
 
+        zero_vector = b"\x00" * (384 * 4)
+        self.conn.execute(
+            "INSERT INTO entity_embeddings (entity_id,embedding) VALUES (?,?)",
+            (entity_id, zero_vector),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings "
+            "(id,entity_id,embedding,chunk_index,char_start,char_end,content_hash) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"{entity_id}::0", entity_id, zero_vector, 0, 0, 4, "hash"),
+        )
+
         # Verify status initially raw
         row = self.conn.execute(
             "SELECT status, embedding_status FROM entities WHERE id = ?", (entity_id,)
@@ -43,6 +55,18 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], "archived")
         self.assertEqual(row[1], "archived")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entity_embeddings WHERE entity_id=?", (entity_id,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id=?", (entity_id,)
+            ).fetchone()[0],
+            0,
+        )
 
     def test_revision_predecessor_has_archived_embedding_status(self):
         res = store_memory(
@@ -53,6 +77,18 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
+
+        zero_vector = b"\x00" * (384 * 4)
+        self.conn.execute(
+            "INSERT INTO entity_embeddings (entity_id,embedding) VALUES (?,?)",
+            (entity_id, zero_vector),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_chunk_embeddings "
+            "(id,entity_id,embedding,chunk_index,char_start,char_end,content_hash) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"{entity_id}::0", entity_id, zero_vector, 0, 0, 4, "hash"),
+        )
 
         # Immutable revision archives the predecessor and creates a new ID.
         result = revise_memory(
@@ -72,6 +108,18 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         self.assertTrue(len(rows) > 0)
         for r in rows:
             self.assertEqual(r[2], "archived")
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entity_embeddings WHERE entity_id=?", (entity_id,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entity_chunk_embeddings WHERE entity_id=?", (entity_id,)
+            ).fetchone()[0],
+            0,
+        )
 
 
 if __name__ == "__main__":

@@ -123,7 +123,11 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
     entity_counts = dict(
         conn.execute("SELECT status, COUNT(*) FROM entities GROUP BY status").fetchall()
     )
-    core_count = conn.execute("SELECT COUNT(*) FROM entities WHERE is_core = 1").fetchone()[0]
+    # Archived former cores intentionally retain is_core=1 for lifecycle provenance, but they
+    # are not injectable/current cores and must not inflate the health report's live inventory.
+    core_count = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE is_core = 1 AND status != 'archived'"
+    ).fetchone()[0]
 
     orphans = detect_orphaned_memories(db_connection=conn)
 

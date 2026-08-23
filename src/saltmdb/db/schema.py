@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 import uuid
+from collections import Counter, defaultdict, deque
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying
 from saltmdb.utils.text import compute_content_hash
@@ -12,6 +13,123 @@ from saltmdb.utils.predicate_vocabulary import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
+    conn, now: str
+) -> dict[str, int]:
+    """Repair deterministic lifecycle drift left by pre-v3 releases.
+
+    A supersedes component is migrated only when every node has at most one incoming and one
+    outgoing edge. Branching components are intentionally retained for human review.
+    """
+    current_sql = """
+        (valid_from IS NULL OR datetime(valid_from) <= datetime(?))
+        AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))
+        AND (valid_at IS NULL OR datetime(valid_at) <= datetime(?))
+        AND (invalid_at IS NULL OR datetime(invalid_at) > datetime(?))
+    """
+    current_params = (now, now, now, now)
+    self_rows = conn.execute(
+        f"SELECT id FROM relations WHERE source_id=target_id AND {current_sql}", current_params
+    ).fetchall()
+    for (relation_id,) in self_rows:
+        conn.execute(
+            "UPDATE relations SET invalid_at=?, valid_to=? WHERE id=?", (now, now, relation_id)
+        )
+
+    rows = conn.execute(
+        f"""SELECT id,source_id,target_id,created_at,valid_from FROM relations
+             WHERE predicate='supersedes' AND source_id != target_id AND {current_sql}""",
+        current_params,
+    ).fetchall()
+    incoming = Counter(row[2] for row in rows)
+    outgoing = Counter(row[1] for row in rows)
+    adjacency: dict[str, set[str]] = defaultdict(set)
+    for _rid, source_id, target_id, _created_at, _valid_from in rows:
+        adjacency[source_id].add(target_id)
+        adjacency[target_id].add(source_id)
+    anomalous = {node for node, count in incoming.items() if count > 1} | {
+        node for node, count in outgoing.items() if count > 1
+    }
+    safe_nodes: set[str] = set()
+    ambiguous_components = 0
+    seen: set[str] = set()
+    for start in adjacency:
+        if start in seen:
+            continue
+        component: set[str] = set()
+        queue = deque([start])
+        while queue:
+            node = queue.popleft()
+            if node in component:
+                continue
+            component.add(node)
+            queue.extend(adjacency[node] - component)
+        seen.update(component)
+        component_edge_count = sum(1 for row in rows if row[1] in component)
+        # Degree limits alone do not prove linearity: A->B plus B->A gives every node one
+        # incoming/outgoing edge but is a closed cycle with no canonical winner.  A connected
+        # linear component must also have exactly |V|-1 edges.
+        if component & anomalous or component_edge_count != len(component) - 1:
+            ambiguous_components += 1
+        else:
+            safe_nodes.update(component)
+
+    from saltmdb.domain.services.embedding_service import (
+        cancel_embedding_jobs_for_entity,
+        cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
+    )
+
+    archived = 0
+    for _rid, _source_id, target_id, created_at, valid_from in rows:
+        if target_id not in safe_nodes:
+            continue
+        entity = conn.execute(
+            "SELECT status,valid_from FROM entities WHERE id=?", (target_id,)
+        ).fetchone()
+        if not entity or entity[0] not in ("raw", "consolidated"):
+            continue
+        retired_at = (
+            max(value for value in (entity[1], valid_from, created_at) if value)
+            if any((entity[1], valid_from, created_at))
+            else now
+        )
+        conn.execute(
+            "UPDATE entities SET status='archived',embedding_status='archived',updated_at=?,"
+            "valid_to=? WHERE id=? AND status IN ('raw','consolidated')",
+            (now, retired_at, target_id),
+        )
+        cancel_embedding_jobs_for_entity(conn, target_id)
+        clear_embedding_vectors_for_entity(conn, target_id, strict=True)
+        cancel_retrieval_embedding_jobs_for_entity(conn, target_id, clear_vector=True)
+        archived += 1
+
+    conn.execute(
+        "UPDATE entities SET valid_to=COALESCE(updated_at,valid_from,created_at) "
+        "WHERE status='archived' AND valid_to IS NULL"
+    )
+
+    vector_ids: set[str] = set()
+    for table in ("entity_embeddings", "entity_chunk_embeddings", "retrieval_embeddings"):
+        vector_ids.update(
+            row[0]
+            for row in conn.execute(
+                f"SELECT DISTINCT v.entity_id FROM {table} v LEFT JOIN entities e "
+                "ON e.id=v.entity_id WHERE e.id IS NULL OR e.status='archived'"
+            ).fetchall()
+        )
+    for entity_id in vector_ids:
+        clear_embedding_vectors_for_entity(conn, entity_id, strict=True)
+        conn.execute("DELETE FROM retrieval_embeddings WHERE entity_id=?", (entity_id,))
+
+    return {
+        "self_relations": len(self_rows),
+        "archived_supersedes_targets": archived,
+        "ambiguous_supersedes_components": ambiguous_components,
+        "cleaned_vector_entities": len(vector_ids),
+    }
 
 
 def _add_column_if_missing(conn, table: str, column_def: str) -> None:
@@ -866,6 +984,47 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
                 "Phase 8 predicate-vocabulary migration skipped/failed (will retry next "
                 "startup): %s",
                 e,
+            )
+
+        # v3 repairs deterministic lifecycle drift from releases that allowed agents to create
+        # supersedes edges directly and retained vectors after archival. Ambiguous graph branches
+        # are reported but never guessed at automatically.
+        try:
+            # Never leapfrog a failed prerequisite migration.  The earlier blocks deliberately
+            # catch OperationalError so startup can continue; an exact gate is therefore needed
+            # to prevent v3 from marking an unfinished v1/v2 database as fully migrated.
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 2:
+                from datetime import UTC, datetime
+
+                now = datetime.now(UTC).isoformat()
+                conn.execute("SAVEPOINT lifecycle_invariants_v3")
+                try:
+                    # CREATE INDEX IF NOT EXISTS does not update an existing definition.  Some
+                    # upgraded databases therefore still have the retired two-column shape
+                    # (context_id, project_id).  Rebuild it inside the versioned/savepointed
+                    # migration so the live schema actually matches fresh databases.
+                    conn.execute("DROP INDEX IF EXISTS idx_entities_context")
+                    conn.execute("CREATE INDEX idx_entities_context ON entities(context_id)")
+                    summary = _migrate_legacy_lifecycle_invariants(conn, now)
+                    conn.execute("PRAGMA user_version = 3")
+                except Exception:
+                    # The surrounding OperationalError handler intentionally permits startup to
+                    # continue.  Roll this migration back first so that retryability does not
+                    # mean committing a half-archived/half-cleaned database.
+                    conn.execute("ROLLBACK TO lifecycle_invariants_v3")
+                    conn.execute("RELEASE lifecycle_invariants_v3")
+                    raise
+                else:
+                    conn.execute("RELEASE lifecycle_invariants_v3")
+                if summary["ambiguous_supersedes_components"]:
+                    logger.warning(
+                        "Lifecycle migration left %d ambiguous supersedes components for review",
+                        summary["ambiguous_supersedes_components"],
+                    )
+                logger.info("Lifecycle invariant migration completed: %s", summary)
+        except sqlite3.OperationalError as e:
+            logger.warning(
+                "Lifecycle invariant migration skipped/failed (will retry next startup): %s", e
             )
 
     write_transaction_retrying(conn, _write)

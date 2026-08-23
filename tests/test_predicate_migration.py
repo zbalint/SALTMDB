@@ -158,7 +158,7 @@ class TestPredicateDriftMigration(_MigrationFixture):
         self._mk_relation(a, b, "relates_to")
         self.conn.commit()
         self._reopen()
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_full_migration_is_idempotent_across_repeated_restarts(self):
         """The single highest-value regression here: re-running init_db() after the migration
@@ -187,7 +187,7 @@ class TestPredicateDriftMigration(_MigrationFixture):
         ).fetchall()
         self.assertEqual(len(before), 6, "no row should have been lost by the migration itself")
 
-        self._reopen()  # user_version already 2 -- must be a pure no-op
+        self._reopen()  # user_version already current -- must be a pure no-op
         after = self.conn.execute(
             "SELECT id, source_id, target_id, predicate, valid_to FROM relations ORDER BY rowid"
         ).fetchall()
@@ -293,7 +293,7 @@ class TestScdHistoryRevisesBackfill(_MigrationFixture):
         )
         self.conn.commit()
         self._reopen()
-        self._reopen()  # user_version already 2, must not create a second edge
+        self._reopen()  # user_version already current, must not create a second edge
 
         rows = self.conn.execute(
             "SELECT id FROM relations WHERE target_id = ? AND predicate = 'revises'", (hist_id,)

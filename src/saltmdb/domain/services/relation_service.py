@@ -1326,7 +1326,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     try:
 
-        def _do_commit():  # noqa: C901, PLR0912
+        def _do_commit():  # noqa: C901, PLR0912, PLR0915
             # A4: TOCTOU revalidation, first statements, before any destructive write. Re-fetch
             # content_hash/status for every resolved parent and compare against observed_state
             # -- the dict returned from the EXACT read that produced (or failed to produce)
@@ -1491,6 +1491,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # with their durable embedding work in this one transaction.
             from saltmdb.domain.services.embedding_service import (
                 cancel_embedding_jobs_for_entity,
+                cancel_retrieval_embedding_jobs_for_entity,
+                clear_embedding_vectors_for_entity,
                 enqueue_embedding_jobs_for_entity,
             )
 
@@ -1527,6 +1529,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
             for parent_id in resolved_parents:
                 cancel_embedding_jobs_for_entity(conn, parent_id)
+                clear_embedding_vectors_for_entity(conn, parent_id)
+                cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=True)
 
             # Semantic relations remain historical claims about the archived parents.  Capture
             # them as an optional replay worklist, but do not close, copy, or repoint them.

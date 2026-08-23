@@ -186,6 +186,31 @@ def cancel_embedding_jobs_for_entity(conn: sqlite3.Connection, entity_id: str) -
     )
 
 
+def clear_embedding_vectors_for_entity(
+    conn: sqlite3.Connection, entity_id: str, *, strict: bool = False
+) -> None:
+    """Remove entity and chunk vectors once an entity stops being searchable.
+
+    Vector tables are optional when sqlite-vec cannot be loaded. Runtime archive paths may
+    therefore degrade to job cancellation, while migrations use ``strict=True`` so their
+    version marker is not advanced past cleanup that could not actually run.
+    """
+    from saltmdb.db.vector_schema import try_load_vector_extension
+
+    if not try_load_vector_extension(conn):
+        if strict:
+            raise sqlite3.OperationalError("sqlite-vec extension unavailable for vector cleanup")
+        logger.debug("vector cleanup unavailable for %s", entity_id)
+        return
+    for table in ("entity_embeddings", "entity_chunk_embeddings"):
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE entity_id=?", (entity_id,))
+        except sqlite3.Error:
+            if strict:
+                raise
+            logger.debug("%s cleanup unavailable for %s", table, entity_id)
+
+
 def reconcile_embedding_jobs(
     conn: sqlite3.Connection, *, limit: int = 100, after_id: str | None = None
 ) -> list[str]:
