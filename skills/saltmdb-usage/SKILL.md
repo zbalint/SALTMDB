@@ -30,8 +30,8 @@ not here).
 
 ## A. Titles
 
-- Use specific, unique, entity-resolution-friendly titles (`SALTMDB Hybrid Vector Search
-  Architecture & RRF Scoring`, not `Search` or `Notes`) — several tools (`manage_relation`,
+- Use specific, unique, entity-resolution-friendly titles (`SALTMDB Hybrid Search Candidate
+  Fusion and Final Ranking`, not `Search` or `Notes`) — several tools (`manage_relation`,
   `get_memory`, `archive_memory`, `get_lineage`, `get_related_memories`, `consolidate_memories`,
   `revise_memory`, `supersede_memory`) auto-resolve entity IDs from an exact title match, so a
   distinctive title lets you chain tool calls without a UUID lookup in between.
@@ -71,8 +71,10 @@ not here).
 
 ## C. Effective search usage
 
-- `search_memory` combines FTS5 BM25 keyword search with dense-vector semantic search via RRF
-  fusion, and returns 1-hop knowledge-graph relations by default (`include_related=True`).
+- `search_memory` combines FTS5 BM25 with BGE-prefixed dense-vector retrieval via weighted RRF
+  candidate fusion. A deployment-configured cross-encoder supplies final ordering when enabled;
+  disabled/error paths retain RRF order. It returns 1-hop graph relations by default
+  (`include_related=True`).
 - Mode selection: `mode="strict"` when you specifically need superseded matches resolved to
   their live successor and low-confidence results dropped rather than returned (an empty `[]`
   result under strict mode is a valid, deliberate abstention — not an error, and not proof

@@ -45,7 +45,7 @@ pip install -e .
 - `SALTMDB_DISABLE_LIBRARIAN`: Set to any non-empty value to suppress all Librarian maintenance-pass triggers (runs in-daemon as of the Track B backend-daemon rework; useful for debugging or controlled environments).
 - `SALTMDB_TEST_MODE`: Set to any non-empty value in automated test environments to suppress Librarian maintenance-pass triggers without affecting other behavior.
 
-> **Mechanical Text Quality Gate & Duplicate Handling:** All writes (`store_memory`) and merges (`consolidate_memories`) undergo sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy bounds \[2.5, 5.3\], Word 3-gram/5-gram sequence repetition, Type-Token Ratio, Coleman-Liau readability bounds \[2.0, 26.0\], and MSDI structural density scoring) and Stage A SHA-256 exact hash deduplication before ONNX embedding execution. The gate aggregates every finding into one response instead of failing on the first: only malformed/empty/placeholder content, unmistakable extreme generation loops, and missing required structure at length are hard rejections — entropy/repetition/TTR/readability findings are advisory warnings that never block the write. Duplicate handling runs on every brand-new `store_memory` write: an exact content-hash match is a hard rejection naming the existing entity; a near-duplicate ($\ge 0.75$ cosine similarity band) always stores and returns `duplicate_candidates` inline, directing the caller to `supersede_memory`/`consolidate_memories` — there is no separate review-token resubmission step. This replaced the two-phase `REVIEW_REQUIRED`/`review_token` disposition gate entirely — see `AGENT_GUIDE.md`'s `store_memory` entry for the full current flow.
+> **Mechanical Text Quality Gate & Duplicate Handling:** All writes (`store_memory`) and merges (`consolidate_memories`) undergo sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy bounds \[2.5, 5.3\], Word 3-gram/5-gram sequence repetition, Type-Token Ratio, Coleman-Liau readability bounds \[2.0, 26.0\], and MSDI structural density scoring) and Stage A SHA-256 exact hash deduplication before ONNX embedding execution. The gate aggregates every finding into one response instead of failing on the first: only malformed/empty/placeholder content, unmistakable extreme generation loops, and missing required structure at length are hard rejections — entropy/repetition/TTR/readability findings are advisory warnings that never block the write. Duplicate handling runs on every brand-new `store_memory` write: an exact content-hash match is a hard rejection naming the existing entity; FTS-prefiltered candidates are judged primarily by the bundled MiniLM-L6 cross-encoder, and a candidate above the provisional logit threshold always stores and returns `duplicate_candidates` inline, directing the caller to `supersede_memory`/`consolidate_memories`/`manage_relation`. Cosine/lexical comparison is only a genuine model-failure fallback; there is no separate review-token resubmission step. This replaced the two-phase `REVIEW_REQUIRED`/`review_token` disposition gate entirely — see `AGENT_GUIDE.md`'s `store_memory` entry for the full current flow.
 
 > **Note on bundled model:** The `BAAI/bge-small-en-v1.5` ONNX model weights (~66 MB) are pre-bundled directly within the `saltmdb` package for offline execution out of the box. If bundled model files are missing or modified, `fastembed` will fall back to downloading them from Hugging Face automatically.
 
@@ -178,6 +178,14 @@ To verify that the database schemas, triggers, and lock rules operate correctly,
 python -m unittest discover tests
 ```
 
+When upgrading an existing database to `v0.1.0-alpha.84`, take and verify a physical SQLite
+backup before reconnecting any client. Normal daemon initialization runs the schema-v3 lifecycle
+cleanup atomically after the v1/v2 migrations; a failure leaves the database at its prior
+`user_version` so the entire v3 step can retry on the next startup. After reconnecting, confirm
+the viewer's **Schema version** metric reports `3` before leaving the deployment unattended. See
+the alpha.84 row in `MIGRATION.md` for the exact repairs and the deliberately untouched ambiguous
+supersession cases.
+
 ---
 
 ## 7. Troubleshooting & Logs
@@ -209,4 +217,3 @@ Lifecycle hooks automate:
 - **GitHub Copilot CLI:** Add `.github/hooks/saltmdb.json` or `~/.copilot/hooks/saltmdb.json` using the `preToolUse` permission JSON protocol (`{"permissionDecision": "allow" | "deny"}`).
 
 👉 **For complete script source listings and JSON configurations, check the [`hooks/`](hooks/) directory and refer to [AGENT_GUIDE.md §7 (Session Automation via Lifecycle Hooks)](AGENT_GUIDE.md#7-session-automation-via-lifecycle-hooks)**.
-

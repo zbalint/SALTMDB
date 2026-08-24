@@ -405,6 +405,9 @@ def store_memory(
 
 @mcp.tool(
     description="""Performs full-text keyword & dense vector hybrid search in long-term memory.
+    FTS5 and BGE-prefixed dense retrieval form a weighted-RRF candidate pool; a
+    deployment-configured cross-encoder supplies final ordering when enabled, with deterministic
+    RRF fallback.
 
     Search by query, tags, context, memory type, or core status. `mode="strict"` resolves
     superseded matches and applies relevance abstention; `mode="history"` keeps matched history
@@ -413,8 +416,9 @@ def store_memory(
     memory; this field is advisory-only and never auto-corrected -- an agent seeing it should
     re-verify the citation itself, not blindly trust either the flag or the original claim.
 
-    Explicit-ID retrieval is provided by the dedicated get_memory tool. Experimental ranking and benchmark controls remain
-    available through internal services/evaluation tooling, but are intentionally absent here.
+    Explicit-ID retrieval is provided by the dedicated get_memory tool. Ranking stages cannot be
+    changed per MCP call; benchmark controls for candidate channels, caps, lifecycle-family
+    experiments, and diagnostics remain internal-only.
 
     owner_id is required on this tool's very first call within a session (it binds the session
     identity); later calls in the same session may omit it once bound.

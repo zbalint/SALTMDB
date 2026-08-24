@@ -66,14 +66,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     function's own semantic-search gate below -- `check_duplicate_memories`'s separate
     `is_semantic_search_enabled()` call site is unrelated and unaffected.
 
-    Cross-encoder reranking (roadmap `ba2cf66f` P1#7, design `1fddc04a`/`8115fa4a`) is the
-    unconditional, always-on Stage-2 final reranker -- not a caller-facing opt-in. It triggers pool
-    widening and shares the `_rrf_gap_confident` gap-gate (a decisive, dual-channel-corroborated
-    hybrid winner skips Stage-2 entirely). Scores the widened pool with an optional ONNX
-    cross-encoder (`reranker_service.score_pairs`, feature-flagged via `SALTMDB_RERANKER_MODEL`,
-    no PyTorch runtime) and full-overrides ordering by score. Deterministic fallback: disabled
-    feature, unsupported/missing model, or any runner failure leaves `ranked_pool_` exactly as it
-    was before this stage -- no exception, no widened result count. Cross-encoder scores are
+    Cross-encoder reranking (roadmap `ba2cf66f` P1#7, design `1fddc04a`/`8115fa4a`) occupies a
+    fixed Stage-2 final-reranker slot -- there is no caller-facing enable/force flag. When the
+    deployment configures a supported `SALTMDB_RERANKER_MODEL`, the widened pool is scored by the
+    ONNX cross-encoder (`reranker_service.score_pairs`, no PyTorch runtime) and its ordering fully
+    overrides RRF for scored candidates. The stage deliberately bypasses `_rrf_gap_confident`;
+    the configured model is the final judge even for a decisive dual-channel RRF winner.
+    Deterministic fallback: an unset/unsupported model or any runner failure leaves
+    `ranked_pool_` exactly as RRF produced it -- no exception and no widened result count.
+    Cross-encoder scores are
     attached to `accept_or_abstain`'s evidence dict as an inert `cross_encoder_score` field this
     release -- they do NOT affect the accept/reject decision yet (that requires its own future,
     separately-calibrated gate rule, not an uncalibrated one invented here).
@@ -114,14 +115,12 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
         mode = "broad"
 
-    # candidate/search-ce-final-reranker (merged d1655d2): the cross-encoder is the
-    # unconditional, always-on final reranker, REPLACING the RRF blend as the caller-visible
-    # default -- not a caller opt-in. It also bypasses _rrf_gap_confident (see below), so CE
-    # gets the final say on every query, not just ambiguous ones. The topic-rerank full-override
-    # path (formerly the caller-facing rerank_by_topic flag) is permanently retired in favor of
-    # CE alone. score_pairs() returning None (disabled/error/malformed) still leaves
-    # ranked_pool_ exactly as RRF produced it -- the existing exception-only fallback below is
-    # untouched, same shape as the dedup round's cosine-as-fallback.
+    # candidate/search-ce-final-reranker (merged d1655d2): the cross-encoder occupies the fixed
+    # final-reranker slot and is no longer a caller opt-in. When enabled by deployment config it
+    # replaces RRF as the caller-visible order and bypasses _rrf_gap_confident, so CE gets the
+    # final say on every eligible query, not just ambiguous ones. The old full-pool topic-rerank
+    # path is retired. score_pairs() returning None (disabled/error/malformed) still leaves
+    # ranked_pool_ exactly as RRF produced it.
 
     chunk_oversampling, chunk_window, configured_chunk_weight = (
         validation._validate_chunk_candidate_controls(
@@ -539,10 +538,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     if rrf_map:
                         # Part 1 gap gate (SALTMDB memory 870a1d4e): originally could skip Stage 2
                         # entirely when hybrid search already had a decisive, dual-channel-
-                        # corroborated winner. The cross-encoder stage below now runs
-                        # unconditionally (force_cross_encoder is permanently on, see the
-                        # forcing-block comment near the top of this function), so this gate no
-                        # longer skips any execution -- it's kept only for the observability debug
+                        # corroborated winner. The fixed cross-encoder stage below bypasses this
+                        # gate whenever deployment configuration enables scoring, so the gate no
+                        # longer skips execution -- it is kept only for the observability debug
                         # log below. Deliberately checked against the pre-substitution
                         # fts_ids_/semantic_ids_ sets (a resolved head's own channel membership is
                         # a separate, Part B evidence question, not this gate's).

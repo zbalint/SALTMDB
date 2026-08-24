@@ -447,7 +447,7 @@ def rerank_candidates_by_topic(
     from the original Gemini-generated spec (which re-chunked/re-embedded candidates live on
     every search), reusing Foundation's precomputed chunk vectors instead. IDs with zero chunk
     rows are simply absent from the returned dict -- callers apply their own fallback (see
-    search_memory's rerank_by_topic handling).
+    strict-mode relevance grounding in search_memory).
 
     Algorithm: chunk the query text the same way entity content is chunked (usually one chunk
     for a realistic search query, implemented generally), batch-embed all query chunks in one
@@ -535,9 +535,9 @@ def rerank_candidates_by_topic(
 
 
 def _score_topics_with_fallback(query_text: str, ids: list[str], db_path: str) -> dict[str, dict]:
-    """Shared by rerank_by_topic's full-pool Stage-2 rerank and mode="strict"'s on-demand,
-    FTS-less-candidates-only grounding lookup (Part B) -- factored out so both call sites use
-    exactly one code path for "score these ids via chunk-level topic_score, falling back to
+    """Score mode="strict" candidates for on-demand relevance grounding (Part B).
+
+    Uses one code path for "score these ids via chunk-level topic_score, falling back to
     entity-level cosine similarity (B4) for any id rerank_candidates_by_topic couldn't score (not
     yet chunk-embedded)". No candidate in `ids` is ever dropped: a fallback-tier id gets a
     BROADLY_RELATED_THEMES/DIFFERENT_TOPICS verdict from RERANK_BROAD_THEME_THRESHOLD instead of

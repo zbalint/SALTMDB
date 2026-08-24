@@ -1,0 +1,3 @@
+# Local evaluation runners may bind private corpus inputs and must never enter release archives.
+exclude scripts/benchmarking/replay_run9_candidate.py
+exclude tests/test_replay_run9_candidate.py

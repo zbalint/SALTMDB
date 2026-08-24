@@ -43,3 +43,7 @@ test_data/
 reports/
 plans/
 test_db/
+
+# Local one-off Gate-D replay runners (may bind private evaluation inputs).
+/scripts/benchmarking/replay_run9_candidate.py
+/tests/test_replay_run9_candidate.py

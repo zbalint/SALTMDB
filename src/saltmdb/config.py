@@ -1,6 +1,6 @@
 import os
 
-__version__ = "0.1.0-alpha.75"
+__version__ = "0.1.0-alpha.84"
 
 
 def get_db_path() -> str:
@@ -63,9 +63,9 @@ CHUNK_OVERLAP_CHARS = 200
 
 # Cross-chunk topic scoring (search_memory's mode="strict" relevance-gate evidence, see
 # src/saltmdb/domain/services/memory_service/search_primitives.py:_score_topics_with_fallback --
-# the caller-facing rerank_by_topic full-override flag this pool size was originally sized for is
-# retired; RERANK_CANDIDATE_POOL_SIZE now sizes Stage-2 pool widening for the mandatory
-# cross-encoder stage instead). Separate RERANK_* prefix from DEDUP_* above -- different
+# the retired full-pool topic-reranking path no longer exists; RERANK_CANDIDATE_POOL_SIZE now
+# sizes Stage-2 pool widening for the fixed cross-encoder pipeline stage instead). Separate
+# RERANK_* prefix from DEDUP_* above -- different
 # subsystem/phase, independently tunable. Threshold values
 # locked from scripts/benchmarking/benchmark_rerank_thresholds.py's real bge-small-en-v1.5
 # Mean(Max(cosine_similarity)) measurements over hand-labeled same-topic/related-theme/unrelated
@@ -246,9 +246,10 @@ SUPERSESSION_CHAIN_MAX_DEPTH = 10
 # pathological queries, not benchmarked.
 STRICT_OVERFETCH_CANDIDATE_CAP = 200
 
-# Cross-encoder reranking (search_memory's mandatory, always-on Stage-2 final reranker as of
-# candidate/search-ce-final-reranker, merged d1655d2 -- originally benchmarked as the opt-in
-# use_cross_encoder flag, now the unconditional default; see
+# Cross-encoder reranking (search_memory's fixed Stage-2 final-reranker slot as of
+# candidate/search-ce-final-reranker, merged d1655d2). The pipeline no longer has per-call
+# enable/force flags; actual scoring remains deployment-configured through SALTMDB_RERANKER_MODEL
+# and deterministically falls back to RRF order when disabled or unavailable. See
 # src/saltmdb/domain/services/reranker_service.py). Roadmap ba2cf66f P1#7 / design memos
 # 1fddc04a/8115fa4a: an ONNX-only Stage-2 pairwise reranker, no PyTorch, no new
 # dependency (fastembed is already pinned and already wraps ONNX Runtime for the bi-encoder).
@@ -257,9 +258,9 @@ STRICT_OVERFETCH_CANDIDATE_CAP = 200
 def get_reranker_model_name() -> str | None:
     """SALTMDB_RERANKER_MODEL env var, stripped. Unset/empty -> None (disabled, the default).
 
-    Feature-flag polarity is the OPPOSITE of is_semantic_search_enabled()'s default-true/opt-out
-    shape: this is an experimental, benchmark-gated, default-OFF/opt-in feature ("add no default
-    dependency" unless a model shows a material holdout gain -- see design memo 1fddc04a).
+    This deployment-level switch controls the fixed final-reranker stage; it is not exposed as a
+    per-call search_memory parameter. Unset keeps RRF ordering, while a supported model enables
+    cross-encoder ordering for every eligible query in that daemon process.
     """
     val = os.environ.get("SALTMDB_RERANKER_MODEL", "").strip()
     return val or None

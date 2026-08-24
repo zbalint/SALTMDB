@@ -341,6 +341,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     existing = cursor.fetchone()
     existing_retrieval_text = None
     existing_retrieval_hash = None
+    metadata_str: str | None
     if existing:
         (
             created_at,

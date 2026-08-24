@@ -20,11 +20,9 @@ from ._shared import logger
 
 def _rrf_gap_confident(rrf_score_map: dict[str, float], fts_ids: set, semantic_ids: set) -> bool:
     """True when RRF's top1 candidate is (a) matched by BOTH the FTS and dense-vector channels
-    and (b) separated from top2 by RERANK_GAP_SKIP_RATIO or more -- hybrid search already has a
-    decisive, corroborated winner and Stage-2 rerank_by_topic has no signal worth adding (see
-    SALTMDB memory 870a1d4e, Q8: rerank overrode a dual-channel, ~2x-margin decisive winner with a
-    noise-level embedding-cosine call). A tie (Q1-style, ~1.0x, or a top1 matched by only one
-    channel) still falls through to rerank -- exactly the ambiguous case rerank helps with.
+    and (b) separated from top2 by RERANK_GAP_SKIP_RATIO or more. This remains retrieval-confidence
+    evidence for diagnostics and evaluation; it no longer skips the fixed cross-encoder pipeline
+    stage. A tie (Q1-style, ~1.0x, or a top1 matched by only one channel) returns False.
     Requiring dual-channel support, not ratio alone, avoids trusting a numeric gap that isn't
     actually backed by real retrieval agreement (see RERANK_GAP_SKIP_RATIO's config.py comment for
     the calibration data behind this).
@@ -647,12 +645,12 @@ def _build_candidate_evidence(
       check, not bypass it via the dual-channel shortcut (this was a real bypass caught during
       review; do not "simplify" `dual_channel` back to `in_fts and in_semantic`).
 
-    `topic_score`/`semantic_verdict` stay optional (None when absent) -- populated only when
-    rerank_by_topic actually ran for this call (cost note, Part B): this function must never force
-    that expensive Stage-2 pass as a side effect of being called.
+    `topic_score`/`semantic_verdict` stay optional (None when absent) -- populated only by strict
+    mode's on-demand relevance-grounding lookup. This function must never force that expensive
+    scoring pass as a side effect of being called.
 
     `cross_encoder_score` (roadmap `ba2cf66f` P1#7) is the same optional-field shape: `None`
-    unless `use_cross_encoder` actually scored this candidate. Evidence only, this release --
+    unless the deployment-configured cross-encoder scored this candidate. Evidence only --
     `accept_or_abstain` does NOT read this field yet (see search_memory's own docstring for why).
     """
     fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}

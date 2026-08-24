@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=61.0.0"]
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "saltmdb"
-version = "0.1.0-alpha.83"
+version = "0.1.0-alpha.84"
 description = "Local-First MCP Memory Server"
 readme = "README.md"
 authors = [
     { name = "Bálint Zoltán Márton" }
 ]
-license = { text = "AGPL-3.0-only" }
+license = "AGPL-3.0-only"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.28.1,<2.0.0",
