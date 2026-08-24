@@ -913,6 +913,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 "context_id": context_id,
                 "scope": scope,
                 "memory_type": effective_memory_type_preview,
+                "agent_session_id": agent_session_id,
             },
         )
     except Exception as e:

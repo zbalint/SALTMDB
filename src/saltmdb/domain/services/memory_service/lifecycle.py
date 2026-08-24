@@ -663,7 +663,8 @@ def get_memory(
             SELECT id, title, full_content, status, created_at, updated_at,
                    last_accessed_at, owner_id, scope, is_core, parent_ids,
                    valid_from, valid_to, metadata, context_id, memory_type,
-                   quality_score, quality_status, quality_flags
+                   quality_score, quality_status, quality_flags,
+                   agent_session_id, last_touched_session_id
             FROM entities WHERE id = ?
             """,
             (resolved_id,),
@@ -728,6 +729,8 @@ def get_memory(
             "quality_score": row[16],
             "quality_status": row[17],
             "quality_flags": row[18],
+            "agent_session_id": row[19],
+            "last_touched_session_id": row[20],
             "tags": tag_ops.list_entity_tags(conn, resolved_id),
             "lineage": lineage,
         }
