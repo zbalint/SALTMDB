@@ -142,6 +142,7 @@ def _dispatch_store_memory(**kw):
         actionability=kw.get("actionability"),
         metadata=kw.get("metadata"),
         context_id=kw.get("context_id"),
+        agent_session_id=kw.get("agent_session_id"),
         retrieval_text=(
             kw.get("retrieval_text")
             if retrieval_text_provided
@@ -164,6 +165,7 @@ def _dispatch_search_memory(**kw):
         explain_mode=_optional_bool(kw, "explain_mode", False),
         limit=_optional_int(kw, "limit", 5),
         context_id=kw.get("context_id"),
+        agent_session_id=kw.get("agent_session_id"),
         is_core=kw.get("is_core"),
         memory_type_filter=kw.get("memory_type_filter"),
         tag_operator=_optional_tag_operator(kw),
@@ -265,6 +267,7 @@ def _dispatch_replacement(**kw):
         context_id=kw.get("context_id"),
         scope=kw.get("scope"),
         memory_type=kw.get("memory_type"),
+        agent_session_id=kw.get("agent_session_id"),
     )
 
 
@@ -290,6 +293,7 @@ def _dispatch_consolidate_memories(**kw):
             consolidations=_required_list(kw, "consolidations"),
             owner_id=kw.get("owner_id"),
             context_id=kw.get("context_id"),
+            agent_session_id=kw.get("agent_session_id"),
         )
     consolidate = getattr(relation_service, "consolidate_memories")
     return consolidate(
@@ -302,6 +306,7 @@ def _dispatch_consolidate_memories(**kw):
         weight=_optional_int(kw, "weight", 1),
         owner_id=kw.get("owner_id"),
         context_id=kw.get("context_id"),
+        agent_session_id=kw.get("agent_session_id"),
         override_justification=kw.get("override_justification"),
         core_reason=kw.get("core_reason"),
         core_exit_condition=kw.get("core_exit_condition"),
@@ -377,7 +382,7 @@ def _dispatch_get_events(**kw):
         context_id=kw.get("context_id"),
         agent_id=kw.get("agent_id"),
         type_filter=kw.get("event_type"),
-        session_id=kw.get("session_id"),
+        agent_session_id=kw.get("agent_session_id"),
         order=kw.get("order") or "newest_first",
         limit=kw.get("limit") or 20,
         offset=kw.get("offset") or 0,

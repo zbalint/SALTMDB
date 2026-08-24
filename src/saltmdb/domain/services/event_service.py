@@ -14,7 +14,7 @@ def log_event(
     type: str = "event",
     content: str = "",
     error_code: str = None,
-    session_id: str = None,
+    agent_session_id: str = None,
     context_id: str = None,
     db_connection=None,
     db_path: str = None,
@@ -48,7 +48,7 @@ def log_event(
         def _do_insert():
             conn.execute(
                 """
-                INSERT INTO events (id, timestamp, agent_id, type, content, error_code, session_id, context_id)
+                INSERT INTO events (id, timestamp, agent_id, type, content, error_code, agent_session_id, context_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
@@ -58,7 +58,7 @@ def log_event(
                     type,
                     redacted_content,
                     redacted_error_code,
-                    session_id,
+                    agent_session_id,
                     redacted_context_id,
                 ),
             )
@@ -89,7 +89,7 @@ def get_recent_events(
     context_id: str = None,
     agent_id: str = None,
     type_filter: str = None,
-    session_id: str = None,
+    agent_session_id: str = None,
     order: str = "newest_first",
     limit: int = 20,
     offset: int = 0,
@@ -101,7 +101,7 @@ def get_recent_events(
 
     `context_id` is the headline filter (§3.3 fixed: previously stored on every row but
     unreachable from any agent-facing path). Every filter is a plain equality clause,
-    including `session_id` -- there is no more forced "session mode" (§3.4's `mode='session'`
+    including `agent_session_id` -- there is no more forced "session mode" (§3.4's `mode='session'`
     is gone) and no more dismissed-event/entity-status derivation loop (§3.5's `status_filter`
     is gone): this is now exactly one `SELECT ... LIMIT ? OFFSET ?`, ordered by `timestamp`
     ascending ("oldest_first") or descending ("newest_first", default).
@@ -125,16 +125,16 @@ def get_recent_events(
         if type_filter:
             where_clauses.append("type = ?")
             params.append(type_filter)
-        if session_id:
-            where_clauses.append("session_id = ?")
-            params.append(session_id)
+        if agent_session_id:
+            where_clauses.append("agent_session_id = ?")
+            params.append(agent_session_id)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         direction = "ASC" if order == "oldest_first" else "DESC"
 
         cursor = conn.execute(
             f"""
-            SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
+            SELECT id, timestamp, agent_id, type, content, error_code, agent_session_id, context_id
             FROM events
             {where_sql}
             ORDER BY timestamp {direction}
@@ -155,7 +155,7 @@ def get_recent_events(
                     "type": etype,
                     "content": display_content,
                     "error_code": ecode,
-                    "session_id": esess,
+                    "agent_session_id": esess,
                     "context_id": ectx,
                 }
             )

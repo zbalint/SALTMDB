@@ -17,6 +17,8 @@ without contaminating the shared daemon dispatch path.
 
 from __future__ import annotations
 
+import uuid6
+
 
 class IdentityRebindRejected(Exception):
     """Raised when a second, different owner_id arrives on an already-bound adapter connection.
@@ -38,7 +40,7 @@ class _SessionIdentity:
 
     def __init__(self) -> None:
         self._owner_id: str | None = None
-        self._host_session_id: str | None = None
+        self.agent_session_id: str = str(uuid6.uuid7())
 
     def bind(self, owner_id: str | None) -> None:
         """Binds the session's owner_id from the first call that supplies one. A falsy value
@@ -54,25 +56,11 @@ class _SessionIdentity:
     def owner_id(self) -> str | None:
         return self._owner_id
 
-    def bind_host_session_id(self, host_session_id: str | None) -> None:
-        """Binds the host harness's own session id (§4.6), an opaque, advisory, may-dangle
-        pointer -- SALTMDB stores it and never resolves it (transcript layouts are host-
-        specific; resolving them is a bootstrap/CLI/hook concern per memory 9be9b3b0, not this
-        module's). First non-empty value wins, same as owner_id, but mismatches are NOT an
-        error here -- unlike owner_id there is no correctness invariant a rebind would violate
-        (it's advisory-only), so silently keeping the first value is sufficient."""
-        if host_session_id and self._host_session_id is None:
-            self._host_session_id = host_session_id
-
-    @property
-    def host_session_id(self) -> str | None:
-        return self._host_session_id
-
     def reset(self) -> None:
         """Test-only: clears bound state so each test starts from a clean adapter. Never called
         by production code -- a real adapter process has exactly one identity for its whole life."""
         self._owner_id = None
-        self._host_session_id = None
+        self.agent_session_id = str(uuid6.uuid7())
 
 
 # One instance per adapter process, by construction (module import happens once per process).

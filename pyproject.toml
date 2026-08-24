@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saltmdb"
-version = "0.1.0-alpha.84"
+version = "0.1.0-alpha.85"
 description = "Local-First MCP Memory Server"
 readme = "README.md"
 authors = [
@@ -16,7 +16,8 @@ dependencies = [
     "mcp>=1.28.1,<2.0.0",
     "sqlite-vec>=0.1.9,<0.2.0",
     "fastembed>=0.8.0,<0.9.0",
-    "numpy>=1.26.0,<3.0.0"
+    "numpy>=1.26.0,<3.0.0",
+    "uuid6>=2024.7.10,<2026.0.0"
 ]
 
 [project.optional-dependencies]
@@ -53,7 +54,7 @@ target-version = "py310"
 select = ["E", "F", "W", "C90", "PLR"]
 # E501: ruff format already wraps executable code to `line-length`; remaining long lines are
 # string/comment literals the formatter won't split, not a code-quality signal worth blocking on.
-ignore = ["E501", "PLR0913", "PLR2004"]
+ignore = ["E501", "PLR0913", "PLR0917", "PLR2004"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12

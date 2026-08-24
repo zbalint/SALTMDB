@@ -152,7 +152,7 @@ class TestDispatchToolTelemetryWiring(unittest.TestCase):
                 "type": "event",
                 "content": "telemetry wiring smoke test",
                 "error_code": None,
-                "session_id": None,
+                "agent_session_id": None,
                 "context_id": None,
             },
             self.coordinator,

@@ -1,4 +1,3 @@
-import os
 import sys
 import logging
 from saltmdb.config import get_db_path
@@ -50,7 +49,6 @@ def main():
     else:
         from saltmdb.daemon.client import ensure_daemon_running
         from saltmdb.mcp import tools
-        from saltmdb.mcp.identity import SESSION_IDENTITY
         from saltmdb.mcp.server import mcp
 
         db_path = get_db_path()
@@ -61,13 +59,10 @@ def main():
         # server_lifespan (which owns only the SessionConnection, §5/§8).
         ensure_daemon_running(db_path)
         tools.configure_backend(tools.RpcBackend())
-        # Host session-id channel (§4.6): a whole-process, startup-time concern, same precedent
-        # as backend configuration just above -- one adapter process serves exactly one agent
-        # session, so this is read once, here, not per-call. Advisory and may be absent: no host
-        # launcher sets this today, so this is a no-op everywhere until a hook/launcher starts
-        # exporting it. SALTMDB stores the value opaquely and never resolves or reads the
-        # transcript it points at (memory 9be9b3b0's bootstrap-is-integration boundary).
-        SESSION_IDENTITY.bind_host_session_id(os.environ.get("SALTMDB_HOST_SESSION_ID"))
+        # agent_session_id (§4.6) needs no wiring here anymore: SESSION_IDENTITY self-mints a
+        # UUIDv7 the moment it's constructed (mcp/identity.py), so there's nothing to read from
+        # the environment at adapter boot -- the old host-harness-cooperation channel this
+        # comment used to describe (SALTMDB_HOST_SESSION_ID) never worked and has been removed.
         mcp.run()
 
 

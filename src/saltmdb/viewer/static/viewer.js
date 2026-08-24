@@ -297,7 +297,7 @@
   const openEventDetail = (event, invoker = document.activeElement) => {
     eventDetail.replaceChildren();
     const facts = node('dl', undefined, 'metadata-grid');
-    [['Event ID', event.id], ['Timestamp', event.timestamp], ['Type', event.type], ['Agent', event.agent_id || '—'], ['Session ID', event.session_id || '—'], ['Context ID', event.context_id || '—'], ['Error code', event.error_code || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
+    [['Event ID', event.id], ['Timestamp', event.timestamp], ['Type', event.type], ['Agent', event.agent_id || '—'], ['Session ID', event.agent_session_id || '—'], ['Context ID', event.context_id || '—'], ['Error code', event.error_code || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
     eventDetail.append(section('Event evidence', 'This is a read-only record. Events do not imply a linked memory unless a context is supplied.'), facts);
     const content = node('pre', event.content || '—', 'raw-markdown'); eventDetail.append(section('Event content'), content);
     const actions = node('div', undefined, 'detail-actions');

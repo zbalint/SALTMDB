@@ -88,7 +88,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
     def test_get_events_filters_by_context_and_agent(self):
         # Phase 6 (plan §5.7): log_event/get_events no longer have `mode` -- context_id/
-        # agent_id/event_type/session_id are all plain equality filters now.
+        # agent_id/event_type/agent_session_id are all plain equality filters now.
         tools.log_event(
             event_type="attempt",
             content="Event mode test",
@@ -1313,7 +1313,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
 class TestGetEventsEndToEnd(unittest.TestCase):
     """End-to-end coverage of get_events' reshaped filters (agent API redesign plan §5.7, Phase
-    6 item 23): context_id/agent_id/event_type/session_id equality filters, order, limit/offset,
+    6 item 23): context_id/agent_id/event_type/agent_session_id equality filters, order, limit/offset,
     and the removed-kwarg regression guard."""
 
     def setUp(self):
@@ -1363,14 +1363,20 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "decision")
 
-    def test_session_id_filters_correctly(self):
-        SESSION_IDENTITY.bind_host_session_id("host-session-filter-test")
-        tools.log_event(event_type="issue", content="session-bound event", owner_id="agent_sess")
-        tools.log_event(event_type="issue", content="no session id from get_events' own filter arg")
+    def test_agent_session_id_filters_correctly(self):
+        session_id = SESSION_IDENTITY.agent_session_id
+        from saltmdb.domain.services import event_service
 
-        events = tools.get_events(session_id="host-session-filter-test")
+        event_service.log_event(
+            agent_id="agent_sess",
+            content="session-bound event",
+            agent_session_id=session_id,
+            db_connection=self.conn,
+        )
+
+        events = tools.get_events(agent_session_id=session_id)
         self.assertTrue(len(events) >= 1)
-        self.assertTrue(all(e["session_id"] == "host-session-filter-test" for e in events))
+        self.assertTrue(all(e["agent_session_id"] == session_id for e in events))
 
     def test_order_oldest_first_vs_newest_first_changes_result_order(self):
         tools.log_event(event_type="issue", content="first", owner_id="agent_order")
@@ -1408,7 +1414,7 @@ class TestGetEventsEndToEnd(unittest.TestCase):
 class TestLogEventEndToEnd(unittest.TestCase):
     """End-to-end coverage of log_event's Phase 6 reshaping (agent API redesign plan §5.7, item
     23): event_type as the parameter name, no agent_id parameter, owner binding as agent_id, and
-    session_id auto-populated from SESSION_IDENTITY.host_session_id."""
+    agent_session_id auto-populated from SESSION_IDENTITY.agent_session_id."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -1444,26 +1450,35 @@ class TestLogEventEndToEnd(unittest.TestCase):
         row = self.conn.execute("SELECT agent_id FROM events WHERE id = ?", (event_id,)).fetchone()
         self.assertEqual(row[0], "agent_bound")
 
-    def test_session_id_reflects_bound_host_session_id(self):
-        SESSION_IDENTITY.bind_host_session_id("host-session-log-event-test")
-        res = tools.log_event(
-            event_type="issue", content="session id check", owner_id="agent_sess2"
-        )
-        event_id = res.split("ID: ")[1].split()[0]
-        row = self.conn.execute(
-            "SELECT session_id FROM events WHERE id = ?", (event_id,)
-        ).fetchone()
-        self.assertEqual(row[0], "host-session-log-event-test")
+    def test_agent_session_id_is_minted_by_adapter(self):
+        from saltmdb.domain.services import event_service
 
-    def test_session_id_is_none_when_unbound(self):
-        res = tools.log_event(
-            event_type="issue", content="no session bound", owner_id="agent_sess3"
+        res = event_service.log_event(
+            agent_id="agent_sess2",
+            content="session id check",
+            agent_session_id=SESSION_IDENTITY.agent_session_id,
+            db_connection=self.conn,
         )
         event_id = res.split("ID: ")[1].split()[0]
         row = self.conn.execute(
-            "SELECT session_id FROM events WHERE id = ?", (event_id,)
+            "SELECT agent_session_id FROM events WHERE id = ?", (event_id,)
         ).fetchone()
-        self.assertIsNone(row[0])
+        self.assertEqual(row[0], SESSION_IDENTITY.agent_session_id)
+
+    def test_agent_session_id_is_never_none(self):
+        from saltmdb.domain.services import event_service
+
+        res = event_service.log_event(
+            agent_id="agent_sess3",
+            content="no session bound",
+            agent_session_id=SESSION_IDENTITY.agent_session_id,
+            db_connection=self.conn,
+        )
+        event_id = res.split("ID: ")[1].split()[0]
+        row = self.conn.execute(
+            "SELECT agent_session_id FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+        self.assertEqual(row[0], SESSION_IDENTITY.agent_session_id)
 
 
 class TestDismissEventRemovalRegression(unittest.TestCase):

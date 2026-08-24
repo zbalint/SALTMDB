@@ -36,21 +36,19 @@ class TestSessionIdentity(unittest.TestCase):
         self.assertIn("claude", str(ctx.exception))
         self.assertIn("antigravity", str(ctx.exception))
 
-    def test_host_session_id_first_value_wins_no_error_on_mismatch(self):
-        self.identity.bind_host_session_id("session-1")
-        self.identity.bind_host_session_id("session-2")  # advisory: never raises
-        self.assertEqual(self.identity.host_session_id, "session-1")
+    def test_eager_mint_is_non_empty(self):
+        self.assertTrue(self.identity.agent_session_id)
 
-    def test_host_session_id_falsy_is_noop(self):
-        self.identity.bind_host_session_id(None)
-        self.assertIsNone(self.identity.host_session_id)
+    def test_separate_instances_get_different_ids(self):
+        self.assertNotEqual(self.identity.agent_session_id, _SessionIdentity().agent_session_id)
 
-    def test_reset_clears_both_fields(self):
+    def test_reset_re_mints_session_id(self):
+        original = self.identity.agent_session_id
         self.identity.bind("claude")
-        self.identity.bind_host_session_id("session-1")
         self.identity.reset()
         self.assertIsNone(self.identity.owner_id)
-        self.assertIsNone(self.identity.host_session_id)
+        self.assertTrue(self.identity.agent_session_id)
+        self.assertNotEqual(original, self.identity.agent_session_id)
 
 
 class TestRpcBackendIdentityWiring(unittest.TestCase):
@@ -94,6 +92,27 @@ class TestRpcBackendIdentityWiring(unittest.TestCase):
         backend = mcp_tools.RpcBackend()
         with self.assertRaises(IdentityRebindRejected):
             backend.call("store_memory", {"owner_id": "antigravity", "title": "T"})
+
+    def test_write_tools_always_receive_current_agent_session_id(self):
+        backend = mcp_tools.RpcBackend()
+        write_tools = (
+            "log_event",
+            "store_memory",
+            "consolidate_memories",
+            "revise_memory",
+            "supersede_memory",
+        )
+        with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:
+            for tool_name in write_tools:
+                backend.call(tool_name, {"agent_session_id": "bogus"})
+                forwarded = mock_call.call_args[0][2]
+                self.assertEqual(forwarded["agent_session_id"], SESSION_IDENTITY.agent_session_id)
+
+    def test_non_session_stamped_tool_does_not_receive_agent_session_id(self):
+        backend = mcp_tools.RpcBackend()
+        with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:
+            backend.call("merge_tags", {})
+        self.assertNotIn("agent_session_id", mock_call.call_args[0][2])
 
 
 if __name__ == "__main__":

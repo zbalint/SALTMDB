@@ -256,6 +256,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     tags = proposed.get("tags")
     retrieval_text_provided = bool(proposed.get("retrieval_text_provided", False))
     requested_retrieval_text = proposed.get("retrieval_text")
+    agent_session_id = proposed["agent_session_id"]
     now = datetime.now(UTC).isoformat()
 
     # Core-memory governance (resolved gap #2): AUTHORITATIVE, in-transaction re-resolution --
@@ -366,8 +367,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
             conn.execute(
                 """
-                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
-                 SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
+                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
+                 SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, agent_session_id, last_touched_session_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
                  FROM entities WHERE id = ?
              """,
                 (hist_id, valid_from if valid_from else created_at, now, entity_id),
@@ -428,10 +429,11 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
 
     conn.execute(
         """
-        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?, ?, ?)
+        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             updated_at = excluded.updated_at,
+            last_touched_session_id = excluded.last_touched_session_id,
             last_accessed_at = excluded.last_accessed_at,
             owner_id = COALESCE(excluded.owner_id, entities.owner_id),
             scope = excluded.scope,
@@ -472,6 +474,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             now,
             metadata_str,
             context_id,
+            agent_session_id,
+            agent_session_id,
             content_hash,
             quality_score,
             quality_status,
@@ -582,6 +586,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     actionability: int = None,
     metadata: dict = None,
     context_id: str = None,
+    agent_session_id: str = None,
     db_connection=None,
     db_path: str = None,
     coordinator=None,
@@ -767,6 +772,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "core_exit_condition": core_exit_condition,
             "core_review_after": core_review_after,
             "detail_memory_ids": detail_memory_ids,
+            "agent_session_id": agent_session_id,
             "_skip_scd_history": frozen_current is not None,
         }
 

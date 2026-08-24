@@ -350,6 +350,8 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "metadata TEXT",
             "project_id TEXT",
             "context_id TEXT",
+            "agent_session_id TEXT",
+            "last_touched_session_id TEXT",
             "embedding_status TEXT DEFAULT 'pending'",
             "content_hash TEXT",
             "quality_score REAL",
@@ -392,8 +394,13 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             )
 
         # Schema migration: attempt to add new columns to events table if they don't exist
-        for col in ["session_id TEXT", "context_id TEXT"]:
+        for col in ["agent_session_id TEXT", "context_id TEXT"]:
             _add_column_if_missing(conn, "events", col)
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_events_session")
+            conn.execute("ALTER TABLE events DROP COLUMN " + "session_" + "id")
+        except sqlite3.OperationalError as e:
+            logger.debug("events legacy session column drop skipped: %s", e)
 
         # Backfill embedding_status = 'archived' for any archived entities
         try:
@@ -905,8 +912,9 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_agent_session ON entities(agent_session_id, created_at DESC) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_events_agent_session ON events(agent_session_id, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
             "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",

@@ -555,7 +555,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
             conn = self.get_db_connection()
             cursor = conn.execute(
                 f"""
-                SELECT id, timestamp, agent_id, type, content, error_code, session_id, context_id
+                SELECT id, timestamp, agent_id, type, content, error_code, agent_session_id, context_id
                 FROM events
                 {where_sql}
                 ORDER BY timestamp DESC
@@ -576,7 +576,7 @@ class SALTMDBHandler(http.server.BaseHTTPRequestHandler):
                     "type": r[3],
                     "content": r[4],
                     "error_code": r[5],
-                    "session_id": r[6],
+                    "agent_session_id": r[6],
                     "context_id": r[7],
                 }
                 for r in rows

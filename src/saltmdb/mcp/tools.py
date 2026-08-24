@@ -135,6 +135,15 @@ class RpcBackend:
         elif SESSION_IDENTITY.owner_id and "owner_id" in kwargs:
             kwargs = {**kwargs, "owner_id": SESSION_IDENTITY.owner_id}
 
+        if tool_name in {
+            "log_event",
+            "store_memory",
+            "consolidate_memories",
+            "revise_memory",
+            "supersede_memory",
+        }:
+            kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
+
         db_path = get_db_path()
         try:
             return daemon_client.call(db_path, tool_name, kwargs)
@@ -201,15 +210,13 @@ def log_event(
     FILTER for cross-agent coordination, which is why the two tools are asymmetric on this
     field: an agent always logs as itself, but may read what any agent logged.
 
-    `session_id` is not a parameter here either -- the adapter auto-populates it from the host
-    harness's own session id (an opaque, advisory pointer; see get_events' docstring).
+    `agent_session_id` is not a parameter here either -- the adapter auto-populates it from its
+    own process-local session identity.
 
     `owner_id` is required on this tool's very first call within a session (it binds the session
     identity); later calls in the same session may omit it once bound.
     """
     owner_id_ = _effective_owner(owner_id, tool_func=log_event, submitted=locals())
-    from saltmdb.mcp.identity import SESSION_IDENTITY
-
     return _backend_or_raise().call(
         "log_event",
         {
@@ -218,7 +225,6 @@ def log_event(
             "content": content,
             "error_code": error_code,
             "context_id": context_id,
-            "session_id": SESSION_IDENTITY.host_session_id,
         },
     )
 
@@ -429,6 +435,7 @@ def search_memory(
     limit: int | None = None,
     cursor: str | None = None,
     context_id: str | None = None,
+    agent_session_id: str | None = None,
     tags_filter: list[str] | None = None,
     memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"]
     | None = None,
@@ -448,6 +455,7 @@ def search_memory(
             "tags_filter": tags_filter_,
             "limit": limit if limit is not None else 5,
             "context_id": context_id,
+            "agent_session_id": agent_session_id,
             "is_core": is_core,
             "memory_type_filter": memory_type_filter,
             "cursor": cursor,
@@ -944,7 +952,7 @@ def get_events(
     context_id: str | None = None,
     agent_id: str | None = None,
     event_type: str | None = None,
-    session_id: str | None = None,
+    agent_session_id: str | None = None,
     order: Literal["newest_first", "oldest_first"] = "newest_first",
     limit: int | None = None,
     offset: int | None = None,
@@ -956,9 +964,8 @@ def get_events(
     thread handle, survivable across a power cut. `agent_id` filters to one agent's events, for
     "what did the other agent just decide" in a multi-agent DB (this tool has no notion of "my
     own events" the way log_event has a bound owner -- it is a read across the whole ledger,
-    narrowed by whichever filters are supplied). `session_id` filters to one host harness
-    session (an opaque, advisory pointer set by log_event automatically; agents never set it,
-    only pass one back here if they already have it from elsewhere).
+    narrowed by whichever filters are supplied). `agent_session_id` filters to one SALTMDB
+    adapter-process session.
 
     `order`: "newest_first" (default, for discovery) or "oldest_first" (for chronological
     wrap-up synthesis) -- always explicit, never inferred from which filter was passed.
@@ -969,7 +976,7 @@ def get_events(
             "context_id": context_id,
             "agent_id": agent_id,
             "event_type": event_type,
-            "session_id": session_id,
+            "agent_session_id": agent_session_id,
             "order": order,
             "limit": limit if limit is not None else 20,
             "offset": offset if offset is not None else 0,

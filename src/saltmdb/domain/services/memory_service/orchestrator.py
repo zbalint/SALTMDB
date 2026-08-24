@@ -31,6 +31,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     explain_mode: bool = False,
     limit: int = 5,
     context_id: str = None,
+    agent_session_id: str = None,
     is_core: bool = None,
     memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"] = None,
     tag_operator: Literal["AND", "OR"] = "AND",
@@ -199,6 +200,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 "(e.context_id = ? OR json_extract(e.metadata, '$.project') = ? OR json_extract(e.metadata, '$.project_id') = ?)"
             )
             params.extend([context_id, context_id, context_id])
+
+        if agent_session_id:
+            where_clauses.append("e.agent_session_id = ?")
+            params.append(agent_session_id)
 
         if is_core is not None:
             where_clauses.append("e.is_core = ?")

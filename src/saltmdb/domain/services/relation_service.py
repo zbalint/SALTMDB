@@ -1109,6 +1109,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     is_core: bool = None,
     owner_id: str = None,
     context_id: str = None,
+    agent_session_id: str = None,
     override_justification: str | None = None,
     metadata: dict | None = None,
     memory_type: str | None = None,
@@ -1446,8 +1447,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute(
                 """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
             """,
                 (
                     consolidated_id,
@@ -1463,6 +1464,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     redacted_content,
                     now,
                     context_id,
+                    agent_session_id,
+                    agent_session_id,
                     content_hash,
                     quality_score,
                     quality_status,
@@ -1633,6 +1636,7 @@ def bulk_commit_consolidation(  # noqa: PLR0915
     consolidations: list,
     owner_id: str = None,
     context_id: str = None,
+    agent_session_id: str = None,
     db_connection=None,
     db_path: str = None,
 ) -> list:
@@ -1730,6 +1734,7 @@ def bulk_commit_consolidation(  # noqa: PLR0915
                     is_core=is_core,
                     owner_id=item_owner_id,
                     context_id=item_context_id,
+                    agent_session_id=agent_session_id,
                     override_justification=override_justification,
                     core_reason=core_reason,
                     core_exit_condition=core_exit_condition,

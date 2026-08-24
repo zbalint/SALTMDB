@@ -100,6 +100,7 @@ class TestPhase4McpSurface(unittest.TestCase):
             context_id=None,
             scope=None,
             memory_type=None,
+            agent_session_id=None,
         )
 
     @patch("saltmdb.daemon.dispatch.memory_service.supersede_memory", return_value={"status": "ok"})
