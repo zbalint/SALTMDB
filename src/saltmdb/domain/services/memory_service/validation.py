@@ -22,7 +22,7 @@ from saltmdb.utils.redaction import redact_secrets
 _search_diagnostics = threading.local()
 
 TITLE_MIN_LENGTH = 5
-TITLE_MAX_LENGTH = 150
+TITLE_MAX_LENGTH = 200
 
 
 def _retrieval_text_hash(value: str | None) -> str | None:
