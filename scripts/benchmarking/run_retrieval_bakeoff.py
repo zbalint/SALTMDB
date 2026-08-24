@@ -1,8 +1,10 @@
-"""Execute one frozen, local-only development retrieval cell.
+"""Execute one frozen, local-only Gate-D retrieval cell.
 
-The command consumes a signed BakeoffSpec, CorpusRepresentationManifest, development query
-manifest, frozen corpus text export, and verified local ModelLock.  It never downloads a model
-and deliberately refuses blind queries; blind execution belongs to the post-winner custody path.
+The command consumes a signed BakeoffSpec, CorpusRepresentationManifest, a frozen query manifest,
+frozen corpus text export, and verified local ModelLock.  It never downloads a model.  Development
+queries are loaded from ``--queries-dev`` as before.  Blind queries must be supplied with
+``--queries-blind`` and are authorized through the winner-specific BlindUnlock and
+BlindQueryManifestReceipt before the blind path is read.
 """
 
 from __future__ import annotations
@@ -26,12 +28,24 @@ sys.path.insert(0, str(_ROOT / "src"))
 
 from bakeoff_state import (  # noqa: E402
     BakeoffContractError,
+    authorize_blind_file,
+    sha256_bytes,
     sign_artifact,
     validate_bakeoff_spec,
+    validate_blind_manifest_receipt,
+    validate_blind_unlock,
     validate_corpus_manifest,
+    validate_development_winner,
     validate_model_lock as validate_model_lock_artifact,
+    validate_signed_artifact,
 )
-from build_evaluation_queries import load_manifest  # noqa: E402
+from build_evaluation_queries import (  # noqa: E402
+    artifact_fingerprint,
+    load_manifest,  # noqa: F401
+    validate_queries,
+    verify_artifact_fingerprint,
+)
+from evaluation_artifacts import validate_provenance  # noqa: E402
 from lexical_adapter import bm25_search, include_current_heads  # noqa: E402
 from materialize_model_locks import PINNED_MODELS  # noqa: E402
 from retrieval_adapters import (  # noqa: E402
@@ -55,6 +69,217 @@ from saltmdb.db.connection import close_connection, get_connection  # noqa: E402
 
 class RetrievalBakeoffError(ValueError):
     """A frozen retrieval cell is incomplete, stale, or unsafe to execute."""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_lexical_snapshot_receipt(
+    receipt: Mapping[str, Any], *, db_path: Path, expected_corpus_root: str
+) -> dict[str, Any]:
+    """Validate the immutable lexical SQLite input before raw-production execution."""
+    try:
+        value = validate_signed_artifact(receipt, kind="LexicalSnapshotReceipt")
+    except (BakeoffContractError, ValueError) as exc:
+        raise RetrievalBakeoffError(str(exc)) from exc
+    if value.get("corpus_root_hash") != expected_corpus_root:
+        raise RetrievalBakeoffError("lexical snapshot receipt corpus root does not match manifest")
+    receipt_path = Path(str(value.get("db_path", ""))).expanduser()
+    if not receipt_path.is_absolute():
+        receipt_path = (Path.cwd() / receipt_path).resolve()
+    if receipt_path != db_path.expanduser().resolve():
+        raise RetrievalBakeoffError("lexical snapshot receipt db_path does not match --db-path")
+    expected_sha = value.get("db_sha256_informational")
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+        raise RetrievalBakeoffError("lexical snapshot receipt lacks db_sha256_informational")
+    actual_sha = _sha256_file(db_path)
+    if actual_sha != expected_sha:
+        raise RetrievalBakeoffError("lexical snapshot database SHA-256 does not match receipt")
+    return value
+
+
+BLIND_WINNER_ID = "late_interaction:answerdotai/answerai-colbert-small-v1:entity"
+BLIND_BASELINE_ID = "lexical:bm25"
+BLIND_BINDING_FIELDS = (
+    "authorized_query_manifest_fingerprint",
+    "blind_manifest_receipt_fingerprint",
+    "blind_manifest_file_sha256",
+)
+
+
+def _load_authorized_blind_manifest(
+    payload: bytes, *, expected_count: int = 800, expected_corpus_fingerprint: str | None = None
+) -> dict[str, Any]:
+    """Validate an already-authorized blind manifest without reopening its path.
+
+    ``authorize_blind_file`` deliberately returns bytes only after validating the unlock and
+    receipt.  Keeping parsing here byte-based prevents a future caller from accidentally falling
+    back to ``load_manifest(path)`` and reading blind material before authorization.
+    """
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetrievalBakeoffError("authorized blind manifest is not valid JSON") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
+        raise RetrievalBakeoffError("authorized blind manifest must contain a queries list")
+    try:
+        verify_artifact_fingerprint(value, field="manifest_fingerprint")
+        if value.get("queries_fingerprint") != artifact_fingerprint(value["queries"]):
+            raise ValueError("query manifest queries_fingerprint mismatch")
+        validate_provenance(value, artifact_label="blind query manifest")
+        validate_queries(value["queries"])
+    except ValueError as exc:
+        raise RetrievalBakeoffError(str(exc)) from exc
+    queries = value["queries"]
+    if (
+        expected_corpus_fingerprint is not None
+        and value.get("corpus_fingerprint") != expected_corpus_fingerprint
+    ):
+        raise RetrievalBakeoffError("blind query manifest corpus_fingerprint does not match spec")
+    if len(queries) != expected_count:
+        raise RetrievalBakeoffError(
+            f"blind query manifest must contain exactly {expected_count} queries"
+        )
+    if any(query.get("split") != "blind" for query in queries):
+        raise RetrievalBakeoffError("blind query manifest contains a non-blind query")
+    return value
+
+
+def load_query_manifest(
+    path: Path,
+    *,
+    split: str,
+    vault_dir: Path | None = None,
+    spec_path: Path | None = None,
+    winner_path: Path | None = None,
+    unlock_path: Path | None = None,
+    manifest_receipt_path: Path | None = None,
+    expected_corpus_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    return load_query_manifest_with_hash(
+        path,
+        split=split,
+        vault_dir=vault_dir,
+        spec_path=spec_path,
+        winner_path=winner_path,
+        unlock_path=unlock_path,
+        manifest_receipt_path=manifest_receipt_path,
+        expected_corpus_fingerprint=expected_corpus_fingerprint,
+    )[0]
+
+
+def load_query_manifest_with_hash(
+    path: Path,
+    *,
+    split: str,
+    vault_dir: Path | None = None,
+    spec_path: Path | None = None,
+    winner_path: Path | None = None,
+    unlock_path: Path | None = None,
+    manifest_receipt_path: Path | None = None,
+    expected_corpus_fingerprint: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    """Load a dev manifest or authorize-then-load a blind manifest.
+
+    The blind branch has no fallback: all five custody paths are required and the target path is
+    opened only inside ``authorize_blind_file`` after the signed controls validate.
+    """
+    if split == "dev":
+        try:
+            payload = path.read_bytes()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RetrievalBakeoffError("development query manifest is not valid JSON") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
+            raise RetrievalBakeoffError("development query manifest must contain a queries list")
+        try:
+            verify_artifact_fingerprint(value, field="manifest_fingerprint")
+            if value.get("queries_fingerprint") != artifact_fingerprint(value["queries"]):
+                raise ValueError("query manifest queries_fingerprint mismatch")
+            validate_provenance(value, artifact_label="query manifest")
+            validate_queries(value["queries"])
+        except ValueError as exc:
+            raise RetrievalBakeoffError(str(exc)) from exc
+        if any(query.get("split") != "dev" for query in value["queries"]):
+            raise RetrievalBakeoffError("query manifest contains a different split")
+        if len(value["queries"]) != 400:
+            raise RetrievalBakeoffError(
+                "development query manifest must contain exactly 400 queries"
+            )
+        return value, sha256_bytes(payload)
+    if split != "blind":
+        raise RetrievalBakeoffError(f"unsupported query split {split!r}")
+    controls = (vault_dir, spec_path, winner_path, unlock_path, manifest_receipt_path)
+    if any(control is None for control in controls):
+        raise RetrievalBakeoffError(
+            "blind retrieval requires vault, spec, development winner, unlock, and manifest receipt"
+        )
+    payload = authorize_blind_file(
+        path,
+        vault_dir,
+        spec_path,
+        winner_path,
+        unlock_path,
+        manifest_receipt_path,
+    )
+    return (
+        _load_authorized_blind_manifest(
+            payload, expected_corpus_fingerprint=expected_corpus_fingerprint
+        ),
+        sha256_bytes(payload),
+    )
+
+
+def _load_blind_binding(
+    *,
+    query_manifest: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    winner_path: Path,
+    unlock_path: Path,
+    receipt_path: Path,
+    authorized_payload_sha256: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Validate the already-used controls and return the binding copied into each blind bundle."""
+    winner = validate_development_winner(_load_json(winner_path), spec)
+    unlock = validate_blind_unlock(_load_json(unlock_path), spec, winner)
+    receipt = validate_blind_manifest_receipt(_load_json(receipt_path), spec, winner, unlock)
+    if receipt["file_sha256"] != authorized_payload_sha256:
+        raise RetrievalBakeoffError(
+            "blind manifest receipt hash does not match authorized payload bytes"
+        )
+    manifest_fingerprint = query_manifest.get("manifest_fingerprint")
+    if not isinstance(manifest_fingerprint, str):
+        raise RetrievalBakeoffError("blind query manifest lacks a signed manifest_fingerprint")
+    return (
+        {
+            "authorized_query_manifest_fingerprint": manifest_fingerprint,
+            "blind_manifest_receipt_fingerprint": receipt["artifact_fingerprint"],
+            "blind_manifest_file_sha256": receipt["file_sha256"],
+        },
+        winner,
+    )
+
+
+def _validate_blind_execution(contender_id: str, binding: Mapping[str, str] | None) -> None:
+    """Reject unapproved blind cells and ensure every blind bundle carries custody binding."""
+    if binding is None:
+        return
+    if contender_id not in {BLIND_WINNER_ID, BLIND_BASELINE_ID}:
+        raise RetrievalBakeoffError(
+            "blind retrieval permits only the selected development winner and lexical:bm25"
+        )
+    missing = [field for field in BLIND_BINDING_FIELDS if not binding.get(field)]
+    if missing:
+        raise RetrievalBakeoffError(f"blind retrieval binding is missing: {', '.join(missing)}")
+
+
+def _blind_bundle_binding(binding: Mapping[str, str] | None) -> dict[str, str]:
+    return {field: str(binding[field]) for field in BLIND_BINDING_FIELDS} if binding else {}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -174,9 +399,12 @@ def execute_dense_cell(
     lock: ModelLock,
     sidecar_path: Path,
     channel: str,
+    blind_binding: Mapping[str, str] | None = None,
     backend_factory: Any = fastembed_dense_factory,
     batch_size: int | None = None,
+    query_binding: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    _validate_blind_execution(f"dense:{lock.spec.model_id}:{channel}", blind_binding)
     adapter = DenseEmbeddingAdapter(lock.spec, lock, backend_factory)
     build_kwargs: dict[str, Any] = {} if batch_size is None else {"batch_size": batch_size}
     with DenseIndexRunner(
@@ -195,25 +423,26 @@ def execute_dense_cell(
                 }
             )
     failures = [row for row in results if row["failure"] is not None]
-    return sign_artifact(
-        "RetrievalRunBundle",
-        {
-            "run_id": spec["run_id"],
-            "spec_fingerprint": spec["artifact_fingerprint"],
-            "cell": {
-                "model_id": lock.spec.model_id,
-                "revision": lock.spec.revision,
-                "kind": "dense",
-                "channel": channel,
-                "compatibility_key": lock.spec.compatibility_key(),
-                "representation_root": manifest["corpus_root_hash"],
-            },
-            "index_receipt": index_receipt,
-            "complete_query_count": len(results) - len(failures),
-            "failures": failures,
-            "results": results,
+    payload = {
+        "run_id": spec["run_id"],
+        "spec_fingerprint": spec["artifact_fingerprint"],
+        "cell": {
+            "model_id": lock.spec.model_id,
+            "revision": lock.spec.revision,
+            "kind": "dense",
+            "channel": channel,
+            "compatibility_key": lock.spec.compatibility_key(),
+            "representation_root": manifest["corpus_root_hash"],
         },
-    )
+        "index_receipt": index_receipt,
+        "complete_query_count": len(results) - len(failures),
+        "failures": failures,
+        "results": results,
+    }
+    payload.update(_blind_bundle_binding(blind_binding))
+    if query_binding:
+        payload.update(query_binding)
+    return sign_artifact("RetrievalRunBundle", payload)
 
 
 def execute_late_cell(
@@ -224,9 +453,12 @@ def execute_late_cell(
     documents: Sequence[IndexDocument],
     lock: ModelLock,
     sidecar_path: Path,
+    blind_binding: Mapping[str, str] | None = None,
     backend_factory: Any = fastembed_late_interaction_factory,
     batch_size: int | None = None,
+    query_binding: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    _validate_blind_execution(f"late_interaction:{lock.spec.model_id}:entity", blind_binding)
     adapter = LateInteractionEmbeddingAdapter(lock.spec, lock, backend_factory)
     build_kwargs: dict[str, Any] = {} if batch_size is None else {"batch_size": batch_size}
     with LateInteractionIndexRunner(
@@ -245,25 +477,26 @@ def execute_late_cell(
                 }
             )
     failures = [row for row in results if row["failure"] is not None]
-    return sign_artifact(
-        "RetrievalRunBundle",
-        {
-            "run_id": spec["run_id"],
-            "spec_fingerprint": spec["artifact_fingerprint"],
-            "cell": {
-                "model_id": lock.spec.model_id,
-                "revision": lock.spec.revision,
-                "kind": "late_interaction",
-                "channel": "entity",
-                "compatibility_key": lock.spec.compatibility_key(),
-                "representation_root": manifest["corpus_root_hash"],
-            },
-            "index_receipt": index_receipt,
-            "complete_query_count": len(results) - len(failures),
-            "failures": failures,
-            "results": results,
+    payload = {
+        "run_id": spec["run_id"],
+        "spec_fingerprint": spec["artifact_fingerprint"],
+        "cell": {
+            "model_id": lock.spec.model_id,
+            "revision": lock.spec.revision,
+            "kind": "late_interaction",
+            "channel": "entity",
+            "compatibility_key": lock.spec.compatibility_key(),
+            "representation_root": manifest["corpus_root_hash"],
         },
-    )
+        "index_receipt": index_receipt,
+        "complete_query_count": len(results) - len(failures),
+        "failures": failures,
+        "results": results,
+    }
+    payload.update(_blind_bundle_binding(blind_binding))
+    if query_binding:
+        payload.update(query_binding)
+    return sign_artifact("RetrievalRunBundle", payload)
 
 
 def execute_lexical_cell(
@@ -271,14 +504,30 @@ def execute_lexical_cell(
     spec: Mapping[str, Any],
     queries: Sequence[Mapping[str, Any]],
     db_path: Path,
+    blind_binding: Mapping[str, str] | None = None,
+    lexical_policy: str = "include_current_heads",
+    query_binding: Mapping[str, str] | None = None,
+    representation_root: str | None = None,
+    lexical_snapshot_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if lexical_policy not in {"include_current_heads", "raw_production"}:
+        raise RetrievalBakeoffError(f"unsupported lexical policy: {lexical_policy}")
+    if lexical_policy == "raw_production" and (
+        lexical_snapshot_receipt is None or representation_root is None
+    ):
+        raise RetrievalBakeoffError(
+            "raw_production lexical execution requires a validated snapshot receipt and "
+            "representation root"
+        )
+    _validate_blind_execution(BLIND_BASELINE_ID, blind_binding)
     conn = get_connection(str(db_path))
     try:
         results = []
         for query in queries:
             hits, latency_ms, error = timed_search(bm25_search, conn, query["query"], limit=20)
             ids = [hit.entity_id for hit in hits]
-            ids = include_current_heads(conn, ids, limit=20)
+            if lexical_policy == "include_current_heads":
+                ids = include_current_heads(conn, ids, limit=20)
             results.append(
                 {
                     "query_id": query["id"],
@@ -301,17 +550,48 @@ def execute_lexical_cell(
     finally:
         close_connection(conn)
     failures = [row for row in results if row["failure"] is not None]
-    return sign_artifact(
-        "RetrievalRunBundle",
-        {
-            "run_id": spec["run_id"],
-            "spec_fingerprint": spec["artifact_fingerprint"],
-            "cell": {"kind": "lexical", "channel": "bm25_plus_current_head"},
-            "complete_query_count": len(results) - len(failures),
-            "failures": failures,
-            "results": results,
+    payload = {
+        "run_id": spec["run_id"],
+        "spec_fingerprint": spec["artifact_fingerprint"],
+        "cell": {
+            "kind": "lexical",
+            "channel": (
+                "bm25_plus_current_head"
+                if lexical_policy == "include_current_heads"
+                else "bm25_raw_production"
+            ),
+            "lexical_policy": lexical_policy,
+            "production_faithful": lexical_policy == "raw_production",
+            **(
+                {
+                    "lexical_snapshot_receipt_fingerprint": lexical_snapshot_receipt[
+                        "artifact_fingerprint"
+                    ],
+                    "lexical_snapshot_db_sha256": lexical_snapshot_receipt[
+                        "db_sha256_informational"
+                    ],
+                }
+                if lexical_policy == "raw_production"
+                else {}
+            ),
+            **(
+                {"representation_root": representation_root}
+                if representation_root is not None
+                else (
+                    {"representation_root": blind_binding["representation_root"]}
+                    if blind_binding is not None and "representation_root" in blind_binding
+                    else {}
+                )
+            ),
         },
-    )
+        "complete_query_count": len(results) - len(failures),
+        "failures": failures,
+        "results": results,
+    }
+    payload.update(_blind_bundle_binding(blind_binding))
+    if query_binding:
+        payload.update(query_binding)
+    return sign_artifact("RetrievalRunBundle", payload)
 
 
 def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
@@ -351,18 +631,117 @@ def _apply_memory_ceiling(limit_mb: int | None) -> None:
     resource.setrlimit(resource.RLIMIT_AS, (min(limit_bytes, new_hard), new_hard))
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _load_cli_queries(
+    args: argparse.Namespace, spec: Mapping[str, Any], parser: argparse.ArgumentParser
+) -> tuple[dict[str, Any], dict[str, str] | None, dict[str, Any] | None, str]:
+    if args.queries_dev is not None:
+        query_manifest, payload_sha256 = load_query_manifest_with_hash(
+            args.queries_dev, split="dev"
+        )
+        assert payload_sha256 is not None
+        return query_manifest, None, None, payload_sha256
+    blind_controls = (
+        args.blind_vault_dir,
+        args.development_winner,
+        args.blind_unlock,
+        args.blind_manifest_receipt,
+    )
+    if any(control is None for control in blind_controls):
+        parser.error(
+            "--queries-blind requires --blind-vault-dir, --development-winner, "
+            "--blind-unlock, and --blind-manifest-receipt"
+        )
+    query_manifest, authorized_payload_sha256 = load_query_manifest_with_hash(
+        args.queries_blind,
+        split="blind",
+        vault_dir=args.blind_vault_dir,
+        spec_path=args.spec,
+        winner_path=args.development_winner,
+        unlock_path=args.blind_unlock,
+        manifest_receipt_path=args.blind_manifest_receipt,
+        expected_corpus_fingerprint=spec["corpus_snapshot_hash"],
+    )
+    blind_binding, winner = _load_blind_binding(
+        query_manifest=query_manifest,
+        spec=spec,
+        winner_path=args.development_winner,
+        unlock_path=args.blind_unlock,
+        receipt_path=args.blind_manifest_receipt,
+        authorized_payload_sha256=authorized_payload_sha256,
+    )
+    if winner["pipeline"].get("contender_id") != BLIND_WINNER_ID:
+        parser.error("signed development winner is not the permitted Gate-D ColBERT winner")
+    return query_manifest, blind_binding, winner, authorized_payload_sha256
+
+
+def _validate_blind_model_cell(
+    *,
+    contender_id: str,
+    lock: ModelLock,
+    channel: str,
+    winner: Mapping[str, Any],
+) -> None:
+    pipeline = winner.get("pipeline") or {}
+    if contender_id != BLIND_WINNER_ID:
+        raise RetrievalBakeoffError("blind retrieval permits only the signed development winner")
+    for field, actual in (
+        ("kind", "late_interaction"),
+        ("channel", channel),
+        ("model_id", lock.spec.model_id),
+        ("revision", lock.spec.revision),
+        ("compatibility_key", lock.spec.compatibility_key()),
+    ):
+        if pipeline.get(field) != actual:
+            raise RetrievalBakeoffError(
+                f"blind model cell {field} does not match the signed development winner"
+            )
+
+
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--corpus-manifest", type=Path, required=True)
-    parser.add_argument("--queries-dev", type=Path, required=True)
+    queries_group = parser.add_mutually_exclusive_group(required=True)
+    queries_group.add_argument("--queries-dev", type=Path)
+    queries_group.add_argument("--queries-blind", type=Path)
+    parser.add_argument(
+        "--blind-vault-dir",
+        type=Path,
+        help="Private vault containing the blind manifest; required with --queries-blind.",
+    )
+    parser.add_argument(
+        "--development-winner",
+        type=Path,
+        help="Signed development winner; required with --queries-blind.",
+    )
+    parser.add_argument(
+        "--blind-unlock",
+        type=Path,
+        help="Signed winner-specific BlindUnlock; required with --queries-blind.",
+    )
+    parser.add_argument(
+        "--blind-manifest-receipt",
+        type=Path,
+        help="Signed BlindQueryManifestReceipt; required with --queries-blind.",
+    )
     parser.add_argument("--kind", choices=("dense", "late_interaction", "lexical"), required=True)
+    parser.add_argument(
+        "--lexical-policy",
+        choices=("include_current_heads", "raw_production"),
+        default="include_current_heads",
+        help="Lexical candidate policy; default preserves historical Gate-D behavior.",
+    )
     parser.add_argument("--channel", choices=("entity", "chunk"), default="entity")
     parser.add_argument("--corpus-export", type=Path)
     parser.add_argument("--model-lock", type=Path)
     parser.add_argument("--model-cache", type=Path)
     parser.add_argument("--sidecar", type=Path)
     parser.add_argument("--db-path", type=Path)
+    parser.add_argument(
+        "--lexical-snapshot-receipt",
+        type=Path,
+        help="Signed LexicalSnapshotReceipt required for --lexical-policy raw_production.",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
         "--batch-size",
@@ -389,14 +768,46 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     spec = validate_bakeoff_spec(_load_json(args.spec))
     manifest = validate_corpus_manifest(_load_json(args.corpus_manifest))
-    query_manifest = load_manifest(args.queries_dev, expected_split="dev", require_provenance=True)
+    if manifest["corpus_root_hash"] != spec["corpus_snapshot_hash"]:
+        raise RetrievalBakeoffError("corpus representation root does not match spec snapshot")
+    query_manifest, blind_binding, blind_winner, query_payload_sha256 = _load_cli_queries(
+        args, spec, parser
+    )
     queries = query_manifest["queries"]
-    if len(queries) != 400:
-        raise RetrievalBakeoffError("development runner requires exactly 400 queries")
+    if blind_binding is not None:
+        blind_binding = dict(blind_binding)
+        blind_binding["representation_root"] = manifest["corpus_root_hash"]
+    query_binding = (
+        {
+            "query_manifest_fingerprint": query_manifest["manifest_fingerprint"],
+            "query_manifest_file_sha256": query_payload_sha256,
+            "query_split": "dev",
+        }
+        if args.queries_dev is not None
+        else None
+    )
     if args.kind == "lexical":
         if args.db_path is None:
             parser.error("lexical cell requires --db-path")
-        result = execute_lexical_cell(spec=spec, queries=queries, db_path=args.db_path)
+        lexical_snapshot_receipt = None
+        if args.lexical_policy == "raw_production":
+            if args.lexical_snapshot_receipt is None:
+                parser.error("raw_production lexical cell requires --lexical-snapshot-receipt")
+            lexical_snapshot_receipt = validate_lexical_snapshot_receipt(
+                _load_json(args.lexical_snapshot_receipt),
+                db_path=args.db_path,
+                expected_corpus_root=manifest["corpus_root_hash"],
+            )
+        result = execute_lexical_cell(
+            spec=spec,
+            queries=queries,
+            db_path=args.db_path,
+            blind_binding=blind_binding,
+            lexical_policy=args.lexical_policy,
+            query_binding=query_binding,
+            representation_root=manifest["corpus_root_hash"],
+            lexical_snapshot_receipt=lexical_snapshot_receipt,
+        )
     else:
         required = (args.corpus_export, args.model_lock, args.model_cache, args.sidecar)
         if any(path is None for path in required):
@@ -404,6 +815,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert args.corpus_export and args.model_lock and args.model_cache and args.sidecar
         lock = adapter_model_lock(_load_json(args.model_lock), args.model_cache, kind=args.kind)
         channel = "entity" if args.kind == "late_interaction" else args.channel
+        if blind_binding is not None:
+            contender_id = f"{args.kind}:{lock.spec.model_id}:{channel}"
+            _validate_blind_execution(contender_id, blind_binding)
+            assert blind_winner is not None
+            _validate_blind_model_cell(
+                contender_id=contender_id,
+                lock=lock,
+                channel=channel,
+                winner=blind_winner,
+            )
         documents = load_frozen_documents(_load_json(args.corpus_export), manifest, channel)
         if args.kind == "dense":
             result = execute_dense_cell(
@@ -414,7 +835,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lock=lock,
                 sidecar_path=args.sidecar,
                 channel=channel,
+                blind_binding=blind_binding,
                 batch_size=args.batch_size,
+                query_binding=query_binding,
             )
         else:
             result = execute_late_cell(
@@ -424,7 +847,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 documents=documents,
                 lock=lock,
                 sidecar_path=args.sidecar,
+                blind_binding=blind_binding,
                 batch_size=args.batch_size,
+                query_binding=query_binding,
             )
     _atomic_write(args.out, result)
     return 0

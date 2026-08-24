@@ -78,10 +78,13 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     release -- they do NOT affect the accept/reject decision yet (that requires its own future,
     separately-calibrated gate rule, not an uncalibrated one invented here).
 
-    mode (opt-in, default "broad" -- today's exact pre-existing behavior, unchanged): Part C of
-    plans/scalable-strolling-stallman.md (SALTMDB memory `9c199005`).
-    - "broad": no chain resolution, no relevance gate, no `is_superseded` tagging. Identical to
-      this function's behavior before mode existed.
+    mode (opt-in, default "broad"): Part C of plans/scalable-strolling-stallman.md (SALTMDB
+    memory `9c199005`).
+    - "broad": no chain resolution, no relevance gate, no `is_superseded` tagging. A literal
+      title matching exactly one active entity within the caller's filters uses an identity fast
+      path and returns that entity without running hybrid retrieval; title collisions retain the
+      ordinary hybrid order. Explicit `collapse_supersedes_families=True` takes precedence over
+      identity matching and stays on the ordinary pipeline so its canonical-family contract holds.
     - "strict": matched-but-superseded candidates are resolved and SUBSTITUTED with their live,
       multi-hop-revalidated `supersedes` successor (Part A); every surviving candidate must then
       independently clear a calibrated relevance-abstention gate (Part B) or is dropped. An empty
@@ -308,6 +311,19 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             validation._set_search_diagnostics(diagnostics)
             return explain_result
 
+        exact_title_id = None
+        if query_keywords and mode in {"broad", "history"}:
+            # A partial index on active titles keeps this bounded lookup independent of corpus
+            # size. LIMIT 2 distinguishes a unique visible identity from a collision without
+            # loading every duplicate; existing caller filters define the visible corpus.
+            exact_title_rows = conn.execute(
+                f"SELECT e.id FROM entities e WHERE e.title = ? "
+                f"AND {' AND '.join(where_clauses)} LIMIT 2",
+                [query_keywords, *params],
+            ).fetchall()
+            if len(exact_title_rows) == 1:
+                exact_title_id = exact_title_rows[0][0]
+
         rows: list[Any] = []
         # topic_score/semantic_verdict are never exposed in result items -- the topic-rerank
         # full-override path is retired (see the docstring/forcing-block comments above), and
@@ -317,7 +333,24 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         # Populated only under mode="history" -- ids in the final pool that are the target of a
         # currently-valid `supersedes` edge, tagged (not hidden/reordered) in the result item.
         superseded_ids: set = set()
-        if sanitized_query:
+        if exact_title_id is not None and not collapse_supersedes_families:
+            if offset == 0 and limit > 0:
+                rows = conn.execute(
+                    """
+                    SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                           0.0 as rank_score,
+                           e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata,
+                           e.context_id, e.memory_type, 0 as rel_count, NULL as fts_snippet
+                    FROM entities e
+                    WHERE e.id = ?
+                    """,
+                    (exact_title_id,),
+                ).fetchall()
+                if mode == "history":
+                    superseded_ids = ranking._compute_superseded_ids_bitemporal(
+                        [exact_title_id], conn
+                    )
+        elif sanitized_query:
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
             from saltmdb.config import is_semantic_search_enabled
 

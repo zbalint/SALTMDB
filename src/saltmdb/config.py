@@ -127,9 +127,6 @@ RERANK_GAP_SKIP_RATIO = 1.9  # rrf_top1/rrf_top2 >= this (AND top1 dual-channel)
 BM25_TITLE_WEIGHT = 10.0
 BM25_CONTENT_WEIGHT = 1.0
 BM25_ALIAS_WEIGHT = 5.0
-# SQLite FTS5 BM25 ranks lower scores first, so an incoming live-relation boost is
-# subtracted from the weighted BM25 value in _run_fts_search.
-RELATION_COUNT_BOOST = 0.1
 
 # FTS5 query-centered snippet generation (src/saltmdb/domain/services/memory_service/search_primitives.py:_run_fts_search)
 # max_tokens must be in FTS5's valid range 1-64. Comparable to the retired top-of-doc

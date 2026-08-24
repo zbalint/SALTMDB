@@ -100,12 +100,26 @@ def _queries() -> list[dict[str, Any]]:
     return queries
 
 
+def _binding(spec: dict[str, Any]) -> dict[str, str]:
+    winner = _winner(spec)
+    unlock = bs.build_blind_unlock(spec, winner, user_confirmation="synthetic approval")
+    payload = json.dumps({"queries": _queries()}, separators=(",", ":")).encode()
+    receipt = bs.build_blind_manifest_receipt(spec, winner, unlock, _hash(payload.decode()))
+    return {
+        "authorized_query_manifest_fingerprint": _hash("manifest"),
+        "blind_manifest_receipt_fingerprint": receipt["artifact_fingerprint"],
+        "blind_manifest_file_sha256": receipt["file_sha256"],
+    }
+
+
 def _matrix(spec: dict[str, Any], queries: list[dict[str, Any]]) -> dict[str, Any]:
+    binding = _binding(spec)
     return bs.sign_artifact(
         "JudgingMatrix",
         {
             "spec_fingerprint": spec["artifact_fingerprint"],
-            "corpus_root_hash": "3" * 64,
+            "corpus_root_hash": spec["corpus_snapshot_hash"],
+            **binding,
             "contenders": [blind.BASELINE_ID, blind.WINNER_ID],
             "query_count": 800,
             "pool_top_n": 20,
@@ -158,6 +172,7 @@ def _bundle(
             "channel": "entity",
         }
     )
+    binding = _binding(spec)
     return bs.sign_artifact(
         "RetrievalRunBundle",
         {
@@ -167,6 +182,7 @@ def _bundle(
             "complete_query_count": 800,
             "failures": [],
             "results": rows,
+            **binding,
         },
     )
 
@@ -387,3 +403,53 @@ def test_evaluate_emits_signed_evidence_and_both_promotion_outcomes(tmp_path: Pa
     )
     retained = bs.build_promotion_decision(spec, retained_evaluation, winner, unlock, receipt)
     assert retained["promotion"] is False
+
+
+def test_evaluate_rejects_matrix_receipt_binding_mismatch(tmp_path: Path) -> None:
+    spec, winner, unlock, receipt, _ = _authorization_artifacts(tmp_path)
+    queries = _queries()
+    matrix = _matrix(spec, queries)
+    matrix["blind_manifest_receipt_fingerprint"] = _hash("stale-receipt")
+    raw, merged = _raw_and_merged(matrix)
+    bundles = {
+        blind.WINNER_ID: _bundle(spec, queries, blind.WINNER_ID),
+        blind.BASELINE_ID: _bundle(spec, queries, blind.BASELINE_ID),
+    }
+    with pytest.raises(blind.GateDBlindError, match="different manifest receipt"):
+        blind.evaluate(
+            spec=spec,
+            winner=winner,
+            unlock=unlock,
+            receipt=receipt,
+            queries=queries,
+            query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
+            matrix=matrix,
+            merged=merged,
+            raw_fingerprints={item["judge"]: item["fingerprint"] for item in raw},
+            bundles=bundles,
+        )
+
+
+def test_evaluate_rejects_missing_matrix_manifest_binding(tmp_path: Path) -> None:
+    spec, winner, unlock, receipt, _ = _authorization_artifacts(tmp_path)
+    queries = _queries()
+    matrix = _matrix(spec, queries)
+    matrix.pop("authorized_query_manifest_fingerprint")
+    raw, merged = _raw_and_merged(matrix)
+    bundles = {
+        blind.WINNER_ID: _bundle(spec, queries, blind.WINNER_ID),
+        blind.BASELINE_ID: _bundle(spec, queries, blind.BASELINE_ID),
+    }
+    with pytest.raises(blind.GateDBlindError, match="complete query custody binding"):
+        blind.evaluate(
+            spec=spec,
+            winner=winner,
+            unlock=unlock,
+            receipt=receipt,
+            queries=queries,
+            query_ids_fingerprint=bs.fingerprint(sorted(q["id"] for q in queries)),
+            matrix=matrix,
+            merged=merged,
+            raw_fingerprints={item["judge"]: item["fingerprint"] for item in raw},
+            bundles=bundles,
+        )

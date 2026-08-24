@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -8,14 +9,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "benchmarking"))
 
 import run_retrieval_bakeoff  # noqa: E402
-from bakeoff_state import sign_artifact, fingerprint  # noqa: E402
+from bakeoff_state import BlindAccessError, sign_artifact, fingerprint  # noqa: E402
+from build_evaluation_queries import write_manifest  # noqa: E402
 from run_retrieval_bakeoff import (  # noqa: E402
     RetrievalBakeoffError,
     adapter_model_lock,
     execute_dense_cell,
     execute_late_cell,
+    execute_lexical_cell,
+    load_query_manifest,
     load_frozen_documents,
+    validate_lexical_snapshot_receipt,
 )
+from lexical_adapter import LexicalHit  # noqa: E402
 
 
 class DenseBackend:
@@ -41,14 +47,14 @@ class LateBackend:
         return np.array([[1.0]], dtype=np.float32)
 
 
-def late_lock_artifact(cache):
+def late_lock_artifact(cache, source_repository="Qdrant/bge-small-en-v1.5-onnx-Q"):
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "model.onnx").write_bytes(b"model")
     file_hash = hashlib.sha256(b"model").hexdigest()
     return sign_artifact(
         "ModelLock",
         {
-            "source_repository": "Qdrant/bge-small-en-v1.5-onnx-Q",
+            "source_repository": source_repository,
             "resolved_revision": "a" * 40,
             "files": [{"path": "model.onnx", "sha256": file_hash, "size_bytes": 5}],
             "dimension": 1,
@@ -105,6 +111,191 @@ def artifacts(tmp_path):
     }
     spec = {"run_id": "run", "artifact_fingerprint": fingerprint("spec")}
     return cache, lock, manifest, export, spec
+
+
+def _blind_manifest(tmp_path, count=800):
+    queries = [
+        {
+            "id": f"blind-{index:04d}",
+            "query": f"synthetic blind query {index}",
+            "lang": "en",
+            "category": "strict_negative",
+            "subtype": "synthetic",
+            "split": "blind",
+            "source_entity_ids": [],
+            "topic_family_id": f"family-{index:04d}",
+            "length_bucket": "short",
+            "provenance": "synthetic",
+        }
+        for index in range(count)
+    ]
+    return write_manifest(
+        queries,
+        tmp_path / "manifest.json",
+        corpus_fingerprint="a" * 64,
+        slot_fingerprint="b" * 64,
+        commit_fingerprint="c" * 64,
+        random_seed=7,
+        config_fingerprint="d" * 64,
+        judge_version_fingerprint="e" * 64,
+    )
+
+
+def test_blind_path_requires_all_custody_controls_before_read(tmp_path):
+    target = tmp_path / "sealed.json"
+    target.write_bytes(b"protected sentinel")
+    with pytest.raises(RetrievalBakeoffError, match="vault, spec, development winner"):
+        load_query_manifest(target, split="blind")
+    assert target.read_bytes() == b"protected sentinel"
+
+
+def test_authorized_blind_manifest_is_parsed_from_exact_800_returned_bytes(monkeypatch, tmp_path):
+    manifest = _blind_manifest(tmp_path)
+    payload = json.dumps(manifest, separators=(",", ":")).encode()
+    calls = []
+
+    def authorize(*args, **kwargs):
+        calls.append((args, kwargs))
+        return payload
+
+    monkeypatch.setattr(run_retrieval_bakeoff, "authorize_blind_file", authorize)
+    paths = tuple(tmp_path / name for name in ("vault", "spec", "winner", "unlock", "receipt"))
+    loaded = load_query_manifest(
+        paths[0] / "queries.json",
+        split="blind",
+        vault_dir=paths[0],
+        spec_path=paths[1],
+        winner_path=paths[2],
+        unlock_path=paths[3],
+        manifest_receipt_path=paths[4],
+    )
+    assert len(loaded["queries"]) == 800
+    assert calls == [
+        (
+            (
+                paths[0] / "queries.json",
+                paths[0],
+                paths[1],
+                paths[2],
+                paths[3],
+                paths[4],
+            ),
+            {},
+        )
+    ]
+
+
+def test_blind_manifest_rejects_wrong_count_and_manifest_fingerprint(monkeypatch, tmp_path):
+    manifest = _blind_manifest(tmp_path, count=799)
+    payload = json.dumps(manifest, separators=(",", ":")).encode()
+    monkeypatch.setattr(run_retrieval_bakeoff, "authorize_blind_file", lambda *a, **k: payload)
+    with pytest.raises(RetrievalBakeoffError, match="exactly 800"):
+        load_query_manifest(
+            tmp_path / "sealed.json",
+            split="blind",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            manifest_receipt_path=tmp_path / "receipt.json",
+        )
+
+    tampered = json.loads(json.dumps(_blind_manifest(tmp_path)))
+    tampered["queries"][0]["query"] = "tampered"
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "authorize_blind_file",
+        lambda *a, **k: json.dumps(tampered, separators=(",", ":")).encode(),
+    )
+    with pytest.raises(RetrievalBakeoffError, match="manifest_fingerprint mismatch"):
+        load_query_manifest(
+            tmp_path / "sealed.json",
+            split="blind",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            manifest_receipt_path=tmp_path / "receipt.json",
+        )
+
+
+def test_blind_authorization_failure_from_stale_receipt_is_not_bypassed(monkeypatch, tmp_path):
+    def reject(*args, **kwargs):
+        raise BlindAccessError("stale receipt")
+
+    monkeypatch.setattr(run_retrieval_bakeoff, "authorize_blind_file", reject)
+    with pytest.raises(BlindAccessError, match="stale receipt"):
+        load_query_manifest(
+            tmp_path / "sealed.json",
+            split="blind",
+            vault_dir=tmp_path,
+            spec_path=tmp_path / "spec.json",
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            manifest_receipt_path=tmp_path / "receipt.json",
+        )
+
+
+def test_blind_execution_rejects_a_losing_cell_before_backend_start():
+    binding = {
+        "authorized_query_manifest_fingerprint": "a" * 64,
+        "blind_manifest_receipt_fingerprint": "b" * 64,
+        "blind_manifest_file_sha256": "c" * 64,
+    }
+    with pytest.raises(RetrievalBakeoffError, match="only the selected development winner"):
+        run_retrieval_bakeoff._validate_blind_execution(
+            "dense:BAAI/bge-small-en-v1.5:entity", binding
+        )
+
+
+def test_blind_binding_rejects_receipt_swapped_after_authorization(monkeypatch, tmp_path):
+    payload = b"authorized manifest bytes"
+    monkeypatch.setattr(run_retrieval_bakeoff, "_load_json", lambda path: {})
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "validate_development_winner",
+        lambda artifact, spec: {
+            "pipeline": {"contender_id": run_retrieval_bakeoff.BLIND_WINNER_ID}
+        },
+    )
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "validate_blind_unlock",
+        lambda artifact, spec, winner: {},
+    )
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "validate_blind_manifest_receipt",
+        lambda artifact, spec, winner, unlock: {
+            "artifact_fingerprint": "r" * 64,
+            "file_sha256": "s" * 64,
+        },
+    )
+    with pytest.raises(RetrievalBakeoffError, match="does not match authorized payload"):
+        run_retrieval_bakeoff._load_blind_binding(
+            query_manifest={"manifest_fingerprint": "m" * 64},
+            spec={},
+            winner_path=tmp_path / "winner.json",
+            unlock_path=tmp_path / "unlock.json",
+            receipt_path=tmp_path / "receipt.json",
+            authorized_payload_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+
+def test_dev_manifest_path_retains_400_query_contract(tmp_path):
+    manifest = _blind_manifest(tmp_path, count=399)
+    for query in manifest["queries"]:
+        query["split"] = "dev"
+    manifest["queries_fingerprint"] = run_retrieval_bakeoff.artifact_fingerprint(
+        manifest["queries"]
+    )
+    unsigned = dict(manifest)
+    unsigned.pop("manifest_fingerprint")
+    manifest["manifest_fingerprint"] = run_retrieval_bakeoff.artifact_fingerprint(unsigned)
+    path = tmp_path / "queries_dev.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RetrievalBakeoffError, match="exactly 400"):
+        load_query_manifest(path, split="dev")
 
 
 def test_frozen_document_loading_and_dense_execution_with_fake_backend(tmp_path):
@@ -270,6 +461,34 @@ def test_execute_late_cell_default_batch_size_omits_build_kwarg(tmp_path, monkey
     assert result["complete_query_count"] == 1
 
 
+def test_blind_late_bundle_carries_authorized_manifest_and_receipt_binding(tmp_path):
+    _cache, _lock, manifest, export, spec = artifacts(tmp_path)
+    lock = adapter_model_lock(
+        late_lock_artifact(
+            tmp_path / "late_cache", source_repository="answerdotai/answerai-colbert-small-v1"
+        ),
+        tmp_path / "late_cache",
+        kind="late_interaction",
+    )
+    documents = load_frozen_documents(export, manifest, "entity")
+    binding = {
+        "authorized_query_manifest_fingerprint": "a" * 64,
+        "blind_manifest_receipt_fingerprint": "b" * 64,
+        "blind_manifest_file_sha256": "c" * 64,
+    }
+    result = execute_late_cell(
+        spec=spec,
+        manifest=manifest,
+        queries=[{"id": "q1", "query": "question"}],
+        documents=documents,
+        lock=lock,
+        sidecar_path=tmp_path / "index.sqlite",
+        blind_binding=binding,
+        backend_factory=lambda **_kwargs: LateBackend(),
+    )
+    assert {field: result[field] for field in binding} == binding
+
+
 def test_execute_late_cell_explicit_batch_size_threads_kwarg(tmp_path, monkeypatch):
     _cache, _lock, manifest, export, spec = artifacts(tmp_path)
     lock = adapter_model_lock(
@@ -378,3 +597,79 @@ def test_cli_defaults_to_the_nonzero_memory_ceiling(monkeypatch):
     with pytest.raises(Exception):  # noqa: B017 - fails later loading missing.json; we only care
         run_retrieval_bakeoff.main()  # that the ceiling was applied first, with the CLI default.
     assert seen == [run_retrieval_bakeoff.DEFAULT_MEMORY_LIMIT_MB]
+
+
+def test_raw_production_lexical_policy_skips_current_head_inclusion(monkeypatch, tmp_path):
+    class Connection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(run_retrieval_bakeoff, "get_connection", lambda _path: Connection())
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "bm25_search",
+        lambda _conn, _query, limit=20: [
+            LexicalHit("raw-a", -1.0, 1, False),
+            LexicalHit("raw-b", -2.0, 2, False),
+        ][:limit],
+    )
+    monkeypatch.setattr(
+        run_retrieval_bakeoff,
+        "include_current_heads",
+        lambda *_args, **_kwargs: pytest.fail("raw policy must not include current heads"),
+    )
+    bundle = execute_lexical_cell(
+        spec={"run_id": "run", "artifact_fingerprint": "spec-fingerprint"},
+        queries=[{"id": "q1", "query": "raw query"}],
+        db_path=tmp_path / "snapshot.db",
+        lexical_policy="raw_production",
+        representation_root="root-hash",
+        lexical_snapshot_receipt={
+            "artifact_fingerprint": "receipt-fingerprint",
+            "db_sha256_informational": "d" * 64,
+        },
+    )
+    assert bundle["cell"] == {
+        "kind": "lexical",
+        "channel": "bm25_raw_production",
+        "lexical_policy": "raw_production",
+        "production_faithful": True,
+        "representation_root": "root-hash",
+        "lexical_snapshot_receipt_fingerprint": "receipt-fingerprint",
+        "lexical_snapshot_db_sha256": "d" * 64,
+    }
+    assert [row["entity_id"] for row in bundle["results"][0]["top20"]] == ["raw-a", "raw-b"]
+
+
+def test_raw_production_receipt_rejects_wrong_db_or_corpus(monkeypatch, tmp_path):
+    db_path = tmp_path / "snapshot.db"
+    db_path.write_bytes(b"frozen-db")
+    import hashlib
+
+    receipt = {
+        "schema_version": 1,
+        "kind": "LexicalSnapshotReceipt",
+        "corpus_root_hash": "root-hash",
+        "db_path": str(db_path),
+        "db_sha256_informational": hashlib.sha256(b"frozen-db").hexdigest(),
+    }
+    receipt = sign_artifact("LexicalSnapshotReceipt", receipt)
+    assert (
+        validate_lexical_snapshot_receipt(
+            receipt, db_path=db_path, expected_corpus_root="root-hash"
+        )["artifact_fingerprint"]
+        == receipt["artifact_fingerprint"]
+    )
+    with pytest.raises(RetrievalBakeoffError, match="corpus root"):
+        validate_lexical_snapshot_receipt(
+            receipt,
+            db_path=db_path,
+            expected_corpus_root="wrong-root",
+        )
+    wrong = dict(receipt)
+    wrong["db_sha256_informational"] = "0" * 64
+    wrong = sign_artifact(
+        "LexicalSnapshotReceipt", {k: v for k, v in wrong.items() if k != "artifact_fingerprint"}
+    )
+    with pytest.raises(RetrievalBakeoffError, match="SHA-256"):
+        validate_lexical_snapshot_receipt(wrong, db_path=db_path, expected_corpus_root="root-hash")

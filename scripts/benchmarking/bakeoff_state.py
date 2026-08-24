@@ -100,6 +100,11 @@ def fingerprint(value: object) -> str:
     ).hexdigest()
 
 
+def sha256_bytes(value: bytes) -> str:
+    """Hash already-authorized artifact bytes without reopening their source path."""
+    return hashlib.sha256(value).hexdigest()
+
+
 def _require_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BakeoffContractError(f"{field} must be a non-empty string")
@@ -866,6 +871,9 @@ def validate_blind_evaluation(  # noqa: C901, PLR0912, PLR0915
         "development_winner",
         "blind_unlock",
         "blind_manifest_receipt",
+        "authorized_query_manifest_fingerprint",
+        "blind_manifest_receipt_fingerprint",
+        "blind_manifest_file_sha256",
         "judging_matrix",
         "winner_bundle",
         "baseline_bundle",

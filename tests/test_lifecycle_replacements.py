@@ -155,7 +155,6 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
             ).fetchone(),
         )
 
-
     def test_inactive_target_message_includes_corrects_guidance(self):
         old_id = self._store()
         revise_memory(
