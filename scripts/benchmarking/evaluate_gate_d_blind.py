@@ -226,6 +226,24 @@ def evaluate(
         or set(matrix.get("contenders", [])) != {WINNER_ID, BASELINE_ID}
     ):
         raise GateDBlindError("blind judging matrix is not the frozen two-bundle 800-query matrix")
+    matrix_binding = {
+        "authorized_query_manifest_fingerprint": matrix.get(
+            "authorized_query_manifest_fingerprint"
+        ),
+        "blind_manifest_receipt_fingerprint": matrix.get("blind_manifest_receipt_fingerprint"),
+        "blind_manifest_file_sha256": matrix.get("blind_manifest_file_sha256"),
+    }
+    if any(not isinstance(value, str) or not value for value in matrix_binding.values()):
+        raise GateDBlindError("blind judging matrix lacks complete query custody binding")
+    if matrix_binding["blind_manifest_receipt_fingerprint"] != receipt.get(
+        "artifact_fingerprint"
+    ) or matrix_binding["blind_manifest_file_sha256"] != receipt.get("file_sha256"):
+        raise GateDBlindError("blind judging matrix is bound to a different manifest receipt")
+    if matrix.get("corpus_root_hash") != spec.get("corpus_snapshot_hash"):
+        raise GateDBlindError("blind judging matrix is bound to a different corpus")
+    for bundle in bundles.values():
+        if any(bundle.get(field) != value for field, value in matrix_binding.items()):
+            raise GateDBlindError("blind retrieval bundle is not bound to the judging matrix")
     query_ids = {q["id"] for q in queries}
     if set(matrix.get("pools", {})) != query_ids:
         raise GateDBlindError("blind judging matrix does not reconstruct query coverage")
@@ -278,6 +296,11 @@ def evaluate(
         "development_winner": winner["artifact_fingerprint"],
         "blind_unlock": unlock["artifact_fingerprint"],
         "blind_manifest_receipt": receipt["artifact_fingerprint"],
+        "authorized_query_manifest_fingerprint": matrix_binding[
+            "authorized_query_manifest_fingerprint"
+        ],
+        "blind_manifest_receipt_fingerprint": matrix_binding["blind_manifest_receipt_fingerprint"],
+        "blind_manifest_file_sha256": matrix_binding["blind_manifest_file_sha256"],
         "judging_matrix": matrix["artifact_fingerprint"],
         "winner_bundle": bundles[WINNER_ID]["artifact_fingerprint"],
         "baseline_bundle": bundles[BASELINE_ID]["artifact_fingerprint"],

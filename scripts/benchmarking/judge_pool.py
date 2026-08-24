@@ -25,6 +25,14 @@ EXCERPT_MAX_CHARS = 600
 # than provider/model names: a packet may be executed by any approved Luna worker, while the
 # role identity remains auditable and cannot silently regress to the legacy judge set.
 JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
+# Development addenda use a disjoint role namespace so their labels cannot be accidentally
+# merged with the already-observed historical devrun.  The packet schema/rubric remains shared.
+ADDENDUM_JUDGES = (
+    "agent_eval_judge_raw_a",
+    "agent_eval_judge_raw_b",
+    "agent_eval_judge_raw_c",
+)
+PACKET_JUDGES = JUDGES + ADDENDUM_JUDGES
 ARBITRATOR = "agent_eval_adjudicator"
 # Bump only when the rubric/packet schema or judge-role contract changes.  The value is included
 # in every Stage-1 provenance envelope so labels from an older rubric cannot be merged silently.
@@ -46,11 +54,21 @@ def judging_protocol_metadata() -> dict:
     }
 
 
+def protocol_metadata_for_judges(judges: tuple[str, ...]) -> dict:
+    if tuple(judges) not in (JUDGES, ADDENDUM_JUDGES):
+        raise ValueError("unsupported judge-role contract")
+    metadata = judging_protocol_metadata()
+    metadata["judges"] = list(judges)
+    return metadata
+
+
 def validate_judging_protocol_metadata(value: object) -> None:
     if not isinstance(value, dict):
         raise ValueError("missing judging protocol metadata")
     expected = judging_protocol_metadata()
     for key, expected_value in expected.items():
+        if key == "judges" and value.get(key) in (list(JUDGES), list(ADDENDUM_JUDGES)):
+            continue
         if value.get(key) != expected_value:
             raise ValueError(f"judging protocol metadata mismatch for {key}")
 
@@ -144,11 +162,13 @@ def excerpt_sha256(excerpt: str) -> str:
     return hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
 
 
-def judge_version_fingerprint() -> str:
+def judge_version_fingerprint(judges: tuple[str, ...] = JUDGES) -> str:
+    if tuple(judges) not in (JUDGES, ADDENDUM_JUDGES):
+        raise ValueError("unsupported judge-role contract")
     return artifact_fingerprint(
         {
             "version": JUDGE_VERSION,
-            "judges": JUDGES,
+            "judges": judges,
             "arbitrator": ARBITRATOR,
             "grades": [0, 1, 2],
             "ndcg_gains": [0, 1, 3],
@@ -229,11 +249,15 @@ def _seed(base_seed: int, split: str, judge: str, query_id: str) -> int:
     return int(hashlib.sha256(value).hexdigest()[:16], 16)
 
 
-def build_judge_packets(
-    queries: list[dict], matrix: dict, judge: str, split: str, base_seed: int = 0
+def build_judge_packets(  # noqa: C901, PLR0912
+    queries: list[dict],
+    matrix: dict,
+    judge: str,
+    split: str,
+    base_seed: int = 0,  # noqa: C901
 ) -> tuple[dict, dict]:
     """Return (external_packet, private_mapping).  The packet is safe to send to a judge."""
-    if judge not in JUDGES:
+    if judge not in PACKET_JUDGES:
         raise ValueError(f"unknown judge {judge!r}")
     if split not in {"dev", "blind"}:
         raise ValueError("split must be dev or blind")
@@ -297,6 +321,9 @@ def build_judge_packets(
             },
             "candidate_source_sha256": candidate_hashes,
         }
+    protocol = judging_protocol_metadata()
+    if judge in ADDENDUM_JUDGES:
+        protocol["judges"] = list(ADDENDUM_JUDGES)
     packet = {
         "schema_version": 1,
         "packet_schema_version": PACKET_SCHEMA_VERSION,
@@ -305,7 +332,7 @@ def build_judge_packets(
         "excerpt_algorithm_version": EXCERPT_ALGORITHM_VERSION,
         "immutable": True,
         "rank_and_config_blind": True,
-        "judging_protocol": judging_protocol_metadata(),
+        "judging_protocol": protocol,
         "rubric": {
             "0": "Irrelevant or non-answer to the query.",
             "1": "Related context or partial relevance, but not a direct answer to the query.",
@@ -318,12 +345,31 @@ def build_judge_packets(
         "judge": judge,
         "split": split,
         "judge_version": JUDGE_VERSION,
-        "judge_version_fingerprint": judge_version_fingerprint(),
+        "judge_version_fingerprint": judge_version_fingerprint(
+            ADDENDUM_JUDGES if judge in ADDENDUM_JUDGES else JUDGES
+        ),
         "random_seed": base_seed,
         "tasks": mapping,
         "queries_fingerprint": artifact_fingerprint(queries),
         "matrix_pools_fingerprint": artifact_fingerprint(pools),
     }
+    if matrix.get("kind") == "JudgingMatrix" and matrix.get("artifact_fingerprint"):
+        private["matrix_binding"] = {
+            key: matrix.get(key)
+            for key in (
+                "artifact_fingerprint",
+                "spec_fingerprint",
+                "query_manifest_fingerprint",
+                "query_manifest_file_sha256",
+                "query_split",
+                "corpus_root_hash",
+                "corpus_manifest_fingerprint",
+                "corpus_export_file_sha256",
+                "raw_bundle_fingerprint",
+                "worklist_fingerprint",
+            )
+            if matrix.get(key) is not None
+        }
     packet["fingerprint"] = artifact_fingerprint(packet)
     private["packet_fingerprint"] = packet["fingerprint"]
     private["coverage_fingerprint"] = artifact_fingerprint(
@@ -341,9 +387,10 @@ def validate_labels(response: dict, private_mapping: dict, judge: str) -> list[d
         raise ValueError("private mapping has invalid split")
     if private_mapping.get("judge_version") != JUDGE_VERSION:
         raise ValueError("private mapping uses a stale judge rubric version")
-    if private_mapping.get("judge_version_fingerprint") != judge_version_fingerprint():
+    role_contract = ADDENDUM_JUDGES if judge in ADDENDUM_JUDGES else JUDGES
+    if private_mapping.get("judge_version_fingerprint") != judge_version_fingerprint(role_contract):
         raise ValueError("private mapping judge-version fingerprint mismatch")
-    if private_mapping.get("judge") not in JUDGES:
+    if private_mapping.get("judge") not in PACKET_JUDGES:
         raise ValueError("private mapping is not for a configured Luna judge")
     if "shard" in private_mapping or private_mapping.get("is_shard"):
         raise ValueError("sharded judge mappings are not accepted")
@@ -392,8 +439,8 @@ def agreement_report(labels: list[dict], *, judges: tuple[str, ...] = JUDGES) ->
     The full adjudication merge remains in ``merge_judgments.py``; this hook is intentionally
     usable at packet-ingest time, before an arbitration response exists.
     """
-    if len(judges) != 3 or set(judges) != set(JUDGES):
-        raise ValueError("agreement report requires the configured three judges")
+    if len(judges) != 3 or tuple(judges) not in (JUDGES, ADDENDUM_JUDGES):
+        raise ValueError("agreement report requires a configured three-judge contract")
     by_item: dict[tuple[str, str], dict[str, int]] = defaultdict(dict)
     for label in labels:
         if not isinstance(label, dict) or label.get("judge") not in judges:
@@ -430,7 +477,7 @@ def agreement_report(labels: list[dict], *, judges: tuple[str, ...] = JUDGES) ->
             }
     complete = sum(1 for grades in by_item.values() if set(grades) == set(judges))
     return {
-        "protocol": judging_protocol_metadata(),
+        "protocol": protocol_metadata_for_judges(judges),
         "items": len(by_item),
         "complete_three_way_items": complete,
         "pairwise": pairwise,
@@ -464,9 +511,14 @@ def write_packets(
     )
     if isinstance(queries, dict):
         queries = queries["queries"]
-    packet, private = build_judge_packets(
-        queries, json.loads(matrix_path.read_text()), judge, split, base_seed
-    )
+    matrix = json.loads(matrix_path.read_text())
+    if isinstance(matrix.get("pools"), dict) and set(matrix["pools"]) != {
+        query["id"] for query in queries
+    }:
+        if not set(matrix["pools"]).issubset({query["id"] for query in queries}):
+            raise ValueError("matrix contains a query absent from supplied manifest")
+        queries = [query for query in queries if query["id"] in matrix["pools"]]
+    packet, private = build_judge_packets(queries, matrix, judge, split, base_seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     mapping_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"judge_packet_{judge}.json").write_text(
@@ -485,19 +537,29 @@ def ingest_labels(response_path: Path, mapping_path: Path, out_path: Path, judge
         "schema_version": 1,
         "judge": judge,
         "judge_version": JUDGE_VERSION,
-        "judge_version_fingerprint": judge_version_fingerprint(),
+        "judge_version_fingerprint": judge_version_fingerprint(
+            ADDENDUM_JUDGES if judge in ADDENDUM_JUDGES else JUDGES
+        ),
         "random_seed": mapping.get("random_seed"),
         "mapping_fingerprint": mapping.get("fingerprint"),
         "coverage_fingerprint": mapping.get("coverage_fingerprint"),
         "label_count": len(normalized),
         "labels": normalized,
         "judging_protocol": judging_protocol_metadata(),
-        "agreement": agreement_report(normalized),
+        "judges": [judge],
+        "agreement": agreement_report(
+            normalized, judges=ADDENDUM_JUDGES if judge in ADDENDUM_JUDGES else JUDGES
+        ),
         "adjudication": {
             "adjudicator": ARBITRATOR,
             "status": "pending_merge",
         },
     }
+    if isinstance(mapping.get("matrix_binding"), dict):
+        artifact["matrix_binding"] = mapping["matrix_binding"]
+    if judge in ADDENDUM_JUDGES:
+        artifact["judging_protocol"] = protocol_metadata_for_judges(ADDENDUM_JUDGES)
+        artifact["judge_role_set"] = "raw_addendum"
     artifact["fingerprint"] = artifact_fingerprint(artifact)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     temp = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -519,7 +581,7 @@ def main() -> None:
         required=True,
         help="Private local directory for ground-truth and provenance mappings.",
     )
-    packet.add_argument("--judge", choices=JUDGES, required=True)
+    packet.add_argument("--judge", choices=PACKET_JUDGES, required=True)
     packet.add_argument("--split", choices=("dev", "blind"), required=True)
     packet.add_argument(
         "--dev-shortlist",
@@ -536,7 +598,7 @@ def main() -> None:
     ingest.add_argument("--response", type=Path, required=True)
     ingest.add_argument("--mapping", type=Path, required=True)
     ingest.add_argument("--out", type=Path, required=True)
-    ingest.add_argument("--judge", choices=JUDGES, required=True)
+    ingest.add_argument("--judge", choices=PACKET_JUDGES, required=True)
     args = parser.parse_args()
     if args.action == "packets":
         authorized_query_bytes = None

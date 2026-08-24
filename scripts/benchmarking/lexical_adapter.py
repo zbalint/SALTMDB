@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 from saltmdb.domain.services.memory_service import _run_fts_search
+from saltmdb.utils.text import sanitize_fts_query
 
 
 class LexicalAdapterError(ValueError):
@@ -23,9 +24,16 @@ class LexicalHit:
 
 def bm25_search(conn: Any, query: str, *, limit: int = 20) -> list[LexicalHit]:
     """Execute the production FTS query while retaining its raw BM25 score and rank."""
-    sanitized = " ".join(query.split())
-    if not sanitized or limit <= 0:
-        raise LexicalAdapterError("BM25 query must be non-empty and limit positive")
+    # Keep the frozen adapter byte-for-byte aligned with the production
+    # orchestrator's FTS5 sanitization.  Whitespace normalization alone lets
+    # punctuation reach MATCH and can change both errors and fallback data.
+    sanitized = sanitize_fts_query(query)
+    if limit <= 0:
+        raise LexicalAdapterError("BM25 query limit must be positive")
+    if not sanitized:
+        # Production broad search treats a query emptied by FTS sanitization
+        # as an empty retrieval channel rather than a failed channel.
+        return []
     rows, used_fallback = _run_fts_search(
         conn,
         sanitized,

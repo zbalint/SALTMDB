@@ -892,6 +892,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # Performance indexes for high-traffic filtering columns
         for index_sql in [
             "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_active_title ON entities(title) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_owner_scope ON entities(owner_id, scope)",
             "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",

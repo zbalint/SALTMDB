@@ -63,12 +63,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bakeoff_state import (  # noqa: E402
     BakeoffContractError,
     sign_artifact,
+    sha256_bytes,
     validate_bakeoff_spec,
+    validate_blind_manifest_receipt,
+    validate_blind_unlock,
     validate_corpus_manifest,
     validate_development_winner,
     validate_signed_artifact,
 )
-from build_evaluation_queries import load_manifest  # noqa: E402
+from build_evaluation_queries import (  # noqa: E402
+    artifact_fingerprint,
+    validate_queries,
+    verify_artifact_fingerprint,
+)
+from evaluation_artifacts import validate_provenance  # noqa: E402
 
 
 class JudgingMatrixBuildError(ValueError):
@@ -142,11 +150,14 @@ def load_frozen_entity_text(
     return result
 
 
-def load_bundles(
+def load_bundles(  # noqa: C901, PLR0912
     retrieval_runs_dir: Path,
     spec: Mapping[str, Any],
     *,
     expected_contenders: Sequence[str] | None = None,
+    expected_blind_binding: Mapping[str, str] | None = None,
+    expected_query_binding: Mapping[str, str] | None = None,
+    expected_representation_root: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, validate, and identify every signed ``RetrievalRunBundle`` in ``retrieval_runs_dir``.
 
@@ -167,6 +178,27 @@ def load_bundles(
             raise JudgingMatrixBuildError(
                 f"{path.name}: spec_fingerprint does not match the supplied BakeoffSpec"
             )
+        if expected_blind_binding is not None:
+            for field, expected_value in expected_blind_binding.items():
+                if bundle.get(field) != expected_value:
+                    raise JudgingMatrixBuildError(
+                        f"{path.name}: {field} does not match the authorized blind manifest"
+                    )
+        if expected_query_binding is not None:
+            for field, expected_value in expected_query_binding.items():
+                if bundle.get(field) != expected_value:
+                    raise JudgingMatrixBuildError(
+                        f"{path.name}: {field} does not match the exact query manifest"
+                    )
+        if expected_representation_root is not None:
+            cell = bundle.get("cell")
+            if (
+                not isinstance(cell, dict)
+                or cell.get("representation_root") != expected_representation_root
+            ):
+                raise JudgingMatrixBuildError(
+                    f"{path.name}: representation_root does not match the supplied corpus"
+                )
         failures = bundle.get("failures")
         if failures:
             raise JudgingMatrixBuildError(f"{path.name}: bundle has non-empty failures")
@@ -308,17 +340,45 @@ def build_judging_matrix(
     manifest = validate_corpus_manifest(
         json.loads(corpus_manifest_path.read_text(encoding="utf-8"))
     )
+    if manifest["corpus_root_hash"] != spec["corpus_snapshot_hash"]:
+        raise JudgingMatrixBuildError("corpus representation root does not match spec snapshot")
     corpus_export = json.loads(corpus_export_path.read_text(encoding="utf-8"))
     if not isinstance(corpus_export, dict):
         raise JudgingMatrixBuildError("corpus export must contain a JSON object")
     entity_text = load_frozen_entity_text(corpus_export, manifest)
 
-    manifest_doc = load_manifest(queries_dev_path, expected_split="dev", require_provenance=True)
+    try:
+        query_bytes = queries_dev_path.read_bytes()
+        manifest_doc = json.loads(query_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise JudgingMatrixBuildError("development query manifest is not valid JSON") from exc
+    if not isinstance(manifest_doc, dict) or not isinstance(manifest_doc.get("queries"), list):
+        raise JudgingMatrixBuildError("development query manifest must contain a queries list")
+    try:
+        verify_artifact_fingerprint(manifest_doc, field="manifest_fingerprint")
+        if manifest_doc.get("queries_fingerprint") != artifact_fingerprint(manifest_doc["queries"]):
+            raise ValueError("query manifest queries_fingerprint mismatch")
+        validate_provenance(manifest_doc, artifact_label="query manifest")
+        validate_queries(manifest_doc["queries"])
+    except ValueError as exc:
+        raise JudgingMatrixBuildError(str(exc)) from exc
+    if any(query.get("split") != "dev" for query in manifest_doc["queries"]):
+        raise JudgingMatrixBuildError("query manifest contains a different split")
+    query_binding = {
+        "query_manifest_fingerprint": manifest_doc["manifest_fingerprint"],
+        "query_manifest_file_sha256": sha256_bytes(query_bytes),
+        "query_split": "dev",
+    }
     queries = manifest_doc["queries"]
     if len(queries) != 400:
         raise JudgingMatrixBuildError(f"expected exactly 400 dev queries, found {len(queries)}")
 
-    bundles = load_bundles(retrieval_runs_dir, spec)
+    bundles = load_bundles(
+        retrieval_runs_dir,
+        spec,
+        expected_query_binding=query_binding,
+        expected_representation_root=spec["corpus_snapshot_hash"],
+    )
     pools = build_pools(queries, bundles, entity_text, pool_top_n=pool_top_n)
 
     payload = {
@@ -327,12 +387,13 @@ def build_judging_matrix(
         "contenders": sorted(bundles),
         "query_count": len(queries),
         "pool_top_n": pool_top_n,
+        **query_binding,
         "pools": pools,
     }
     return sign_artifact("JudgingMatrix", payload)
 
 
-def build_blind_judging_matrix(
+def build_blind_judging_matrix(  # noqa: C901, PLR0912, PLR0915
     *,
     spec_path: Path,
     retrieval_runs_dir: Path,
@@ -369,6 +430,17 @@ def build_blind_judging_matrix(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise JudgingMatrixBuildError("authorized blind manifest is not JSON") from exc
     queries = manifest_doc.get("queries") if isinstance(manifest_doc, dict) else None
+    if not isinstance(manifest_doc, dict):
+        raise JudgingMatrixBuildError("authorized blind manifest must be a JSON object")
+    try:
+        verify_artifact_fingerprint(manifest_doc, field="manifest_fingerprint")
+    except ValueError as exc:
+        raise JudgingMatrixBuildError(str(exc)) from exc
+    if manifest_doc.get("queries_fingerprint") != artifact_fingerprint(queries):
+        raise JudgingMatrixBuildError("blind manifest queries_fingerprint mismatch")
+    if manifest_doc.get("corpus_fingerprint") != spec.get("corpus_snapshot_hash"):
+        raise JudgingMatrixBuildError("blind manifest corpus_fingerprint does not match spec")
+    authorized_payload_sha256 = sha256_bytes(query_bytes)
     if not isinstance(queries, list) or len(queries) != 800:
         raise JudgingMatrixBuildError("authorized blind manifest must contain exactly 800 queries")
     query_ids = [row.get("id") for row in queries if isinstance(row, dict)]
@@ -380,12 +452,44 @@ def build_blind_judging_matrix(
         raise JudgingMatrixBuildError("authorized blind manifest has invalid query IDs")
     if any(row.get("split") != "blind" for row in queries):
         raise JudgingMatrixBuildError("blind matrix rejects non-blind query rows")
+    try:
+        validate_provenance(manifest_doc, artifact_label="blind query manifest")
+        validate_queries(queries)
+    except ValueError as exc:
+        raise JudgingMatrixBuildError(str(exc)) from exc
+    try:
+        unlock_artifact = json.loads(unlock_path.read_text(encoding="utf-8"))
+        receipt = validate_blind_manifest_receipt(
+            json.loads(manifest_receipt_path.read_text(encoding="utf-8")),
+            spec,
+            winner,
+            validate_blind_unlock(unlock_artifact, spec, winner),
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise JudgingMatrixBuildError("blind manifest receipt is invalid") from exc
+    blind_binding = {
+        "authorized_query_manifest_fingerprint": manifest_doc["manifest_fingerprint"],
+        "blind_manifest_receipt_fingerprint": receipt["artifact_fingerprint"],
+        "blind_manifest_file_sha256": receipt["file_sha256"],
+    }
+    if receipt["file_sha256"] != authorized_payload_sha256:
+        raise JudgingMatrixBuildError(
+            "blind manifest receipt hash does not match authorized payload bytes"
+        )
     manifest = validate_corpus_manifest(
         json.loads(corpus_manifest_path.read_text(encoding="utf-8"))
     )
+    if manifest["corpus_root_hash"] != spec["corpus_snapshot_hash"]:
+        raise JudgingMatrixBuildError("corpus representation root does not match spec snapshot")
     corpus_export = json.loads(corpus_export_path.read_text(encoding="utf-8"))
     entity_text = load_frozen_entity_text(corpus_export, manifest)
-    bundles = load_bundles(retrieval_runs_dir, spec, expected_contenders=sorted(expected))
+    bundles = load_bundles(
+        retrieval_runs_dir,
+        spec,
+        expected_contenders=sorted(expected),
+        expected_blind_binding=blind_binding,
+        expected_representation_root=spec["corpus_snapshot_hash"],
+    )
     pools = build_pools(queries, bundles, entity_text, pool_top_n=20)
     return sign_artifact(
         "JudgingMatrix",
@@ -395,6 +499,7 @@ def build_blind_judging_matrix(
             "contenders": sorted(bundles),
             "query_count": 800,
             "pool_top_n": 20,
+            **blind_binding,
             "pools": pools,
         },
     )

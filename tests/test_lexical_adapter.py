@@ -1,11 +1,15 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "benchmarking"))
 
 from saltmdb.db.schema import init_db  # noqa: E402
+from saltmdb.utils.text import sanitize_fts_query  # noqa: E402
 from lexical_adapter import bm25_search, include_current_heads, resolve_current_head  # noqa: E402
+import lexical_adapter  # noqa: E402
 
 
 def connection(tmp_path):
@@ -33,6 +37,26 @@ def test_bm25_exposes_raw_score_and_fallback(tmp_path):
     assert all(hit.used_or_fallback is False for hit in hits)
     fallback = bm25_search(conn, "cache missingword")
     assert fallback and all(hit.used_or_fallback is True for hit in fallback)
+
+
+def test_bm25_uses_production_fts_sanitizer_before_search(monkeypatch):
+    calls = []
+
+    def fake_fts(conn, query, where, params, limit, offset, *, return_fallback_flag):
+        calls.append(query)
+        return ([("e1", None, None, None, None, -1.0)], False)
+
+    monkeypatch.setattr(lexical_adapter, "_run_fts_search", fake_fts)
+    query = "alpha, beta = gamma;"
+    hits = bm25_search(object(), query)
+    assert calls == [sanitize_fts_query(query)] == ["alpha beta gamma"]
+    assert hits[0].entity_id == "e1"
+
+
+def test_bm25_matches_production_empty_sanitized_query_behavior():
+    assert bm25_search(object(), "!!! === ...") == []
+    with pytest.raises(lexical_adapter.LexicalAdapterError, match="limit"):
+        bm25_search(object(), "cache", limit=0)
 
 
 def test_current_head_inclusion_is_multihop_and_stable(tmp_path):

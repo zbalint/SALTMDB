@@ -25,7 +25,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from bakeoff_state import validate_signed_artifact
+
 JUDGES = ("agent_eval_judge_a", "agent_eval_judge_b", "agent_eval_judge_c")
+ADDENDUM_JUDGES = (
+    "agent_eval_judge_raw_a",
+    "agent_eval_judge_raw_b",
+    "agent_eval_judge_raw_c",
+)
 ARBITRATOR = "agent_eval_adjudicator"
 JUDGE_VERSION = "stage1-grades-0-1-2-gains-0-1-3-v1"
 VALID_GRADES = {0, 1, 2}
@@ -86,14 +93,53 @@ def _median_int(grades: list[int]) -> int:
     return int(result)
 
 
+def _validate_judge_contract(judges: tuple[str, ...]) -> None:
+    if tuple(judges) not in (JUDGES, ADDENDUM_JUDGES):
+        raise ValueError("unsupported judge-role contract")
+
+
+def addendum_binding(matrix: dict) -> dict:
+    """Validate and extract the immutable binding carried by a raw judging addendum."""
+    try:
+        validate_signed_artifact(matrix, kind="JudgingMatrix")
+    except ValueError as exc:
+        raise ValueError("raw addendum matrix is not signed") from exc
+    if (
+        matrix.get("query_count") != 172
+        or matrix.get("missing_pair_count") != 241
+        or not isinstance(matrix.get("pools"), dict)
+        or len(matrix["pools"]) != 172
+        or sum(len(items) for items in matrix["pools"].values()) != 241
+    ):
+        raise ValueError("raw addendum matrix must contain exactly 172 queries and 241 pairs")
+    required = (
+        "artifact_fingerprint",
+        "spec_fingerprint",
+        "query_manifest_fingerprint",
+        "query_manifest_file_sha256",
+        "query_split",
+        "corpus_root_hash",
+        "corpus_manifest_fingerprint",
+        "corpus_export_file_sha256",
+        "raw_bundle_fingerprint",
+        "worklist_fingerprint",
+    )
+    if any(not isinstance(matrix.get(key), str) or not matrix[key] for key in required):
+        raise ValueError("raw addendum matrix lacks complete frozen-input binding")
+    return {key: matrix[key] for key in required}
+
+
 def merge_query_judgments(
     raw_judgments: list[RawJudgment],
     source_entity_ids: list[str] | None = None,
+    *,
+    judges: tuple[str, ...] = JUDGES,
 ) -> list[MergedJudgment]:
     """Groups raw_judgments (already filtered to ONE query_id, all candidates for that query) by
     candidate_id, computes the median + escalation trigger for each. source_entity_ids is that
     query's predeclared ground truth (empty/None for LLM-paraphrase-only positive queries and all
     negative queries) -- used only for the ground-truth-conflict escalation trigger."""
+    _validate_judge_contract(judges)
     if not raw_judgments:
         return []
     query_ids = {item.query_id for item in raw_judgments}
@@ -101,7 +147,7 @@ def merge_query_judgments(
         raise ValueError("merge_query_judgments accepts one query at a time")
     by_candidate: dict[str, dict[str, int]] = {}
     for rj in raw_judgments:
-        if rj.judge not in JUDGES or rj.grade not in VALID_GRADES:
+        if rj.judge not in judges or rj.grade not in VALID_GRADES:
             raise ValueError("unknown judge role or invalid grade")
         if rj.judge in by_candidate.setdefault(rj.candidate_id, {}):
             raise ValueError("duplicate judge judgment")
@@ -110,7 +156,7 @@ def merge_query_judgments(
     source_set = set(source_entity_ids or [])
     results = []
     for candidate_id, judge_grades in by_candidate.items():
-        if set(judge_grades) != set(JUDGES):
+        if set(judge_grades) != set(judges):
             raise ValueError("candidate lacks complete three-way Luna coverage")
         grades = list(judge_grades.values())
         median = _median_int(grades)
@@ -148,13 +194,16 @@ def apply_arbitration_override(merged: MergedJudgment, arbitrated_grade: int) ->
     return merged
 
 
-def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:  # noqa: C901
+def _raw_from_artifacts(  # noqa: C901
+    label_artifacts: list[dict], *, judges: tuple[str, ...] = JUDGES
+) -> list[RawJudgment]:  # noqa: C901
     """Accept exactly three complete, non-overlapping judge artifacts."""
+    _validate_judge_contract(judges)
     by_judge: dict[str, list[dict]] = {}
     for artifact in label_artifacts:
         verify_artifact_fingerprint(artifact)
         judge = artifact.get("judge")
-        if judge not in JUDGES or judge in by_judge:
+        if judge not in judges or judge in by_judge:
             raise ValueError("need one raw-label artifact for each configured judge")
         if artifact.get("judge_version") != JUDGE_VERSION:
             raise ValueError("raw labels use a stale judge rubric version")
@@ -164,7 +213,7 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:  # no
         if artifact.get("label_count") != len(labels):
             raise ValueError("raw-label artifact label_count mismatch")
         by_judge[judge] = labels
-    if set(by_judge) != set(JUDGES):
+    if set(by_judge) != set(judges):
         raise ValueError("need exactly the three configured judge label sets")
     expected: set[tuple[str, str]] | None = None
     result = []
@@ -189,11 +238,16 @@ def _raw_from_artifacts(label_artifacts: list[dict]) -> list[RawJudgment]:  # no
 
 
 def merge_all_judgments(
-    queries: list[dict], label_artifacts: list[dict], matrix: dict | None = None
+    queries: list[dict],
+    label_artifacts: list[dict],
+    matrix: dict | None = None,
+    *,
+    judges: tuple[str, ...] = JUDGES,
 ) -> list[MergedJudgment]:
     """Merge only after complete three-way coverage is proven for every pooled item."""
     query_sources = {q["id"]: q.get("source_entity_ids", []) for q in queries}
-    raw = _raw_from_artifacts(label_artifacts)
+    _validate_judge_contract(judges)
+    raw = _raw_from_artifacts(label_artifacts, judges=judges)
     if matrix is not None:
         pools = matrix.get("pools")
         if not isinstance(pools, dict) or set(pools) != set(query_sources):
@@ -215,7 +269,9 @@ def merge_all_judgments(
         raise ValueError("raw labels do not cover every query")
     merged = []
     for query_id in sorted(grouped):
-        merged.extend(merge_query_judgments(grouped[query_id], query_sources[query_id]))
+        merged.extend(
+            merge_query_judgments(grouped[query_id], query_sources[query_id], judges=judges)
+        )
     return sorted(merged, key=lambda item: (item.query_id, item.candidate_id))
 
 
@@ -269,17 +325,23 @@ def apply_arbitration_results(merged: list[MergedJudgment], response: dict) -> l
 
 
 def merged_artifact(
-    merged: list[MergedJudgment], raw_artifacts: list[dict], queries: list[dict]
+    merged: list[MergedJudgment],
+    raw_artifacts: list[dict],
+    queries: list[dict],
+    *,
+    judges: tuple[str, ...] = JUDGES,
+    binding: dict | None = None,
 ) -> dict:
     source_map = {
         q["id"]: q.get("source_entity_ids", [])
         for q in queries
         if q.get("provenance") == "squad-ground-truth"
     }
-    raw = _raw_from_artifacts(raw_artifacts)
+    _validate_judge_contract(judges)
+    raw = _raw_from_artifacts(raw_artifacts, judges=judges)
     agreements = []
-    for i, judge_a in enumerate(JUDGES):
-        for judge_b in JUDGES[i + 1 :]:
+    for i, judge_a in enumerate(judges):
+        for judge_b in judges[i + 1 :]:
             agreement = compute_pairwise_agreement(raw, judge_a, judge_b)
             agreements.append(
                 {
@@ -307,7 +369,7 @@ def merged_artifact(
     ]
     result = {
         "schema_version": 1,
-        "judges": list(JUDGES),
+        "judges": list(judges),
         "adjudicator": ARBITRATOR,
         "judge_version": JUDGE_VERSION,
         "judgment_grades": [0, 1, 2],
@@ -330,6 +392,11 @@ def merged_artifact(
             },
         },
     }
+    if judges == ADDENDUM_JUDGES:
+        result["kind"] = "DevelopmentJudgingAddendumLabels"
+        if not isinstance(binding, dict):
+            raise ValueError("raw addendum merged labels require frozen-input binding")
+        result["addendum_binding"] = dict(binding)
     result["fingerprint"] = artifact_fingerprint(result)
     return result
 
@@ -348,6 +415,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--arbitration-packet", type=Path)
     parser.add_argument("--arbitration-response", type=Path)
+    parser.add_argument("--judge-role-set", choices=("legacy", "raw_addendum"), default="legacy")
+    parser.add_argument(
+        "--addendum-matrix",
+        type=Path,
+        help="Signed 172-query/241-pair matrix required for --judge-role-set raw_addendum.",
+    )
     args = parser.parse_args()
     query_value = json.loads(args.queries.read_text())
     queries = (
@@ -355,7 +428,21 @@ def main() -> None:
     )
     raw_artifacts = [json.loads(path.read_text()) for path in args.labels]
     matrix = json.loads(args.matrix.read_text())
-    merged = merge_all_judgments(queries, raw_artifacts, matrix)
+    judges = ADDENDUM_JUDGES if args.judge_role_set == "raw_addendum" else JUDGES
+    binding = None
+    if args.judge_role_set == "raw_addendum":
+        if args.addendum_matrix is None:
+            raise RuntimeError("raw_addendum merge requires --addendum-matrix")
+        matrix = json.loads(args.addendum_matrix.read_text())
+        binding = addendum_binding(matrix)
+        query_ids = {query["id"] for query in queries}
+        if not set(matrix["pools"]).issubset(query_ids):
+            raise RuntimeError("raw addendum matrix contains an unknown supplied query")
+        queries = [query for query in queries if query["id"] in matrix["pools"]]
+        for artifact in raw_artifacts:
+            if artifact.get("matrix_binding") != binding:
+                raise RuntimeError("raw label artifact is stale or bound to another addendum")
+    merged = merge_all_judgments(queries, raw_artifacts, matrix, judges=judges)
     packet = build_arbitration_packet(merged, queries, matrix)
     if packet["tasks"] and not args.arbitration_response:
         if not args.arbitration_packet:
@@ -370,7 +457,7 @@ def main() -> None:
         return
     if args.arbitration_response:
         apply_arbitration_results(merged, json.loads(args.arbitration_response.read_text()))
-    artifact = merged_artifact(merged, raw_artifacts, queries)
+    artifact = merged_artifact(merged, raw_artifacts, queries, judges=judges, binding=binding)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     temp = args.out.with_suffix(args.out.suffix + ".tmp")
     temp.write_text(json.dumps(artifact, indent=2, ensure_ascii=False))

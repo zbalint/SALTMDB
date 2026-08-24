@@ -448,13 +448,14 @@ def write_manifest(
 def load_manifest(
     path: Path,
     *,
+    raw_bytes: bytes | None = None,
     expected_split: str | None = None,
     expected_corpus_fingerprint: str | None = None,
     expected_slot_fingerprint: str | None = None,
     require_provenance: bool = True,
 ) -> dict:
     """Load and verify a frozen query manifest before matrix or judging execution."""
-    value = json.loads(path.read_text())
+    value = json.loads(raw_bytes if raw_bytes is not None else path.read_bytes())
     if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
         raise ValueError("query manifest must contain a queries list")
     verify_artifact_fingerprint(value, field="manifest_fingerprint")
