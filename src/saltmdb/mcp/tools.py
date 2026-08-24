@@ -328,7 +328,7 @@ def store_memory(
     title: str,
     content: str,
     tags: list[str],
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] = "fact",
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
     owner_id: str | None = None,
     context_id: str | None = None,
     entity_id: str | None = None,

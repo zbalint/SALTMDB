@@ -185,6 +185,29 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("entity_id", params)
         self.assertIs(params["entity_id"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
+    def test_store_memory_omitted_memory_type_defaults_only_fresh_inserts_to_fact(self):
+        """The MCP wrapper must forward omission as None so updates can preserve their type.
+
+        Fresh inserts still become facts in the domain layer; putting ``"fact"`` on the wrapper
+        signature would make omission indistinguishable from an explicit type change on updates.
+        """
+        import inspect
+
+        memory_type_param = inspect.signature(tools.store_memory).parameters["memory_type"]
+        self.assertIsNone(memory_type_param.default)
+
+        inserted = tools.store_memory(
+            content="Fresh MCP wrapper insert with an omitted memory type",
+            title="Fresh Wrapper Fact Default",
+            tags=["#memory-type"],
+            owner_id="user1",
+        )
+        entity_id = inserted["data"]["id"]
+        stored_type = self.conn.execute(
+            "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()[0]
+        self.assertEqual(stored_type, "fact")
+
     def test_store_memory_metadata_is_explicit_parameter(self):
         """MCP wrapper regression: metadata must be an explicit named parameter so FastMCP's
         auto-generated JSON Schema declares it over the real MCP wire protocol."""
@@ -195,8 +218,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIs(params["metadata"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
     def test_store_memory_entity_id_bypasses_exact_duplicate_on_metadata_only_update(self):
-        """Behavioral counterpart to the schema test above: an explicit entity_id alone (no
-        explicit entity_id must let a metadata-only edit -- content byte-identical, only
+        """Behavioral counterpart to the schema test above: an explicit entity_id must let a
+        metadata-only edit -- content byte-identical, only
         core_reason/core_exit_condition changing -- go through, matching store_memory's own
         docstring promise. Before the live incident this fixed, this exact call pattern (against
         the real MCP tool, not this direct Python call) returned REJECT_EXACT_DUPLICATE."""
@@ -206,6 +229,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             title="Metadata-Only Update Entity",
             tags=["#metadata"],
             owner_id="user1",
+            memory_type="event",
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
@@ -222,6 +246,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             core_exit_condition="D" * 25,
         )
         self.assertEqual(update_res["status"], "ok")
+        stored_type = self.conn.execute(
+            "SELECT memory_type FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()[0]
+        self.assertEqual(stored_type, "event")
 
     def test_polymorphic_archive_memory(self):
         res1 = tools.store_memory(
