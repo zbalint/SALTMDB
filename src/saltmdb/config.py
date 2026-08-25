@@ -1,6 +1,6 @@
 import os
 
-__version__ = "0.1.0-alpha.85"
+__version__ = "0.1.0-alpha.86"
 
 
 def get_db_path() -> str:

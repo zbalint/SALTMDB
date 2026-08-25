@@ -428,7 +428,7 @@ Claude Code supports lifecycle hooks configured in your global settings file (`~
 - **Pre-Compact Sweep Script (standalone)**: [`hooks/saltmdb-pre-compact-sweep.py`](hooks/saltmdb-pre-compact-sweep.py)
 
 #### Overview of Hooks:
-1. **`SessionStart`**: Triggers [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py), which invokes `saltmdb-cli bootstrap-digest` (no arguments) to auto-inject the canonical core-memory digest into context — global and core-only, no project-keyword search — plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`).
+1. **`SessionStart`**: Triggers [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py), which invokes `saltmdb-cli bootstrap-digest` (no arguments) to auto-inject the canonical core-memory digest into context — global and core-only, no project-keyword search — plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`), and `saltmdb-cli session-digest` to inject the directory-scoped last-session digest when one exists for the current cwd.
 2. **`PreToolUse`**: Triggers [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) for edit/bash tool executions, enforcing Rule 1 ("Think Before You Leap") by denying action until at least one `search_memory` call has been recorded this session. Primary signal is a structured per-session flag file set by the `PostToolUse` nudge script on every `search_memory` call (not a transcript-only check — see §C below for why); a transcript scan remains as a fallback for harnesses that supply `transcript_path`.
 3. **`PostToolUse`**: Triggers [`saltmdb-post-tool-response-nudges.py`](hooks/saltmdb-post-tool-response-nudges.py) on `store_memory`/`search_memory` (unacted duplicate candidates, unlinked memories, empty strict results; also sets the retrieval-outcome-pending flag consumed at `Stop`) and [`saltmdb-post-tool-failure-circuit-breaker.py`](hooks/saltmdb-post-tool-failure-circuit-breaker.py) on `log_event` (repeated-failure fingerprinting per CLAUDE.md rule 2; also clears that pending flag on a `retrieval_outcome` event).
 4. **`PreCompact`**: Inlines a background agent prompt to sweep and persist unrecorded decisions, bug fixes, or rules before conversation transcript compaction (a standalone script version also exists for manual/cron use — see above).
@@ -447,7 +447,7 @@ Antigravity CLI supports execution lifecycle hooks configured in workspace or gl
 - **Pre-Tool Search Gate**: [`hooks/saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py)
 
 #### Overview of Hooks:
-- **`PreInvocation`**: Invokes [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to pre-load the canonical core-memory digest prior to initial prompt processing.
+- **`PreInvocation`**: Invokes [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to pre-load the canonical core-memory digest prior to initial prompt processing, and injects the directory-scoped last-session digest via `saltmdb-cli session-digest` when one exists for the current cwd.
 - **`PreToolUse`**: Intercepts file modification tools (`replace_file_content`, `write_to_file`, `run_command`) using [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) to ensure prior memory searches.
 
 ---
@@ -463,7 +463,7 @@ GitHub Copilot CLI supports custom hooks defined in `.github/hooks/*.json` in yo
 - **Stop Self-Critique Gate Script**: [`hooks/saltmdb-stop-critique-gate.py`](hooks/saltmdb-stop-critique-gate.py)
 
 #### Overview & Permission Decision Protocol:
-- **`sessionStart`**: Runs [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to output the canonical core-memory digest on session init.
+- **`sessionStart`**: Runs [`saltmdb-session-start-bootstrap.py`](hooks/saltmdb-session-start-bootstrap.py) to output the canonical core-memory digest on session init, plus the directory-scoped last-session digest via `saltmdb-cli session-digest` when one exists for the current cwd.
 - **`preToolUse`**: Runs [`saltmdb-pre-tool-search-gate.py`](hooks/saltmdb-pre-tool-search-gate.py) — the same script Claude Code and Antigravity use. Reads tool context on `stdin`, does its own read-only-tool check internally (Copilot's `preToolUse` fires unfiltered, unlike the other two harnesses' matcher-scoped registration), and writes JSON permission decisions on `stdout`:
   - Allowed: `{"permissionDecision": "allow", ...}`
   - Denied: `{"permissionDecision": "deny", "permissionDecisionReason": "...", ...}`

@@ -117,6 +117,7 @@ Exactly one daemon process (`src/saltmdb/daemon/server.py`) ever opens SQLite fo
 ### 7. Automated Session Lifecycle Hooks
 SALTMDB integrates with native lifecycle hooks across major AI agent frameworks (**Claude Code**, **Google Antigravity CLI**, and **GitHub Copilot CLI**):
 * **Context Digest Injection (`SessionStart` / `PreInvocation` / `sessionStart`):** Automatically injects the canonical core-memory bootstrap digest (global, core-only, fail-closed) at session initialization.
+* **Directory-Scoped Last-Session Digest (`SessionStart` / `PreInvocation` / `sessionStart`):** Additively injects the most recent prior session's logged memories for the same working directory, distinct from the global core-only digest above; remains silent when there is nothing to show and walks back past content-free sessions so it works correctly under concurrent multi-agent use of one directory.
 * **Pre-Action Memory Search Gate (`PreToolUse`):** Enforces Rule 1 ("Think Before You Leap") by requiring a memory search before executing code edits or terminal commands. Supports Copilot CLI's JSON `permissionDecision` (`allow`/`deny`) protocol.
 * **Pre-Compaction Memory Sweeps (`PreCompact`):** Triggers autonomous background agent sweeps to persist unrecorded decisions and bug fixes before transcript truncation.
 * **Stop Self-Critique Gate (`Stop` / `agentStop`):** Triggers mandatory self-reflection checks on confidence and unknown risks before finishing complex turns.
