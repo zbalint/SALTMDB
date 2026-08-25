@@ -34,6 +34,9 @@ class SearchMixin:
                     search_kwargs["is_core"] = False
                 else:
                     raise ValueError("is_core must be one of true, 1, yes, false, 0, no")
+            session_id_raw = query.get("agent_session_id", [None])[0]
+            if session_id_raw:
+                search_kwargs["agent_session_id"] = session_id_raw
             results = memory_service.search_memory(**search_kwargs)
             if not isinstance(results, list):
                 message = (

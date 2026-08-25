@@ -11,6 +11,7 @@ def get_frontend_html(db_path: str = None) -> str:
 <button data-view="overview" class="nav-item is-active">Overview</button>
 <button data-view="explorer" class="nav-item">Memory Explorer</button>
 <button data-view="activity" class="nav-item">Activity</button>
+<button data-view="sessions" class="nav-item">Agent Sessions</button>
 <button data-view="relationships" class="nav-item">Relationships</button>
 <button data-view="quality" class="nav-item">Quality</button>
 <button data-view="operations" class="nav-item">Operations</button>

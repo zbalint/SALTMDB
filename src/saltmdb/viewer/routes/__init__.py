@@ -26,6 +26,7 @@ from saltmdb.viewer.routes.events import EventsMixin
 from saltmdb.viewer.routes.relations import RelationsMixin
 from saltmdb.viewer.routes.scatterplot import ScatterplotMixin
 from saltmdb.viewer.routes.search import SearchMixin
+from saltmdb.viewer.routes.sessions import SessionsMixin
 from saltmdb.viewer.routes.stats import StatsMixin
 
 __all__ = ["STATIC_ASSETS", "SALTMDBHandler", "memory_service", "relation_service"]
@@ -37,6 +38,7 @@ class SALTMDBHandler(
     RelationsMixin,
     StatsMixin,
     SearchMixin,
+    SessionsMixin,
     ScatterplotMixin,
     EntityDetailMixin,
     ViewerHandlerBase,

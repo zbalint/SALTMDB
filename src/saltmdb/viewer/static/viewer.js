@@ -3,8 +3,9 @@
 
   const state = {
     view: 'overview', renderController: null, detailController: null, poller: null,
-    explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', relationRoot: '', modalInvoker: null,
+    explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
+    sessionsPage: 1, sessionsIdPrefix: '', sessionDetailId: '',
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -16,7 +17,7 @@
   const eventDialog = document.querySelector('#event-detail');
   const eventDetail = document.querySelector('#event-detail-content');
   const names = {
-    overview: 'Overview', explorer: 'Memory Explorer', activity: 'Activity',
+    overview: 'Overview', explorer: 'Memory Explorer', activity: 'Activity', sessions: 'Agent Sessions',
     relationships: 'Relationships', quality: 'Quality & Lifecycle', operations: 'Operations',
     tags: 'Tags & Taxonomy', diagnostics: 'Diagnostics',
   };
@@ -225,13 +226,16 @@
     if (state.explorerMode === 'hybrid') {
       const form = node('form', undefined, 'toolbar explorer-toolbar');
       const query = inputField('Hybrid retrieval query', 'Search the memory graph', state.hybridQuery);
-      form.append(mode.wrap, query.wrap, button('Search memories', 'primary', undefined, 'submit'));
+      const sessionField = inputField('Session ID', 'Filter by agent session ID', state.hybridSessionId);
+      form.append(mode.wrap, query.wrap, sessionField.wrap, button('Search memories', 'primary', undefined, 'submit'));
       form.addEventListener('submit', async event => {
         event.preventDefault(); state.hybridQuery = query.element.value.trim();
+        state.hybridSessionId = sessionField.element.value.trim();
         if (!state.hybridQuery) { result.replaceChildren(node('p', 'Enter a query to run hybrid retrieval.', 'muted')); return; }
         setBusy(result, true);
         try {
-          const data = await api(`/api/search?q=${encodeURIComponent(state.hybridQuery)}`);
+          const sessionParam = state.hybridSessionId ? `&agent_session_id=${encodeURIComponent(state.hybridSessionId)}` : '';
+          const data = await api(`/api/search?q=${encodeURIComponent(state.hybridQuery)}${sessionParam}`);
           const rows = data.results.map(item => {
             const row = node('tr'); const score = Number.isFinite(item.score) ? item.score.toFixed(4) : '—';
             const typeCell = node('td'); typeCell.append(statusBadge(item.memory_type || 'fact'));
@@ -248,6 +252,7 @@
     const search = inputField('Keyword match in title and memory text', 'Literal title or content text', state.explorerPreset.q || '');
     const prefixField = inputField('ID prefix', 'ID prefix', state.explorerPreset.id_prefix || '');
     const tagField = inputField('Tag', 'Tag', state.explorerPreset.tag || '');
+    const sessionField = inputField('Session ID', 'Agent session ID', state.explorerPreset.session_id || '');
     const { element: q } = search; const { element: prefix } = prefixField; const { element: tag } = tagField;
     const lifecycle = select('Lifecycle', [['', 'All statuses'], ['raw', 'Raw'], ['consolidated', 'Consolidated'], ['archived', 'Archived']], state.explorerPreset.status || '');
     const type = select('Memory type', [['', 'All types'], ['decision', 'Decision'], ['fact', 'Fact'], ['procedure', 'Procedure'], ['preference', 'Preference'], ['event', 'Event']], state.explorerPreset.memory_type || '');
@@ -259,7 +264,7 @@
     const resetFilters = button('Reset filters', '', () => {
       state.explorerPreset = {}; state.explorerPage = 1; render();
     });
-    form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'), resetFilters);
+    form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, sessionField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'), resetFilters);
     let currentParams = new URLSearchParams(state.explorerPreset);
     const list = async (params, page = 1) => {
       currentParams = new URLSearchParams(params); const requestParams = new URLSearchParams(params); requestParams.set('page', String(page)); requestParams.set('limit', '50');
@@ -281,7 +286,7 @@
     };
     form.addEventListener('submit', async event => {
       event.preventDefault(); const params = new URLSearchParams();
-      [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['status', lifecycle.element.value], ['memory_type', type.element.value], ['sort', sort.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['session_id', sessionField.element.value], ['status', lifecycle.element.value], ['memory_type', type.element.value], ['sort', sort.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
       if (core.element.checked) params.set('is_core', 'true');
       if (dateFrom.element.value || dateTo.element.value) {
         params.set('date_field', dateField.element.value);
@@ -310,6 +315,96 @@
     const data = await api('/api/events?limit=20'); const rows = data.events.map(event => {
       const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(node('td', event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
     }); view.replaceChildren(section('Recent activity', 'Read-only operational evidence. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows));
+  };
+
+  const openSessionDetail = (sessionId) => { state.sessionDetailId = sessionId; render(); };
+
+  const sessionRow = (item) => {
+    const row = node('tr');
+    const idCell = node('td'); const idLine = node('div', undefined, 'id-prefix');
+    idLine.append(node('code', (item.session_id || '').slice(0, 12)), button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
+    idCell.append(button(item.session_id, 'row-button', () => openSessionDetail(item.session_id)), idLine);
+    row.append(idCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
+    return row;
+  };
+
+  const eventTypeGroups = (events) => {
+    const groups = new Map();
+    events.forEach(event => {
+      const key = event.type || 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(event);
+    });
+    return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  };
+
+  const sessionDetail = async (sessionId) => {
+    const back = button('← Back to Agent Sessions', '', () => { state.sessionDetailId = ''; render(); });
+    const result = node('div');
+    view.replaceChildren(back, section(sessionId, 'Memories created or touched by this session, and its logged events.'), result);
+    setBusy(result, true);
+    try {
+      const [memoriesData, eventsData] = await Promise.all([
+        api(`/api/entities?session_id=${encodeURIComponent(sessionId)}&limit=100`),
+        api(`/api/events?agent_session_id=${encodeURIComponent(sessionId)}&limit=100`),
+      ]);
+      const memoryRows = memoriesData.entities.map(entity => {
+        const row = node('tr'); const lifecycleCell = node('td'); lifecycleCell.append(statusBadge(entity.status));
+        const roles = []; if (entity.agent_session_id === sessionId) roles.push('created'); if (entity.last_touched_session_id === sessionId) roles.push('touched');
+        row.append(memoryCell(entity), lifecycleCell, node('td', roles.join(', ') || '—')); return row;
+      });
+      const memorySection = node('div');
+      memorySection.append(
+        section(`${memoriesData.total_count} memories`, memoriesData.total_count > memoriesData.entities.length ? `Showing the first ${memoriesData.entities.length}.` : ''),
+        renderTable(['Memory', 'Lifecycle', 'Session role'], memoryRows, 'No memories created or touched by this session.'),
+      );
+      const eventGroups = eventTypeGroups(eventsData.events);
+      const eventsSection = node('div');
+      eventsSection.append(section(`${eventsData.total_count} events`, eventsData.total_count > eventsData.events.length ? `Showing the first ${eventsData.events.length}, grouped by type.` : 'Grouped by type.'));
+      if (!eventGroups.length) eventsSection.append(node('p', 'No events logged for this session.', 'muted'));
+      eventGroups.forEach(([type, items]) => {
+        const details = document.createElement('details'); details.className = 'event-group';
+        const summary = document.createElement('summary'); summary.append(node('span', type, 'predicate-pill'), node('span', ` · ${items.length}`, 'muted'));
+        const rows = items.map(event => {
+          const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget)));
+          row.append(node('td', event.timestamp), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
+        });
+        details.append(summary, renderTable(['Time', 'Agent', 'Event', 'Action'], rows));
+        eventsSection.append(details);
+      });
+      result.replaceChildren(memorySection, eventsSection);
+    } finally { setBusy(result, false); }
+  };
+
+  const sessions = async () => {
+    if (state.sessionDetailId) { await sessionDetail(state.sessionDetailId); return; }
+    const form = node('form', undefined, 'toolbar');
+    const prefixField = inputField('Session ID prefix', 'Filter by session ID prefix', state.sessionsIdPrefix);
+    const resetFilter = button('Reset filter', '', () => { state.sessionsIdPrefix = ''; state.sessionsPage = 1; render(); });
+    form.append(prefixField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
+    const result = node('div');
+    let currentPrefix = state.sessionsIdPrefix;
+    const list = async (page = 1) => {
+      setBusy(result, true);
+      try {
+        const params = new URLSearchParams({ page: String(page), limit: '50' });
+        if (currentPrefix) params.set('id_prefix', currentPrefix);
+        const data = await api(`/api/sessions?${params}`);
+        const rows = data.sessions.map(sessionRow);
+        const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Session pages');
+        const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
+        const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
+        pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
+        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Sorted by most recent activity. Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
+        state.sessionsPage = page;
+      } finally { setBusy(result, false); }
+    };
+    form.addEventListener('submit', event => {
+      event.preventDefault(); currentPrefix = prefixField.element.value.trim();
+      state.sessionsIdPrefix = currentPrefix; state.sessionsPage = 1; list(1);
+    });
+    view.replaceChildren(section('Agent sessions', 'Browse memories and events grouped by the MCP session that created or touched them.'), form, result);
+    await list(state.sessionsPage);
   };
 
   const normalizeGraph = (data) => {
@@ -415,7 +510,7 @@
     view.replaceChildren(fragment);
   };
 
-  const loaders = { overview, explorer, activity, relationships, quality, operations, tags, diagnostics };
+  const loaders = { overview, explorer, activity, sessions, relationships, quality, operations, tags, diagnostics };
   const render = async () => {
     state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
     document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('is-active', item.dataset.view === state.view));

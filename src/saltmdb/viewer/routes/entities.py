@@ -34,6 +34,7 @@ class EntitiesMixin:
             memory_type_filter = query.get("memory_type", [None])[0]
             embedding_filter = query.get("embedding_status", [None])[0]
             quality_filter = query.get("quality_status", [None])[0]
+            session_id_filter = query.get("session_id", [None])[0]
             sort = query.get("sort", ["updated_desc"])[0] or "updated_desc"
             date_field = query.get("date_field", [None])[0]
             date_from = query.get("date_from", [None])[0]
@@ -96,6 +97,9 @@ class EntitiesMixin:
             if quality_filter:
                 where_clauses.append("quality_status = ?")
                 params.append(quality_filter)
+            if session_id_filter:
+                where_clauses.append("(agent_session_id = ? OR last_touched_session_id = ?)")
+                params.extend([session_id_filter, session_id_filter])
             if date_from:
                 where_clauses.append(f"{date_field}_at >= ?")
                 params.append(_utc_day_bound(date_from, end_exclusive=False))
@@ -109,7 +113,7 @@ class EntitiesMixin:
             conn = self.get_db_connection()
             cursor = conn.execute(
                 f"""
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status, memory_type, quality_score, quality_status
+                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status, memory_type, quality_score, quality_status, agent_session_id, last_touched_session_id
                 FROM entities
                 {where_sql}
                 ORDER BY {order_field} {order_direction}, id ASC
@@ -162,6 +166,8 @@ class EntitiesMixin:
                         "memory_type": r[13] or "fact",
                         "quality_score": r[14],
                         "quality_status": r[15],
+                        "agent_session_id": r[16],
+                        "last_touched_session_id": r[17],
                         "tags": tag_map.get(r[0], []),
                     }
                 )

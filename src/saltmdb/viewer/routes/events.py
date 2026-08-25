@@ -27,12 +27,16 @@ class EventsMixin:
             type_filter = query.get("type", [None])[0]
             context_filter = query.get("context_id", [None])[0]
             q_filter = query.get("q", [None])[0]
+            session_filter = query.get("agent_session_id", [None])[0]
 
             where = []
             params = []
             if agent_filter:
                 where.append("agent_id = ?")
                 params.append(agent_filter)
+            if session_filter:
+                where.append("agent_session_id = ?")
+                params.append(session_filter)
             if type_filter:
                 where.append("type = ?")
                 params.append(type_filter)

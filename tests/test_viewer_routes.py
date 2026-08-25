@@ -147,6 +147,211 @@ class TestViewerBrowseAndHybridSearch(unittest.TestCase):
             db_path=self.db_path,
         )
 
+    @patch("saltmdb.viewer.routes.memory_service.search_memory")
+    def test_search_passes_through_agent_session_id_filter(self, search_memory_mock):
+        search_memory_mock.return_value = []
+        handler = self._handler()
+        self._capture(handler)
+        handler.get_search({"q": ["meaningful query"], "agent_session_id": ["sess-alpha"]})
+        search_memory_mock.assert_called_once_with(
+            query_keywords="meaningful query",
+            limit=50,
+            include_related=False,
+            mode="broad",
+            db_path=self.db_path,
+            agent_session_id="sess-alpha",
+        )
+
+
+class TestViewerAgentSessions(unittest.TestCase):
+    """GET /api/entities?session_id=, /api/events?agent_session_id=, and /api/sessions.
+
+    Covers the backend half of the agent-session-browse feature scoped in handover
+    memory 1ce2f08b: exposing agent_session_id/last_touched_session_id on
+    get_entities, adding the missing agent_session_id filter to get_events, and the
+    new get_sessions distinct-session enumeration (nothing previously listed
+    distinct session ids at all).
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "viewer-sessions.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+
+    def tearDown(self):
+        self.conn.close()
+        os.environ.pop("SALTMDB_DB_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _handler(self):
+        return SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), DummyServer())
+
+    @staticmethod
+    def _capture(handler):
+        captured = {}
+        handler.send_json = lambda data, status=200: captured.update(data=data, status=status)
+        return captured
+
+    def _insert_entity(
+        self, entity_id, created_at, updated_at, agent_session_id=None, last_touched_session_id=None
+    ):
+        self.conn.execute(
+            """INSERT INTO entities
+               (id, created_at, updated_at, last_accessed_at, title, full_content,
+                agent_session_id, last_touched_session_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entity_id,
+                created_at,
+                updated_at,
+                updated_at,
+                entity_id,
+                f"content {entity_id}",
+                agent_session_id,
+                last_touched_session_id,
+            ),
+        )
+        self.conn.commit()
+
+    def _insert_event(
+        self, event_id, timestamp, event_type, agent_session_id=None, agent_id="tester"
+    ):
+        self.conn.execute(
+            """INSERT INTO events (id, timestamp, agent_id, type, content, agent_session_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (event_id, timestamp, agent_id, event_type, f"content {event_id}", agent_session_id),
+        )
+        self.conn.commit()
+
+    def test_get_entities_exposes_session_columns_and_session_id_filters_created_or_touched(self):
+        # created by sess-a, never touched by anyone else
+        self._insert_entity(
+            "created-only",
+            "2026-08-24T10:00:00+00:00",
+            "2026-08-24T10:00:00+00:00",
+            agent_session_id="sess-a",
+            last_touched_session_id="sess-a",
+        )
+        # created by sess-b, later touched (e.g. supersede/consolidate) by sess-a
+        self._insert_entity(
+            "touched-only",
+            "2026-08-24T09:00:00+00:00",
+            "2026-08-24T11:00:00+00:00",
+            agent_session_id="sess-b",
+            last_touched_session_id="sess-a",
+        )
+        # unrelated to sess-a entirely
+        self._insert_entity(
+            "unrelated",
+            "2026-08-24T09:00:00+00:00",
+            "2026-08-24T09:00:00+00:00",
+            agent_session_id="sess-c",
+            last_touched_session_id="sess-c",
+        )
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_entities({})
+        by_id = {e["id"]: e for e in captured["data"]["entities"]}
+        self.assertEqual(by_id["created-only"]["agent_session_id"], "sess-a")
+        self.assertEqual(by_id["created-only"]["last_touched_session_id"], "sess-a")
+        self.assertEqual(by_id["touched-only"]["agent_session_id"], "sess-b")
+        self.assertEqual(by_id["touched-only"]["last_touched_session_id"], "sess-a")
+
+        captured_filtered = self._capture(handler)
+        handler.get_entities({"session_id": ["sess-a"]})
+        filtered_ids = {e["id"] for e in captured_filtered["data"]["entities"]}
+        self.assertEqual(filtered_ids, {"created-only", "touched-only"})
+
+    def test_get_events_agent_session_id_filter(self):
+        self._insert_event(
+            "evt-1", "2026-08-24T10:00:00+00:00", "decision", agent_session_id="sess-a"
+        )
+        self._insert_event("evt-2", "2026-08-24T10:05:00+00:00", "issue", agent_session_id="sess-b")
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_events({"agent_session_id": ["sess-a"]})
+        ids = {e["id"] for e in captured["data"]["events"]}
+        self.assertEqual(ids, {"evt-1"})
+
+    def test_get_sessions_aggregates_memory_and_event_counts_sorted_by_recency(self):
+        # sess-a: two memories (one created, one only touched) + one event; most recent activity.
+        self._insert_entity(
+            "a-created",
+            "2026-08-24T08:00:00+00:00",
+            "2026-08-24T08:00:00+00:00",
+            agent_session_id="sess-a",
+            last_touched_session_id="sess-a",
+        )
+        self._insert_entity(
+            "a-touched",
+            "2026-08-23T08:00:00+00:00",
+            "2026-08-25T12:00:00+00:00",
+            agent_session_id="sess-old",
+            last_touched_session_id="sess-a",
+        )
+        self._insert_event(
+            "a-evt", "2026-08-24T09:00:00+00:00", "decision", agent_session_id="sess-a"
+        )
+        # sess-old: one memory (as creator only, already counted for sess-a as toucher), older activity.
+        self._insert_event(
+            "old-evt", "2026-08-20T09:00:00+00:00", "issue", agent_session_id="sess-old"
+        )
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        self.assertEqual(captured["status"], 200)
+        by_id = {s["session_id"]: s for s in captured["data"]["sessions"]}
+
+        self.assertEqual(by_id["sess-a"]["memory_count"], 2)
+        self.assertEqual(by_id["sess-a"]["event_count"], 1)
+        self.assertEqual(by_id["sess-old"]["memory_count"], 1)
+        self.assertEqual(by_id["sess-old"]["event_count"], 1)
+
+        # sess-a's last-touched memory update (2026-08-25T12:00) is its most recent activity,
+        # more recent than sess-old's latest event (2026-08-20) -- so sess-a sorts first.
+        session_order = [s["session_id"] for s in captured["data"]["sessions"]]
+        self.assertEqual(session_order.index("sess-a"), 0)
+        self.assertLess(session_order.index("sess-a"), session_order.index("sess-old"))
+
+    def test_get_sessions_id_prefix_filter_and_pagination(self):
+        for i in range(3):
+            self._insert_entity(
+                f"e{i}",
+                "2026-08-24T08:00:00+00:00",
+                "2026-08-24T08:00:00+00:00",
+                agent_session_id=f"prefix-x-{i}",
+                last_touched_session_id=f"prefix-x-{i}",
+            )
+        self._insert_entity(
+            "e-other",
+            "2026-08-24T08:00:00+00:00",
+            "2026-08-24T08:00:00+00:00",
+            agent_session_id="other-session",
+            last_touched_session_id="other-session",
+        )
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"id_prefix": ["prefix-x-"]})
+        ids = {s["session_id"] for s in captured["data"]["sessions"]}
+        self.assertEqual(ids, {"prefix-x-0", "prefix-x-1", "prefix-x-2"})
+        self.assertEqual(captured["data"]["total_count"], 3)
+
+        captured_page = self._capture(handler)
+        handler.get_sessions({"id_prefix": ["prefix-x-"], "limit": ["2"], "page": ["2"]})
+        self.assertEqual(len(captured_page["data"]["sessions"]), 1)
+        self.assertEqual(captured_page["data"]["total_pages"], 2)
+
+    def test_get_sessions_rejects_invalid_pagination(self):
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"limit": ["0"]})
+        self.assertEqual(captured["status"], 400)
+
 
 class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
     def setUp(self):

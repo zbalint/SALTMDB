@@ -113,6 +113,8 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler):
             self.get_events(query)
         elif path == "/api/tags":
             self.get_tags()
+        elif path == "/api/sessions":
+            self.get_sessions(query)
         elif path == "/api/locks":
             self.send_json(
                 {"error": "System Locks was retired", "replacement": "/api/operations"}, 410

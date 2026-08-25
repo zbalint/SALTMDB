@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 MAX_ENTITY_LIMIT = 100
 MAX_EVENT_LIMIT = 100
 MAX_RELATION_LIMIT = 50
+MAX_SESSION_LIMIT = 100
 
 STATIC_ASSETS = {
     "/static/viewer.css": "viewer.css",
