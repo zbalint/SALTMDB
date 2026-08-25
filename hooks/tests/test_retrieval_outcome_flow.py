@@ -50,7 +50,7 @@ def _run_hook(script: str, payload: dict, home: Path) -> dict:
 
 
 def _flag_file(home: Path, session_id: str) -> Path:
-    return home / ".claude" / "hooks" / ".state" / f"retrieval-outcome-pending-{session_id}.flag"
+    return home / ".saltmdb" / "hooks" / ".state" / f"retrieval-outcome-pending-{session_id}.flag"
 
 
 # --- Bug #1: stop-critique-gate turn-boundary detection ---------------------------------------

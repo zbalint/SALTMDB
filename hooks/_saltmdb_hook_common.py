@@ -154,7 +154,19 @@ def stop_block_payload(data: dict, reason: str) -> dict:
 
 
 def state_dir() -> Path:
-    d = Path.home() / ".claude" / "hooks" / ".state"
+    """Per-user scratch dir for this module's own bookkeeping (pending-flag files, counters).
+
+    Deliberately NOT under ``~/.claude`` -- that would contradict this file's own "agent-agnostic
+    script bodies" design principle (see module docstring / README.md): the script *install*
+    location legitimately varies per harness (``~/.claude/hooks/`` for Claude Code,
+    ``~/.mcp/SALTMDB/hooks/`` for Antigravity, ``~/.copilot/hooks/`` for Copilot CLI), but this
+    directory is pure internal state that has nothing to do with which harness is running the
+    script -- pinning it to one harness's install convention meant an Antigravity/Copilot install
+    silently wrote its state under an unrelated (and possibly nonexistent) ``~/.claude`` tree.
+    Mirrors the project's own existing harness-neutral per-user directory convention instead
+    (``~/.saltmdb``, e.g. ``daemon/discovery.py``'s discovery-file directory).
+    """
+    d = Path.home() / ".saltmdb" / "hooks" / ".state"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
