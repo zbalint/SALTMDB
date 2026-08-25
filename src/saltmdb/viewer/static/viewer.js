@@ -179,9 +179,10 @@
         ['Owner', data.owner_id || 'system'], ['Scope', data.scope || '—'], ['Weight', data.weight ?? '—'],
         ['Core memory', data.is_core ? 'Yes (#core)' : 'No'], ['Created', formatTimestamp(data.created_at)],
         ['Updated', formatTimestamp(data.updated_at)], ['Last accessed', formatTimestamp(data.last_accessed_at)],
-        ['Context ID', data.context_id || data.project_id || '—'], ['Entity ID', data.id],
+        ['Context ID', data.context_id || data.project_id || '—'],
       ];
       metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
+      metadataGrid.append(factPairWithCopy('Entity ID', data.id, 'Memory ID'));
       metadataGrid.append(factPairWithCopy('Created by session', data.agent_session_id, 'Session ID'));
       metadataGrid.append(factPairWithCopy('Last touched by session', data.last_touched_session_id, 'Session ID'));
       metadata.append(metadataGrid);
