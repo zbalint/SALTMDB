@@ -7,14 +7,20 @@ plus the shared _collect_stats() helper they both use.
 import json
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from saltmdb.db.vector_schema import try_load_vector_extension
 from saltmdb.viewer.routes._shared import MAX_ENTITY_LIMIT, _bounded_query_int
 
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
+
 logger = logging.getLogger(__name__)
 
 
-class StatsMixin:
+class StatsMixin(ViewerHandlerProtocol):
     """Provides _collect_stats/get_stats/get_operations/get_quality/get_embeddings_stats."""
 
     def _collect_stats(self, conn):

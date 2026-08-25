@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from saltmdb.viewer.routes._shared import (
     MAX_ENTITY_LIMIT,
@@ -11,10 +11,15 @@ from saltmdb.viewer.routes._shared import (
     _utc_day_bound,
 )
 
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
+
 logger = logging.getLogger(__name__)
 
 
-class EntitiesMixin:
+class EntitiesMixin(ViewerHandlerProtocol):
     """Provides get_entities(); mixed into the final SALTMDBHandler elsewhere."""
 
     def get_entities(self, query):  # noqa: C901, PLR0912, PLR0915

@@ -1,8 +1,14 @@
 """Embedding scatterplot endpoint: GET /api/scatterplot."""
 
 import logging
+from typing import TYPE_CHECKING
 
 from saltmdb.db.vector_schema import try_load_vector_extension
+
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +66,7 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
     return X @ Q[:, :n_components]
 
 
-class ScatterplotMixin:
+class ScatterplotMixin(ViewerHandlerProtocol):
     """Provides get_scatterplot(); mixed into the final SALTMDBHandler elsewhere."""
 
     def get_scatterplot(self):  # noqa: C901

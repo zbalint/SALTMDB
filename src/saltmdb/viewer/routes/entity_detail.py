@@ -3,13 +3,19 @@
 import json
 import logging
 import urllib.parse
+from typing import TYPE_CHECKING
 
 from saltmdb.domain.services import relation_service
+
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
 
 
-class EntityDetailMixin:
+class EntityDetailMixin(ViewerHandlerProtocol):
     """Provides get_lineage() and get_entity_detail(); mixed into SALTMDBHandler elsewhere."""
 
     def get_lineage(self, entity_id):

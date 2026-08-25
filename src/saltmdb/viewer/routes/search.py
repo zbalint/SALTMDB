@@ -1,14 +1,20 @@
 """Hybrid search endpoint: GET /api/search."""
 
 import logging
+from typing import TYPE_CHECKING
 
 from saltmdb.config import get_db_path
 from saltmdb.domain.services import memory_service
 
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
+
 logger = logging.getLogger(__name__)
 
 
-class SearchMixin:
+class SearchMixin(ViewerHandlerProtocol):
     """Provides get_search(); mixed into the final SALTMDBHandler elsewhere."""
 
     def get_search(self, query):

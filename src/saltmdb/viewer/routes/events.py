@@ -7,13 +7,19 @@ rather than deleted, since deleting it is a separate decision from this refactor
 
 import logging
 import sqlite3
+from typing import TYPE_CHECKING
 
 from saltmdb.viewer.routes._shared import MAX_EVENT_LIMIT, _bounded_query_int
+
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
 
 
-class EventsMixin:
+class EventsMixin(ViewerHandlerProtocol):
     """Provides get_events(), get_tags(), get_locks(); mixed into SALTMDBHandler elsewhere."""
 
     def get_events(self, query):

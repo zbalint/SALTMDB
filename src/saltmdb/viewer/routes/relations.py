@@ -6,14 +6,19 @@ and GET /api/entities/{id}/relations (single-entity relation paging).
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from saltmdb.viewer.routes._shared import MAX_RELATION_LIMIT, _bounded_query_int
+
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
 
 
-class RelationsMixin:
+class RelationsMixin(ViewerHandlerProtocol):
     """Provides get_relations_graph/get_all_relations/get_relations_neighborhood/get_entity_relations."""
 
     def get_relations_graph(self, query=None):

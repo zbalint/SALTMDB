@@ -14,16 +14,22 @@ import mimetypes
 import os
 import urllib.parse
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from saltmdb.config import get_db_path
 from saltmdb.viewer.context import ViewerReadGateway
 from saltmdb.viewer.routes._shared import STATIC_ASSETS
 from saltmdb.viewer.templates import get_frontend_html
 
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
+
 logger = logging.getLogger(__name__)
 
 
-class ViewerHandlerBase(http.server.BaseHTTPRequestHandler):
+class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtocol):
     """Zero-dependency HTTP Request Handler for the SALTMDB Dashboard Viewer."""
 
     def log_message(self, format, *args):

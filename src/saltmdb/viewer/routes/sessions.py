@@ -17,13 +17,19 @@ path only) matches -- the same OR semantics as the ``session_id`` filter added t
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 from saltmdb.viewer.routes._shared import MAX_SESSION_LIMIT, _bounded_query_int
+
+if TYPE_CHECKING:
+    from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
+else:
+    ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
 
 
-class SessionsMixin:
+class SessionsMixin(ViewerHandlerProtocol):
     """Provides get_sessions(); mixed into the final SALTMDBHandler elsewhere."""
 
     def get_sessions(self, query):  # noqa: C901
