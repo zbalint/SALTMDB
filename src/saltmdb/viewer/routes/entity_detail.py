@@ -109,7 +109,7 @@ class EntityDetailMixin(ViewerHandlerProtocol):
             conn = self.get_db_connection()
             cursor = conn.execute(
                 """
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, memory_type, quality_score, quality_status, quality_flags
+                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, memory_type, quality_score, quality_status, quality_flags, agent_session_id, last_touched_session_id
                 FROM entities WHERE id = ?
             """,
                 (entity_id,),
@@ -184,6 +184,8 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                 "quality_score": row[19],
                 "quality_status": row[20],
                 "quality_flags": json.loads(row[21]) if row[21] else [],
+                "agent_session_id": row[22],
+                "last_touched_session_id": row[23],
                 "tags": tags,
                 "relations": {
                     "outgoing": outgoing,

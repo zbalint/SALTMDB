@@ -264,6 +264,21 @@ class TestViewerAgentSessions(unittest.TestCase):
         filtered_ids = {e["id"] for e in captured_filtered["data"]["entities"]}
         self.assertEqual(filtered_ids, {"created-only", "touched-only"})
 
+    def test_get_entity_detail_exposes_session_columns(self):
+        self._insert_entity(
+            "touched-only",
+            "2026-08-24T09:00:00+00:00",
+            "2026-08-24T11:00:00+00:00",
+            agent_session_id="sess-b",
+            last_touched_session_id="sess-a",
+        )
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_entity_detail("touched-only")
+        self.assertEqual(captured["data"]["agent_session_id"], "sess-b")
+        self.assertEqual(captured["data"]["last_touched_session_id"], "sess-a")
+
     def test_get_events_agent_session_id_filter(self):
         self._insert_event(
             "evt-1", "2026-08-24T10:00:00+00:00", "decision", agent_session_id="sess-a"

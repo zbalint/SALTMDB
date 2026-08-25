@@ -99,6 +99,18 @@
     pair.append(node('dt', label), node('dd', value));
     return pair;
   };
+  const factPairWithCopy = (label, value, copyLabel) => {
+    const pair = node('div'); const dd = node('dd');
+    if (value) {
+      const line = node('div', undefined, 'id-prefix');
+      const code = node('code', value.slice(0, 12));
+      code.title = value;
+      line.append(code, button('Copy ID', 'copy-id', () => copyText(value, copyLabel)));
+      dd.append(line);
+    } else dd.textContent = '—';
+    pair.append(node('dt', label), dd);
+    return pair;
+  };
   const statusBadge = (value) => node('span', value || 'unknown', `status-pill status-${value || 'unknown'}`);
   const tagList = (tags) => {
     const wrap = node('span', undefined, 'tag-list');
@@ -170,6 +182,8 @@
         ['Context ID', data.context_id || data.project_id || '—'], ['Entity ID', data.id],
       ];
       metadataEntries.forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
+      metadataGrid.append(factPairWithCopy('Created by session', data.agent_session_id, 'Session ID'));
+      metadataGrid.append(factPairWithCopy('Last touched by session', data.last_touched_session_id, 'Session ID'));
       metadata.append(metadataGrid);
       const topTags = node('div', undefined, 'metadata-tags'); topTags.append(node('strong', 'Tags'), tagList(data.tags)); metadata.append(topTags);
       if (data.metadata && Object.keys(data.metadata).length) {
