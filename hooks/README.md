@@ -68,8 +68,8 @@ every body is fully shared).
 | :--- | :--- | :--- |
 | [`_saltmdb_hook_common.py`](_saltmdb_hook_common.py) | *(not a hook)* | Shared stdlib-only helpers imported by every script below: alias-tolerant field lookup, transcript scanning, multi-schema JSON emission, per-session state files. |
 | [`saltmdb-session-start-bootstrap.py`](saltmdb-session-start-bootstrap.py) | `SessionStart` / `PreInvocation` / `sessionStart` | Injects the canonical core-memory bootstrap digest (`saltmdb-cli bootstrap-digest`), plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`). Locates `saltmdb-cli` via (in order) the `SALTMDB_CLI_PATH` env var, `PATH`, then a last-resort `~/.mcp/SALTMDB/.venv/bin/saltmdb-cli` guess — set `SALTMDB_CLI_PATH` if your install lives somewhere `PATH` doesn't reach inside a hook subprocess. |
-| [`saltmdb-pre-tool-search-gate.py`](saltmdb-pre-tool-search-gate.py) | `PreToolUse` / `preToolUse` | Enforces Rule 1 ("Think Before You Leap"): denies a risky edit/bash/file-write call until `search_memory` has been called this session. Does its own read-only-tool check internally (needed for Copilot, whose `preToolUse` fires unfiltered) — replaces the old separate Copilot-only pre-tool script, which reimplemented the same decision logic with drift risk. |
-| [`saltmdb-post-tool-response-nudges.py`](saltmdb-post-tool-response-nudges.py) | `PostToolUse` on `store_memory`/`search_memory` | Inspects the tool *response*, not just the tool name: nudges on unacted `duplicate_candidates`, a `store_memory` with no follow-up `manage_relation`, and an empty `mode="strict"` result. Also sets a per-session retrieval-outcome-pending flag on every `search_memory` call, for the Stop-time gate below. |
+| [`saltmdb-pre-tool-search-gate.py`](saltmdb-pre-tool-search-gate.py) | `PreToolUse` / `preToolUse` | Enforces Rule 1 ("Think Before You Leap"): denies a risky edit/bash/file-write call until `search_memory` has been called this session. Does its own read-only-tool check internally (needed for Copilot, whose `preToolUse` fires unfiltered) — replaces the old separate Copilot-only pre-tool script, which reimplemented the same decision logic with drift risk. Its primary "was `search_memory` called this session" signal is a structured per-session flag file set by `saltmdb-post-tool-response-nudges.py` on every `search_memory` call (see Windows notes below for why this replaced a transcript-only check); a transcript scan remains as a fallback for harnesses that do supply `transcript_path`. Tool-name lookup falls back to Copilot's nested `toolCalls[0].name` shape when no flat `tool_name`/`toolName` field is present. |
+| [`saltmdb-post-tool-response-nudges.py`](saltmdb-post-tool-response-nudges.py) | `PostToolUse` on `store_memory`/`search_memory` | Inspects the tool *response*, not just the tool name: nudges on unacted `duplicate_candidates`, a `store_memory` with no follow-up `manage_relation`, and an empty `mode="strict"` result. Also sets two per-session flags on every `search_memory` call: the retrieval-outcome-pending flag (for the Stop-time gate below) and the search-memory-called flag (for `saltmdb-pre-tool-search-gate.py` above). |
 | [`saltmdb-post-tool-failure-circuit-breaker.py`](saltmdb-post-tool-failure-circuit-breaker.py) | `PostToolUse` on `log_event` | Fingerprints repeated `log_event(event_type="issue")` calls sharing an `error_code`; nudges CLAUDE.md rule 2 (stop after 2 consecutive failures, search memory, replan) instead of relying on the agent remembering it mid-loop. Also clears the retrieval-outcome-pending flag on a matching `log_event(event_type="retrieval_outcome")` call. |
 | [`saltmdb-stop-critique-gate.py`](saltmdb-stop-critique-gate.py) | `Stop` / `agentStop` | Two-stage gate: (1) mandatory 2-question self-reflection before closing a turn that touched files/commands; (2) requires that reflection to become a `store_memory` call or an explicit "no durable lesson" acknowledgment — otherwise a genuine finding just evaporates. |
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
@@ -125,6 +125,26 @@ never fired, since the target file never existed). Per
 the *same* shared `.py` script via `python "..."` instead of requiring a parallel PowerShell
 reimplementation -- keeping the one-shared-implementation principle above intact for Copilot CLI
 too.
+
+Three further confirmed-live bugs, all specific to Windows Copilot CLI's actual payload shape
+(as opposed to documented/assumed shape -- see the pattern above), all fixed:
+1. `RISKY_TOOL_NAMES` (used by `saltmdb-stop-critique-gate.py`) matched literal-cased tool names
+   only, but Copilot lowercases tool names in its transcript (`"bash"`/`"edit"` vs Claude Code's
+   `"Bash"`/`"Edit"`) -- the risky-call detection silently never matched. Now case-insensitive.
+2. Copilot's `preToolUse` payload has no flat `tool_name`/`toolName` field at all, only a nested
+   `toolCalls[0].name` -- `saltmdb-pre-tool-search-gate.py`'s read-only-tool fast path never
+   engaged. `get_tool_name()` in `_saltmdb_hook_common.py` now falls back to the nested shape.
+3. Copilot's `preToolUse` carries **no `transcript_path` field at all** (unlike its own
+   `agentStop`, which does) -- the search gate's only signal was a transcript scan keyed off
+   `transcript_path`, so it always saw an empty segment and permanently fail-opened, allowing
+   every edit/bash/PowerShell call regardless of `search_memory` history. Fixed with a structured
+   per-session flag file (`search_memory_called_flag_path`) set by
+   `saltmdb-post-tool-response-nudges.py` on every `search_memory` call and checked by the gate
+   before falling back to the transcript scan -- no dependency on `transcript_path` being present.
+   **Known residual gap**: the very first risky call of a Copilot session, before `search_memory`
+   has ever run (so before the flag can exist, with no transcript to fall back on either), still
+   fails open -- closing that would mean flipping the "can't verify" default from fail-open to
+   fail-closed, a separate strictness trade-off not made here.
 
 Claude Code's own Windows hook execution has open, upstream bugs unrelated to anything in this
 repo -- worth knowing if a Claude Code hook still doesn't fire on Windows after the `python`
