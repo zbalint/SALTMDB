@@ -191,6 +191,40 @@ class TestSessionDigestService(unittest.TestCase):
         self.assertIn("[procedure]", digest)
         self.assertIn("[decision]", digest)
 
+    def test_falls_back_past_newer_content_free_session(self):
+        """A newer registered session with zero surviving entities (e.g. a concurrently-started
+        sibling session's hello, registered before it has produced anything) does not shadow an
+        older session that has real content -- the digest should walk back to the older one
+        instead of rendering empty. Regression test for the live repro in SALTMDB memory 8402f500
+        (concurrent Claude + Codex sessions in the same cwd)."""
+        cwd = "/test/project"
+        older_session = "older-session-with-content"
+        newer_empty_session = "newer-session-empty"
+
+        agent_sessions.record_session(self.conn, older_session, cwd, "2024-01-01T10:00:00+00:00")
+        self._mk_entity("Real Memory", agent_session_id=older_session)
+
+        # Registered later, but never produced anything (e.g. a sibling session's hello that
+        # fired before its own first tool call).
+        agent_sessions.record_session(
+            self.conn, newer_empty_session, cwd, "2024-01-01T11:00:00+00:00"
+        )
+
+        digest = session_digest_service.render_last_session_digest(self.conn, cwd)
+        self.assertIn(older_session, digest)
+        self.assertIn("Real Memory", digest)
+        self.assertNotIn(newer_empty_session, digest)
+
+    def test_empty_envelope_when_all_recent_sessions_are_content_free(self):
+        """If every recent session for this cwd (within the lookback window) has zero surviving
+        entities, the digest is still the empty envelope, not an error."""
+        cwd = "/test/project"
+        agent_sessions.record_session(self.conn, "empty-1", cwd, "2024-01-01T10:00:00+00:00")
+        agent_sessions.record_session(self.conn, "empty-2", cwd, "2024-01-01T11:00:00+00:00")
+
+        digest = session_digest_service.render_last_session_digest(self.conn, cwd)
+        self.assertEqual(digest, "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>")
+
     def test_title_escaping_in_digest(self):
         """Titles with special YAML characters are escaped."""
         cwd = "/test/project"

@@ -6,7 +6,11 @@ import tempfile
 import unittest
 
 from saltmdb.db.schema import init_db
-from saltmdb.db.agent_sessions import record_session, get_last_session_for_cwd
+from saltmdb.db.agent_sessions import (
+    record_session,
+    get_last_session_for_cwd,
+    get_recent_sessions_for_cwd,
+)
 
 
 class TestAgentSessions(unittest.TestCase):
@@ -81,6 +85,35 @@ class TestAgentSessions(unittest.TestCase):
         self.assertIn("started_at", result)
         self.assertEqual(result["session_id"], "test-session")
         self.assertEqual(result["started_at"], "2024-01-01T12:00:00+00:00")
+
+    def test_get_recent_sessions_returns_newest_first(self):
+        """get_recent_sessions_for_cwd orders all matching rows newest-to-oldest."""
+        cwd = "/home/user/project"
+        record_session(self.conn, "session-old", cwd, "2024-01-01T10:00:00+00:00")
+        record_session(self.conn, "session-newest", cwd, "2024-01-01T12:00:00+00:00")
+        record_session(self.conn, "session-mid", cwd, "2024-01-01T11:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd)
+        self.assertEqual(
+            [r["session_id"] for r in result],
+            ["session-newest", "session-mid", "session-old"],
+        )
+
+    def test_get_recent_sessions_respects_limit(self):
+        """get_recent_sessions_for_cwd caps the number of rows returned at `limit`."""
+        cwd = "/home/user/project"
+        for i in range(5):
+            record_session(self.conn, f"session-{i}", cwd, f"2024-01-01T{10 + i:02d}:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, limit=2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["session_id"], "session-4")
+        self.assertEqual(result[1]["session_id"], "session-3")
+
+    def test_get_recent_sessions_returns_empty_list_for_unknown_cwd(self):
+        """get_recent_sessions_for_cwd returns [] (not None) when the cwd has no sessions."""
+        result = get_recent_sessions_for_cwd(self.conn, "/never/seen")
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

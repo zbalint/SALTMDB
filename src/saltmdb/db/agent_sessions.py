@@ -42,3 +42,26 @@ def get_last_session_for_cwd(conn: sqlite3.Connection, cwd: str) -> dict | None:
     if row is None:
         return None
     return {"session_id": row[0], "started_at": row[1]}
+
+
+def get_recent_sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int = 10) -> list[dict]:
+    """Return up to ``limit`` most recent _agent_sessions rows for this exact cwd, newest first.
+
+    Unlike get_last_session_for_cwd (which always returns just the single latest row,
+    regardless of whether that session ever produced anything), this lets a caller walk
+    backward past sessions that turn out to be content-free -- see
+    session_digest_service.render_last_session_digest, which needs that fallback so a
+    concurrently-started sibling session (own or another agent's, freshly registered via
+    hello but with zero entities yet) doesn't shadow a genuinely prior session that has
+    real content.
+    """
+    cursor = conn.execute(
+        """
+        SELECT session_id, started_at FROM _agent_sessions
+        WHERE cwd = ?
+        ORDER BY started_at DESC
+        LIMIT ?
+        """,
+        (cwd, limit),
+    )
+    return [{"session_id": row[0], "started_at": row[1]} for row in cursor.fetchall()]
