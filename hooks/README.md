@@ -126,7 +126,7 @@ the *same* shared `.py` script via `python "..."` instead of requiring a paralle
 reimplementation -- keeping the one-shared-implementation principle above intact for Copilot CLI
 too.
 
-Three further confirmed-live bugs, all specific to Windows Copilot CLI's actual payload shape
+Four further confirmed-live bugs, all specific to Windows Copilot CLI's actual payload shape
 (as opposed to documented/assumed shape -- see the pattern above), all fixed:
 1. `RISKY_TOOL_NAMES` (used by `saltmdb-stop-critique-gate.py`) matched literal-cased tool names
    only, but Copilot lowercases tool names in its transcript (`"bash"`/`"edit"` vs Claude Code's
@@ -145,6 +145,16 @@ Three further confirmed-live bugs, all specific to Windows Copilot CLI's actual 
    has ever run (so before the flag can exist, with no transcript to fall back on either), still
    fails open -- closing that would mean flipping the "can't verify" default from fail-open to
    fail-closed, a separate strictness trade-off not made here.
+4. Bug 3's own fix shipped broken on first pass: `saltmdb-post-tool-response-nudges.py` and
+   `saltmdb-post-tool-failure-circuit-breaker.py` still read `tool_name` via the old flat-alias-only
+   `get_field(...)` call, not the new `get_tool_name()` from bug 2's fix -- so on Copilot's
+   `postToolUse` (same nested `toolCalls[0].name` shape as its `preToolUse`), `tool_name` was
+   always `""`, `.endswith("search_memory")` never matched, and `search_memory_called_flag_path`'s
+   flag was never actually written in practice. Bug 3's fix was correct in isolation (verified
+   against a synthetic flat payload) but never verified against Copilot's real nested
+   `postToolUse` shape before shipping -- exactly the gap flagged as a risk in the "audit closed
+   vocab / verify against a real sample" lesson from bug 1's fix, and it bit immediately on the
+   very next thing that used the same lookup pattern. Both scripts now use `get_tool_name()` too.
 
 Claude Code's own Windows hook execution has open, upstream bugs unrelated to anything in this
 repo -- worth knowing if a Claude Code hook still doesn't fire on Windows after the `python`

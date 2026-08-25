@@ -29,6 +29,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     clear_state,
     emit,
     get_field,
+    get_tool_name,
     read_stdin_json,
     retrieval_outcome_flag_path,
 )
@@ -40,7 +41,7 @@ ERROR_CODE_PATTERN = re.compile(r'"error_code"\s*:\s*"([^"]*)"')
 
 def main() -> None:
     data = read_stdin_json()
-    tool_name = get_field(data, "tool_name", "toolName", "tool", "name")
+    tool_name = get_tool_name(data)
     if not tool_name.endswith("log_event"):
         return
 
