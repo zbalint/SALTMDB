@@ -67,7 +67,7 @@ every body is fully shared).
 | File | Lifecycle event(s) | Description |
 | :--- | :--- | :--- |
 | [`_saltmdb_hook_common.py`](_saltmdb_hook_common.py) | *(not a hook)* | Shared stdlib-only helpers imported by every script below: alias-tolerant field lookup, transcript scanning, multi-schema JSON emission, per-session state files. |
-| [`saltmdb-session-start-bootstrap.py`](saltmdb-session-start-bootstrap.py) | `SessionStart` / `PreInvocation` / `sessionStart` | Injects the canonical core-memory bootstrap digest (`saltmdb-cli bootstrap-digest`), plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`). |
+| [`saltmdb-session-start-bootstrap.py`](saltmdb-session-start-bootstrap.py) | `SessionStart` / `PreInvocation` / `sessionStart` | Injects the canonical core-memory bootstrap digest (`saltmdb-cli bootstrap-digest`), plus a nudge if any core memory is overdue for review (`saltmdb-cli corpus-health`). Locates `saltmdb-cli` via (in order) the `SALTMDB_CLI_PATH` env var, `PATH`, then a last-resort `~/.mcp/SALTMDB/.venv/bin/saltmdb-cli` guess — set `SALTMDB_CLI_PATH` if your install lives somewhere `PATH` doesn't reach inside a hook subprocess. |
 | [`saltmdb-pre-tool-search-gate.py`](saltmdb-pre-tool-search-gate.py) | `PreToolUse` / `preToolUse` | Enforces Rule 1 ("Think Before You Leap"): denies a risky edit/bash/file-write call until `search_memory` has been called this session. Does its own read-only-tool check internally (needed for Copilot, whose `preToolUse` fires unfiltered) — replaces the old separate Copilot-only pre-tool script, which reimplemented the same decision logic with drift risk. |
 | [`saltmdb-post-tool-response-nudges.py`](saltmdb-post-tool-response-nudges.py) | `PostToolUse` on `store_memory`/`search_memory` | Inspects the tool *response*, not just the tool name: nudges on unacted `duplicate_candidates`, a `store_memory` with no follow-up `manage_relation`, and an empty `mode="strict"` result. Also sets a per-session retrieval-outcome-pending flag on every `search_memory` call, for the Stop-time gate below. |
 | [`saltmdb-post-tool-failure-circuit-breaker.py`](saltmdb-post-tool-failure-circuit-breaker.py) | `PostToolUse` on `log_event` | Fingerprints repeated `log_event(event_type="issue")` calls sharing an `error_code`; nudges CLAUDE.md rule 2 (stop after 2 consecutive failures, search memory, replan) instead of relying on the agent remembering it mid-loop. Also clears the retrieval-outcome-pending flag on a matching `log_event(event_type="retrieval_outcome")` call. |
@@ -104,6 +104,39 @@ add the block from [`antigravity-settings-example.json`](antigravity-settings-ex
 Copy hook scripts (including `_saltmdb_hook_common.py`) to `~/.copilot/hooks/` (or repository
 `.github/hooks/`), and add `.github/hooks/saltmdb.json` using
 [`copilot-hooks-example.json`](copilot-hooks-example.json) as a reference.
+
+---
+
+## 🪟 Windows notes
+
+All three example configs invoke scripts as `python <path>` (never a bare `.py` path relying on
+the POSIX shebang line) -- confirmed necessary, not just defensive: native Windows has no shebang
+support at all, and `python3` (the POSIX convention this repo otherwise uses) is typically not on
+`PATH` on Windows, only `python`/`py` (community-confirmed, e.g.
+[claude-plugins-official#85](https://github.com/anthropics/claude-plugins-official/issues/85)).
+This costs nothing on macOS/Linux -- `python script.py` runs identically to a shebang+chmod
+invocation there.
+
+`copilot-hooks-example.json`'s `powershell` field previously pointed at `saltmdb-*.ps1` files
+that were **never shipped** -- a real, confirmed bug (every Windows Copilot CLI hook silently
+never fired, since the target file never existed). Per
+[GitHub's own hooks reference](https://docs.github.com/en/copilot/reference/hooks-reference), the
+`bash`/`powershell` fields are shell command-lines, not required script paths, so the fix invokes
+the *same* shared `.py` script via `python "..."` instead of requiring a parallel PowerShell
+reimplementation -- keeping the one-shared-implementation principle above intact for Copilot CLI
+too.
+
+Claude Code's own Windows hook execution has open, upstream bugs unrelated to anything in this
+repo -- worth knowing if a Claude Code hook still doesn't fire on Windows after the `python`
+fix above: shell/PATH resolution
+([anthropics/claude-code#73971](https://github.com/anthropics/claude-code/issues/73971)) and
+`.sh`/file-association handling
+([anthropic-code-mirror/claude-code#24097](https://github.com/anthropic-code-mirror/claude-code/issues/24097)).
+Also unverified from this repo: whether a literal `~` in a *global* `~/.claude/settings.json`
+hook `command` (as opposed to a project-scoped one) reliably expands on Windows -- left as-is
+here since it's Claude Code's own documented convention, not something to silently "fix" with an
+unverified guess; if your Windows Claude Code hooks still don't fire, try an absolute path in
+place of `~/.claude/hooks/...`.
 
 ---
 

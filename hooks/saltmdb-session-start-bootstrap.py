@@ -16,19 +16,40 @@ jq-or-regex-fallback would.
 """
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-CLI = Path.home() / ".mcp" / "SALTMDB" / ".venv" / "bin" / "saltmdb-cli"
+
+def _resolve_cli() -> str | None:
+    """Locate the saltmdb-cli executable without assuming any one install layout -- SALTMDB can be
+    installed anywhere (a venv the user chose, pipx, a global install), not just the
+    ``~/.mcp/SALTMDB`` layout this project's own maintainer happens to use. Precedence, most
+    explicit first: (1) ``SALTMDB_CLI_PATH`` env var, for a hook subprocess whose PATH doesn't
+    carry the real install's bin dir; (2) ``saltmdb-cli`` on PATH, the normal case for a pip/pipx
+    install; (3) the legacy ``~/.mcp/SALTMDB/.venv/bin/saltmdb-cli`` default, kept only as a
+    last-resort fallback for that one specific layout -- never the primary strategy."""
+    override = os.environ.get("SALTMDB_CLI_PATH")
+    if override and Path(override).is_file():
+        return override
+    on_path = shutil.which("saltmdb-cli")
+    if on_path:
+        return on_path
+    legacy = Path.home() / ".mcp" / "SALTMDB" / ".venv" / "bin" / "saltmdb-cli"
+    return str(legacy) if legacy.is_file() else None
+
+
+CLI = _resolve_cli()
 
 
 def run_cli(*args: str) -> str | None:
-    if not CLI.is_file():
+    if not CLI:
         return None
     try:
         result = subprocess.run(
-            [str(CLI), *args], capture_output=True, text=True, timeout=10, check=False
+            [CLI, *args], capture_output=True, text=True, timeout=10, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

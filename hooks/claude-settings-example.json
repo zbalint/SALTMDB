@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-session-start-bootstrap.py",
+            "command": "python ~/.claude/hooks/saltmdb-session-start-bootstrap.py",
             "timeout": 15
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-pre-tool-search-gate.py",
+            "command": "python ~/.claude/hooks/saltmdb-pre-tool-search-gate.py",
             "timeout": 15
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-post-tool-response-nudges.py",
+            "command": "python ~/.claude/hooks/saltmdb-post-tool-response-nudges.py",
             "timeout": 15
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-post-tool-failure-circuit-breaker.py",
+            "command": "python ~/.claude/hooks/saltmdb-post-tool-failure-circuit-breaker.py",
             "timeout": 15
           }
         ]
@@ -64,12 +64,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-stop-critique-gate.py",
+            "command": "python ~/.claude/hooks/saltmdb-stop-critique-gate.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-stop-retrieval-outcome-gate.py",
+            "command": "python ~/.claude/hooks/saltmdb-stop-retrieval-outcome-gate.py",
             "timeout": 15
           }
         ]
@@ -81,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/saltmdb-session-end-wrapup-reminder.py",
+            "command": "python ~/.claude/hooks/saltmdb-session-end-wrapup-reminder.py",
             "timeout": 10
           }
         ]

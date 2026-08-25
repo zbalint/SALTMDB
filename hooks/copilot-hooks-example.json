@@ -5,7 +5,7 @@
       {
         "type": "command",
         "bash": "$HOME/.copilot/hooks/saltmdb-session-start-bootstrap.py",
-        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-session-start-bootstrap.ps1",
+        "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-session-start-bootstrap.py\"",
         "timeoutSec": 10
       }
     ],
@@ -13,7 +13,7 @@
       {
         "type": "command",
         "bash": "$HOME/.copilot/hooks/saltmdb-pre-tool-search-gate.py",
-        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-pre-tool-search-gate.ps1",
+        "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-pre-tool-search-gate.py\"",
         "timeoutSec": 15
       }
     ],
@@ -21,7 +21,7 @@
       {
         "type": "command",
         "bash": "$HOME/.copilot/hooks/saltmdb-stop-critique-gate.py",
-        "powershell": "$HOME\\.copilot\\hooks\\saltmdb-stop-critique-gate.ps1",
+        "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-stop-critique-gate.py\"",
         "timeoutSec": 10
       }
     ]
