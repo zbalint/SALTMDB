@@ -100,6 +100,8 @@ class TestSessionConnectionOpen(unittest.TestCase):
         session.db_path = "/tmp/saltmdb_test_daemon_client.db"
         session._sock = None
         session._auth_token = None
+        session._agent_session_id = None
+        session._cwd = None
         return session
 
     def test_open_raises_and_closes_socket_on_rejected_hello(self):

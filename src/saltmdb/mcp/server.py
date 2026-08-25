@@ -5,6 +5,7 @@ from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
 from saltmdb.config import get_db_path
 from saltmdb.daemon.client import SessionConnection
+from saltmdb.mcp.identity import SESSION_IDENTITY
 
 # Configure standard logging exclusively to stderr to protect MCP stdio stream
 logging.basicConfig(
@@ -26,7 +27,11 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     concern handled once by __main__.py before mcp.run() is even called, not a per-lifespan one
     (round-3/round-4 correction: a contextvars.ContextVar tried to solve this here first and was
     the wrong primitive)."""
-    session = SessionConnection(get_db_path())
+    session = SessionConnection(
+        get_db_path(),
+        session_id=SESSION_IDENTITY.agent_session_id,
+        cwd=SESSION_IDENTITY.cwd,
+    )
     session.open()
     try:
         yield {}

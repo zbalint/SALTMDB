@@ -183,7 +183,7 @@ class _DaemonState:
             )
 
         if method in ("hello", "goodbye", "ping", "viewer_status"):
-            return self._handle_session_method(method, request_id, session_id)
+            return self._handle_session_method(method, request_id, session_id, params)
 
         if not self._acquire_inflight():
             return protocol.build_error_response(
@@ -207,7 +207,7 @@ class _DaemonState:
             self._release_inflight()
 
     def _handle_session_method(
-        self, method: str, request_id: str | None, session_id: int | None
+        self, method: str, request_id: str | None, session_id: int | None, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Handle session-lifecycle (hello/goodbye/ping) and status methods.
         These never acquire the inflight counter -- they are exempt from the shutdown gate."""
@@ -225,6 +225,30 @@ class _DaemonState:
                 if self._shutdown_timer is not None:
                     self._shutdown_timer.cancel()
                     self._shutdown_timer = None
+            # Record agent session (best-effort bookkeeping, never blocks hello RPC)
+            if (
+                params.get("agent_session_id")
+                and params.get("cwd")
+                and self.coordinator is not None
+            ):
+                try:
+                    from saltmdb.db import agent_sessions
+                    import datetime
+
+                    self.coordinator.submit(
+                        "record_agent_session",
+                        lambda conn: agent_sessions.record_session(
+                            conn,
+                            params["agent_session_id"],
+                            params["cwd"],
+                            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        ),
+                        priority="foreground",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to record agent session (non-fatal, hello still succeeds)"
+                    )
         if method == "viewer_status":
             return protocol.build_ok_response(
                 request_id, {"enabled": self.viewer_port is not None, "port": self.viewer_port}

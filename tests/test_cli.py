@@ -9,7 +9,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from saltmdb.cli import build_parser, cmd_bootstrap_digest, cmd_corpus_health, cmd_orphans
+from saltmdb.cli import (
+    build_parser,
+    cmd_bootstrap_digest,
+    cmd_corpus_health,
+    cmd_orphans,
+    cmd_session_digest,
+)
 from saltmdb.db.schema import init_db
 
 
@@ -64,6 +70,53 @@ class TestBootstrapDigestCli(unittest.TestCase):
                     rc = cmd_bootstrap_digest(_Args(db_path=tmp.name))
             self.assertEqual(rc, 0)
             self.assertIn("<saltmdb-digest>", buf.getvalue())
+
+
+class TestSessionDigestCli(unittest.TestCase):
+    """cmd_session_digest mirrors cmd_bootstrap_digest exactly: db-path existence
+    short-circuit, daemon dispatch (passing the resolved cwd through), and never crashing
+    the caller. Rendering itself lives in session_digest_service, tested separately."""
+
+    def test_missing_db_returns_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = os.path.join(tmp, "does-not-exist.db")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cmd_session_digest(_Args(db_path=missing_path))
+            self.assertEqual(rc, 0)
+            self.assertEqual(buf.getvalue(), "")
+
+    def test_prints_daemon_digest_verbatim_and_passes_cwd(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            fake_digest = "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>"
+            with patch("saltmdb.daemon.client.call", return_value=fake_digest) as mock_call:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cmd_session_digest(_Args(db_path=tmp.name))
+            self.assertEqual(rc, 0)
+            self.assertIn(fake_digest, buf.getvalue())
+            mock_call.assert_called_once_with(
+                tmp.name, "get_last_session_digest", {"cwd": os.path.realpath(os.getcwd())}
+            )
+
+    def test_daemon_failure_never_crashes_caller(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            with patch("saltmdb.daemon.client.call", side_effect=RuntimeError("boom")):
+                buf = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(buf), redirect_stderr(err):
+                    rc = cmd_session_digest(_Args(db_path=tmp.name))
+            self.assertEqual(rc, 0)
+            self.assertIn("Warning", err.getvalue())
+
+    def test_non_string_daemon_response_falls_back_to_empty_digest(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            with patch("saltmdb.daemon.client.call", return_value=None):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cmd_session_digest(_Args(db_path=tmp.name))
+            self.assertEqual(rc, 0)
+            self.assertIn("<saltmdb-last-session-digest>", buf.getvalue())
 
 
 class TestBuildParser(unittest.TestCase):

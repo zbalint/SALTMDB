@@ -17,6 +17,7 @@ without contaminating the shared daemon dispatch path.
 
 from __future__ import annotations
 
+import os
 import uuid6
 
 
@@ -41,6 +42,7 @@ class _SessionIdentity:
     def __init__(self) -> None:
         self._owner_id: str | None = None
         self.agent_session_id: str = str(uuid6.uuid7())
+        self.cwd: str = os.path.realpath(os.getcwd())
 
     def bind(self, owner_id: str | None) -> None:
         """Binds the session's owner_id from the first call that supplies one. A falsy value
@@ -61,6 +63,7 @@ class _SessionIdentity:
         by production code -- a real adapter process has exactly one identity for its whole life."""
         self._owner_id = None
         self.agent_session_id = str(uuid6.uuid7())
+        self.cwd = os.path.realpath(os.getcwd())
 
 
 # One instance per adapter process, by construction (module import happens once per process).

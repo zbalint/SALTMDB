@@ -1049,6 +1049,45 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         self.assertIn("<saltmdb-digest>", digest)
         self.assertIn("Dispatch Digest Core", digest)
 
+    def test_get_last_session_digest_dispatch_entry(self):
+        """Not a public MCP tool -- exercised directly through the daemon dispatch table.
+        Tests the dispatch function returns the expected digest string for a seeded scenario."""
+        from saltmdb.daemon import dispatch
+        from saltmdb.db import agent_sessions
+        import datetime
+
+        # Record a prior session
+        cwd = "/test/project"
+        session_id = "prior-session-123"
+        started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        agent_sessions.record_session(self.conn, session_id, cwd, started_at)
+
+        # Create a memory in that session directly -- store_memory auto-stamps
+        # agent_session_id from SESSION_IDENTITY and has no parameter to override it, so a
+        # specific known session_id must be seeded via a direct insert like this.
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id,
+            scope, status, title, memory_type, full_content, valid_from, agent_session_id)
+            VALUES (?, ?, ?, ?, 'tester', 'shared', 'raw', ?, 'fact', 'body', ?, ?)""",
+            ("prior-session-memory-id", now, now, now, "Prior Session Memory", now, session_id),
+        )
+        self.conn.commit()
+
+        # Call the dispatch function
+        digest = dispatch.DISPATCH_TABLE["get_last_session_digest"](cwd=cwd)
+        self.assertIn("<saltmdb-last-session-digest", digest)
+        self.assertIn(session_id, digest)
+        self.assertIn("Prior Session Memory", digest)
+
+    def test_get_last_session_digest_no_prior_session_returns_empty_envelope(self):
+        """get_last_session_digest returns empty envelope when no prior session exists."""
+        from saltmdb.daemon import dispatch
+
+        # No prior session recorded
+        digest = dispatch.DISPATCH_TABLE["get_last_session_digest"](cwd="/unknown/path")
+        self.assertEqual(digest, "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>")
+
 
 class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
     """Core-memory governance resolved gap #6: the MCP adapter layer must reject ambiguous

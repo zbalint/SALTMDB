@@ -4,6 +4,7 @@ import shutil
 import unittest
 from unittest.mock import MagicMock, patch
 
+from saltmdb.mcp.identity import SESSION_IDENTITY
 from saltmdb.mcp.server import server_lifespan
 
 
@@ -26,7 +27,11 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
             patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session) as mock_cls,
         ):
             async with server_lifespan(MagicMock()):
-                mock_cls.assert_called_once_with(self.db_path)
+                mock_cls.assert_called_once_with(
+                    self.db_path,
+                    session_id=SESSION_IDENTITY.agent_session_id,
+                    cwd=SESSION_IDENTITY.cwd,
+                )
                 mock_session.open.assert_called_once()
                 mock_session.close.assert_not_called()
             mock_session.close.assert_called_once()

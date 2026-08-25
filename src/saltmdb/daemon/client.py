@@ -242,10 +242,17 @@ class SessionConnection:
     Opened once during server_lifespan's startup, held open for the adapter process's entire
     life, closed during lifespan shutdown."""
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        session_id: str | None = None,
+        cwd: str | None = None,
+    ):
         self.db_path = discovery.resolve_canonical_db_path(db_path)
         self._sock: socket.socket | None = None
         self._auth_token: str | None = None
+        self._agent_session_id = session_id
+        self._cwd = cwd
 
     def open(self) -> None:
         info = ensure_daemon_running(self.db_path)
@@ -254,11 +261,16 @@ class SessionConnection:
         )
         try:
             sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
+            hello_params = {"pid": os.getpid(), "client_label": "saltmdb-adapter"}
+            if self._agent_session_id is not None:
+                hello_params["agent_session_id"] = self._agent_session_id
+            if self._cwd is not None:
+                hello_params["cwd"] = self._cwd
             protocol.send_frame(
                 sock,
                 protocol.build_request(
                     "hello",
-                    {"pid": os.getpid(), "client_label": "saltmdb-adapter"},
+                    hello_params,
                     token=info["auth_token"],
                 ),
             )

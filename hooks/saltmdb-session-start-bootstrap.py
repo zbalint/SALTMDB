@@ -61,6 +61,11 @@ def main() -> None:
     if digest:
         sys.stdout.write(digest)
 
+    session_digest = run_cli("session-digest")
+    if session_digest:
+        sys.stdout.write(session_digest)
+        print()
+
     health_raw = run_cli("corpus-health")
     if not health_raw:
         return

@@ -254,6 +254,78 @@ class TestDaemonStateRealConcurrency(unittest.TestCase):
             )
             state._sessions.discard(1)
 
+    def test_hello_with_agent_session_id_and_cwd_records_session(self):
+        """hello with agent_session_id and cwd params records the agent session when coordinator
+        is available (best-effort bookkeeping, never blocks hello RPC)."""
+        import os
+        import shutil
+        import tempfile
+        from saltmdb.db.schema import init_db
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(temp_dir, "test.db")
+            conn = init_db(db_path)
+            os.environ["SALTMDB_DB_PATH"] = db_path
+
+            # Create a state with a real coordinator
+            from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
+
+            coordinator = DbWriteCoordinator(db_path)
+            coordinator.start()
+            try:
+                state = self._state()
+                state.coordinator = coordinator
+
+                # Send hello with agent_session_id and cwd
+                cwd = "/test/project"
+                session_id = "test-session-abc"
+                resp = state.handle_request(
+                    protocol.build_request(
+                        "hello",
+                        {
+                            "pid": 12345,
+                            "client_label": "saltmdb-adapter",
+                            "agent_session_id": session_id,
+                            "cwd": cwd,
+                        },
+                        token="tok",
+                    ),
+                    session_id=1,
+                )
+
+                self.assertTrue(resp["ok"])
+                self.assertIn(1, state._sessions)
+
+                # Give the coordinator time to process the write
+                import time
+
+                time.sleep(0.5)
+
+                # Check the session was recorded
+                cursor = conn.execute(
+                    "SELECT session_id, cwd FROM _agent_sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                row = cursor.fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row[0], session_id)
+                self.assertEqual(row[1], cwd)
+            finally:
+                coordinator.shutdown()
+                conn.close()
+        finally:
+            if "SALTMDB_DB_PATH" in os.environ:
+                del os.environ["SALTMDB_DB_PATH"]
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_hello_without_agent_session_id_and_cwd_does_not_error(self):
+        """hello without agent_session_id and cwd params (back-compat) does not error."""
+        state = self._state()
+        resp = state.handle_request(protocol.build_request("hello", {}, token="tok"), session_id=1)
+        self.assertTrue(resp["ok"])
+        self.assertIn(1, state._sessions)
+
 
 class TestDaemonSignalShutdown(unittest.TestCase):
     def setUp(self):

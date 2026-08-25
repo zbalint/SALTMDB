@@ -28,6 +28,29 @@ def cmd_bootstrap_digest(args):
     return 0
 
 
+def cmd_session_digest(args):
+    from saltmdb.config import get_db_path
+    from saltmdb.daemon import client as daemon_client
+
+    db_path = args.db_path or get_db_path()
+    if not os.path.exists(db_path):
+        return 0
+
+    cwd = os.path.realpath(os.getcwd())
+    try:
+        digest = daemon_client.call(db_path, "get_last_session_digest", {"cwd": cwd})
+    except Exception as e:
+        print(f"# Warning: Failed to fetch last-session digest: {e}", file=sys.stderr)
+        return 0
+
+    print(
+        digest
+        if isinstance(digest, str)
+        else "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>"
+    )
+    return 0
+
+
 def cmd_export_corpus_snapshot(args):
     """Agent API redesign plan §5.12/Phase 7 item 29: export_corpus_snapshot moved off MCP --
     "evaluation/benchmark tooling for building SALTMDB itself, not agent operation" (§5.12).
@@ -261,6 +284,12 @@ def build_parser():
     )
     d.set_defaults(func=cmd_bootstrap_digest)
 
+    s = sub.add_parser(
+        "session-digest",
+        help="Print the last session's memory index for this directory (session-start hook).",
+    )
+    s.set_defaults(func=cmd_session_digest)
+
     e = sub.add_parser(
         "export-corpus-snapshot",
         help="Export the full corpus as one immutable, hash-verified JSON snapshot "
@@ -305,13 +334,13 @@ def main():
         sys.exit(args.func(args) or 0)
     except Exception as e:
         print(f"# SALTMDB CLI error: {e}", file=sys.stderr)
-        # bootstrap-digest is consumed by a SessionStart hook that treats stdout as best-effort
-        # context and must never fail the session merely because SALTMDB itself errored -- that
-        # command alone is swallowed to exit 0 (matching its pre-Phase-7 behavior exactly). Every
-        # other subcommand is either a human-run dev tool (export-corpus-snapshot) or feeds a
-        # scheduled-maintenance hook (orphans, corpus-health) that needs a real nonzero exit code
-        # to detect failure, so those propagate genuinely.
-        sys.exit(0 if args.command == "bootstrap-digest" else 1)
+        # bootstrap-digest and session-digest are consumed by a SessionStart hook that treats
+        # stdout as best-effort context and must never fail the session merely because SALTMDB
+        # itself errored -- these commands alone are swallowed to exit 0 (matching pre-Phase-7
+        # behavior exactly). Every other subcommand is either a human-run dev tool
+        # (export-corpus-snapshot) or feeds a scheduled-maintenance hook (orphans, corpus-health)
+        # that needs a real nonzero exit code to detect failure, so those propagate genuinely.
+        sys.exit(0 if args.command in ("bootstrap-digest", "session-digest") else 1)
 
 
 if __name__ == "__main__":

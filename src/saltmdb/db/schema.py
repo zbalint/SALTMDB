@@ -768,6 +768,19 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         );
         """)
 
+        # 6c. Agent Sessions Table for Last Session Bootstrap Digest
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS _agent_sessions (
+            session_id TEXT PRIMARY KEY,
+            cwd TEXT NOT NULL,
+            started_at DATETIME NOT NULL
+        );
+        """)
+        conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_sessions_cwd_started
+            ON _agent_sessions(cwd, started_at DESC);
+        """)
+
         # Drop old triggers to recreate with search_aliases support
         conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
         conn.execute("DROP TRIGGER IF EXISTS update_entity_fts")

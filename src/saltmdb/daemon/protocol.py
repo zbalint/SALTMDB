@@ -45,6 +45,9 @@ READ_TOOLS = frozenset(
         # digest via core_governance_service.render_bootstrap_response. Read-only -- classified
         # here so the RPC mid-call-failure contract (client.py) retries it like any other read.
         "get_core_bootstrap_digest",
+        # Internal-only (no public MCP tool): returns the last session in a directory for bootstrap
+        # context. Read-only -- classified here so the RPC mid-call-failure contract retries it.
+        "get_last_session_digest",
     }
 )
 

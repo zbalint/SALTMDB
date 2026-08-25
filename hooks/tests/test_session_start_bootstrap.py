@@ -85,3 +85,25 @@ def test_run_cli_returns_none_without_a_subprocess_call_when_unresolved():
     with patch("subprocess.run") as mock_run:
         assert bootstrap.run_cli("bootstrap-digest") is None
         mock_run.assert_not_called()
+
+
+def test_main_prints_session_digest_when_run_cli_returns_one(capsys):
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+    fake_session_digest = "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>"
+
+    def fake_run_cli(*args):
+        if args and args[0] == "session-digest":
+            return fake_session_digest
+        return None
+
+    with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
+        bootstrap.main()
+    assert fake_session_digest in capsys.readouterr().out
+
+
+def test_main_skips_session_digest_section_when_run_cli_returns_none(capsys):
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+
+    with patch.object(bootstrap, "run_cli", return_value=None):
+        bootstrap.main()
+    assert "saltmdb-last-session-digest" not in capsys.readouterr().out

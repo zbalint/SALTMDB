@@ -347,6 +347,15 @@ def _dispatch_get_core_bootstrap_digest(**kw):
     return core_governance_service.render_bootstrap_response(conn)
 
 
+def _dispatch_get_last_session_digest(**kw):
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+    from saltmdb.domain.services import session_digest_service
+
+    conn = get_connection(get_db_path())
+    return session_digest_service.render_last_session_digest(conn, kw["cwd"])
+
+
 def _dispatch_get_lineage(**kw):
     entity_id = _required_str(kw, "entity_id")
     direction = kw.get("direction") or "ancestors"
@@ -409,6 +418,7 @@ DISPATCH_TABLE = {
     "get_events": _dispatch_get_events,
     "review_core_memory": _dispatch_review_core_memory,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
+    "get_last_session_digest": _dispatch_get_last_session_digest,
 }
 
 # Tool calls that can mutate persistent state.  The daemon server calls these
