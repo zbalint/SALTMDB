@@ -27,8 +27,11 @@ from _saltmdb_hook_common import (  # noqa: E402
     READ_ONLY_TOOL_PREFIXES,
     emit,
     get_field,
+    get_tool_name,
+    prune_stale_state,
     read_stdin_json,
     read_transcript_full,
+    search_memory_called_flag_path,
 )
 
 SEARCH_MEMORY_PATTERN = re.compile(r'"(name|tool|toolName)"\s*:\s*"[^"]*search_memory"')
@@ -63,10 +66,22 @@ def emit_deny(reason: str) -> None:
 
 def main() -> None:
     data = read_stdin_json()
-    tool_name = get_field(data, "tool_name", "toolName", "tool", "name")
+    tool_name = get_tool_name(data)
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
+    session_id = get_field(data, "session_id", "sessionId") or "unknown"
 
     if tool_name and READ_ONLY_TOOL_PREFIXES.match(tool_name):
+        emit_allow()
+
+    prune_stale_state("search-memory-called-*.flag")
+
+    # Primary signal: structured-PostToolUse-derived flag (see search_memory_called_flag_path
+    # docstring), checked before -- and independent of -- the transcript scan below. Confirmed
+    # live (Windows Copilot CLI): PreToolUse carries no transcript_path field at all, so the
+    # transcript scan below always saw an empty segment and this gate permanently fail-opened,
+    # allowing every edit/PowerShell call on Copilot regardless of search_memory history. This
+    # flag has no such dependency.
+    if search_memory_called_flag_path(session_id).is_file():
         emit_allow()
 
     # Unbounded, not a tail window: this check is "was search_memory called ANYWHERE this
@@ -75,7 +90,8 @@ def main() -> None:
     # caught live).
     segment = read_transcript_full(transcript_path)
     if not segment:
-        # Can't verify search history -- fail open rather than block on missing/unreadable data.
+        # Can't verify search history via transcript either (missing/unreadable transcript_path,
+        # or none of it visible yet) -- fail open rather than block on missing data.
         sys.exit(0)
 
     if SEARCH_MEMORY_PATTERN.search(segment):

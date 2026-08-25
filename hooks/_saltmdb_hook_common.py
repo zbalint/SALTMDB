@@ -31,6 +31,7 @@ READ_ONLY_TOOL_PREFIXES = re.compile(r"^(view|read|grep|list|glob|search|ls|cat|
 RISKY_TOOL_NAMES = re.compile(
     r'"name"\s*:\s*"(Edit|Write|NotebookEdit|Bash|PowerShell'
     r"|replace_file_content|write_to_file|run_command)\"",
+    re.I,
 )
 
 
@@ -55,6 +56,23 @@ def get_field(data: dict, *aliases: str) -> str:
         val = data.get(alias)
         if val:
             return str(val)
+    return ""
+
+
+def get_tool_name(data: dict) -> str:
+    """Tool name for the current call, tolerant of both a flat top-level field
+    (tool_name/toolName/tool/name -- Claude Code, Antigravity) and Copilot CLI's nested shape.
+    Confirmed live (Windows Copilot CLI, PreToolUse): the payload carries no top-level
+    tool_name/toolName field at all -- only a `toolCalls` array, e.g.
+    `{"toolCalls": [{"name": "bash", ...}]}` -- so a flat-alias-only lookup always returned "" for
+    Copilot's PreToolUse, which meant READ_ONLY_TOOL_PREFIXES never matched and every read-only
+    call got gated exactly like a risky one."""
+    flat = get_field(data, "tool_name", "toolName", "tool", "name")
+    if flat:
+        return flat
+    tool_calls = data.get("toolCalls") or data.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls and isinstance(tool_calls[0], dict):
+        return get_field(tool_calls[0], "name", "toolName", "tool_name")
     return ""
 
 
@@ -186,6 +204,25 @@ def retrieval_outcome_flag_path(session_id: str) -> Path:
     by scanning for a bare `"type":"user"` substring, which also matches tool-result echo lines).
     """
     return state_dir() / f"retrieval-outcome-pending-{session_id}.flag"
+
+
+def search_memory_called_flag_path(session_id: str) -> Path:
+    """Shared state-file path for "was search_memory called at all this session": written
+    (unconditionally, never cleared mid-session) by saltmdb-post-tool-response-nudges.py's
+    handle_search_memory on every search_memory call, read by saltmdb-pre-tool-search-gate.py as
+    its primary signal for Rule 1 enforcement.
+
+    Structured-PostToolUse-derived, not transcript-text-derived, for the same reason as
+    retrieval_outcome_flag_path above -- but here it matters even more: confirmed live (Windows
+    Copilot CLI), Copilot's PreToolUse payload carries no transcript_path field at all (unlike its
+    own agentStop, which does). Before this flag existed, saltmdb-pre-tool-search-gate.py's only
+    signal was a transcript scan keyed off transcript_path -- which was always empty for Copilot's
+    PreToolUse, so `read_transcript_full` always returned "" and the gate hit its "can't verify,
+    fail open" branch on every single call, permanently allowing every edit/PowerShell/bash call
+    on Copilot regardless of whether search_memory had ever been called. This flag doesn't depend
+    on transcript_path being present at all.
+    """
+    return state_dir() / f"search-memory-called-{session_id}.flag"
 
 
 def prune_stale_state(glob_pattern: str, max_age_days: int = 2) -> None:

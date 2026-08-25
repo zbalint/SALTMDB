@@ -38,6 +38,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     get_field,
     read_stdin_json,
     retrieval_outcome_flag_path,
+    search_memory_called_flag_path,
     write_count,
 )
 
@@ -96,10 +97,13 @@ def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> Non
 
 
 def handle_search_memory(data: dict, resp_text: str, session_id: str) -> None:
-    # Pending flag first, unconditionally -- the empty-strict-result nudge below is allowed to
-    # exit early via emit_nudge(), and the flag must be set regardless of whether that nudge
-    # fires.
+    # Both flags first, unconditionally -- the empty-strict-result nudge below is allowed to
+    # exit early via emit_nudge(), and both flags must be set regardless of whether that nudge
+    # fires. search_memory_called_flag_path is the pre-tool search gate's primary "has
+    # search_memory ever been called this session" signal (see its docstring for why it exists
+    # independently of retrieval_outcome_flag_path, which tracks a different, clearable thing).
     write_count(retrieval_outcome_flag_path(session_id), 1)
+    write_count(search_memory_called_flag_path(session_id), 1)
 
     input_text = json.dumps(data)
     if (
