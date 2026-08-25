@@ -325,6 +325,37 @@ lineage_info = get_lineage(entity_id="Synthesized Summary Title", direction="anc
 # that didn't exist under the old graph-inspection tool's lineage mode, which only walked backwards.
 ```
 
+### D. Session Recall — From One Memory to Its Whole Session (`agent_session_id`)
+Every memory and event carries the id of the SALTMDB adapter session that produced it
+(`agent_session_id`, minted once per adapter process — see `mcp/identity.py`). This lets you pivot
+from a single memory you found to everything else that same session did, which is often more
+useful than the one memory alone: it recovers the *narrative* around a fact (why it was decided,
+what else happened in that pass), not just the fact itself.
+
+```python
+# 1. Find or recall a memory. get_memory / search_memory results both include
+#    agent_session_id (who created it, immutable) and last_touched_session_id
+#    (who last touched it via an in-place administrative update, e.g. a core-flag change).
+hit = get_memory(entity_id="Nginx Buffer Tuning")
+session = hit["data"]["agent_session_id"]
+
+# 2. Pull every OTHER memory that same session created.
+sibling_memories = search_memory(agent_session_id=session, limit=50)
+
+# 3. Pull that session's own event log -- often the richer half, since it's the actual
+#    decision/issue/fix narrative, not just the durable facts that got promoted to memory.
+sibling_events = get_events(agent_session_id=session, order="oldest_first")
+```
+**Caveat — this covers *creation*, not every *touch*.** `search_memory`'s `agent_session_id`
+filter matches `entities.agent_session_id` only (`WHERE e.agent_session_id = ?` in
+`memory_service/orchestrator.py`) — it will not surface a memory that session merely touched
+in place (`last_touched_session_id`, e.g. an administrative metadata update via
+`store_memory(entity_id=...)`) but didn't originally create. There is currently no MCP-level
+filter with the "created OR touched" OR-semantics — that combined filter exists only on the
+SALTMDB Viewer's HTTP route (`GET /api/entities?session_id=`, viewer-internal, not an MCP tool).
+If you need every memory a session touched at all, not just what it created, you don't have a
+single-call way to get that from MCP tools today.
+
 ---
 
 ## 5. Immutable Identity: `revise_memory` & `supersede_memory`

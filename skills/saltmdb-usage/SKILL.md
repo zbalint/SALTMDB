@@ -83,6 +83,12 @@ not here).
   them. Default `mode="broad"` for ordinary retrieval.
 - `manage_relation` accepts a `store_memory` status string or an exact title directly as
   `source_id`/`target_id` — no need to manually parse a UUID out of a response string.
+- **Session recall**: a memory/event's `agent_session_id` (who created it) lets you pivot from
+  one hit to everything else that session did — `search_memory(agent_session_id=<id>)` for its
+  other memories, `get_events(agent_session_id=<id>, order='oldest_first')` for its event
+  narrative (often the more useful half). Caveat: `search_memory`'s filter matches
+  `agent_session_id` (creator) only, not `last_touched_session_id` (a later in-place touch) — no
+  MCP tool exposes the "created OR touched" OR-filter the Viewer's HTTP route has internally.
 
 ## D. Operational lifecycle
 
