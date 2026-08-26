@@ -339,7 +339,8 @@
     const idCell = node('td'); const idLine = node('div', undefined, 'id-prefix');
     idLine.append(node('code', (item.session_id || '').slice(0, 12)), button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
     idCell.append(button(item.session_id, 'row-button', () => openSessionDetail(item.session_id)), idLine);
-    row.append(idCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
+    const stateCell = node('td'); stateCell.append(statusBadge(item.liveness));
+    row.append(idCell, node('td', item.owner_id || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
     return row;
   };
 
@@ -410,7 +411,7 @@
         const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
         const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
-        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Sorted by most recent activity. Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
+        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Sorted by most recent activity. Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'State', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
         state.sessionsPage = page;
       } finally { setBusy(result, false); }
     };
