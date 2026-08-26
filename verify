@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$ROOT/.venv"
+
+cd "$ROOT"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+    echo "ERROR: virtual environment not found at $VENV"
+    exit 1
+fi
+
+run() {
+    echo
+    echo "==> $*"
+    "$@"
+}
+
+run "$VENV/bin/ruff" check .
+run "$VENV/bin/ruff" format --check .
+run "$VENV/bin/mypy" src
+run "$VENV/bin/bandit" -c pyproject.toml -r src -q
+run "$VENV/bin/pip-audit" --skip-editable
+run "$VENV/bin/deptry" src
+run "$VENV/bin/pytest" -q
+
+echo
+echo "==> All verification checks passed."
