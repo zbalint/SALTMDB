@@ -39,8 +39,7 @@ We welcome contributions from the open-source community! Follow these steps to s
 
 ### 2.1 Behavioral Coding Rules (AI-Agent & Human Contributors)
 
-Derived from `CODING_STANDARDS_RESEARCH.md`'s findings on AI-agent coding pitfalls. These are
-discipline-only rules — no new tooling required to follow them (see §4 for the tool-backed gates
+These are discipline-only rules — no new tooling required to follow them (see §4 for the tool-backed gates
 that check some of these mechanically).
 
 **Reuse over reinvention**
@@ -97,19 +96,22 @@ Every modification must pass the unit test suite before submission.
    ```
 2. Run the unit test suite (matches the command CI enforces in `.github/workflows/python-tests.yml`):
    ```bash
-   python -m unittest discover -s tests
+   PYTHONPATH=src python -m pytest tests/
    ```
-3. Inspect and verify the live outputs inside the local browser viewer by running:
+3. Start or use the SALTMDB daemon with the viewer enabled first (it is enabled by default; set
+   `SALTMDB_VIEWER_ENABLED=true` if needed). Then check the viewer status by running:
    ```bash
    python -m saltmdb.viewer.server
    ```
+   This is a status check, not a viewer launcher; it reports the daemon's viewer URL to open in a
+   browser.
 
 ---
 
 ## 4. Tooling & Quality Gates
 
-Adopted 2026-07-31 on top of the behavioral rules in §2.1, closing the tooling gap noted in
-`CODING_STANDARDS_RESEARCH.md` (no lint/type/security config existed in this repo before then).
+Adopted 2026-07-31 on top of the behavioral rules in §2.1, closing the tooling gap (no
+lint/type/security config existed in this repo before then).
 Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit]`/`[tool.deptry]`.
 
 * **`ruff check` / `ruff format`** — lint (`E`, `F`, `W`, `C90` complexity, `PLR` refactor
@@ -119,22 +121,18 @@ Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit
   `PLR0911`) and two intentional `sys.path`-before-import cases (`E402`) are marked with
   `# noqa` as a one-time adoption baseline (2026-07-31) — new code should not add more of these
   without a specific reason.
-* **`mypy`** — incremental/basic-mode type checking (per `CODING_STANDARDS_RESEARCH.md` §3.1's
-  recommendation for a repo with no prior type-check baseline). `implicit_optional = true` is
-  set deliberately: the public MCP tool signatures in `mcp/tools.py` pervasively use
-  `param: str = None` for FastMCP's schema generation, and rewriting ~60 of those is a separate,
-  reviewable change to a documented public API (see the Documentation Sync Checklist below), not
-  something to fold into a tooling pass.
+* **`mypy`** — incremental/basic-mode type checking. Public MCP tool signatures in `mcp/tools.py`
+  use the explicit `X | None = None` form throughout.
 * **`bandit`** — security scan. `B608` (hardcoded-SQL-expression) is disabled at the project
   level: verified (2026-07-31) as a systemic false positive across every dynamic-SQL call site —
   all f-string interpolation is either a `",".join("?" for _ in ids)` placeholder run or an
   internal config constant, never attacker-controlled text; actual values are always bound via
   `?` parameters. Everything else pre-existing (mostly `B110`/`B112` bare `except: pass`/
-  `continue`, and `subprocess`/`urlopen` findings in the viewer) is captured in
-  `.bandit-baseline.json` (committed) — `bandit -b .bandit-baseline.json` only fails on *new*
-  findings beyond that baseline. **The pre-existing findings are a real follow-up item, not a
-  closed matter** — in particular the 17 `try/except: pass` sites directly overlap rule #14 in
-  §2.1 and deserve a dedicated review pass, not a rewrite rushed through alongside tool adoption.
+  `continue`, and `subprocess`/`urlopen` findings in the viewer) remain reported by Bandit under
+  the project-level configuration in `pyproject.toml`. **The pre-existing findings are a real
+  follow-up item, not a closed matter** — in particular the 17 `try/except: pass` sites directly
+  overlap rule #14 in §2.1 and deserve a dedicated review pass, not a rewrite rushed through
+  alongside tool adoption.
 * **`pip-audit`** — dependency CVE / typosquat scanning against `pyproject.toml`'s dependencies.
 * **`deptry`** — unused/missing/transitive dependency detection. `numpy` was added as an
   explicit direct dependency (2026-07-31) after deptry caught it being imported directly
@@ -144,7 +142,7 @@ Run everything locally before pushing:
 ```bash
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src
-uv run bandit -c pyproject.toml -r src -b .bandit-baseline.json -q
+uv run bandit -c pyproject.toml -r src -q
 uv run pip-audit --skip-editable
 uv run deptry src
 ```
@@ -156,14 +154,8 @@ same set as a required `lint` job (`.github/workflows/python-tests.yml`) alongsi
 
 **Known follow-up items** (found during 2026-07-31 tool adoption, deliberately not fixed as part
 of it — each needs its own reviewed change):
-* 17 `try/except: pass` + 2 `try/except: continue` sites (`bandit` B110/B112, baselined) — audit
+* 17 `try/except: pass` + 2 `try/except: continue` sites (`bandit` B110/B112) — audit
   against §2.1 rule #14.
-* `mcp/tools.py`'s `scope` MCP-tool parameter accepts any string from the wire and is passed to
-  internal functions typed as a narrower `Literal`; `store_memory`'s `scope` *is*
-  runtime-validated, but `consolidate_memories`'s is not (an invalid value would be written to
-  the DB as-is), marked `# type: ignore[arg-type]` in `mcp/tools.py`, not fixed. (This finding's
-  original `tag_operator` half is now moot post-agent-API-redesign: `tag_operator` is no longer
-  an MCP-tool parameter on `search_memory` at all, only an internal domain-layer one.)
 * 50 pre-existing `ruff` complexity findings (`C901`/`PLR0912`/`PLR0915`/`PLR0911`), noqa'd as a
   baseline — candidates for a dedicated refactor pass, not a drive-by fix.
 

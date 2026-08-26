@@ -54,9 +54,10 @@ subprocesses that invoke `saltmdb-cli` must inherit the same environment so daem
 carry the intended owner.
 
 Each MCP adapter mints one immutable `agent_session_id` at startup. The daemon records its working
-directory, owner, `started_at`, receipt-time `last_activity_at`, and nullable `ended_at`. Normal
-adapter shutdown sends a foreground `goodbye`; a dropped connection intentionally leaves
-`ended_at` unset because the adapter can reconnect with the same session ID. The Viewer reports
+directory, owner, `started_at`, receipt-time `last_activity_at`, and nullable `ended_at`. Normal EOF
+cleanup and host-initiated SIGTERM/SIGINT adapter shutdown both send a foreground `goodbye` and
+durably write `ended_at`; only a raw/unclean connection loss intentionally leaves it unset because
+the adapter can reconnect with the same session ID. The Viewer reports
 live `active` state from the daemon connection registry and uses `unknown` when daemon liveness is
 unavailable. Session rows are retained indefinitely.
 

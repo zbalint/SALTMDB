@@ -151,17 +151,17 @@ UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived';
 
 > [!IMPORTANT]
 > **Order of Operations for Backfill:**
-> Before running `backfill_embeddings.py`, the `entity_embeddings` virtual `vec0` table **must** be created. 
+> Before running `python -m saltmdb --backfill-chunk-embeddings`, the `entity_embeddings` virtual `vec0` table **must** be created. 
 > 
 > You can create it by either:
 > 1. Launching the server once (`python -m saltmdb`), or
 > 2. Running `python -c "from saltmdb.db.schema import init_db; init_db()"`
 > 
-> If `backfill_embeddings.py` is executed before initializing `init_db()`, embedding generation will fail with `no such table: entity_embeddings` and mark entity statuses as `failed`. If this happens, run `init_db()`, reset failed records (`UPDATE entities SET embedding_status = 'pending' WHERE embedding_status = 'failed'`), and re-run `backfill_embeddings.py`.
+> If `python -m saltmdb --backfill-chunk-embeddings` is executed before initializing `init_db()`, embedding generation will fail with `no such table: entity_embeddings` and mark entity statuses as `failed`. If this happens, run `init_db()`, reset failed records (`UPDATE entities SET embedding_status = 'pending' WHERE embedding_status = 'failed'`), and re-run `python -m saltmdb --backfill-chunk-embeddings`.
 
-Finally, run the one-time backfill script to generate embeddings for existing rows:
+Finally, run the one-time backfill command to generate embeddings for existing rows:
 ```bash
-python scratch/backfill_embeddings.py
+python -m saltmdb --backfill-chunk-embeddings
 ```
 
 ---
@@ -216,4 +216,4 @@ CREATE INDEX IF NOT EXISTS idx_entities_agent_session
 
 Existing rows remain NULL because no real host session identifier was previously stored. New
 writes populate both entity columns on creation; targeted updates change only
-`last_touched_session_id`, while SCD snapshots preserve both pre-update values.
+`last_touched_session_id`.
