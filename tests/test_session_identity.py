@@ -136,6 +136,29 @@ class TestRpcBackendIdentityWiring(unittest.TestCase):
                 forwarded = mock_call.call_args[0][2]
                 self.assertEqual(forwarded["agent_session_id"], SESSION_IDENTITY.agent_session_id)
 
+    def test_log_event_never_receives_owner_id_injection(self):
+        """Regression for the 2026-08-26 live outage (v0.1.0-alpha.87): log_event was
+        listed in _OWNER_INJECTED_TOOLS, so RpcBackend injected an `owner_id` kwarg on
+        every call. event_service.log_event's signature has no owner_id parameter and no
+        **kwargs catch-all, so every real log_event call raised TypeError in production.
+        log_event already binds ownership itself via `agent_id` inside its own tools.py
+        wrapper before backend.call() runs -- it must never receive a bolted-on owner_id
+        key from this layer."""
+        backend = mcp_tools.RpcBackend()
+        with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:
+            backend.call(
+                "log_event",
+                {
+                    "agent_id": "claude",
+                    "type": "issue",
+                    "content": "x",
+                    "error_code": None,
+                    "context_id": None,
+                },
+            )
+        forwarded_kwargs = mock_call.call_args[0][2]
+        self.assertNotIn("owner_id", forwarded_kwargs)
+
     def test_non_session_stamped_tool_does_not_receive_agent_session_id(self):
         backend = mcp_tools.RpcBackend()
         with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:

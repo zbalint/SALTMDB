@@ -93,7 +93,13 @@ def _effective_owner() -> str:
 
 _OWNER_INJECTED_TOOLS = frozenset(
     {
-        "log_event",
+        # NOTE: log_event is deliberately absent. Its own tools.py wrapper already binds
+        # ownership via `agent_id = _effective_owner()` before backend.call() is ever
+        # invoked, so it never emits an `owner_id` key for this re-assertion to guard --
+        # and event_service.log_event()'s signature has no owner_id parameter and no
+        # **kwargs catch-all, so injecting one here raised TypeError on every call in
+        # production (2026-08-26 live outage, v0.1.0-alpha.87). Do not re-add it without
+        # also adding an owner_id parameter to event_service.log_event.
         "store_memory",
         "search_memory",
         "archive_memory",
