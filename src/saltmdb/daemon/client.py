@@ -141,13 +141,24 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         "env": env,
     }
     if sys.platform == "win32":
-        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB -- the latter is the Windows analogue of
-        # start_new_session's setsid() below: without it, the daemon stays a member of whatever
-        # Job Object its ancestor belongs to (VS Code/Copilot's extension host commonly assigns
-        # its whole child-process tree to a job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, to avoid
-        # orphaned processes), so the daemon gets force-killed the instant that job closes --
-        # bypassing shutdown_watcher/goodbye/the grace timer entirely, no different from SIGKILL.
-        popen_kwargs["creationflags"] = 0x08000000 | 0x01000000
+        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- the combo is
+        # the Windows analogue of start_new_session's setsid() below, addressing two SEPARATE
+        # OS-level cleanup mechanisms that can each kill the daemon early:
+        #  - CREATE_BREAKAWAY_FROM_JOB: without it, the daemon stays a member of whatever Job
+        #    Object its ancestor belongs to (VS Code/Copilot's extension host commonly assigns
+        #    its whole child-process tree to a job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, to
+        #    avoid orphaned processes), so the daemon gets force-killed the instant that job
+        #    closes. Live testing (SALTMDB memories 7a96d8cb/1774920a) showed the daemon still
+        #    dying silently with in_job=False, i.e. NOT a job-object member -- ruling this
+        #    mechanism out as the cause and pointing at the second one below.
+        #  - CREATE_NEW_PROCESS_GROUP: without it, the daemon stays attached to its parent's
+        #    console. Closing that console/terminal window delivers CTRL_CLOSE_EVENT to every
+        #    process still attached to it; a plain Python process has no console-ctrl handler
+        #    installed, so the OS default action force-terminates it with zero code-execution
+        #    window -- explaining the "airtight", not-even-a-partial-log-line evidence (memory
+        #    e2540a84) independently of Job Object membership. This flag isolates the daemon
+        #    into its own process group so console-close events stop reaching it.
+        popen_kwargs["creationflags"] = 0x08000000 | 0x01000000 | 0x00000200
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -162,10 +173,11 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
                 raise
             # Some job objects explicitly disallow breakaway (no JOB_OBJECT_LIMIT_BREAKAWAY_OK /
             # SILENT_BREAKAWAY_OK) and CreateProcess then fails outright instead of silently
-            # ignoring the flag. Retry without it -- the daemon still starts (just remains tied
-            # to the parent's job/process tree, same exposure as before this fix), which beats
-            # never starting at all.
-            popen_kwargs["creationflags"] = 0x08000000
+            # ignoring the flag. Retry without just CREATE_BREAKAWAY_FROM_JOB -- the daemon still
+            # starts (just remains tied to the parent's job/process tree, same exposure as before
+            # that fix), which beats never starting at all. CREATE_NEW_PROCESS_GROUP is unrelated
+            # to job-breakaway policy and stays, so console-close isolation still applies here.
+            popen_kwargs["creationflags"] = 0x08000000 | 0x00000200
             subprocess.Popen(  # nosec B603 -- see above.
                 args, **popen_kwargs
             )

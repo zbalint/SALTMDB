@@ -605,7 +605,10 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             client._spawn_daemon_subprocess(self.db_path)
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
-        self.assertEqual(kwargs["creationflags"], 0x08000000 | 0x01000000)
+        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- the last one
+        # (added alongside this test) isolates the daemon from console CTRL_CLOSE_EVENT delivery,
+        # a mechanism separate from and in addition to Job Object breakaway.
+        self.assertEqual(kwargs["creationflags"], 0x08000000 | 0x01000000 | 0x00000200)
 
     def test_win32_spawn_falls_back_without_breakaway_on_oserror(self):
         seen_creationflags = []
@@ -621,7 +624,11 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             patch.object(client.subprocess, "Popen", side_effect=_fake_popen),
         ):
             client._spawn_daemon_subprocess(self.db_path)
-        self.assertEqual(seen_creationflags, [0x08000000 | 0x01000000, 0x08000000])
+        # CREATE_NEW_PROCESS_GROUP (0x00000200) is unrelated to job-breakaway policy, so it
+        # survives the OSError fallback retry; only CREATE_BREAKAWAY_FROM_JOB is dropped.
+        self.assertEqual(
+            seen_creationflags, [0x08000000 | 0x01000000 | 0x00000200, 0x08000000 | 0x00000200]
+        )
 
     def test_posix_spawn_unaffected_still_uses_start_new_session(self):
         with (
