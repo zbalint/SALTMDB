@@ -10,9 +10,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main():  # noqa: PLR0915 -- one more statement than the threshold from the new signal-shutdown
-    # block; splitting it out would obscure the branch it belongs to more than it would help (same
-    # tradeoff daemon/server.py's own main() already accepts via its noqa: C901, PLR0912, PLR0915).
+def main():  # noqa: C901, PLR0915 -- the win32/POSIX signal-handling branch pushed both statement
+    # count and branch complexity one step past their thresholds; splitting it out would obscure
+    # the branch it belongs to more than it would help (same tradeoff daemon/server.py's own
+    # main() already accepts via its noqa: C901, PLR0912, PLR0915).
     # Track B (scratch/plans/track_b_daemon_detailed.md §11): both --backfill-chunk-embeddings
     # and --librarian are RPC-forwarding clients now, not direct-DB one-shot processes -- neither
     # opens SQLite directly anymore. daemon_client.call_method() itself calls
@@ -83,27 +84,41 @@ def main():  # noqa: PLR0915 -- one more statement than the threshold from the n
             daemon/server.py's own os._exit(0) pattern for exactly this "can't cleanly join a
             stuck blocking operation" situation. The normal graceful-EOF path (host closes stdin)
             is untouched: mcp.run_stdio_async() still returns on its own and server_lifespan's
-            `finally` still runs goodbye for that case."""
+            `finally` still runs goodbye for that case.
+
+            Windows note: anyio.open_signal_receiver() calls asyncio's loop.add_signal_handler()
+            under the hood, which is unimplemented on every Windows event loop -- it raises
+            NotImplementedError unconditionally, for any signal, not just SIGTERM. Narrowing the
+            requested signal set doesn't avoid it; the failure is in the mechanism itself. So on
+            win32 this skips the anyio/asyncio signal-receiver path entirely and falls back to
+            the plain stdlib signal.signal() API, which Python's runtime does support on Windows
+            for SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break) -- delivered outside the event loop
+            entirely, so the same synchronous close-and-exit logic can run directly with no task
+            group needed on that path."""
+
+            def _shutdown_on_signal(signum, frame=None) -> None:
+                logger.info("SALTMDB adapter received signal %s; shutting down.", signum)
+                session = get_current_session()
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        logger.exception("Failed to send goodbye during signal shutdown")
+                os._exit(0)
+
+            if sys.platform == "win32":
+                signal.signal(signal.SIGINT, _shutdown_on_signal)
+                if hasattr(signal, "SIGBREAK"):
+                    signal.signal(signal.SIGBREAK, _shutdown_on_signal)
+                await mcp.run_stdio_async()
+                return
+
             async with anyio.create_task_group() as tg:
 
                 async def _watch_signals() -> None:
-                    sigs = (
-                        (signal.SIGINT,)
-                        if sys.platform == "win32"
-                        else (signal.SIGTERM, signal.SIGINT)
-                    )
-                    with anyio.open_signal_receiver(*sigs) as signals:
+                    with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
                         async for sig in signals:
-                            logger.info("SALTMDB adapter received signal %s; shutting down.", sig)
-                            session = get_current_session()
-                            if session is not None:
-                                try:
-                                    session.close()
-                                except Exception:
-                                    logger.exception(
-                                        "Failed to send goodbye during signal shutdown"
-                                    )
-                            os._exit(0)
+                            _shutdown_on_signal(sig)
 
                 tg.start_soon(_watch_signals)
                 try:
