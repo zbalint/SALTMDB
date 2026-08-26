@@ -698,6 +698,39 @@ def _daemon_log_redirect(db_path: str) -> None:
     sys.stderr = log_file
 
 
+def _log_windows_job_diagnostics() -> None:
+    """Best-effort diagnostic for the Windows Job-Object hard-kill investigation (SALTMDB memory
+    9d613a10 / 7a96d8cb): records this daemon process's own Job Object membership into daemon.log
+    at startup. A daemon that dies silently (no "Grace period elapsed"/"shutdown complete" lines)
+    currently leaves no way to tell in hindsight whether CREATE_BREAKAWAY_FROM_JOB actually took
+    effect for that specific process -- this makes that evidence durable instead of requiring a
+    live ctypes check raced against the dying process. Never allowed to affect startup: any
+    failure here is logged and swallowed, not raised."""
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        pid = os.getpid()
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            in_job: bool | str = f"OpenProcess failed (err={ctypes.get_last_error()})"
+        else:
+            try:
+                result = wt.BOOL()
+                ok = ctypes.windll.kernel32.IsProcessInJob(handle, None, ctypes.byref(result))
+                in_job = (
+                    bool(result.value)
+                    if ok
+                    else f"IsProcessInJob failed (err={ctypes.get_last_error()})"
+                )
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        logger.info("Windows job-object diagnostic: pid=%d in_job=%s", pid, in_job)
+    except Exception:
+        logger.warning("Windows job-object diagnostic logging failed (non-fatal)", exc_info=True)
+
+
 def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser(prog="saltmdb-daemon")
     parser.add_argument(
@@ -915,6 +948,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         e_port,
         p_port,
     )
+    if sys.platform == "win32":
+        _log_windows_job_diagnostics()
 
     # Codex round-1 finding (confirmed against Python's own documented constraint: "[shutdown]
     # must be called while serve_forever() is running in a different thread, or it will
