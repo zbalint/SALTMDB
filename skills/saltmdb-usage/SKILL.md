@@ -137,13 +137,13 @@ Purely agent-initiated — no background scanner triggers this for you. Two thin
 redundant/overlapping raw memories yourself while searching.
 1. Retrieve the candidate entities (`get_memory`).
 2. Decide the shape: **multi-node synthesis** (`consolidate_memories` with multiple `parent_ids`)
-   when several memories hold complementary/overlapping/partial detail on the same topic;
-   **single-node promotion** (`consolidate_memories` with one `parent_id`, re-supplying the
-   source's own title/content verbatim if no rewording is needed) when one memory is already
-   comprehensive and self-contained — don't force-merge it with unrelated notes just because it
-   surfaced as a duplicate candidate; **straight replacement** (`supersede_memory`) when one
-   candidate should simply replace another with corrected/newer knowledge, not a synthesis of
-   both.
+   when several memories hold complementary/overlapping/partial detail on the same topic —
+   `consolidate_memories` requires a minimum of two distinct active parent IDs, there is no
+   single-parent form; **single-node repair** (`revise_memory`, not `consolidate_memories`) when
+   one memory is already comprehensive and self-contained but needs a correction — don't
+   force-merge it with unrelated notes just because it surfaced as a duplicate candidate;
+   **straight replacement** (`supersede_memory`) when one candidate should simply replace another
+   with corrected/newer knowledge, not a synthesis of both.
 3. Source memories are soft-archived and auto-linked via lineage edges — nothing is destroyed;
    full ancestry stays auditable via `get_lineage`.
 4. `revise_memory`/`supersede_memory`/`consolidate_memories` all hard-reject a target/parent
