@@ -597,12 +597,44 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_win32_spawn_includes_create_breakaway_from_job(self):
+    def test_win32_spawn_goes_through_intermediary_launcher(self):
+        """Since alpha.97 (SALTMDB memory 61fc01d0's ProcMon-confirmed taskkill /T finding),
+        win32 no longer spawns the daemon directly from _spawn_daemon_subprocess -- it spawns a
+        short-lived intermediary launcher (`--spawn-detached`) that exits immediately after
+        spawning the real daemon, so the daemon isn't a live descendant of the CLI session's
+        root PID by the time any later tree-kill walks it."""
         with (
             patch.object(client.sys, "platform", "win32"),
             patch.object(client.subprocess, "Popen") as mock_popen,
         ):
             client._spawn_daemon_subprocess(self.db_path)
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        self.assertIn("--spawn-detached", args[0])
+        self.assertIn(self.db_path, args[0])
+        # Same DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP combo as
+        # the daemon spawn itself -- the intermediary needs the same console/job isolation to
+        # survive long enough to spawn its own child.
+        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200)
+
+    def test_win32_intermediary_spawn_falls_back_to_direct_on_oserror(self):
+        """If even the intermediary fails to spawn (e.g. job disallows breakaway outright), fall
+        back to the old direct-spawn path rather than leaving no daemon at all."""
+        with (
+            patch.object(client.sys, "platform", "win32"),
+            patch.object(client.subprocess, "Popen", side_effect=OSError("boom")) as mock_popen,
+            patch.object(client, "_spawn_daemon_process") as mock_direct_spawn,
+        ):
+            client._spawn_daemon_subprocess(self.db_path)
+        mock_popen.assert_called_once()
+        mock_direct_spawn.assert_called_once_with(self.db_path)
+
+    def test_win32_direct_spawn_includes_create_breakaway_from_job(self):
+        with (
+            patch.object(client.sys, "platform", "win32"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_process(self.db_path)
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
         # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- DETACHED_
@@ -611,7 +643,7 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         # goes to every process attached to the console regardless of process group.
         self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200)
 
-    def test_win32_spawn_falls_back_without_breakaway_on_oserror(self):
+    def test_win32_direct_spawn_falls_back_without_breakaway_on_oserror(self):
         seen_creationflags = []
 
         def _fake_popen(_args, **kwargs):
@@ -624,7 +656,7 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             patch.object(client.sys, "platform", "win32"),
             patch.object(client.subprocess, "Popen", side_effect=_fake_popen),
         ):
-            client._spawn_daemon_subprocess(self.db_path)
+            client._spawn_daemon_process(self.db_path)
         # DETACHED_PROCESS (0x00000008) and CREATE_NEW_PROCESS_GROUP (0x00000200) are unrelated
         # to job-breakaway policy, so they survive the OSError fallback retry; only
         # CREATE_BREAKAWAY_FROM_JOB is dropped.
@@ -649,6 +681,31 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         ):
             with self.assertRaises(OSError):
                 client._spawn_daemon_subprocess(self.db_path)
+
+
+class TestIntermediaryMain(unittest.TestCase):
+    """`python -m saltmdb.daemon.client --spawn-detached <db_path>` -- the win32 intermediary
+    launcher's entry point (see _spawn_daemon_via_intermediary)."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_spawns_daemon_and_returns(self):
+        with patch.object(client, "_spawn_daemon_process") as mock_spawn:
+            client._intermediary_main(["client.py", "--spawn-detached", self.db_path])
+        mock_spawn.assert_called_once_with(self.db_path)
+
+    def test_missing_flag_exits_with_usage(self):
+        with self.assertRaises(SystemExit):
+            client._intermediary_main(["client.py", self.db_path])
+
+    def test_missing_db_path_exits_with_usage(self):
+        with self.assertRaises(SystemExit):
+            client._intermediary_main(["client.py", "--spawn-detached"])
 
 
 if __name__ == "__main__":

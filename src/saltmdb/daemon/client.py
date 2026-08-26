@@ -122,10 +122,69 @@ def _read_daemon_log_tail(db_path: str, lines: int = 20) -> str:
 
 
 def _spawn_daemon_subprocess(db_path: str) -> None:
+    """Spawn-dispatch chokepoint: on win32, goes through a short-lived intermediary launcher
+    (see _spawn_daemon_via_intermediary) instead of spawning the daemon directly, because
+    SALTMDB memory 61fc01d0 (live ProcMon capture, 2026-08-26) confirmed the Claude Code CLI
+    harness runs `taskkill /PID <session-root> /T /F` on its own session teardown -- a tree-kill
+    that walks a LIVE ParentProcessID snapshot at kill time and is completely unaffected by
+    DETACHED_PROCESS/CREATE_BREAKAWAY_FROM_JOB/CREATE_NEW_PROCESS_GROUP (alpha.91/94/95, all
+    confirmed working for the OS mechanisms they target -- job membership and console
+    attachment -- yet the daemon kept dying anyway, because a tree-walk consults neither). On
+    POSIX, start_new_session's setsid() below is unaffected by this Windows-specific finding and
+    spawns the daemon directly as before."""
+    if sys.platform == "win32":
+        _spawn_daemon_via_intermediary(db_path)
+    else:
+        _spawn_daemon_process(db_path)
+
+
+def _spawn_daemon_via_intermediary(db_path: str) -> None:
+    """win32-only: spawns a short-lived launcher (`python -m saltmdb.daemon.client
+    --spawn-detached <db_path>`, see _intermediary_main) that itself spawns the real daemon via
+    _spawn_daemon_process and then exits immediately. `taskkill /T`'s tree-walk builds its kill
+    set from a LIVE process-table snapshot taken at kill time, walking ParentProcessID from the
+    terminating session's root PID -- once this intermediary has exited, it is simply absent
+    from that snapshot, so the walk cannot traverse through it to discover the daemon as a
+    grandchild. This is the Windows analogue of the POSIX double-fork orphaning trick. The
+    intermediary itself is spawned with the same DETACHED_PROCESS/CREATE_BREAKAWAY_FROM_JOB/
+    CREATE_NEW_PROCESS_GROUP flags as the daemon, for the same console/job reasons -- it just
+    also needs to survive long enough to finish spawning its own child."""
+    env = dict(os.environ)
+    env["SALTMDB_DB_PATH"] = db_path
+    args = [sys.executable, "-m", "saltmdb.daemon.client", "--spawn-detached", db_path]
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": env,
+        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- same combo
+        # and same rationale as _spawn_daemon_process's win32 branch below.
+        "creationflags": 0x00000008 | 0x01000000 | 0x00000200,
+    }
+    try:
+        proc = subprocess.Popen(args, **popen_kwargs)  # nosec B603 -- fixed argv, shell=False.
+        logger.info(
+            "Spawned intermediary launcher: pid=%d (will spawn daemon then exit immediately, "
+            "breaking the ParentProcessID chain taskkill /T walks)",
+            proc.pid,
+        )
+    except OSError as e:
+        logger.warning(
+            "Intermediary launcher spawn failed (%s); falling back to spawning the daemon "
+            "directly -- daemon will remain a live descendant of this process, exposed to any "
+            "future taskkill /T tree-walk rooted at it",
+            e,
+        )
+        _spawn_daemon_process(db_path)
+
+
+def _spawn_daemon_process(db_path: str) -> None:
     """Detached, log-redirected daemon spawn -- matches viewer/server.py's start_viewer() existing
     Popen kwargs shape. env carries the CANONICAL db_path explicitly, never a re-derived/raw
     value. A losing contender's own election-bind attempt (daemon/server.py) fails almost
-    instantly and exits cleanly, so calling this speculatively/redundantly is cheap."""
+    instantly and exits cleanly, so calling this speculatively/redundantly is cheap. Called
+    directly on POSIX; called from inside the short-lived intermediary launcher on win32 (see
+    _spawn_daemon_via_intermediary)."""
     log_dir = os.path.dirname(db_path) or os.path.expanduser("~/.saltmdb")
     os.makedirs(log_dir, exist_ok=True)
     log_path = _daemon_log_path(db_path)
@@ -633,3 +692,34 @@ class SessionConnection:
                 sock.close()
             except OSError:
                 pass
+
+
+def _intermediary_main(argv: list[str] | None = None) -> None:
+    """Entry point for `python -m saltmdb.daemon.client --spawn-detached <db_path>` -- the
+    short-lived win32 intermediary launcher process spawned by _spawn_daemon_via_intermediary.
+    This process has no logging handlers configured by default when run standalone, so it
+    configures a minimal file logger onto the same daemon.log the daemon itself writes to,
+    keeping the pid handoff traceable. Spawns the real daemon, then returns so __main__ can exit
+    -- that exit is the entire point: it removes this process from the live process table before
+    any later taskkill /T tree-walk could traverse through it to reach the daemon."""
+    argv = sys.argv if argv is None else argv
+    if len(argv) < 3 or argv[1] != "--spawn-detached":
+        raise SystemExit("Usage: python -m saltmdb.daemon.client --spawn-detached <db_path>")
+    db_path = argv[2]
+    logging.basicConfig(
+        filename=_daemon_log_path(db_path),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logger.info(
+        "Intermediary launcher started: pid=%d ppid=%d -- spawning daemon then exiting "
+        "immediately",
+        os.getpid(),
+        os.getppid(),
+    )
+    _spawn_daemon_process(db_path)
+    logger.info("Intermediary launcher exiting: pid=%d", os.getpid())
+
+
+if __name__ == "__main__":
+    _intermediary_main()
