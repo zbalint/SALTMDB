@@ -605,10 +605,11 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             client._spawn_daemon_subprocess(self.db_path)
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
-        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- the last one
-        # (added alongside this test) isolates the daemon from console CTRL_CLOSE_EVENT delivery,
-        # a mechanism separate from and in addition to Job Object breakaway.
-        self.assertEqual(kwargs["creationflags"], 0x08000000 | 0x01000000 | 0x00000200)
+        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- DETACHED_
+        # PROCESS (not CREATE_NEW_PROCESS_GROUP alone, alpha.94's disproven attempt) is what
+        # actually stops console CTRL_CLOSE_EVENT delivery, per Microsoft's docs: that signal
+        # goes to every process attached to the console regardless of process group.
+        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200)
 
     def test_win32_spawn_falls_back_without_breakaway_on_oserror(self):
         seen_creationflags = []
@@ -624,10 +625,11 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             patch.object(client.subprocess, "Popen", side_effect=_fake_popen),
         ):
             client._spawn_daemon_subprocess(self.db_path)
-        # CREATE_NEW_PROCESS_GROUP (0x00000200) is unrelated to job-breakaway policy, so it
-        # survives the OSError fallback retry; only CREATE_BREAKAWAY_FROM_JOB is dropped.
+        # DETACHED_PROCESS (0x00000008) and CREATE_NEW_PROCESS_GROUP (0x00000200) are unrelated
+        # to job-breakaway policy, so they survive the OSError fallback retry; only
+        # CREATE_BREAKAWAY_FROM_JOB is dropped.
         self.assertEqual(
-            seen_creationflags, [0x08000000 | 0x01000000 | 0x00000200, 0x08000000 | 0x00000200]
+            seen_creationflags, [0x00000008 | 0x01000000 | 0x00000200, 0x00000008 | 0x00000200]
         )
 
     def test_posix_spawn_unaffected_still_uses_start_new_session(self):

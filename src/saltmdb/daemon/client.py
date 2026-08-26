@@ -141,8 +141,8 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         "env": env,
     }
     if sys.platform == "win32":
-        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- the combo is
-        # the Windows analogue of start_new_session's setsid() below, addressing two SEPARATE
+        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- the combo is
+        # the Windows analogue of start_new_session's setsid() below, addressing THREE SEPARATE
         # OS-level cleanup mechanisms that can each kill the daemon early:
         #  - CREATE_BREAKAWAY_FROM_JOB: without it, the daemon stays a member of whatever Job
         #    Object its ancestor belongs to (VS Code/Copilot's extension host commonly assigns
@@ -150,15 +150,22 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         #    avoid orphaned processes), so the daemon gets force-killed the instant that job
         #    closes. Live testing (SALTMDB memories 7a96d8cb/1774920a) showed the daemon still
         #    dying silently with in_job=False, i.e. NOT a job-object member -- ruling this
-        #    mechanism out as the cause and pointing at the second one below.
-        #  - CREATE_NEW_PROCESS_GROUP: without it, the daemon stays attached to its parent's
-        #    console. Closing that console/terminal window delivers CTRL_CLOSE_EVENT to every
-        #    process still attached to it; a plain Python process has no console-ctrl handler
-        #    installed, so the OS default action force-terminates it with zero code-execution
-        #    window -- explaining the "airtight", not-even-a-partial-log-line evidence (memory
-        #    e2540a84) independently of Job Object membership. This flag isolates the daemon
-        #    into its own process group so console-close events stop reaching it.
-        popen_kwargs["creationflags"] = 0x08000000 | 0x01000000 | 0x00000200
+        #    mechanism out as the sole cause.
+        #  - DETACHED_PROCESS: alpha.94 added CREATE_NEW_PROCESS_GROUP alone and it still died
+        #    live on every retest (memory 652ad9ff's fix, disproven the same saga). Per Microsoft's
+        #    own docs, that flag only rescopes GenerateConsoleCtrlEvent's CTRL_C/CTRL_BREAK
+        #    targeting -- the OS-generated CTRL+CLOSE signal (console window closed) is delivered
+        #    to "all processes attached to the console" unconditionally, regardless of process
+        #    group (learn.microsoft.com/windows/console/ctrl-close-signal). Without CREATE_NEW_
+        #    CONSOLE or DETACHED_PROCESS, a child attaches to its parent's console by default, so
+        #    the daemon was never actually detached at all. DETACHED_PROCESS gives it no console
+        #    to be attached to, which is the only thing that stops CTRL+CLOSE delivery. (Unlike
+        #    CREATE_NEW_CONSOLE, this doesn't pop a visible window, so CREATE_NO_WINDOW -- which
+        #    the docs say is ignored when paired with DETACHED_PROCESS anyway -- is dropped here.)
+        #  - CREATE_NEW_PROCESS_GROUP: kept as defense-in-depth against CTRL_C/CTRL_BREAK
+        #    specifically, in case the daemon process ever ends up console-attached again (e.g.
+        #    a future AllocConsole/AttachConsole call); harmless, ignored where irrelevant.
+        popen_kwargs["creationflags"] = 0x00000008 | 0x01000000 | 0x00000200
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -175,9 +182,10 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
             # SILENT_BREAKAWAY_OK) and CreateProcess then fails outright instead of silently
             # ignoring the flag. Retry without just CREATE_BREAKAWAY_FROM_JOB -- the daemon still
             # starts (just remains tied to the parent's job/process tree, same exposure as before
-            # that fix), which beats never starting at all. CREATE_NEW_PROCESS_GROUP is unrelated
-            # to job-breakaway policy and stays, so console-close isolation still applies here.
-            popen_kwargs["creationflags"] = 0x08000000 | 0x00000200
+            # that fix), which beats never starting at all. DETACHED_PROCESS/CREATE_NEW_PROCESS_
+            # GROUP are unrelated to job-breakaway policy and stay, so console isolation still
+            # applies here.
+            popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
             subprocess.Popen(  # nosec B603 -- see above.
                 args, **popen_kwargs
             )
