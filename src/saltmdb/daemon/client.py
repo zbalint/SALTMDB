@@ -54,6 +54,15 @@ class DaemonRpcError(Exception):
 _current_session: "SessionConnection | None" = None
 
 
+def get_current_session() -> "SessionConnection | None":
+    """Public accessor for the process's one SessionConnection, if any is currently open.
+
+    Added so a signal handler outside server_lifespan's own closure (see __main__.py's
+    SIGTERM/SIGINT handling) can reach the exact same object server_lifespan's `finally` would
+    otherwise close, to send a synchronous goodbye before a forced process exit."""
+    return _current_session
+
+
 def _identify_probe(db_path: str, key: str) -> dict[str, Any] | None:
     """Connects to the probe port (never the election/guard port) and asks "identify". Returns
     the parsed response dict, or None on any connection/framing failure (caller treats that as
