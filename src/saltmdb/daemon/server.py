@@ -108,9 +108,19 @@ class _DaemonState:
 
     def unregister_session(self, session_id: int) -> None:
         with self._leases_changed:
+            had_session = session_id in self._sessions
             self._sessions.discard(session_id)
             self._agent_sessions.pop(session_id, None)
             self._leases_changed.notify_all()
+            logger.info(
+                "Session unregistered: session_id=%d was_registered=%s remaining_sessions=%d "
+                "inflight=%d draining=%s",
+                session_id,
+                had_session,
+                len(self._sessions),
+                self._inflight,
+                self._draining,
+            )
             if (
                 not self._sessions
                 and not self._inflight
@@ -200,6 +210,11 @@ class _DaemonState:
             logger.warning("Agent-session activity update failed", exc_info=True)
 
     def _start_grace_timer(self) -> None:
+        logger.info(
+            "Starting %.0fs shutdown grace timer (pid=%d)",
+            config.DAEMON_SHUTDOWN_GRACE_PERIOD_S,
+            os.getpid(),
+        )
         timer = threading.Timer(config.DAEMON_SHUTDOWN_GRACE_PERIOD_S, self._grace_fire)
         timer.daemon = True
         self._shutdown_timer = timer
@@ -211,10 +226,17 @@ class _DaemonState:
                 # hello-arrives/RPC-in-flight-right-as-timer-fires races. Don't shut down, but the
                 # timer is one-shot and has already fired -- clear it so _release_inflight/
                 # unregister_session know to re-arm once things actually go quiet.
+                logger.info(
+                    "Grace timer fired but %d session(s)/%d inflight dispatch(es) present; "
+                    "not shutting down (pid=%d)",
+                    len(self._sessions),
+                    self._inflight,
+                    os.getpid(),
+                )
                 self._shutdown_timer = None
                 return
             self._draining = True
-        logger.info("Grace period elapsed with zero sessions; shutting down.")
+        logger.info("Grace period elapsed with zero sessions; shutting down. (pid=%d)", os.getpid())
         if self._shutdown_callback:
             self._shutdown_callback()
 
@@ -232,6 +254,11 @@ class _DaemonState:
             if self._shutdown_timer is not None:
                 self._shutdown_timer.cancel()
                 self._shutdown_timer = None
+                logger.info(
+                    "Grace timer cancelled: inflight RPC dispatch starting (inflight=%d, pid=%d)",
+                    self._inflight,
+                    os.getpid(),
+                )
             return True
 
     def _release_inflight(self) -> None:
@@ -315,12 +342,24 @@ class _DaemonState:
         """Handle session-lifecycle (hello/goodbye/ping) and status methods.
         These never acquire the inflight counter -- they are exempt from the shutdown gate."""
         if method == "hello" and session_id is not None:
+            logger.info(
+                "hello received: session_id=%d agent_session_id=%s cwd=%s (pid=%d)",
+                session_id,
+                params.get("agent_session_id"),
+                params.get("cwd"),
+                os.getpid(),
+            )
             # Atomic with _grace_fire's own lock: closes the exact race where a hello is
             # acknowledged "ok" to the caller in the gap before the session is actually
             # registered, during which the grace timer could observe zero sessions and start
             # draining a connection the caller just believes it successfully opened.
             with self._lock:
                 if self._draining:
+                    logger.info(
+                        "hello rejected: session_id=%d daemon already draining (pid=%d)",
+                        session_id,
+                        os.getpid(),
+                    )
                     return protocol.build_error_response(
                         request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
                     )
@@ -328,6 +367,11 @@ class _DaemonState:
                 if self._shutdown_timer is not None:
                     self._shutdown_timer.cancel()
                     self._shutdown_timer = None
+                    logger.info(
+                        "Grace timer cancelled: hello session_id=%d admitted (pid=%d)",
+                        session_id,
+                        os.getpid(),
+                    )
             # Registration is a foreground write: once hello succeeds, its provenance row exists.
             capability: str | None = None
             if params.get("agent_session_id") and self.coordinator is not None:
@@ -378,8 +422,15 @@ class _DaemonState:
             result: dict[str, Any] = {"status": "ok"}
             if capability is not None:
                 result["caller_agent_session_capability"] = capability
+            logger.info(
+                "hello admitted: session_id=%d total_sessions=%d (pid=%d)",
+                session_id,
+                len(self._sessions),
+                os.getpid(),
+            )
             return protocol.build_ok_response(request_id, result)
         if method == "goodbye" and session_id is not None:
+            logger.info("goodbye received: session_id=%d (pid=%d)", session_id, os.getpid())
             # Marking closing is done before the session-loop persists ended_at and sends the
             # acknowledgement, so no late call can acquire a lease during that window.
             self.begin_goodbye(session_id)
@@ -573,7 +624,13 @@ class _RpcRequestHandler(socketserver.BaseRequestHandler):
             while True:
                 try:
                     request = protocol.recv_frame(sock)
-                except (OSError, protocol.FrameError):
+                except (OSError, protocol.FrameError) as e:
+                    logger.info(
+                        "Hello session_id=%d socket dropped without goodbye: %s (pid=%d)",
+                        session_id,
+                        e,
+                        os.getpid(),
+                    )
                     return
                 response = state.handle_request(request, session_id=session_id)
                 if request.get("method") == "goodbye" and response.get("ok"):
@@ -592,9 +649,21 @@ class _RpcRequestHandler(socketserver.BaseRequestHandler):
                         )
                 try:
                     protocol.send_frame(sock, response)
-                except (OSError, protocol.FrameError):
+                except (OSError, protocol.FrameError) as e:
+                    logger.info(
+                        "Hello session_id=%d send failed after %s: %s (pid=%d)",
+                        session_id,
+                        request.get("method"),
+                        e,
+                        os.getpid(),
+                    )
                     return
                 if request.get("method") == "goodbye":
+                    logger.info(
+                        "Hello session_id=%d closed cleanly via goodbye (pid=%d)",
+                        session_id,
+                        os.getpid(),
+                    )
                     return
         finally:
             state.unregister_session(session_id)
@@ -746,6 +815,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     if not args.foreground:
         _daemon_log_redirect(db_path)
     _configure_stdio_logging()
+
+    logger.info(
+        "Daemon process starting: pid=%d ppid=%d argv=%s cwd=%s foreground=%s",
+        os.getpid(),
+        os.getppid(),
+        sys.argv,
+        os.getcwd(),
+        args.foreground,
+    )
 
     for _blas_var in (
         "OPENBLAS_NUM_THREADS",
@@ -970,7 +1048,17 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     # _shutdown_sequence() more than once.
     shutdown_requested = threading.Event()
 
-    def _request_shutdown(*_args) -> None:
+    def _request_shutdown(*args) -> None:
+        # `args` distinguishes the caller: (signum, frame) when invoked as a signal.signal
+        # handler, empty when invoked as the grace-timer callback or the KeyboardInterrupt
+        # fallback below -- durable evidence of *why* shutdown was requested, for the Windows
+        # daemon-death investigation (SALTMDB memories 9d613a10 et al.).
+        logger.info(
+            "Shutdown requested: trigger_args=%r already_set=%s (pid=%d)",
+            args,
+            shutdown_requested.is_set(),
+            os.getpid(),
+        )
         shutdown_requested.set()
 
     # Construct before the watcher thread starts: the watcher closes over this object to stop it
@@ -979,6 +1067,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     def _shutdown_watcher() -> None:
         shutdown_requested.wait()
+        logger.info("Shutdown watcher woken; beginning shutdown sequence (pid=%d)", os.getpid())
         _shutdown_sequence(
             state, service_server, probe_sock, guard, viewer_httpd, key, stall_monitor
         )
@@ -997,11 +1086,18 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
+    logger.info(
+        "Signal handlers registered: %s (pid=%d)",
+        "SIGINT+SIGTERM" if sys.platform != "win32" else "SIGINT only (win32 has no real SIGTERM delivery)",
+        os.getpid(),
+    )
 
     try:
         service_server.serve_forever()
     except KeyboardInterrupt:
+        logger.info("serve_forever() interrupted by KeyboardInterrupt (pid=%d)", os.getpid())
         _request_shutdown()
+    logger.info("serve_forever() returned; main thread blocking on watcher_thread.join() (pid=%d)", os.getpid())
 
     # serve_forever() only returns once the watcher thread has called service_server.shutdown()
     # from within _shutdown_sequence() -- i.e. shutdown is already fully underway. If this (main)
@@ -1021,6 +1117,7 @@ def _shutdown_sequence(
     scratch/plans/track_b_daemon_detailed.md §6's reframing: SQLite's own WAL+busy_timeout+retry
     concurrency machinery, already relied on throughout this codebase, is what actually makes
     brief overlap between an outgoing daemon and its successor safe)."""
+    logger.info("Shutdown sequence starting (pid=%d)", os.getpid())
     state.begin_draining()
 
     if state.embedding_scheduler is not None:
@@ -1069,6 +1166,7 @@ def _shutdown_sequence(
         pass
 
     logger.info("SALTMDB daemon shutdown complete.")
+    logger.info("About to call os._exit(0) now (pid=%d) -- this is the last line this process will ever log.", os.getpid())
     # Forceful exit rather than a normal interpreter shutdown: ThreadPoolExecutor's worker
     # threads are non-daemon, so a hung/slow background task would otherwise keep this process
     # alive well past the guard release -- an accepted, bounded resource-retention tail per §6's

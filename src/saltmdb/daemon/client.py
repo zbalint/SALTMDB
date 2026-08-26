@@ -170,12 +170,20 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         popen_kwargs["start_new_session"] = True
 
     args = [sys.executable, "-m", "saltmdb.daemon.server"]
+    logger.info(
+        "Spawning daemon subprocess: args=%s platform=%s creationflags=%s parent_pid=%d",
+        args,
+        sys.platform,
+        hex(popen_kwargs.get("creationflags", 0)) if sys.platform == "win32" else "n/a",
+        os.getpid(),
+    )
     try:
         try:
-            subprocess.Popen(  # nosec B603 -- fixed argv, shell=False, and environment contains only the DB path.
+            proc = subprocess.Popen(  # nosec B603 -- fixed argv, shell=False, and environment contains only the DB path.
                 args, **popen_kwargs
             )
-        except OSError:
+            logger.info("Daemon subprocess spawned: child_pid=%d (primary flags)", proc.pid)
+        except OSError as e:
             if sys.platform != "win32":
                 raise
             # Some job objects explicitly disallow breakaway (no JOB_OBJECT_LIMIT_BREAKAWAY_OK /
@@ -185,9 +193,16 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
             # that fix), which beats never starting at all. DETACHED_PROCESS/CREATE_NEW_PROCESS_
             # GROUP are unrelated to job-breakaway policy and stay, so console isolation still
             # applies here.
+            logger.warning(
+                "Primary daemon spawn failed (%s); retrying without CREATE_BREAKAWAY_FROM_JOB "
+                "-- daemon will remain tied to this process's Job Object if one exists", e,
+            )
             popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
-            subprocess.Popen(  # nosec B603 -- see above.
+            proc = subprocess.Popen(  # nosec B603 -- see above.
                 args, **popen_kwargs
+            )
+            logger.info(
+                "Daemon subprocess spawned: child_pid=%d (fallback flags, still job-tied)", proc.pid
             )
     finally:
         log_file.close()
@@ -215,18 +230,42 @@ def ensure_daemon_running(db_path: str) -> dict[str, Any]:
     key = discovery.daemon_key(db_path)
     info = discovery.read(key)
     if info and info.get("db_path") == db_path and _authenticated_ping_ok(info):
+        logger.debug(
+            "ensure_daemon_running: existing daemon reachable (pid=%s port=%s), no spawn needed",
+            info.get("daemon_pid"),
+            info.get("service_port"),
+        )
         return info
 
+    logger.info(
+        "ensure_daemon_running: no reachable daemon for db_path=%s (caller_pid=%d); spawning",
+        db_path,
+        os.getpid(),
+    )
     _spawn_daemon_subprocess(db_path)
     for attempt in range(DAEMON_DISCOVERY_RETRY_ATTEMPTS):
         time.sleep(DAEMON_DISCOVERY_RETRY_DELAY_S)
         info = discovery.read(key)
         if info and info.get("db_path") == db_path and _authenticated_ping_ok(info):
+            logger.info(
+                "ensure_daemon_running: daemon reachable after %d discovery attempt(s) "
+                "(pid=%s port=%s)",
+                attempt + 1,
+                info.get("daemon_pid"),
+                info.get("service_port"),
+            )
             return info
         # Round-2 fix: periodically re-attempt a fresh spawn, not just re-poll, so progress
         # doesn't depend on winning a one-shot timing race against an unrelated shutdown.
         if attempt % DAEMON_RESPAWN_RETRY_INTERVAL == 0:
+            logger.info(
+                "ensure_daemon_running: still no reachable daemon at attempt %d; respawn retry",
+                attempt,
+            )
             _spawn_daemon_subprocess(db_path)
+    logger.warning(
+        "ensure_daemon_running: exhausted discovery-retry window for db_path=%s", db_path
+    )
     raise DaemonStartupError(_classify_startup_failure(db_path, key))
 
 
@@ -466,6 +505,14 @@ class SessionConnection:
                 self._session_capability = capability if self._agent_session_id is not None else None
                 global _current_session
                 _current_session = self
+                logger.info(
+                    "Session opened: agent_session_id=%s adapter_pid=%d daemon_pid=%s "
+                    "service_port=%s",
+                    self._agent_session_id,
+                    os.getpid(),
+                    info.get("daemon_pid"),
+                    info.get("service_port"),
+                )
                 return
             assert last_error is not None
             raise last_error
@@ -477,6 +524,12 @@ class SessionConnection:
             self._session_capability = None
         with self._state_lock:
             sock = self._sock
+            logger.info(
+                "Session closing: agent_session_id=%s adapter_pid=%d send_goodbye=%s",
+                self._agent_session_id,
+                os.getpid(),
+                send_goodbye,
+            )
             if sock is not None:
                 if send_goodbye:
                     try:
