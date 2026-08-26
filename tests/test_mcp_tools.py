@@ -4,7 +4,16 @@ import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
-from saltmdb.mcp.identity import IdentityRebindRejected, SESSION_IDENTITY
+from saltmdb.mcp.identity import SESSION_IDENTITY
+
+
+class _CaptureBackend:
+    def __init__(self):
+        self.calls = []
+
+    def call(self, tool_name, kwargs):
+        self.calls.append((tool_name, kwargs))
+        return {"tool": tool_name, "kwargs": kwargs}
 
 
 class TestMCPToolsWrapper(unittest.TestCase):
@@ -14,6 +23,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         # Track B (scratch/plans/track_b_daemon_detailed.md §8): tools.py's tool functions call
         # through a backend indirection now; inject the in-process DirectDispatchBackend so these
         # tests keep exercising tools.py's argument-normalization layer against this temp DB with
@@ -23,6 +33,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -33,26 +44,95 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Full content text of target chunk",
             title="Target Chunk",
             tags=["#fetch-full"],
-            owner_id="agent1",
         )
         entity_id = res["data"]["id"]
 
-        result = tools.get_memory(entity_id=entity_id, owner_id="agent1")
+        result = tools.get_memory(entity_id=entity_id)
         self.assertEqual(result["status"], "ok")
         self.assertIn("Full content text of target chunk", result["data"]["content"])
 
-    def test_first_call_without_owner_id_explains_copyable_correction(self):
-        """A fresh adapter must teach the caller how to establish identity before dispatch."""
+    def test_missing_startup_owner_explains_environment_configuration(self):
+        SESSION_IDENTITY.reset()
         with self.assertRaises(ValueError) as ctx:
             tools.search_memory(query_keywords="first call identity probe")
         message = str(ctx.exception)
-        self.assertIn("owner_id", message)
-        self.assertIn("corrected_call", message)
+        self.assertIn("SALTMDB_OWNER_ID", message)
+        self.assertIn("restart", message)
 
-    def test_owner_binding_rejects_mid_session_rebind(self):
-        SESSION_IDENTITY.bind("agent_qa")
-        with self.assertRaises(IdentityRebindRejected):
-            tools.search_memory(query_keywords="identity rebind probe", owner_id="other-agent")
+    def test_owner_id_is_absent_from_every_public_schema(self):
+        import inspect
+
+        for registered in tools.mcp._tool_manager._tools.values():
+            self.assertNotIn("owner_id", registered.parameters.get("properties", {}))
+            self.assertNotIn("owner_id", inspect.signature(registered.fn).parameters)
+
+    def test_owner_id_is_not_accepted_by_public_python_wrappers(self):
+        """The Python wrapper surface must match the generated MCP schema exactly."""
+        owner_tools = (
+            tools.log_event,
+            tools.store_memory,
+            tools.search_memory,
+            tools.archive_memory,
+            tools.manage_relation,
+            tools.consolidate_memories,
+            tools.revise_memory,
+            tools.supersede_memory,
+            tools.get_memory,
+            tools.get_lineage,
+            tools.get_related_memories,
+            tools.review_core_memory,
+        )
+        for tool in owner_tools:
+            with self.assertRaises(TypeError, msg=tool.__name__):
+                tool(owner_id="attacker")
+
+    def test_bulk_item_owner_overrides_are_removed_before_dispatch(self):
+        """A stale per-item owner is never allowed to cross the adapter boundary."""
+        capture = _CaptureBackend()
+        previous = tools._set_backend_for_test(capture)
+        try:
+            tools.manage_relation(
+                relations=[
+                    {
+                        "source_id": "source",
+                        "target_id": "target",
+                        "predicate": "part_of",
+                        "owner_id": "attacker",
+                    }
+                ]
+            )
+            tools.consolidate_memories(
+                consolidations=[
+                    {
+                        "parent_ids": ["parent-a", "parent-b"],
+                        "title": "Merged",
+                        "content": "Merged content",
+                        "owner_id": "attacker",
+                    }
+                ]
+            )
+        finally:
+            tools._set_backend_for_test(previous)
+
+        relation_kwargs = capture.calls[0][1]
+        consolidation_kwargs = capture.calls[1][1]
+        self.assertEqual(relation_kwargs["owner_id"], "test_agent")
+        self.assertNotIn("owner_id", relation_kwargs["relations"][0])
+        self.assertEqual(consolidation_kwargs["owner_id"], "test_agent")
+        self.assertNotIn("owner_id", consolidation_kwargs["consolidations"][0])
+
+    def test_daemon_dispatch_forwards_batch_owner_to_relation_service(self):
+        """The daemon must retain the adapter-injected owner for bulk relation attribution."""
+        from unittest.mock import patch
+        from saltmdb.daemon import dispatch
+
+        relations = [{"source_id": "source", "target_id": "target", "predicate": "part_of"}]
+        with patch.object(
+            dispatch.relation_service, "bulk_store_relations", return_value=[]
+        ) as bulk_store:
+            dispatch._dispatch_manage_relation(relations=relations, owner_id="test_agent")
+
+        bulk_store.assert_called_once_with(relations=relations, owner_id="test_agent")
 
     def test_registered_mcp_schemas_have_no_kwargs_catchall(self):
         """The generated FastMCP schema and Python signatures must agree on explicit fields."""
@@ -75,13 +155,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
             tags=["#auth"],
-            owner_id="user_test",
         )
         dup_res = tools.store_memory(
             content="Token authentication via OAuth2 protocol with JWT refresh tokens and bearer headers",
             title="OAuth2 Authentication Core",
             tags=["#auth"],
-            owner_id="user_test",
         )
         self.assertEqual(dup_res["status"], "rejected")
         self.assertEqual(dup_res["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
@@ -92,7 +170,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
         tools.log_event(
             event_type="attempt",
             content="Event mode test",
-            owner_id="test_agent",
             context_id="ctx_get_events_modes_test",
         )
         events = tools.get_events(agent_id="test_agent")
@@ -107,7 +184,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Tag test content",
             title="Tag Test",
             tags=["#database"],
-            owner_id="user1",
         )
         tags = tools.search_tags(query="data")
         self.assertIsInstance(tags, list)
@@ -122,7 +198,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Content for explicit tag clearing test on update path",
             title="Tag Clearing Entity",
             tags=["#python"],
-            owner_id="user1",
         )
         entity_id = res["data"]["id"]
         self.assertEqual(self._tag_count_for_entity(entity_id), 1)
@@ -132,7 +207,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Content for explicit tag clearing test on update path",
             title="Tag Clearing Entity",
             tags=[],
-            owner_id="user1",
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -149,7 +223,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Content for explicit tag replacement test on update path",
             title="Tag Replacement Entity",
             tags=["#alpha"],
-            owner_id="user1",
         )
         entity_id = res["data"]["id"]
 
@@ -158,7 +231,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Content for explicit tag replacement test on update path",
             title="Tag Replacement Entity",
             tags=["#beta"],
-            owner_id="user1",
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -200,7 +272,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Fresh MCP wrapper insert with an omitted memory type",
             title="Fresh Wrapper Fact Default",
             tags=["#memory-type"],
-            owner_id="user1",
         )
         entity_id = inserted["data"]["id"]
         stored_type = self.conn.execute(
@@ -228,7 +299,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content=content,
             title="Metadata-Only Update Entity",
             tags=["#metadata"],
-            owner_id="user1",
             memory_type="event",
             is_core=True,
             core_reason="A" * 20,
@@ -241,7 +311,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content=content,
             title="Metadata-Only Update Entity",
             tags=["#metadata"],
-            owner_id="user1",
             core_reason="C" * 25,
             core_exit_condition="D" * 25,
         )
@@ -256,30 +325,27 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Archive test single node",
             title="Single Node",
             tags=["#archive"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
 
-        arch_res1 = tools.archive_memory(entity_id=id1, owner_id="user1")
+        arch_res1 = tools.archive_memory(entity_id=id1)
         self.assertIn("successfully archived", arch_res1)
 
         res2 = tools.store_memory(
             content="Archive test bulk node 1",
             title="Bulk Node 1",
             tags=["#archive"],
-            owner_id="user1",
         )
         res3 = tools.store_memory(
             content="Archive test bulk node 2",
             title="Bulk Node 2",
             tags=["#archive"],
-            owner_id="user1",
         )
         id2 = res2["data"]["id"]
         id3 = res3["data"]["id"]
 
         # Test passing stringified list / actual list
-        arch_res2 = tools.archive_memory(entity_id=[id2, id3], owner_id="user1")
+        arch_res2 = tools.archive_memory(entity_id=[id2, id3])
         self.assertIsInstance(arch_res2, list)
 
     def test_polymorphic_manage_relation(self):
@@ -287,27 +353,22 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Source entity for relation",
             title="Source Entity",
             tags=["#relation"],
-            owner_id="user1",
         )
         res2 = tools.store_memory(
             content="Target entity for relation",
             title="Target Entity",
             tags=["#relation"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         id2 = res2["data"]["id"]
 
-        rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
-        )
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
         self.assertIn("Relation successfully stored", rel_res)
 
         # 'part_of' -- an agent-selectable, non-strong canonical predicate -- so this exercises
         # the bulk-shape plumbing itself, not the predicate-vocabulary gate (covered separately).
         bulk_rel_res = tools.manage_relation(
             relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}],
-            owner_id="user1",
         )
         self.assertIsInstance(bulk_rel_res, list)
 
@@ -373,20 +434,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Source entity for predicate canonicalization test",
             title="Predicate Canon Source",
             tags=["#predicate"],
-            owner_id="user1",
         )
         res2 = tools.store_memory(
             content="Target entity for predicate canonicalization test",
             title="Predicate Canon Target",
             tags=["#predicate"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         id2 = res2["data"]["id"]
 
-        rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="Depends-On", owner_id="user1"
-        )
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
         self.assertIn("Relation successfully stored", rel_res)
 
         row = self.conn.execute(
@@ -399,9 +456,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "manage_relation must persist the CANONICALIZED predicate, not the raw 'Depends-On' input",
         )
 
-        rel_res2 = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="Depends-On", owner_id="user1"
-        )
+        rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
         self.assertIn("already exists", rel_res2)
 
     def test_manage_relation_rejects_seeded_alias_with_resubmittable_corrected_call(self):
@@ -412,20 +467,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Source entity for seeded alias substitution test",
             title="Alias Substitution Source",
             tags=["#alias"],
-            owner_id="user1",
         )
         res2 = tools.store_memory(
             content="Target entity for seeded alias substitution test",
             title="Alias Substitution Target",
             tags=["#alias"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         id2 = res2["data"]["id"]
 
-        rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="relates_to", owner_id="user1"
-        )
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
         self.assertEqual(rel_res["status"], "rejected")
         self.assertEqual(rel_res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = rel_res["corrected_call"]
@@ -441,7 +492,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Content for memory_type tool round trip test",
             title="Memory Type Tool Entity",
             tags=["#memory-type"],
-            owner_id="user1",
             memory_type="preference",
         )
         self.assertEqual(res["status"], "ok")
@@ -453,7 +503,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(row[0], "preference")
 
         # Confirm it also round-trips through search_memory's echoed field.
-        search_res = tools.search_memory(owner_id="user1", memory_type_filter="preference")
+        search_res = tools.search_memory(memory_type_filter="preference")
         ids = {r["id"] for r in search_res}
         self.assertIn(entity_id, ids)
 
@@ -462,18 +512,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Fact-typed content for the memory_type_filter tool test",
             title="Fact Typed Tool Entity",
             tags=["#memory-type"],
-            owner_id="user1",
             memory_type="fact",
         )
         tools.store_memory(
             content="Event-typed content for the memory_type_filter tool test",
             title="Event Typed Tool Entity",
             tags=["#memory-type"],
-            owner_id="user1",
             memory_type="event",
         )
 
-        results = tools.search_memory(memory_type_filter="fact", owner_id="user1")
+        results = tools.search_memory(memory_type_filter="fact")
         self.assertTrue(len(results) > 0)
         for r in results:
             self.assertEqual(r["memory_type"], "fact")
@@ -483,18 +531,17 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Root entity node title",
             title="Root Entity",
             tags=["#graph"],
-            owner_id="user1",
         )
         self.assertEqual(res1["status"], "ok")
         id1 = res1["data"]["id"]
 
-        deps = tools.get_related_memories(entity_id=id1, owner_id="user1")
+        deps = tools.get_related_memories(entity_id=id1)
         self.assertIsInstance(deps, dict)
 
-        lineage = tools.get_lineage(entity_id=id1, owner_id="user1")
+        lineage = tools.get_lineage(entity_id=id1)
         self.assertIsInstance(lineage, dict)
 
-        memory = tools.get_memory(entity_id=id1, owner_id="user1")
+        memory = tools.get_memory(entity_id=id1)
         self.assertEqual(memory["status"], "ok")
 
     def test_graph_tools_honor_depth_limits(self):
@@ -502,23 +549,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="PIT MCP dependency source content",
             title="PIT MCP Source",
             tags=["#pit"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         res2 = tools.store_memory(
             content="PIT MCP dependency target content",
             title="PIT MCP Target",
             tags=["#pit"],
-            owner_id="user1",
         )
         id2 = res2["data"]["id"]
 
-        rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
-        )
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
         self.assertIn("successfully stored", rel_res)
 
-        deps_now = tools.get_related_memories(entity_id=id1, max_depth=1, owner_id="user1")
+        deps_now = tools.get_related_memories(entity_id=id1, max_depth=1)
         self.assertEqual(deps_now["total_related_found"], 1)
 
         # Lineage threading: consolidate two memories and confirm point_in_time excludes the
@@ -527,14 +570,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="PIT MCP lineage parent A content",
             title="PIT MCP Lineage A",
             tags=["#pit"],
-            owner_id="user1",
         )
         a_id = res3["data"]["id"]
         res4 = tools.store_memory(
             content="PIT MCP lineage parent B content",
             title="PIT MCP Lineage B",
             tags=["#pit"],
-            owner_id="user1",
         )
         b_id = res4["data"]["id"]
 
@@ -547,12 +588,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
             parent_ids=[a_id, b_id],
             title="PIT MCP Consolidated Lineage Entity",
             content=cons_content,
-            owner_id="user1",
         )
         self.assertEqual(cons_res["status"], "ok")
         c_id = cons_res["data"]["entity_id"]
 
-        lineage_now = tools.get_lineage(entity_id=c_id, owner_id="user1")
+        lineage_now = tools.get_lineage(entity_id=c_id)
         self.assertEqual(lineage_now["total"], 2)
 
     def test_manage_relation_invalidate_mode(self):
@@ -560,25 +600,21 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Source entity for relation invalidation test",
             title="Invalidate MCP Source",
             tags=["#relation"],
-            owner_id="user1",
         )
         res2 = tools.store_memory(
             content="Target entity for relation invalidation test",
             title="Invalidate MCP Target",
             tags=["#relation"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         id2 = res2["data"]["id"]
 
-        rel_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", owner_id="user1"
-        )
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
         self.assertIn("Relation successfully stored", rel_res)
         rel_id = rel_res.split("ID: ")[1].rstrip(")")
 
         inv_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", invalidate=True, owner_id="user1"
+            source_id=id1, target_id=id2, predicate="depends_on", invalidate=True
         )
         self.assertIn("Relation invalidated", inv_res)
 
@@ -594,13 +630,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Source entity for valid_at passthrough",
             title="ValidAt Source",
             tags=["#relation"],
-            owner_id="user1",
         )
         res2 = tools.store_memory(
             content="Target entity for valid_at passthrough",
             title="ValidAt Target",
             tags=["#relation"],
-            owner_id="user1",
         )
         id1 = res1["data"]["id"]
         id2 = res2["data"]["id"]
@@ -611,7 +645,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             target_id=id2,
             predicate="depends_on",
             valid_at=custom_valid_at,
-            owner_id="user1",
         )
         self.assertIn("Relation successfully stored", rel_res)
         rel_id = rel_res.split("ID: ")[1].rstrip(")")
@@ -626,7 +659,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             predicate="depends_on",
             invalidate=True,
             invalid_at=custom_invalid_at,
-            owner_id="user1",
         )
         self.assertIn("Relation invalidated", inv_res)
 
@@ -685,7 +717,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
                 "- Merged detail alpha\n- Merged detail beta"
             ),
-            owner_id="agent_c",
         )
         self.assertEqual(res_no_override["status"], "rejected")
         self.assertEqual(res_no_override["errors"][0]["code"], "REJECT_LOW_COHESION")
@@ -697,7 +728,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
                 "- Merged detail alpha\n- Merged detail beta"
             ),
-            owner_id="agent_c",
             override_justification="deliberately merging unrelated fixtures via the MCP tool wrapper",
         )
         self.assertEqual(res_with_override["status"], "ok")
@@ -722,7 +752,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 {
                     "parent_ids": [c, d],
                     "title": "Bulk Override Item CD",
-                    "content": bulk_content,
+                    "content": bulk_content + "\n- Owner-default item",
                     "override_justification": (
                         "deliberately merging unrelated bulk fixtures via the MCP tool wrapper"
                     ),
@@ -730,10 +760,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 {
                     "parent_ids": [e, f],
                     "title": "Bulk Override Item EF",
-                    "content": bulk_content,
+                    "content": bulk_content + "\n- Owner-override item",
                 },
             ],
-            owner_id="agent_c",
         )
         self.assertEqual(len(bulk_results), 2)
         self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
@@ -748,14 +777,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertIn("[Consolidation Override]", cd_content)
         self.assertNotIn("[Consolidation Override]", ef_content)
 
-    def test_commit_consolidation_tool_forwards_owner_id_and_context_id(self):
-        """owner_id/context_id must reach relation_service.bulk_commit_consolidation through the
-        actual MCP tool wrapper for the bulk (`consolidations`) shape: a top-level value is the
-        batch-wide default, while an item's own value overrides it per item. Regression for the
-        bulk-consolidation ownership-attribution gap found 2026-08-19 live-testing: dispatch.py's
-        bulk branch was forwarding only `consolidations`, silently dropping owner_id/context_id,
-        so every bulk-consolidated entity landed with relation_service's fallback
-        owner_id="system" and context_id=None regardless of what was requested."""
+    def test_commit_consolidation_uses_configured_owner_and_context_id(self):
+        """Bulk consolidation always uses the startup owner; per-item owner values cannot win.
+
+        ``context_id`` remains a legitimate batch/item field, so this also guards that the owner
+        migration does not accidentally remove unrelated bulk metadata.
+        """
         dim = 384
 
         def _axis(i):
@@ -777,18 +804,18 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 {
                     "parent_ids": [a, b],
                     "title": "Bulk Owner Default Item AB",
-                    "content": bulk_content,
-                    # no owner_id/context_id here -> must inherit the top-level batch defaults
+                    "content": bulk_content + "\n- Owner-default item",
+                    # no context_id here -> must inherit the top-level batch default
                 },
                 {
                     "parent_ids": [c, d],
                     "title": "Bulk Owner Override Item CD",
-                    "content": bulk_content,
+                    "content": bulk_content + "\n- Owner-override item",
+                    # A stale per-item owner must be ignored by the adapter boundary.
                     "owner_id": "agent_override",
                     "context_id": "ctx_override",
                 },
             ],
-            owner_id="agent_batch_default",
             context_id="ctx_batch_default",
         )
         self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
@@ -802,13 +829,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "SELECT owner_id, context_id FROM entities WHERE id = ?",
             (bulk_results[1]["entity_id"],),
         ).fetchone()
-        self.assertEqual(row_ab, ("agent_batch_default", "ctx_batch_default"))
-        self.assertEqual(row_cd, ("agent_override", "ctx_override"))
+        self.assertEqual(row_ab, ("test_agent", "ctx_batch_default"))
+        self.assertEqual(row_cd, ("test_agent", "ctx_override"))
 
-    def test_manage_relation_tool_forwards_override_justification_and_owner_id(self):
-        """owner_id and override_justification must reach relation_service.store_relation's
-        governance gate through the actual MCP tool wrapper (memory-core rework Phase 5), not
-        just through direct service-level calls."""
+    def test_manage_relation_tool_uses_configured_owner_for_override_audit(self):
+        """The relation override audit is attributed to the startup owner."""
         dim = 384
 
         def _axis(i):
@@ -819,9 +844,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         a = self._mk_vector_entity("Relation Gate Tool A", _axis(0))
         b = self._mk_vector_entity("Relation Gate Tool B", _axis(1))  # orthogonal -> low similarity
 
-        res_no_override = tools.manage_relation(
-            source_id=a, target_id=b, predicate="elaborates_on", owner_id="agent_mcp_owner"
-        )
+        res_no_override = tools.manage_relation(source_id=a, target_id=b, predicate="elaborates_on")
         self.assertTrue(
             res_no_override.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res_no_override
         )
@@ -830,7 +853,6 @@ class TestMCPToolsWrapper(unittest.TestCase):
             source_id=a,
             target_id=b,
             predicate="elaborates_on",
-            owner_id="agent_mcp_owner",
             override_justification="deliberately forcing a low-similarity relation via the MCP tool wrapper",
         )
         self.assertIn("Relation successfully stored", res_with_override)
@@ -838,7 +860,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         event = self.conn.execute(
             "SELECT agent_id, content FROM events WHERE type = 'relation_gate_override'"
         ).fetchone()
-        self.assertEqual(event[0], "agent_mcp_owner")
+        self.assertEqual(event[0], "test_agent")
         self.assertIn(
             "deliberately forcing a low-similarity relation via the MCP tool wrapper", event[1]
         )
@@ -853,13 +875,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tools.log_event(
                 event_type="consolidation_request",
                 content="{}",
-                owner_id="pag_test",
             )
 
-        page1 = tools.get_events(agent_id="pag_test", limit=2, offset=0)
+        page1 = tools.get_events(agent_id="test_agent", limit=2, offset=0)
         self.assertEqual(len(page1), 2)
 
-        page2 = tools.get_events(agent_id="pag_test", limit=2, offset=2)
+        page2 = tools.get_events(agent_id="test_agent", limit=2, offset=2)
         self.assertEqual(len(page2), 2)
 
         self.assertNotEqual(page1[0]["id"], page2[0]["id"])
@@ -874,35 +895,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
             f"got {registered_count}",
         )
 
-    def test_owner_id_first_call_requirement_documented_on_every_ownership_bearing_tool(self):
-        """Cold-start agent-experience review, Issue D: the owner_id-required-on-first-call
-        behavior (_effective_owner) was previously undiscoverable from any tool's exposed
-        description -- only from hitting the runtime error once. Confirm every tool that calls
-        _effective_owner now documents it in its actual MCP-exposed description text (read via
-        the real Tool registry, not tools.py's raw docstring, since store_memory/search_memory/
-        manage_relation/consolidate_memories set description via @mcp.tool(description=...)
-        rather than a plain docstring -- the two differ)."""
-        ownership_bearing_tools = [
-            "log_event",
-            "store_memory",
-            "search_memory",
-            "archive_memory",
-            "manage_relation",
-            "consolidate_memories",
-            "revise_memory",
-            "supersede_memory",
-            "get_memory",
-            "get_lineage",
-            "get_related_memories",
-        ]
+    def test_public_descriptions_do_not_describe_tool_call_owner_binding(self):
+        """The retired first-call owner-binding behavior must not be advertised anywhere."""
         registered = tools.mcp._tool_manager._tools
-        for name in ownership_bearing_tools:
+        for name in registered:
             description = registered[name].description or ""
-            self.assertIn(
-                "first call within a session",
-                description,
-                f"{name}'s exposed description must document the owner_id first-call requirement",
-            )
+            self.assertNotIn("first call within a session", description)
 
 
 class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
@@ -921,11 +919,13 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("agent_two")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -936,13 +936,11 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
             content="Parent A content for the real call_tool output-schema regression probe",
             title="Output Schema Probe Parent A",
             tags=["#probe"],
-            owner_id="user1",
         )
         b = tools.store_memory(
             content="Parent B content, closely related, for the same output-schema probe",
             title="Output Schema Probe Parent B",
             tags=["#probe"],
-            owner_id="user1",
         )
 
         # This must go through tools.mcp.call_tool (the real FastMCP protocol entry point, not a
@@ -954,7 +952,6 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
                 "parent_ids": [a["data"]["id"], b["data"]["id"]],
                 "title": "Output Schema Probe Consolidated",
                 "content": "Consolidated probe content combining A and B.",
-                "owner_id": "user1",
             },
         )
         structured = result[1]["result"]
@@ -973,11 +970,13 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -988,7 +987,6 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             content=f"Distinct fixture content body for {title}, not a near-duplicate.",
             title=title,
             tags=["#core-test"],
-            owner_id="tester",
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
@@ -1002,7 +1000,6 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             entity_id=entity_id,
             outcome="retain",
             review_rationale="C" * 20,
-            owner_id="reviewer_agent",
         )
         self.assertIn("retained as core", result)
 
@@ -1012,7 +1009,6 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             entity_id=entity_id,
             outcome="demote",
             review_rationale="C" * 20,
-            owner_id="reviewer_agent",
         )
         self.assertIn("demoted", result)
         row = self.conn.execute(
@@ -1026,7 +1022,6 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale="C" * 20,
-            owner_id="reviewer_agent",
         )
         self.assertIn("archived", result)
 
@@ -1099,11 +1094,13 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1114,7 +1111,6 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             content="Content long enough to clear the quality gate minimum length.",
             title="Ambiguous Is Core Value",
             tags=["#core-test"],
-            owner_id="tester",
             is_core="yes",
         )
         self.assertIsInstance(result, str)
@@ -1125,7 +1121,6 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             content="Content long enough to clear the quality gate minimum length.",
             title="Explicit Boolean True",
             tags=["#core-test"],
-            owner_id="tester",
             is_core=True,
             core_reason="A" * 20,
             core_exit_condition="B" * 20,
@@ -1144,11 +1139,13 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1159,21 +1156,17 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             content=f"Source entity content for {label} test",
             title=f"{label} Source",
             tags=["#gate"],
-            owner_id="gate_tester",
         )
         res2 = tools.store_memory(
             content=f"Target entity content for {label} test",
             title=f"{label} Target",
             tags=["#gate"],
-            owner_id="gate_tester",
         )
         return res1["data"]["id"], res2["data"]["id"]
 
     def test_selectable_predicate_succeeds(self):
         id1, id2 = self._mk_pair("selectable")
-        res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="part_of", owner_id="gate_tester"
-        )
+        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
         self.assertIsInstance(res, str)
         self.assertIn("Relation successfully stored", res)
 
@@ -1187,9 +1180,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         }
         for predicate, lifecycle_tool in expected_tools.items():
             id1, id2 = self._mk_pair(f"reserved_{predicate}")
-            res = tools.manage_relation(
-                source_id=id1, target_id=id2, predicate=predicate, owner_id="gate_tester"
-            )
+            res = tools.manage_relation(source_id=id1, target_id=id2, predicate=predicate)
             self.assertEqual(res["status"], "rejected", predicate)
             self.assertEqual(res["errors"][0]["code"], "RESERVED_PREDICATE", predicate)
             self.assertIn(lifecycle_tool, res["errors"][0]["message"], predicate)
@@ -1197,18 +1188,14 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
     def test_similar_to_is_refused_with_no_corrected_call(self):
         id1, id2 = self._mk_pair("similar_to")
-        res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="similar_to", owner_id="gate_tester"
-        )
+        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="similar_to")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "LEGACY_READONLY_PREDICATE")
         self.assertNotIn("corrected_call", res)
 
     def test_same_direction_alias_is_refused_and_corrected_call_resubmits_successfully(self):
         id1, id2 = self._mk_pair("same_direction_alias")
-        res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="relates_to", owner_id="gate_tester"
-        )
+        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = res["corrected_call"]
@@ -1224,9 +1211,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         # A). caused_by is not a RELATION_GATE_STRONG_PREDICATE, so this exercises the swap
         # mechanics in isolation from the embedding-similarity gate.
         id1, id2 = self._mk_pair("swap_alias")
-        res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="affects", owner_id="gate_tester"
-        )
+        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="affects")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = res["corrected_call"]
@@ -1244,9 +1229,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
     def test_unknown_predicate_is_refused_listing_valid_predicates_with_no_corrected_call(self):
         id1, id2 = self._mk_pair("unknown")
-        res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="completely_made_up", owner_id="gate_tester"
-        )
+        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="completely_made_up")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "UNKNOWN_PREDICATE")
         self.assertIn("depends_on", res["errors"][0]["message"])
@@ -1257,9 +1240,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         # intentional per manage_relation's own docstring: "This gate applies only to creating
         # a new edge, never to invalidate=True".
         id1, id2 = self._mk_pair("invalidate_bypass")
-        create_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="related_to", owner_id="gate_tester"
-        )
+        create_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="related_to")
         self.assertIn("Relation successfully stored", create_res)
 
         # (a) invalidating with the already-canonical predicate works, unsurprisingly.
@@ -1268,7 +1249,6 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             target_id=id2,
             predicate="related_to",
             invalidate=True,
-            owner_id="gate_tester",
         )
         self.assertIn("Relation invalidated", inv_res)
 
@@ -1277,15 +1257,12 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         # invalidate=True, because invalidate_relation's read-side canonicalization still
         # resolves the alias to the same underlying edge.
         id3, id4 = self._mk_pair("invalidate_bypass_alias")
-        tools.manage_relation(
-            source_id=id3, target_id=id4, predicate="related_to", owner_id="gate_tester"
-        )
+        tools.manage_relation(source_id=id3, target_id=id4, predicate="related_to")
         inv_res2 = tools.manage_relation(
             source_id=id3,
             target_id=id4,
             predicate="relates_to",
             invalidate=True,
-            owner_id="gate_tester",
         )
         self.assertIsInstance(
             inv_res2,
@@ -1306,7 +1283,6 @@ class TestManageRelationPredicateGate(unittest.TestCase):
                 {"source_id": id1, "target_id": id2, "predicate": "part_of"},
                 {"source_id": id3, "target_id": id4, "predicate": "relates_to"},
             ],
-            owner_id="gate_tester",
         )
         self.assertEqual(res["status"], "rejected")
         codes = {e["code"] for e in res["errors"]}
@@ -1336,7 +1312,6 @@ class TestManageRelationPredicateGate(unittest.TestCase):
                 {"source_id": id1, "target_id": id2, "predicate": "relates_to"},
                 {"source_id": id3, "target_id": id4, "predicate": "supersedes"},
             ],
-            owner_id="gate_tester",
         )
         self.assertEqual(res["status"], "rejected")
         codes = {e["code"] for e in res["errors"]}
@@ -1361,44 +1336,43 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_context_id_filters_correctly(self):
-        tools.log_event(
-            event_type="issue", content="ctx A event", owner_id="agent_x", context_id="ctx_A"
-        )
-        tools.log_event(
-            event_type="issue", content="ctx B event", owner_id="agent_x", context_id="ctx_B"
-        )
+        tools.log_event(event_type="issue", content="ctx A event", context_id="ctx_A")
+        tools.log_event(event_type="issue", content="ctx B event", context_id="ctx_B")
 
         events = tools.get_events(context_id="ctx_A")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["context_id"], "ctx_A")
 
     def test_agent_id_filters_correctly(self):
-        tools.log_event(event_type="issue", content="agent one event", owner_id="agent_one")
-        # owner_id is bound per adapter session (immutable for its life, §4.5) -- reset between
-        # calls attributed to a different agent, exactly like starting a new MCP connection.
+        tools.log_event(event_type="issue", content="agent one event")
+        # Owner identity is startup configuration (immutable for the adapter process) -- reset
+        # between calls attributed to a different agent, exactly like starting a new MCP process.
         SESSION_IDENTITY.reset()
-        tools.log_event(event_type="issue", content="agent two event", owner_id="agent_two")
+        SESSION_IDENTITY.configure_owner("agent_two")
+        tools.log_event(event_type="issue", content="agent two event")
 
-        events = tools.get_events(agent_id="agent_one")
+        events = tools.get_events(agent_id="test_agent")
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["agent_id"], "agent_one")
+        self.assertEqual(events[0]["agent_id"], "test_agent")
 
     def test_event_type_filters_correctly(self):
-        tools.log_event(event_type="issue", content="an issue", owner_id="agent_evt_type")
-        tools.log_event(event_type="decision", content="a decision", owner_id="agent_evt_type")
+        tools.log_event(event_type="issue", content="an issue")
+        tools.log_event(event_type="decision", content="a decision")
 
-        events = tools.get_events(agent_id="agent_evt_type", event_type="decision")
+        events = tools.get_events(agent_id="test_agent", event_type="decision")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "decision")
 
@@ -1418,12 +1392,12 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         self.assertTrue(all(e["agent_session_id"] == session_id for e in events))
 
     def test_order_oldest_first_vs_newest_first_changes_result_order(self):
-        tools.log_event(event_type="issue", content="first", owner_id="agent_order")
-        tools.log_event(event_type="issue", content="second", owner_id="agent_order")
-        tools.log_event(event_type="issue", content="third", owner_id="agent_order")
+        tools.log_event(event_type="issue", content="first")
+        tools.log_event(event_type="issue", content="second")
+        tools.log_event(event_type="issue", content="third")
 
-        newest_first = tools.get_events(agent_id="agent_order", order="newest_first")
-        oldest_first = tools.get_events(agent_id="agent_order", order="oldest_first")
+        newest_first = tools.get_events(agent_id="test_agent", order="newest_first")
+        oldest_first = tools.get_events(agent_id="test_agent", order="oldest_first")
 
         self.assertEqual(len(newest_first), 3)
         self.assertEqual(len(oldest_first), 3)
@@ -1432,10 +1406,10 @@ class TestGetEventsEndToEnd(unittest.TestCase):
 
     def test_limit_and_offset_paginate_correctly(self):
         for i in range(5):
-            tools.log_event(event_type="issue", content=f"paged {i}", owner_id="agent_page")
+            tools.log_event(event_type="issue", content=f"paged {i}")
 
-        page1 = tools.get_events(agent_id="agent_page", order="oldest_first", limit=2, offset=0)
-        page2 = tools.get_events(agent_id="agent_page", order="oldest_first", limit=2, offset=2)
+        page1 = tools.get_events(agent_id="test_agent", order="oldest_first", limit=2, offset=0)
+        page2 = tools.get_events(agent_id="test_agent", order="oldest_first", limit=2, offset=2)
         self.assertEqual(len(page1), 2)
         self.assertEqual(len(page2), 2)
         self.assertNotEqual([e["id"] for e in page1], [e["id"] for e in page2])
@@ -1461,33 +1435,31 @@ class TestLogEventEndToEnd(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_event_type_is_the_parameter_name(self):
-        res = tools.log_event(event_type="decision", content="picked option A", owner_id="agent_p")
+        res = tools.log_event(event_type="decision", content="picked option A")
         self.assertIn("Event logged successfully", res)
 
     def test_no_agent_id_parameter_exists(self):
         with self.assertRaises(TypeError):
-            tools.log_event(
-                agent_id="agent_p", event_type="decision", content="x", owner_id="agent_p"
-            )
+            tools.log_event(agent_id="agent_p", event_type="decision", content="x")
 
     def test_bound_owner_becomes_stored_agent_id(self):
-        res = tools.log_event(
-            event_type="issue", content="owner binding check", owner_id="agent_bound"
-        )
+        res = tools.log_event(event_type="issue", content="owner binding check")
         event_id = res.split("ID: ")[1].split()[0]
         row = self.conn.execute("SELECT agent_id FROM events WHERE id = ?", (event_id,)).fetchone()
-        self.assertEqual(row[0], "agent_bound")
+        self.assertEqual(row[0], "test_agent")
 
     def test_agent_session_id_is_minted_by_adapter(self):
         from saltmdb.domain.services import event_service

@@ -134,23 +134,22 @@ class TestBuildParser(unittest.TestCase):
         args = parser.parse_args(["--db-path", "/tmp/custom.db", "bootstrap-digest"])
         self.assertEqual(args.db_path, "/tmp/custom.db")
 
-    def test_export_corpus_snapshot_subcommand_requires_owner_id(self):
+    def test_export_corpus_snapshot_subcommand_has_no_owner_argument(self):
         parser = build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["export-corpus-snapshot"])
+        args = parser.parse_args(["export-corpus-snapshot"])
+        self.assertFalse(hasattr(args, "owner_id"))
 
     def test_export_corpus_snapshot_subcommand_defaults(self):
         parser = build_parser()
-        args = parser.parse_args(["export-corpus-snapshot", "--owner-id", "alice"])
-        self.assertEqual(args.owner_id, "alice")
+        args = parser.parse_args(["export-corpus-snapshot"])
         self.assertIsNone(args.page_size)
         self.assertFalse(args.include_archived)
         self.assertIsNone(args.out)
 
-    def test_orphans_subcommand_owner_id_optional(self):
+    def test_orphans_subcommand_has_no_owner_argument(self):
         parser = build_parser()
         args = parser.parse_args(["orphans"])
-        self.assertIsNone(args.owner_id)
+        self.assertFalse(hasattr(args, "owner_id"))
 
     def test_corpus_health_subcommand_defaults(self):
         parser = build_parser()
@@ -160,34 +159,39 @@ class TestBuildParser(unittest.TestCase):
 
 
 class _OrphansArgs:
-    def __init__(self, db_path=None, owner_id=None):
+    def __init__(self, db_path=None):
         self.db_path = db_path
-        self.owner_id = owner_id
 
 
 class TestOrphansCli(unittest.TestCase):
     """Phase 7 item 30: orphan detection moved off MCP -- cmd_orphans is a thin wrapper around
     the pre-existing memory_service.detect_orphaned_memories, unit-tested on its own already;
-    this only covers the CLI's own responsibilities (owner_id passthrough, JSON output, exit
+    this only covers the CLI's own responsibilities (configured-owner passthrough, JSON output, exit
     code on error)."""
 
-    def test_passes_owner_id_and_prints_json(self):
+    def test_passes_configured_owner_and_prints_json(self):
         fake_result = {"total_orphans": 1, "orphaned_memories": [{"id": "e1"}]}
-        with patch(
-            "saltmdb.domain.services.memory_service.detect_orphaned_memories",
-            return_value=fake_result,
-        ) as mock_detect:
+        with (
+            patch.dict(os.environ, {"SALTMDB_OWNER_ID": "alice"}),
+            patch(
+                "saltmdb.domain.services.memory_service.detect_orphaned_memories",
+                return_value=fake_result,
+            ) as mock_detect,
+        ):
             buf = io.StringIO()
             with redirect_stdout(buf):
-                rc = cmd_orphans(_OrphansArgs(db_path="/tmp/whatever.db", owner_id="alice"))
+                rc = cmd_orphans(_OrphansArgs(db_path="/tmp/whatever.db"))
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(buf.getvalue()), fake_result)
         mock_detect.assert_called_once_with(owner_id="alice", db_path="/tmp/whatever.db")
 
     def test_error_result_returns_nonzero_exit(self):
-        with patch(
-            "saltmdb.domain.services.memory_service.detect_orphaned_memories",
-            return_value={"error": "boom"},
+        with (
+            patch.dict(os.environ, {"SALTMDB_OWNER_ID": "alice"}),
+            patch(
+                "saltmdb.domain.services.memory_service.detect_orphaned_memories",
+                return_value={"error": "boom"},
+            ),
         ):
             buf = io.StringIO()
             with redirect_stdout(buf):

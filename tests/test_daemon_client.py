@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from saltmdb.daemon import client, protocol
 
@@ -25,23 +25,31 @@ class _FakeDaemonServer:
         self._response = response
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(1)
+        self._sock.listen(2)
         self.port = self._sock.getsockname()[1]
         self.accepted_conn: socket.socket | None = None
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def _serve(self) -> None:
-        try:
-            conn, _addr = self._sock.accept()
-        except OSError:
-            return
-        self.accepted_conn = conn
-        try:
-            protocol.recv_frame(conn)
-            protocol.send_frame(conn, self._response)
-        except (OSError, protocol.FrameError):
-            pass
+        for _ in range(2):
+            try:
+                conn, _addr = self._sock.accept()
+            except OSError:
+                return
+            if self.accepted_conn is None:
+                self.accepted_conn = conn
+            try:
+                protocol.recv_frame(conn)
+                protocol.send_frame(conn, self._response)
+            except (OSError, protocol.FrameError):
+                pass
+            finally:
+                if conn is not self.accepted_conn:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
 
     def wait_for_accepted_conn(self, timeout: float = 5.0) -> socket.socket:
         deadline = time.time() + timeout
@@ -68,21 +76,22 @@ class _AbruptCloseServer:
     def __init__(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(1)
+        self._sock.listen(2)
         self.port = self._sock.getsockname()[1]
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
     def _serve(self) -> None:
-        try:
-            conn, _addr = self._sock.accept()
-        except OSError:
-            return
-        try:
-            protocol.recv_frame(conn)
-        except (OSError, protocol.FrameError):
-            pass
-        conn.close()
+        for _ in range(2):
+            try:
+                conn, _addr = self._sock.accept()
+            except OSError:
+                return
+            try:
+                protocol.recv_frame(conn)
+            except (OSError, protocol.FrameError):
+                pass
+            conn.close()
 
     def close(self) -> None:
         self._sock.close()
@@ -102,7 +111,24 @@ class TestSessionConnectionOpen(unittest.TestCase):
         session._auth_token = None
         session._agent_session_id = None
         session._cwd = None
+        session._owner_id = None
         return session
+
+    def test_restart_reconnect_does_not_send_definitive_goodbye(self):
+        session = self._blank_session()
+        session._auth_token = "old-token"
+        session._sock = MagicMock()
+        with (
+            patch.object(
+                client.discovery,
+                "read",
+                return_value={"auth_token": "new-token"},
+            ),
+            patch.object(session, "_close_transport_locked") as close,
+            patch.object(session, "open"),
+        ):
+            session.ensure_fresh(session.db_path)
+        close.assert_called_once_with()
 
     def test_open_raises_and_closes_socket_on_rejected_hello(self):
         server = _FakeDaemonServer(
@@ -115,7 +141,9 @@ class TestSessionConnectionOpen(unittest.TestCase):
                 "ensure_daemon_running",
                 return_value={"service_port": server.port, "auth_token": "tok"},
             ):
-                with self.assertRaises(client.DaemonRpcError):
+                # The stale-auth response is retryable once; this single-shot fixture has no
+                # second daemon accept, so the final connection failure is also valid here.
+                with self.assertRaises((client.DaemonRpcError, OSError)):
                     session.open()
             self.assertIsNone(session._sock)
             self.assertIsNone(client._current_session)
@@ -160,7 +188,8 @@ class TestSessionConnectionOpen(unittest.TestCase):
                     session.open()
             self.assertIsNone(session._sock)
             self.assertIsNone(client._current_session)
-            self.assertEqual(len(created_sockets), 1)
+            self.assertEqual(len(created_sockets), 2)
+            self.assertTrue(all(sock.fileno() == -1 for sock in created_sockets))
             self.assertEqual(
                 created_sockets[0].fileno(),
                 -1,
@@ -185,6 +214,369 @@ class TestSessionConnectionOpen(unittest.TestCase):
             session.close()
         finally:
             server.close()
+
+    def test_open_retries_stale_auth_once_and_retains_daemon_capability(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        fake_sock = MagicMock()
+        responses = [
+            protocol.build_error_response("x", protocol.AUTH_FAILED, "stale token"),
+            protocol.build_ok_response(
+                "x", {"caller_agent_session_capability": "opaque-capability"}
+            ),
+        ]
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                side_effect=[
+                    {"service_port": 1, "auth_token": "old"},
+                    {"service_port": 2, "auth_token": "new"},
+                ],
+            ),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(client.protocol, "send_frame"),
+            patch.object(client.protocol, "recv_frame", side_effect=responses),
+        ):
+            session.open()
+        self.assertEqual(session.session_metadata, ("logical-session", "opaque-capability"))
+        self.assertEqual(fake_sock.close.call_count, 1)
+        session.close(send_goodbye=False)
+
+    def test_open_does_not_retry_final_internal_error(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        fake_sock = MagicMock()
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ) as ensure_daemon,
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(client.protocol, "send_frame"),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_error_response(
+                    "x", protocol.INTERNAL_ERROR, "registration failed"
+                ),
+            ),
+        ):
+            with self.assertRaises(client.DaemonRpcError) as ctx:
+                session.open()
+        self.assertEqual(ctx.exception.code, protocol.INTERNAL_ERROR)
+        self.assertEqual(ensure_daemon.call_count, 1)
+
+    def test_call_uses_capability_minted_during_refresh_not_pre_refresh_snapshot(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = "old-capability"
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+
+        def refresh(_db_path):
+            session._session_capability = "new-capability"
+
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh", side_effect=refresh),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_ok_response("x", "ok"),
+            ),
+        ):
+            client._current_session = session
+            try:
+                result = client.call(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="logical-session",
+                )
+            finally:
+                client._current_session = None
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(sent_requests[0]["params"]["caller_agent_session_id"], "logical-session")
+        self.assertEqual(
+            sent_requests[0]["params"]["caller_agent_session_capability"], "new-capability"
+        )
+
+    def test_failed_refresh_blocks_rpc_and_next_call_can_retry_logical_session(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = "old-capability"
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+        refresh_results = iter(
+            [
+                client.DaemonRpcError(protocol.INTERNAL_ERROR, "refresh failed"),
+                None,
+            ]
+        )
+
+        def refresh(_db_path):
+            result = next(refresh_results)
+            if result is not None:
+                raise result
+            session._session_capability = "retry-capability"
+
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh", side_effect=refresh),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_ok_response("x", "ok"),
+            ),
+        ):
+            client._current_session = session
+            try:
+                with self.assertRaises(client.DaemonRpcError):
+                    client.call(
+                        "/tmp/saltmdb-test.db",
+                        "search_tags",
+                        {},
+                        caller_agent_session_id="logical-session",
+                    )
+                self.assertEqual(sent_requests, [])
+                result = client.call(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="logical-session",
+                )
+            finally:
+                client._current_session = None
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(
+            sent_requests[0]["params"]["caller_agent_session_capability"],
+            "retry-capability",
+        )
+        self.assertEqual(session._agent_session_id, "logical-session")
+
+    def test_explicit_mismatched_caller_id_does_not_borrow_current_capability(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = "current-capability"
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh"),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_ok_response("x", "ok"),
+            ),
+        ):
+            client._current_session = session
+            try:
+                client.call(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="other-session",
+                )
+            finally:
+                client._current_session = None
+        self.assertNotIn("caller_agent_session_capability", sent_requests[0]["params"])
+
+    def test_protocol_retry_resnapshots_capability_after_refresh(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = "old-capability"
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+        refreshed_capabilities = iter(("first-capability", "retry-capability"))
+
+        def refresh(_db_path):
+            session._session_capability = next(refreshed_capabilities)
+
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh", side_effect=refresh),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                side_effect=[
+                    protocol.build_error_response("x", protocol.AUTH_FAILED, "stale auth"),
+                    protocol.build_ok_response("x", "ok"),
+                ],
+            ),
+        ):
+            client._current_session = session
+            try:
+                result = client.call(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="logical-session",
+                )
+            finally:
+                client._current_session = None
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(
+            [
+                request["params"]["caller_agent_session_capability"]
+                for request in sent_requests
+            ],
+            ["first-capability", "retry-capability"],
+        )
+
+    def test_call_forces_reconnect_and_retries_on_caller_session_invalid(self):
+        """Fresh review finding (2026-08-26): CALLER_SESSION_INVALID means the daemon has
+        already dropped our capability (e.g. a raw persistent-socket disconnect) while its own
+        auth_token never changed, so ensure_fresh()'s cheap token comparison alone can never
+        detect it. call_method() must force a real reconnect specifically on this error code
+        instead of resending the same stale capability."""
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = "old-capability"
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+
+        def fake_force_reconnect(_db_path):
+            session._session_capability = "reconnected-capability"
+
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh"),
+            patch.object(
+                session, "force_reconnect", side_effect=fake_force_reconnect
+            ) as force_reconnect,
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                side_effect=[
+                    protocol.build_error_response(
+                        "x", protocol.CALLER_SESSION_INVALID, "inactive session"
+                    ),
+                    protocol.build_ok_response("x", "ok"),
+                ],
+            ),
+        ):
+            client._current_session = session
+            try:
+                result = client.call(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="logical-session",
+                )
+            finally:
+                client._current_session = None
+
+        self.assertEqual(result, "ok")
+        force_reconnect.assert_called_once()
+        self.assertEqual(
+            [
+                request["params"]["caller_agent_session_capability"]
+                for request in sent_requests
+            ],
+            ["old-capability", "reconnected-capability"],
+        )
+
+    def test_force_reconnect_closes_transport_and_reopens(self):
+        session = self._blank_session()
+        session._sock = MagicMock()
+        session._auth_token = "old-token"
+        calls = []
+        with (
+            patch.object(
+                session,
+                "_close_transport_locked",
+                side_effect=lambda: calls.append("close_transport"),
+            ),
+            patch.object(session, "open", side_effect=lambda: calls.append("open")),
+        ):
+            session.force_reconnect(session.db_path)
+        self.assertEqual(calls, ["close_transport", "open"])
+
+    def test_close_reads_and_logs_failed_goodbye_ack(self):
+        """Fresh review finding (2026-08-26): close() previously sent goodbye and tore down the
+        socket without ever attempting to read the response, so a server-side persistence
+        failure was silently indistinguishable from success."""
+        session = self._blank_session()
+        session._sock = MagicMock()
+        session._auth_token = "tok"
+        session._agent_session_id = "logical-session"
+        with (
+            patch.object(client.protocol, "send_frame"),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_error_response(
+                    "x", protocol.INTERNAL_ERROR, "failed to close agent session: db busy"
+                ),
+            ),
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            session.close()
+        self.assertTrue(
+            any("logical-session" in message for message in logs.output),
+            logs.output,
+        )
+        self.assertIsNone(session._sock)
 
 
 if __name__ == "__main__":

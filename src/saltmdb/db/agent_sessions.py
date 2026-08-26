@@ -8,18 +8,53 @@ injected as bootstrap context (see session_digest_service).
 import sqlite3
 
 
-def record_session(conn: sqlite3.Connection, session_id: str, cwd: str, started_at: str) -> None:
-    """INSERT OR IGNORE into _agent_sessions -- idempotent per session_id.
+def record_session(
+    conn: sqlite3.Connection,
+    session_id: str,
+    cwd: str | None,
+    started_at: str,
+    owner_id: str | None = None,
+) -> None:
+    """Register idempotently, enriching a legacy row without inventing old values.
 
     A daemon restart may re-send hello for an adapter that already registered,
     so this must not fail or duplicate on the second call with the same session_id.
     """
     conn.execute(
         """
-        INSERT OR IGNORE INTO _agent_sessions (session_id, cwd, started_at)
-        VALUES (?, ?, ?)
+        INSERT INTO _agent_sessions
+            (session_id, cwd, started_at, owner_id, last_activity_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            cwd = COALESCE(_agent_sessions.cwd, excluded.cwd),
+            owner_id = COALESCE(_agent_sessions.owner_id, excluded.owner_id),
+            last_activity_at = CASE
+                WHEN _agent_sessions.last_activity_at IS NULL
+                  OR _agent_sessions.last_activity_at < excluded.last_activity_at
+                THEN excluded.last_activity_at
+                ELSE _agent_sessions.last_activity_at
+            END,
+            ended_at = NULL
         """,
-        (session_id, cwd, started_at),
+        (session_id, cwd, started_at, owner_id, started_at),
+    )
+
+
+def touch_session(conn: sqlite3.Connection, session_id: str, received_at: str) -> None:
+    """Advance activity monotonically; delayed background jobs never move it backwards."""
+    conn.execute(
+        """UPDATE _agent_sessions SET last_activity_at = ?
+           WHERE session_id = ?
+             AND (last_activity_at IS NULL OR last_activity_at < ?)""",
+        (received_at, session_id, received_at),
+    )
+
+
+def close_session(conn: sqlite3.Connection, session_id: str, ended_at: str) -> None:
+    """Record only a definitive normal goodbye; raw disconnects remain historically unknown."""
+    conn.execute(
+        "UPDATE _agent_sessions SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL",
+        (ended_at, session_id),
     )
 
 

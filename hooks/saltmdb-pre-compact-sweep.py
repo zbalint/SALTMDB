@@ -26,7 +26,7 @@ SWEEP_PROMPT = (
     "architectural rules, or user preferences established in this session but NOT yet persisted "
     "to SALTMDB. For each item found, first call mcp__saltmdb__search_memory to confirm it is "
     "not already recorded, and if genuinely new, call mcp__saltmdb__store_memory "
-    '(owner_id="agent_hook_precompact") to persist it, and mcp__saltmdb__log_event for any '
+    "to persist it, and mcp__saltmdb__log_event for any "
     "issue/fix worth a short-term event log entry. Do not report back conversationally -- this "
     "is a background sweep."
 )

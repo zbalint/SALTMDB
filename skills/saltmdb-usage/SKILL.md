@@ -118,7 +118,7 @@ not here).
 
 ### Phase C — Session wrap-up (commit & link)
 1. Query this session's own event log (`get_events(context_id=...)` or
-   `get_events(agent_id=<your owner_id>)`) for anything durable that only exists there.
+   `get_events(agent_id=<configured SALTMDB_OWNER_ID>)`) for anything durable that only exists there.
 2. Synthesize new permanent facts/rules/progress into `store_memory`.
 3. Link dependent/resolving relationships via `manage_relation`.
 4. **Retrieval-outcome telemetry** (pairs with the `saltmdb-stop-retrieval-outcome-gate.py` hook

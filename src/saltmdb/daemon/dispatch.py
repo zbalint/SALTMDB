@@ -225,7 +225,10 @@ def _dispatch_archive_memory(**kw):
 
 def _dispatch_manage_relation(**kw):
     if kw.get("relations"):
-        return relation_service.bulk_store_relations(relations=_required_list(kw, "relations"))
+        return relation_service.bulk_store_relations(
+            relations=_required_list(kw, "relations"),
+            owner_id=kw.get("owner_id"),
+        )
     if kw.get("invalidate"):
         return relation_service.invalidate_relation(
             source_id=kw.get("source_id"),

@@ -44,6 +44,22 @@ Every `saltmdb-*.py` script below has an identical body regardless of which harn
   emission, transcript scanning, per-session state files) lives in `_saltmdb_hook_common.py` —
   copy it alongside the `saltmdb-*.py` scripts, it's not a hook itself.
 
+## Adapter identity and session lifecycle
+
+Configure `SALTMDB_OWNER_ID` in every MCP server entry before enabling these hooks. The value is
+the stable lowercase identity of the agent or worker role (for example `claude`, `codex`, or
+`agent_docs`) and must match `^[a-z][a-z0-9_-]{0,63}$`. It is an adapter environment setting, not
+an MCP tool argument; hook prompts and tool calls must not supply `owner_id` themselves. Hook
+subprocesses that invoke `saltmdb-cli` must inherit the same environment so daemon-side writes
+carry the intended owner.
+
+Each MCP adapter mints one immutable `agent_session_id` at startup. The daemon records its working
+directory, owner, `started_at`, receipt-time `last_activity_at`, and nullable `ended_at`. Normal
+adapter shutdown sends a foreground `goodbye`; a dropped connection intentionally leaves
+`ended_at` unset because the adapter can reconnect with the same session ID. The Viewer reports
+live `active` state from the daemon connection registry and uses `unknown` when daemon liveness is
+unavailable. Session rows are retained indefinitely.
+
 ## Naming convention
 
 `saltmdb-<lifecycle-event>-<purpose>[-<harness>].py`, where `<lifecycle-event>` is one of

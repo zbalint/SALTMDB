@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "agent",
-            "prompt": "You are the SALTMDB pre-compaction sweep hook. The current session's conversation transcript is about to be compacted and working context will be lost. Review the conversation so far for: unresolved decisions, root-cause fixes to bugs/issues, new architectural rules, or user preferences established in this session but NOT yet persisted to SALTMDB. For each item found, first call mcp__saltmdb__search_memory to confirm it isn't already recorded, and if genuinely new, call mcp__saltmdb__store_memory (owner_id='agent_hook_precompact') to persist it, and mcp__saltmdb__log_event for any issue/fix worth a short-term event log entry. Do not report back conversationally -- this is a background sweep.",
+            "prompt": "You are the SALTMDB pre-compaction sweep hook. The current session's conversation transcript is about to be compacted and working context will be lost. Review the conversation so far for: unresolved decisions, root-cause fixes to bugs/issues, new architectural rules, or user preferences established in this session but NOT yet persisted to SALTMDB. For each item found, first call mcp__saltmdb__search_memory to confirm it isn't already recorded, and if genuinely new, call mcp__saltmdb__store_memory to persist it, and mcp__saltmdb__log_event for any issue/fix worth a short-term event log entry. Identity comes from the hook agent's SALTMDB_OWNER_ID configuration. Do not report back conversationally -- this is a background sweep.",
             "timeout": 60
           }
         ]

@@ -66,37 +66,47 @@ def _normalize_list_or_str(val) -> list:
     return [val]
 
 
-def _effective_owner(
-    owner_id: str | None,
-    *,
-    tool_func=None,
-    submitted: dict | None = None,
-) -> str:
-    """Bind the adapter identity at the tool boundary and return its effective value.
+def _strip_item_owner_id(items: list) -> list:
+    """Remove a stray/attacker-supplied ``owner_id`` key from each bulk item before it crosses
+    the adapter boundary (manage_relation's ``relations`` and consolidate_memories's
+    ``consolidations``, review finding 2026-08-26: was duplicated inline at both call sites).
+    Non-dict items are passed through unchanged -- the caller's own validation rejects those."""
+    return [
+        {key: value for key, value in item.items() if key != "owner_id"}
+        if isinstance(item, dict)
+        else item
+        for item in items
+    ]
 
-    The daemon is shared by all adapter sessions, so identity must be established before a
-    request crosses the backend boundary.  A first call without an owner is a hard failure with
-    a copyable correction; subsequent calls may omit it and use the immutable binding.
-    """
+
+def _effective_owner() -> str:
+    """Return the startup-configured adapter identity for internal dispatch."""
     from saltmdb.mcp.identity import SESSION_IDENTITY
 
-    if owner_id:
-        SESSION_IDENTITY.bind(owner_id)
-        return owner_id
     if SESSION_IDENTITY.owner_id:
         return SESSION_IDENTITY.owner_id
-    from saltmdb.utils.corrected_call import build_corrected_call
-
-    corrected_call = (
-        build_corrected_call(tool_func, submitted or {}, {"owner_id": "<agent-id>"})
-        if tool_func is not None
-        else {"owner_id": "<agent-id>"}
-    )
     raise ValueError(
-        "owner_id is required on the first MCP tool call; retry with an agent identity. "
-        f"corrected_call: {json.dumps(corrected_call)}. "
-        "Start a new MCP connection to change it."
+        "SALTMDB owner identity is not configured; set SALTMDB_OWNER_ID in the MCP server "
+        "environment and restart the MCP server."
     )
+
+
+_OWNER_INJECTED_TOOLS = frozenset(
+    {
+        "log_event",
+        "store_memory",
+        "search_memory",
+        "archive_memory",
+        "manage_relation",
+        "consolidate_memories",
+        "revise_memory",
+        "supersede_memory",
+        "get_memory",
+        "get_lineage",
+        "get_related_memories",
+        "review_core_memory",
+    }
+)
 
 
 class DirectDispatchBackend:
@@ -123,17 +133,14 @@ class RpcBackend:
         from saltmdb.config import get_db_path
         from saltmdb.mcp.identity import SESSION_IDENTITY
 
-        # Per-session owner binding (§4.5): the first call that supplies owner_id binds it for
-        # the rest of this adapter process's life; every later call that omits owner_id gets the
-        # bound value injected here. A rebind attempt (a different owner_id later) raises
-        # IdentityRebindRejected -- deliberately NOT caught here, so it surfaces exactly like any
-        # other tool-call exception (Phase 1 scope: bind/inject only, no hard-fail on a MISSING
-        # owner_id yet -- ownership-bearing tool bodies now reject that first call before this
-        # backend is reached; this guard remains responsible only for real adapter RPC calls.
-        if kwargs.get("owner_id"):
-            SESSION_IDENTITY.bind(kwargs["owner_id"])
-        elif SESSION_IDENTITY.owner_id and "owner_id" in kwargs:
-            kwargs = {**kwargs, "owner_id": SESSION_IDENTITY.owner_id}
+        # The adapter is the trust boundary for owner identity.  Public wrappers already add
+        # this field for the daemon, but re-assert it here so an internal caller (or a stale
+        # wrapper) cannot smuggle a different owner through the transport envelope.  Tools whose
+        # contract is intentionally cross-agent/ownership-neutral must not receive an owner key.
+        if tool_name in _OWNER_INJECTED_TOOLS:
+            kwargs = {**kwargs, "owner_id": _effective_owner()}
+        else:
+            kwargs = {key: value for key, value in kwargs.items() if key != "owner_id"}
 
         if tool_name in {
             "log_event",
@@ -144,13 +151,25 @@ class RpcBackend:
         }:
             kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
 
+        # Transport metadata, consumed by daemon/server.py before ordinary tool dispatch.  This
+        # intentionally differs from public agent_session_id filters on search/event tools.
         db_path = get_db_path()
         try:
-            return daemon_client.call(db_path, tool_name, kwargs)
+            return daemon_client.call(
+                db_path,
+                tool_name,
+                kwargs,
+                caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
+            )
         except daemon_client.DaemonRpcError as e:
             if e.code == "MID_CALL_FAILURE":
                 if tool_name in protocol.READ_TOOLS:
-                    return daemon_client.call(db_path, tool_name, kwargs)
+                    return daemon_client.call(
+                        db_path,
+                        tool_name,
+                        kwargs,
+                        caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
+                    )
                 if tool_name in protocol.WRITE_TOOLS:
                     return {
                         "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
@@ -201,7 +220,6 @@ def log_event(
     content: str,
     context_id: str | None = None,
     error_code: str | None = None,
-    owner_id: str | None = None,
 ) -> str:
     """Appends an event to the append-only events ledger.
 
@@ -213,10 +231,8 @@ def log_event(
     `agent_session_id` is not a parameter here either -- the adapter auto-populates it from its
     own process-local session identity.
 
-    `owner_id` is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=log_event, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "log_event",
         {
@@ -326,8 +342,6 @@ def merge_tags(
     A core must stay directly actionable on its own even if a weaker agent never follows a detail
     link; move rationale/chronology/evidence into the linked detail memories instead.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
 )
 def store_memory(
@@ -335,7 +349,6 @@ def store_memory(
     content: str,
     tags: list[str],
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    owner_id: str | None = None,
     context_id: str | None = None,
     entity_id: str | None = None,
     metadata: dict | None = None,
@@ -348,7 +361,7 @@ def store_memory(
     detail_memory_ids: list | None = None,
 ) -> str | dict:
     submitted = locals().copy()
-    owner_id_ = _effective_owner(owner_id, tool_func=store_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     tags_ = _normalize_list_or_str(tags)
     front_matter_fields, body_without_front_matter = _front_matter_identity_fields(content)
     if front_matter_fields:
@@ -426,8 +439,6 @@ def store_memory(
     changed per MCP call; benchmark controls for candidate channels, caps, lifecycle-family
     experiments, and diagnostics remain internal-only.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
 )
 def search_memory(
@@ -442,9 +453,8 @@ def search_memory(
     is_core: bool | None = None,
     include_related: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
-    owner_id: str | None = None,
 ) -> list | dict | str:
-    owner_id_ = _effective_owner(owner_id, tool_func=search_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     tags_filter_ = _normalize_list_or_str(tags_filter) if tags_filter else None
 
     return _backend_or_raise().call(
@@ -466,17 +476,13 @@ def search_memory(
 
 
 @mcp.tool()
-def archive_memory(
-    entity_id: str | list[str] | None = None, owner_id: str | None = None
-) -> str | list:
+def archive_memory(entity_id: str | list[str] | None = None) -> str | list:
     """Explicitly archives (retires) one or multiple long-term memories.
 
     Accepts entity_id as a single string ID OR a list of string IDs.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=archive_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     raw_target = entity_id
     target = _normalize_list_or_str(raw_target)
 
@@ -574,7 +580,6 @@ def manage_relation(
     valid_at: str | None = None,
     invalid_at: str | None = None,
     override_justification: str | None = None,
-    owner_id: str | None = None,
 ) -> str | list | dict:
     """Stores one or multiple directional semantic relationship edges between memory nodes, or invalidates an existing edge (invalidate=True).
 
@@ -593,24 +598,22 @@ def manage_relation(
     directional edge (REJECT_CONTRADICTORY_PREDICATE), unless override_justification (a
     non-throwaway string explaining why this relation should proceed anyway) is supplied to
     force it through -- the override is atomically audited. For the bulk (`relations`) shape,
-    put `override_justification`/`owner_id` on each individual item that needs them, not at the
-    top level -- neither is shared across items in the same batch.
+    put `override_justification` on each individual item that needs it.
 
     Core-memory governance: a NEW `elaborates_on` edge whose target is an active core memory is
     rejected (`REJECT_CORE_ELABORATES_ON`) -- only that core's own `detail_memory_ids`
     declaration (via `store_memory`/`consolidate_memories`) may create one. Re-submitting an
     edge that already exists stays an idempotent no-op regardless.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
     submitted = locals().copy()
-    owner_id_ = _effective_owner(owner_id, tool_func=manage_relation, submitted=locals())
+    owner_id_ = _effective_owner()
     relations_ = relations
     if relations_ and isinstance(relations_, str):
         relations_ = _normalize_list_or_str(relations_)
 
     if relations_:
+        relations_ = _strip_item_owner_id(relations_)
         from saltmdb.utils.corrected_call import build_corrected_call
         from saltmdb.utils.envelope import error as env_error
         from saltmdb.utils.envelope import rejected
@@ -694,7 +697,6 @@ def consolidate_memories(
     title: str | None = None,
     content: str | None = None,
     tags: list | None = None,
-    owner_id: str | None = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] = "shared",
     weight: int | float = 1,
@@ -719,10 +721,7 @@ def consolidate_memories(
     (`consolidations`) shape, put `override_justification` on each individual item that needs
     it, not at the top level -- it is never shared across items in the same batch.
 
-    `owner_id`/`context_id` behave differently for the bulk shape: the top-level value (if any)
-    is the batch-wide default, applied to any item that doesn't set its own -- an item's own
-    `owner_id`/`context_id` always wins when present, so a single-owner batch can set it once
-    while a batch that legitimately mixes ownership can still override per item.
+    `context_id` is the batch-wide default for the bulk shape; an item's own `context_id` wins.
 
     Core-memory governance: `is_core` is NEVER inherited from parents. If any resolved parent is
     currently an active core (is_core=1, not archived) and `is_core` is omitted, the commit is
@@ -732,13 +731,13 @@ def consolidate_memories(
     memory. The same capacity caps and detail-relation rules as `store_memory` apply. For the
     bulk shape, put every `core_*`/`detail_memory_ids` field on each individual item.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=consolidate_memories, submitted=locals())
+    owner_id_ = _effective_owner()
     consolidations_ = consolidations
     if consolidations_ and isinstance(consolidations_, str):
         consolidations_ = _normalize_list_or_str(consolidations_)
+    if consolidations_:
+        consolidations_ = _strip_item_owner_id(consolidations_)
 
     parent_ids_ = _normalize_list_or_str(parent_ids)
     tags_ = _normalize_list_or_str(tags)
@@ -806,7 +805,6 @@ def revise_memory(
     content: str,
     tags: list[str],
     reason: str,
-    owner_id: str | None = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
@@ -815,13 +813,10 @@ def revise_memory(
 
     ``entity_id`` is never mutated in place. The predecessor is archived byte-for-byte and the
     new entity links to it with ``revises``. An inactive target is a hard failure: inspect the
-    reported successor before retrying. ``owner_id``, ``context_id``, ``scope``, ``memory_type``,
-    are inherited when omitted and may be changed deliberately when supplied.
-
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
+    reported successor before retrying. ``context_id``, ``scope``, and ``memory_type`` are
+    inherited when omitted; provenance is assigned to the configured calling agent.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=revise_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "revise_memory",
         _replacement_payload(
@@ -845,7 +840,6 @@ def supersede_memory(
     content: str,
     tags: list[str],
     reason: str,
-    owner_id: str | None = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
@@ -856,10 +850,8 @@ def supersede_memory(
     is never silently redirected; the error reports known active successors and lineage. Optional
     administrative fields are inherited unless explicitly supplied.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=supersede_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "supersede_memory",
         _replacement_payload(
@@ -877,16 +869,14 @@ def supersede_memory(
 
 
 @mcp.tool()
-def get_memory(entity_id: str, owner_id: str | None = None) -> dict:
+def get_memory(entity_id: str) -> dict:
     """Retrieves one memory by full ID or an unambiguous ID prefix.
 
     Explicit retrieval includes archived memories and returns the memory's status and lineage;
     an archived ID is never silently redirected to a successor.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=get_memory, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call("get_memory", {"entity_id": entity_id, "owner_id": owner_id_})
 
 
@@ -895,17 +885,14 @@ def get_lineage(
     entity_id: str,
     direction: Literal["ancestors", "descendants"] = "ancestors",
     max_depth: int = 5,
-    owner_id: str | None = None,
 ) -> dict:
     """Traverses memory lineage in either direction.
 
     ``ancestors`` shows where an entity came from; ``descendants`` shows what it became.
     Archived nodes remain visible so historical provenance is never hidden.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=get_lineage, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "get_lineage",
         {
@@ -922,7 +909,6 @@ def get_related_memories(
     entity_id: str,
     max_depth: int = 5,
     direction: Literal["outbound", "inbound", "both"] = "both",
-    owner_id: str | None = None,
 ) -> dict:
     """Traverses semantic relations from one memory for up to ``max_depth`` hops.
 
@@ -932,10 +918,8 @@ def get_related_memories(
     not a true mixed-direction graph walk: pass direction="outbound" for the original
     downstream-only behavior, or direction="inbound" for upstream-only.
 
-    owner_id is required on this tool's very first call within a session (it binds the session
-    identity); later calls in the same session may omit it once bound.
     """
-    owner_id_ = _effective_owner(owner_id, tool_func=get_related_memories, submitted=locals())
+    owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "get_related_memories",
         {
@@ -989,15 +973,14 @@ def review_core_memory(
     entity_id: str | None = None,
     outcome: Literal["retain", "demote", "archive"] | None = None,
     review_rationale: str | None = None,
-    owner_id: str | None = None,
     core_review_after: str | None = None,
 ) -> str:
     """Reviews an active core memory: retain (extend its next review date), demote (turn it back
     into an ordinary searchable memory), or archive (retire it) -- a direct, synchronous
     operation, never a request/queue/event.
 
-    `owner_id` identifies the REVIEWING agent; it need not match the entity's own owner and never
-    transfers ownership. `review_rationale` (20-1,000 chars) is stored for provenance but never
+    The configured owner identifies the reviewing agent; it need not match the entity's own
+    owner and never transfers ownership. `review_rationale` (20-1,000 chars) is stored for provenance but never
     injected into the bootstrap digest. `retain` requires an absolute `core_review_after`
     timestamp in the future and no more than 30 days out (omit it to default to 14 days from
     now); `demote`/`archive` must not supply `core_review_after`. Meaningful CONTENT revision is
@@ -1011,7 +994,7 @@ def review_core_memory(
             "entity_id": entity_id,
             "outcome": outcome,
             "review_rationale": review_rationale,
-            "owner_id": owner_id,
+            "owner_id": _effective_owner(),
             "core_review_after": core_review_after,
         },
     )

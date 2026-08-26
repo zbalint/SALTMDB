@@ -1,4 +1,4 @@
-"""Per-adapter-process session identity binding (agent API redesign plan §4.5/§4.6).
+"""Per-adapter-process identity configured at MCP adapter startup.
 
 One MCP adapter process serves exactly one agent session end-to-end (mcp/server.py's
 server_lifespan owns exactly one SessionConnection for the process's life), so a module-level
@@ -9,10 +9,9 @@ only into RpcBackend (§4.5), never into daemon/dispatch.py's DISPATCH_TABLE or
 DirectDispatchBackend -- the latter also runs INSIDE the daemon (its own RPC handler) and is
 shared across sessions there, exactly the case this must not touch.
 
-The tool boundary performs the first-call hard failure (including its corrected-call guidance),
-while this holder remains deliberately small: it only owns the immutable bind/inject state.
-Keeping validation in tools.py also means DirectDispatchBackend tests exercise the same contract
-without contaminating the shared daemon dispatch path.
+The owner is supplied by ``SALTMDB_OWNER_ID`` in the harness's MCP server configuration, never by
+an agent-facing tool argument. This holder owns the immutable configured identity and the minted
+SALTMDB session ID.
 """
 
 from __future__ import annotations
@@ -22,37 +21,29 @@ import uuid6
 
 
 class IdentityRebindRejected(Exception):
-    """Raised when a second, different owner_id arrives on an already-bound adapter connection.
-    Binding is immutable for the connection's life (§4.5) -- a genuinely different identity
-    requires a new MCP connection (a new adapter process), not a mid-session switch."""
+    """Raised if startup code attempts to configure two identities in one adapter process."""
 
     def __init__(self, bound: str, attempted: str) -> None:
         self.bound = bound
         self.attempted = attempted
         super().__init__(
-            f"owner_id is already bound to '{bound}' for this session; cannot rebind to "
-            f"'{attempted}'. Start a new MCP connection to use a different owner_id."
+            f"SALTMDB_OWNER_ID is already configured as '{bound}'; cannot reconfigure it as "
+            f"'{attempted}' in the same MCP process."
         )
 
 
 class _SessionIdentity:
-    """Per-adapter-process owner binding. One MCP adapter serves exactly one agent session,
-    so process-local state is correct here -- unlike in the daemon, which is shared."""
+    """Immutable owner/session identity for one MCP adapter process.
+
+    The owner is configured once during process startup from ``SALTMDB_OWNER_ID``.  There is no
+    first-tool-call binding or agent-controlled rebind path: every public MCP tool receives the
+    already-configured identity through the private dispatch envelope.
+    """
 
     def __init__(self) -> None:
         self._owner_id: str | None = None
         self.agent_session_id: str = str(uuid6.uuid7())
         self.cwd: str = os.path.realpath(os.getcwd())
-
-    def bind(self, owner_id: str | None) -> None:
-        """Binds the session's owner_id from the first call that supplies one. A falsy value
-        is a no-op (nothing to bind yet). A later call with a DIFFERENT non-falsy value raises
-        IdentityRebindRejected; the identical value again is always a no-op."""
-        if not owner_id:
-            return
-        if self._owner_id is not None and self._owner_id != owner_id:
-            raise IdentityRebindRejected(bound=self._owner_id, attempted=owner_id)
-        self._owner_id = owner_id
 
     @property
     def owner_id(self) -> str | None:
@@ -64,6 +55,19 @@ class _SessionIdentity:
         self._owner_id = None
         self.agent_session_id = str(uuid6.uuid7())
         self.cwd = os.path.realpath(os.getcwd())
+
+    def configure_owner(self, owner_id: str) -> None:
+        """Configure the required owner exactly once during adapter startup.
+
+        Validation is repeated here as a defense-in-depth measure for embedding applications and
+        tests that call this startup hook directly instead of going through ``__main__``.
+        """
+        from saltmdb.config import validate_owner_id
+
+        owner_id = validate_owner_id(owner_id)
+        if self._owner_id is not None and self._owner_id != owner_id:
+            raise IdentityRebindRejected(bound=self._owner_id, attempted=owner_id)
+        self._owner_id = owner_id
 
 
 # One instance per adapter process, by construction (module import happens once per process).

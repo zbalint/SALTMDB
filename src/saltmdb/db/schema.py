@@ -142,6 +142,76 @@ def _add_column_if_missing(conn, table: str, column_def: str) -> None:
             raise
 
 
+def _ensure_agent_sessions_table(conn) -> None:
+    """Create the lifecycle ledger and migrate the original non-null cwd constraint.
+
+    ``cwd`` was required by the first session-digest schema, but it is unavailable for some
+    historical/incomplete registrations. SQLite cannot drop a column constraint in place, so
+    rebuild only this small ledger when an older table is encountered, preserving every row and
+    all lifecycle columns that may already exist.
+    """
+    columns = conn.execute("PRAGMA table_info(_agent_sessions)").fetchall()
+    if not columns:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _agent_sessions (
+                session_id TEXT PRIMARY KEY,
+                cwd TEXT,
+                started_at DATETIME NOT NULL,
+                owner_id TEXT,
+                last_activity_at DATETIME,
+                ended_at DATETIME
+            )
+            """
+        )
+        return
+
+    column_names = {row[1] for row in columns}
+    cwd_info = next((row for row in columns if row[1] == "cwd"), None)
+    if cwd_info is None:
+        # The earliest lifecycle table only had session_id and started_at.  Add cwd as
+        # nullable before the lifecycle columns below so historical rows remain usable while
+        # registrations that know the working directory can enrich them later.
+        conn.execute("ALTER TABLE _agent_sessions ADD COLUMN cwd TEXT")
+        return
+    if not cwd_info[3]:
+        return
+
+    conn.execute("DROP INDEX IF EXISTS idx_agent_sessions_cwd_started")
+    conn.execute("ALTER TABLE _agent_sessions RENAME TO _agent_sessions_legacy")
+    conn.execute(
+        """
+        CREATE TABLE _agent_sessions (
+            session_id TEXT PRIMARY KEY,
+            cwd TEXT,
+            started_at DATETIME NOT NULL,
+            owner_id TEXT,
+            last_activity_at DATETIME,
+            ended_at DATETIME
+        )
+        """
+    )
+    select_expr = [
+        column if column in column_names else "NULL"
+        for column in (
+            "session_id",
+            "cwd",
+            "started_at",
+            "owner_id",
+            "last_activity_at",
+            "ended_at",
+        )
+    ]
+    conn.execute(
+        "INSERT INTO _agent_sessions "
+        "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+        "SELECT "
+        + ", ".join(select_expr)
+        + " FROM _agent_sessions_legacy"
+    )
+    conn.execute("DROP TABLE _agent_sessions_legacy")
+
+
 def _migrate_predicate_drift(conn, now: str) -> None:  # noqa: C901
     """Agent API redesign plan §7.1 (Phase 8 data migration): rewrites every relation edge whose
     predicate is a known drifted alias (saltmdb.utils.predicate_vocabulary.PREDICATE_ALIASES --
@@ -769,13 +839,18 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         """)
 
         # 6c. Agent Sessions Table for Last Session Bootstrap Digest
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS _agent_sessions (
-            session_id TEXT PRIMARY KEY,
-            cwd TEXT NOT NULL,
-            started_at DATETIME NOT NULL
-        );
-        """)
+        _ensure_agent_sessions_table(conn)
+        # Additive migration for databases created before lifecycle metadata existed.
+        for column in (
+            "owner_id TEXT",
+            "last_activity_at DATETIME",
+            "ended_at DATETIME",
+        ):
+            try:
+                conn.execute(f"ALTER TABLE _agent_sessions ADD COLUMN {column}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_agent_sessions_cwd_started
             ON _agent_sessions(cwd, started_at DESC);

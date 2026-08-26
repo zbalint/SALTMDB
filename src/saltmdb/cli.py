@@ -61,19 +61,18 @@ def cmd_export_corpus_snapshot(args):
     document scripts/benchmarking/freeze_live_corpus.py already expects (has_more=False,
     next_cursor=None, entity_count == len(entities)).
     """
-    from saltmdb.config import get_db_path
+    from saltmdb.config import get_db_path, get_owner_id
     from saltmdb.domain.services.corpus_snapshot_service import (
         CorpusSnapshotError,
         SnapshotChangedError,
         iter_corpus_snapshot_pages,
     )
 
-    # --owner-id is argparse-required (see build_parser), so it's always present here.
     db_path = args.db_path or get_db_path()
     try:
         pages = list(
             iter_corpus_snapshot_pages(
-                owner_id=args.owner_id,
+                owner_id=get_owner_id(),
                 page_size=args.page_size,
                 include_archived=args.include_archived,
                 db_path=db_path,
@@ -117,11 +116,11 @@ def cmd_orphans(args):
     No entity_id, owner-wide maintenance scan -- flagged reversible under the plan's §1.2 (an
     unlinked memory is still fully searchable; the corpus does not degrade if this never runs).
     """
-    from saltmdb.config import get_db_path
+    from saltmdb.config import get_db_path, get_owner_id
     from saltmdb.domain.services.memory_service import detect_orphaned_memories
 
     db_path = args.db_path or get_db_path()
-    result = detect_orphaned_memories(owner_id=args.owner_id, db_path=db_path)
+    result = detect_orphaned_memories(owner_id=get_owner_id(), db_path=db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 1 if "error" in result else 0
 
@@ -295,7 +294,6 @@ def build_parser():
         help="Export the full corpus as one immutable, hash-verified JSON snapshot "
         "(evaluation/benchmark tooling, not agent operation).",
     )
-    e.add_argument("--owner-id", required=True, help="Owner whose corpus to export.")
     e.add_argument("--page-size", type=int, default=None, help="Rows fetched per internal page.")
     e.add_argument(
         "--include-archived", action="store_true", help="Include archived entities in the export."
@@ -306,7 +304,6 @@ def build_parser():
     o = sub.add_parser(
         "orphans", help="List active memories with zero relationship links (maintenance scan)."
     )
-    o.add_argument("--owner-id", default=None, help="Restrict the scan to one owner.")
     o.set_defaults(func=cmd_orphans)
 
     c = sub.add_parser(

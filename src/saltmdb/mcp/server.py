@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
-from saltmdb.config import get_db_path
+from saltmdb.config import get_db_path, get_owner_id
 from saltmdb.daemon.client import SessionConnection
 from saltmdb.mcp.identity import SESSION_IDENTITY
 
@@ -27,13 +27,22 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     concern handled once by __main__.py before mcp.run() is even called, not a per-lifespan one
     (round-3/round-4 correction: a contextvars.ContextVar tried to solve this here first and was
     the wrong primitive)."""
+    # ``__main__`` configures this before calling ``mcp.run()``, but server_lifespan is also a
+    # supported construction boundary for embedded/test adapters.  Validate the deployment
+    # identity here as well so no hello can be emitted with owner_id=None when startup wiring is
+    # bypassed.  configure_owner is immutable and idempotent for the already-configured value.
+    SESSION_IDENTITY.configure_owner(get_owner_id())
     session = SessionConnection(
         get_db_path(),
         session_id=SESSION_IDENTITY.agent_session_id,
         cwd=SESSION_IDENTITY.cwd,
+        owner_id=SESSION_IDENTITY.owner_id,
     )
-    session.open()
     try:
+        # Keep startup inside the cleanup boundary as well: a retryable hello failure must not
+        # leave a partially initialized connection or emit a goodbye for a session that never
+        # reached durable registration.
+        session.open()
         yield {}
     finally:
         # Codex round-1 finding: without try/finally, an exception raised anywhere during the

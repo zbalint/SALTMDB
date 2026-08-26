@@ -1779,8 +1779,18 @@ def bulk_commit_consolidation(  # noqa: PLR0915
 bulk_consolidate_memories = bulk_commit_consolidation
 
 
-def bulk_store_relations(relations: list, db_connection=None, db_path: str = None) -> list:
+def bulk_store_relations(
+    relations: list,
+    db_connection=None,
+    db_path: str = None,
+    owner_id: str | None = None,
+) -> list:
     """Executes multiple relation insertions atomically in a single transaction -- all-or-nothing.
+
+    ``owner_id`` is the default attribution for the batch.  Trusted in-process callers may
+    provide an ``owner_id`` on an individual item to intentionally mix ownership; the MCP
+    adapter strips those per-item fields before dispatch, so public callers cannot override the
+    configured adapter identity.
 
     If any item raises (or would otherwise be reported as an error), the whole batch rolls
     back, so no partial set of relations is ever left committed. Because a single failure
@@ -1807,19 +1817,18 @@ def bulk_store_relations(relations: list, db_connection=None, db_path: str = Non
                 tgt = r.get("target_id")
                 pred = r.get("predicate")
                 valid_at = r.get("valid_at")
-                # Phase 5 D8: per-item, not a single top-level value for the whole batch -- a
-                # bulk call can legitimately mix relations attributed to different agents/owners
-                # or needing different override justifications, same reasoning as
-                # commit_consolidation's per-item override_justification.
+                # Per-item ownership is an internal compatibility affordance.  Public MCP
+                # wrappers remove this field before crossing the adapter boundary; retaining
+                # the item-level override here supports trusted in-process callers.
                 override_justification = r.get("override_justification")
-                owner_id = r.get("owner_id")
+                item_owner_id = r.get("owner_id", owner_id)
                 res = store_relation(
                     source_id=src,
                     target_id=tgt,
                     predicate=pred,
                     valid_at=valid_at,
                     override_justification=override_justification,
-                    owner_id=owner_id,
+                    owner_id=item_owner_id,
                     db_connection=conn,
                     _in_transaction=True,
                 )

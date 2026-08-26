@@ -325,6 +325,9 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.assertEqual(by_id["sess-a"]["event_count"], 1)
         self.assertEqual(by_id["sess-old"]["memory_count"], 1)
         self.assertEqual(by_id["sess-old"]["event_count"], 1)
+        self.assertIsNone(by_id["sess-old"]["owner_id"])
+        self.assertIsNone(by_id["sess-old"]["ended_at"])
+        self.assertEqual(by_id["sess-old"]["liveness"], "unknown")
 
         # sess-a's last-touched memory update (2026-08-25T12:00) is its most recent activity,
         # more recent than sess-old's latest event (2026-08-20) -- so sess-a sorts first.
@@ -360,6 +363,70 @@ class TestViewerAgentSessions(unittest.TestCase):
         handler.get_sessions({"id_prefix": ["prefix-x-"], "limit": ["2"], "page": ["2"]})
         self.assertEqual(len(captured_page["data"]["sessions"]), 1)
         self.assertEqual(captured_page["data"]["total_pages"], 2)
+
+    def test_get_sessions_exposes_persisted_lifecycle_metadata(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, owner_id, last_activity_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "lifecycle-session",
+                "/project",
+                "2026-08-25T08:00:00+00:00",
+                "codex",
+                "2026-08-25T09:00:00+00:00",
+                None,
+            ),
+        )
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(
+            s for s in captured["data"]["sessions"] if s["session_id"] == "lifecycle-session"
+        )
+        self.assertEqual(row["owner_id"], "codex")
+        self.assertEqual(row["last_activity_at"], "2026-08-25T09:00:00+00:00")
+        self.assertEqual(row["liveness"], "unknown")
+
+    def test_get_sessions_derives_active_only_from_daemon_registry(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            ("live-session", "/project", "2026-08-25T08:00:00+00:00", None),
+        )
+        self.conn.commit()
+
+        class LiveState:
+            @staticmethod
+            def viewer_snapshot():
+                return {"active_agent_session_ids": ["live-session"]}
+
+        server = DummyServer()
+        server.daemon_state = LiveState()
+        handler = SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), server)
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(s for s in captured["data"]["sessions"] if s["session_id"] == "live-session")
+        self.assertEqual(row["liveness"], "active")
+
+    def test_get_sessions_falls_back_to_unknown_when_daemon_liveness_fails(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            ("unavailable-session", "/project", "2026-08-25T08:00:00+00:00", None),
+        )
+        self.conn.commit()
+
+        class BrokenState:
+            @staticmethod
+            def viewer_snapshot():
+                raise OSError("daemon unavailable")
+
+        server = DummyServer()
+        server.daemon_state = BrokenState()
+        handler = SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), server)
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(
+            s for s in captured["data"]["sessions"] if s["session_id"] == "unavailable-session"
+        )
+        self.assertEqual(row["liveness"], "unknown")
 
     def test_get_sessions_rejects_invalid_pagination(self):
         handler = self._handler()

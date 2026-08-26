@@ -15,11 +15,13 @@ class TestTagMergeTool(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -43,7 +45,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with the fix fragment",
             title="Fix Fragment Entity",
             tags=["#fix"],
-            owner_id="user1",
         )
         id1 = self._id(res1)
 
@@ -51,7 +52,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with the bugfix fragment",
             title="Bugfix Fragment Entity",
             tags=["#bugfix"],
-            owner_id="user1",
         )
         id2 = self._id(res2)
 
@@ -79,7 +79,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with the docs fragment",
             title="Docs Fragment Entity",
             tags=["#docs", "#documentation"],
-            owner_id="user1",
         )
         id1 = self._id(res1)
 
@@ -99,7 +98,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with skill singular",
             title="Skill Singular Entity",
             tags=["#skill"],
-            owner_id="user1",
         )
         id1 = self._id(res1)
 
@@ -107,7 +105,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with skills plural",
             title="Skills Plural Entity",
             tags=["#skills"],
-            owner_id="user1",
         )
         id2 = self._id(res2)
 
@@ -138,7 +135,6 @@ class TestTagMergeTool(unittest.TestCase):
             content="Content for entity tagged with docs canonical tag",
             title="Docs Canonical Entity",
             tags=["#docs"],
-            owner_id="user1",
         )
         res = tools.merge_tags(keep_tag="#docs", tags_to_merge=["#nonexistent-alias"])
         self.assertIn("Merged 0 tag(s)", res)

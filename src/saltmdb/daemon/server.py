@@ -17,6 +17,7 @@ import socketserver
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -26,10 +27,19 @@ from saltmdb import config
 from saltmdb.daemon import discovery, platform_paths, protocol
 from saltmdb.daemon.dispatch import DISPATCH_TABLE, dispatch_tool
 from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
+from saltmdb.daemon.db_write_coordinator import CoordinatorUsageError
 from saltmdb.daemon.embed_stall_monitor import EmbedStallMonitor
 from saltmdb.db.schema import init_db
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AgentSession:
+    agent_session_id: str
+    capability: str
+    closing: bool = False
+    leases: int = 0
 
 
 class _DaemonState:
@@ -45,8 +55,10 @@ class _DaemonState:
         self.viewer_port: int | None = None  # set by main() after the Viewer thread decision; None
         # means the Viewer is disabled for this daemon -- viewer_status() reports it authoritatively.
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._leases_changed = threading.Condition(self._lock)
         self._sessions: set[int] = set()
+        self._agent_sessions: dict[int, _AgentSession] = {}
         self._inflight = 0  # one-shot RPC dispatches currently in progress (not hello sessions --
         # see _acquire_inflight/_release_inflight); the grace timer must not fire while this is
         # nonzero, closing the "long backfill/librarian call killed by the 30s grace timer" gap.
@@ -65,6 +77,15 @@ class _DaemonState:
                 "uptime_s": round(time.monotonic() - self._started_at, 3),
                 "viewer": {"enabled": self.viewer_port is not None, "port": self.viewer_port},
                 "active_hello_sessions": len(self._sessions),
+                # Fix (2026-08-26 review finding): a session already fenced by begin_goodbye()
+                # (record.closing) is mid-shutdown, not "active" -- excluding it keeps the
+                # Viewer's liveness overlay from showing a session as active for however long its
+                # goodbye takes to drain (bounded by DAEMON_GOODBYE_LEASE_DRAIN_TIMEOUT_S above).
+                "active_agent_session_ids": [
+                    record.agent_session_id
+                    for record in self._agent_sessions.values()
+                    if not record.closing
+                ],
                 "inflight_rpc_dispatches": self._inflight,
                 "db_writer": self.coordinator.telemetry() if self.coordinator else None,
             }
@@ -86,8 +107,10 @@ class _DaemonState:
             self._start_grace_timer()
 
     def unregister_session(self, session_id: int) -> None:
-        with self._lock:
+        with self._leases_changed:
             self._sessions.discard(session_id)
+            self._agent_sessions.pop(session_id, None)
+            self._leases_changed.notify_all()
             if (
                 not self._sessions
                 and not self._inflight
@@ -95,6 +118,86 @@ class _DaemonState:
                 and not self.foreground
             ):
                 self._start_grace_timer()
+
+    def close_agent_session(self, session_id: int) -> None:
+        """Persist a definitive normal goodbye before removing its live mapping."""
+        with self._lock:
+            record = self._agent_sessions.get(session_id)
+            agent_session_id = record.agent_session_id if record else None
+        if agent_session_id and self.coordinator:
+            import datetime
+            from saltmdb.db import agent_sessions
+
+            self.coordinator.submit(
+                "close_agent_session",
+                lambda conn: agent_sessions.close_session(
+                    conn, agent_session_id, datetime.datetime.now(datetime.timezone.utc).isoformat()
+                ),
+                priority="foreground",
+            )
+
+    def begin_goodbye(self, session_id: int) -> None:
+        """Fence a hello session and wait for every already-accepted call to finish.
+
+        Bounded (fix for a 2026-08-26 review finding): an unbounded ``Condition.wait()`` here
+        used to hang this thread -- and the client-facing goodbye response with it -- forever if
+        a lease was ever left unreleased (a hung ``dispatch_tool`` call, or a future bug that
+        skips ``_release_caller_lease``'s ``finally``). Give up after
+        ``DAEMON_GOODBYE_LEASE_DRAIN_TIMEOUT_S`` and log a warning instead: the session is already
+        marked ``closing`` (further calls are rejected regardless), so proceeding just means the
+        stuck lease's tool_call is no longer waited on before goodbye completes.
+        """
+        with self._leases_changed:
+            record = self._agent_sessions.get(session_id)
+            if record is None:
+                return
+            record.closing = True
+            deadline = time.monotonic() + config.DAEMON_GOODBYE_LEASE_DRAIN_TIMEOUT_S
+            while record.leases:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Goodbye for agent session %s proceeding with %d lease(s) still held "
+                        "after %.0fs; a tool_call dispatch may be stuck.",
+                        record.agent_session_id,
+                        record.leases,
+                        config.DAEMON_GOODBYE_LEASE_DRAIN_TIMEOUT_S,
+                    )
+                    return
+                self._leases_changed.wait(timeout=remaining)
+
+    def touch_agent_session(self, session_id: str, received_at: str) -> None:
+        """Queue a best-effort receipt-time activity update through the sole DB writer.
+
+        Activity is intentionally non-blocking: a tool call must not wait for this low-value
+        telemetry row.  The coordinator still serializes it with every other mutation, and its
+        monotonic SQL predicate makes delayed jobs harmless.  Retaining a callback on the future
+        makes failures visible in the daemon log without changing the tool response.
+        """
+        if self.coordinator is None:
+            return
+        from saltmdb.db import agent_sessions
+
+        try:
+            future = self.coordinator.submit(
+                "touch_agent_session",
+                lambda conn: agent_sessions.touch_session(conn, session_id, received_at),
+                priority="background",
+                wait=False,
+            )
+        except Exception:
+            logger.warning("Could not submit agent-session activity update", exc_info=True)
+            return
+        add_done_callback = getattr(future, "add_done_callback", None)
+        if add_done_callback is not None:
+            add_done_callback(self._log_activity_touch_failure)
+
+    @staticmethod
+    def _log_activity_touch_failure(future) -> None:
+        try:
+            future.result()
+        except Exception:
+            logger.warning("Agent-session activity update failed", exc_info=True)
 
     def _start_grace_timer(self) -> None:
         timer = threading.Timer(config.DAEMON_SHUTDOWN_GRACE_PERIOD_S, self._grace_fire)
@@ -191,7 +294,7 @@ class _DaemonState:
             )
         try:
             if method == "tool_call":
-                return self._handle_tool_call(request_id, params)
+                return self._handle_tool_call(request_id, params, session_id)
             elif method == "run_librarian_now":
                 return self._handle_run_librarian(request_id, params)
             elif method == "run_backfill_chunk_embeddings_now":
@@ -225,37 +328,141 @@ class _DaemonState:
                 if self._shutdown_timer is not None:
                     self._shutdown_timer.cancel()
                     self._shutdown_timer = None
-            # Record agent session (best-effort bookkeeping, never blocks hello RPC)
-            if (
-                params.get("agent_session_id")
-                and params.get("cwd")
-                and self.coordinator is not None
-            ):
+            # Registration is a foreground write: once hello succeeds, its provenance row exists.
+            capability: str | None = None
+            if params.get("agent_session_id") and self.coordinator is not None:
                 try:
                     from saltmdb.db import agent_sessions
                     import datetime
+
+                    cwd = params.get("cwd") or None
 
                     self.coordinator.submit(
                         "record_agent_session",
                         lambda conn: agent_sessions.record_session(
                             conn,
                             params["agent_session_id"],
-                            params["cwd"],
+                            cwd,
                             datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            params.get("owner_id"),
                         ),
                         priority="foreground",
                     )
-                except Exception:
-                    logger.exception(
-                        "Failed to record agent session (non-fatal, hello still succeeds)"
+                    capability = secrets.token_urlsafe(32)
+                    with self._lock:
+                        self._agent_sessions[session_id] = _AgentSession(
+                            params["agent_session_id"], capability
+                        )
+                except Exception as exc:
+                    self.unregister_session(session_id)
+                    logger.exception("Failed to record agent session")
+                    code = (
+                        protocol.DAEMON_SHUTTING_DOWN
+                        if str(exc) == protocol.DAEMON_SHUTTING_DOWN
+                        or (
+                            isinstance(exc, CoordinatorUsageError)
+                            and getattr(exc, "code", None) == protocol.DAEMON_SHUTTING_DOWN
+                        )
+                        else protocol.INTERNAL_ERROR
                     )
+                    return protocol.build_error_response(
+                        request_id,
+                        code,
+                        f"failed to record agent session: {exc}",
+                    )
+            elif params.get("agent_session_id"):
+                self.unregister_session(session_id)
+                return protocol.build_error_response(
+                    request_id, protocol.INTERNAL_ERROR, "database writer unavailable"
+                )
+            result: dict[str, Any] = {"status": "ok"}
+            if capability is not None:
+                result["caller_agent_session_capability"] = capability
+            return protocol.build_ok_response(request_id, result)
+        if method == "goodbye" and session_id is not None:
+            # Marking closing is done before the session-loop persists ended_at and sends the
+            # acknowledgement, so no late call can acquire a lease during that window.
+            self.begin_goodbye(session_id)
         if method == "viewer_status":
-            return protocol.build_ok_response(
-                request_id, {"enabled": self.viewer_port is not None, "port": self.viewer_port}
-            )
+            snapshot = self.viewer_snapshot()
+            snapshot.update({"enabled": self.viewer_port is not None, "port": self.viewer_port})
+            return protocol.build_ok_response(request_id, snapshot)
         return protocol.build_ok_response(request_id, {"status": "ok"})
 
-    def _handle_tool_call(self, request_id: str | None, params: dict[str, Any]) -> dict[str, Any]:
+    def _validate_caller_session(  # noqa: PLR0911 -- explicit malformed/inactive outcomes
+        self,
+        request_id: str | None,
+        params: dict[str, Any],
+        transport_session_id: int | None,  # noqa: ARG002 -- kept for call-site stability; see note below
+    ) -> tuple[_AgentSession | None, dict[str, Any] | None]:  # noqa: PLR0911
+        # Fix (2026-08-26 second-pass review finding): a `transport_session_id in self._sessions`
+        # branch used to sit here, meant to require caller metadata "for an active adapter
+        # session". It was dead code: `self._sessions` only ever gains an entry for the socket
+        # that carried a `hello` (see `_handle_session_method`), while every `tool_call` arrives
+        # on a brand-new one-shot socket opened by daemon/client.py's `call_method()` -- it never
+        # reuses the persistent hello socket -- so `transport_session_id` (that one-shot socket's
+        # own id()) could never equal a live hello session's id. The branch never fired for any
+        # real caller, and even where a test forced it to fire (by reusing a hello's session_id
+        # for a later `handle_request` call), the very next check below already produces the same
+        # MALFORMED_REQUEST outcome whenever caller metadata is present-but-invalid. Real
+        # enforcement is exactly what remains: caller metadata is optional (metadata-free
+        # one-shot CLI calls stay allowed), but when supplied it must be a well-formed pair whose
+        # capability actually matches a live, non-closing `_agent_sessions` record (checked below).
+        caller_field_present = "caller_agent_session_id" in params
+        capability_field_present = "caller_agent_session_capability" in params
+        caller_session_id = params.get("caller_agent_session_id")
+        capability = params.get("caller_agent_session_capability")
+        if caller_field_present != capability_field_present:
+            return None, protocol.build_error_response(
+                request_id,
+                protocol.MALFORMED_REQUEST,
+                "caller_agent_session_id and caller_agent_session_capability must be supplied together",
+            )
+        if caller_field_present and (
+            not isinstance(caller_session_id, str)
+            or not caller_session_id
+            or not isinstance(capability, str)
+            or not capability
+        ):
+            return None, protocol.build_error_response(
+                request_id,
+                protocol.MALFORMED_REQUEST,
+                "caller session metadata must be non-empty strings",
+            )
+        if caller_session_id is not None:
+            with self._leases_changed:
+                record = next(
+                    (
+                        candidate
+                        for candidate in self._agent_sessions.values()
+                        if candidate.agent_session_id == caller_session_id
+                        and hmac.compare_digest(candidate.capability, capability)
+                    ),
+                    None,
+                )
+                if record is None or record.closing:
+                    return None, protocol.build_error_response(
+                        request_id,
+                        protocol.CALLER_SESSION_INVALID,
+                        "caller session is inactive, mismatched, or closing",
+                    )
+                record.leases += 1
+                return record, None
+        return None, None
+
+    def _release_caller_lease(self, record: _AgentSession | None) -> None:
+        if record is None:
+            return
+        with self._leases_changed:
+            record.leases = max(0, record.leases - 1)
+            self._leases_changed.notify_all()
+
+    def _handle_tool_call(
+        self,
+        request_id: str | None,
+        params: dict[str, Any],
+        transport_session_id: int | None = None,
+    ) -> dict[str, Any]:
         """Dispatch a tool_call RPC method."""
         tool = params.get("tool")
         if tool not in DISPATCH_TABLE:
@@ -266,8 +473,26 @@ class _DaemonState:
             return protocol.build_error_response(
                 request_id, protocol.INTERNAL_ERROR, "database writer unavailable"
             )
-        result = dispatch_tool(tool, params.get("kwargs") or {}, self.coordinator)
-        return protocol.build_ok_response(request_id, result)
+        kwargs = params.get("kwargs") or {}
+        if not isinstance(kwargs, dict):
+            return protocol.build_error_response(
+                request_id, protocol.MALFORMED_REQUEST, "tool kwargs must be an object"
+            )
+        caller_record, validation_error = self._validate_caller_session(
+            request_id, params, transport_session_id
+        )
+        if validation_error is not None:
+            return validation_error
+        if caller_record is not None:
+            import datetime
+
+            received_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            self.touch_agent_session(caller_record.agent_session_id, received_at)
+        try:
+            result = dispatch_tool(tool, kwargs, self.coordinator)
+            return protocol.build_ok_response(request_id, result)
+        finally:
+            self._release_caller_lease(caller_record)
 
     def _handle_run_librarian(
         self, request_id: str | None, params: dict[str, Any]
@@ -332,6 +557,8 @@ class _RpcRequestHandler(socketserver.BaseRequestHandler):
         try:
             protocol.send_frame(sock, response)
         except (OSError, protocol.FrameError):
+            if request.get("method") == "hello" and response.get("ok"):
+                state.unregister_session(session_id)
             return
         if request.get("method") == "hello" and response.get("ok"):
             self._session_loop(sock, state, session_id)
@@ -348,7 +575,21 @@ class _RpcRequestHandler(socketserver.BaseRequestHandler):
                     request = protocol.recv_frame(sock)
                 except (OSError, protocol.FrameError):
                     return
-                response = state.handle_request(request)
+                response = state.handle_request(request, session_id=session_id)
+                if request.get("method") == "goodbye" and response.get("ok"):
+                    # Persist the definitive lifecycle transition before acknowledging goodbye.
+                    # A client is allowed to exit immediately after receiving this response, so
+                    # sending it first would make the supposedly synchronous close observable as
+                    # merely best effort.
+                    try:
+                        state.close_agent_session(session_id)
+                    except Exception as exc:
+                        logger.exception("Failed to close agent session on goodbye")
+                        response = protocol.build_error_response(
+                            request.get("id"),
+                            protocol.INTERNAL_ERROR,
+                            f"failed to close agent session: {exc}",
+                        )
                 try:
                     protocol.send_frame(sock, response)
                 except (OSError, protocol.FrameError):

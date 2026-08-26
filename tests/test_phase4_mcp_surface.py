@@ -19,12 +19,14 @@ class _CaptureBackend:
 class TestPhase4McpSurface(unittest.TestCase):
     def setUp(self):
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.backend = _CaptureBackend()
         self.previous_backend = tools._set_backend_for_test(self.backend)
 
     def tearDown(self):
         tools._set_backend_for_test(self.previous_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
 
     def test_lifecycle_tools_are_typed_and_old_name_is_not_public(self):
         # Phase 4 adds two lifecycle intents and renames consolidation one-for-one.
@@ -54,7 +56,6 @@ class TestPhase4McpSurface(unittest.TestCase):
             content="# Revised\n\nComplete representation.",
             tags=["#api"],
             reason="Fix an incomplete representation",
-            owner_id="agent",
         )
         tools.supersede_memory(
             entity_id="old",
@@ -62,7 +63,6 @@ class TestPhase4McpSurface(unittest.TestCase):
             content="# Current\n\nNew knowledge.",
             tags=["#api"],
             reason="A newer decision replaced the old one",
-            owner_id="agent",
             memory_type="decision",
         )
         self.assertEqual(
@@ -139,9 +139,7 @@ class TestPhase4McpSurface(unittest.TestCase):
     @patch.object(tools, "_backend_or_raise")
     def test_consolidation_uses_renamed_public_method(self, backend):
         backend.return_value.call.return_value = "ok"
-        tools.consolidate_memories(
-            parent_ids=["a", "b"], title="Merged", content="content", owner_id="agent"
-        )
+        tools.consolidate_memories(parent_ids=["a", "b"], title="Merged", content="content")
         backend.return_value.call.assert_called_once()
         self.assertEqual(backend.return_value.call.call_args.args[0], "consolidate_memories")
 

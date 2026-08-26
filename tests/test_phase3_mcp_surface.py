@@ -18,11 +18,13 @@ class _CaptureBackend:
 class TestPhase3McpSurface(unittest.TestCase):
     def setUp(self):
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.previous_backend = tools._set_backend_for_test(_CaptureBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self.previous_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
 
     def test_tool_count_and_registration(self):
         # Phase 6 removed dismiss_event (19 -> 18); Phase 7 removed ephemeral_memory and
@@ -40,22 +42,20 @@ class TestPhase3McpSurface(unittest.TestCase):
         self.assertNotIn("fetch_full", params)
 
     def test_graph_tools_have_small_explicit_schemas(self):
-        self.assertEqual(
-            list(inspect.signature(tools.get_memory).parameters), ["entity_id", "owner_id"]
-        )
+        self.assertEqual(list(inspect.signature(tools.get_memory).parameters), ["entity_id"])
         self.assertEqual(
             list(inspect.signature(tools.get_lineage).parameters),
-            ["entity_id", "direction", "max_depth", "owner_id"],
+            ["entity_id", "direction", "max_depth"],
         )
         self.assertEqual(
             list(inspect.signature(tools.get_related_memories).parameters),
-            ["entity_id", "max_depth", "direction", "owner_id"],
+            ["entity_id", "max_depth", "direction"],
         )
 
     def test_graph_tools_forward_normalized_calls(self):
-        tools.get_memory(entity_id="memory-id", owner_id="agent")
-        tools.get_lineage(entity_id="memory-id", owner_id="agent")
-        tools.get_related_memories(entity_id="memory-id", owner_id="agent")
+        tools.get_memory(entity_id="memory-id")
+        tools.get_lineage(entity_id="memory-id")
+        tools.get_related_memories(entity_id="memory-id")
         self.assertEqual(
             [name for name, _kwargs in tools._backend.calls],
             ["get_memory", "get_lineage", "get_related_memories"],

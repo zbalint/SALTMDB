@@ -46,7 +46,8 @@ This skill defines the "Codify" stage of SALTMDB's closed self-correction loop. 
 - Do NOT invoke any file-editing tool (`Write`, `Edit`, `replace_file_content`, etc.). The diff exists purely as text in the proposal memory.
 
 ### 5. Review Gate (Store Proposal)
-- Store findings via `store_memory` (`owner_id="agent_hook_skillreview"`, `memory_type="fact"`).
+- Store findings via `store_memory(memory_type="fact", ...)`; the hook's MCP server environment
+  must configure `SALTMDB_OWNER_ID=agent_hook_skillreview`.
 - Title format: `[SALTMDB Skill-Review Sweep] <ISO date> -- N pattern(s) found, M diff(s) proposed` (or `0 patterns found` if nothing qualified).
 - Include mined event counts, date range, causal diagnoses, proposed text diffs, and confidence level (paired vs unpaired).
 - Even if no patterns qualify, store a short "no new findings" memory so future runs know where the last review window ended.

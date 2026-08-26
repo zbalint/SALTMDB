@@ -15,6 +15,7 @@ dedicated test coverage at all -- only a manual smoke test. Two layers here:
 """
 
 import os
+import sqlite3
 import shutil
 import signal
 import subprocess
@@ -23,9 +24,25 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 from saltmdb.daemon import discovery, protocol
-from saltmdb.daemon.server import _DaemonState
+from saltmdb.daemon.server import _DaemonState, _RpcRequestHandler
+from saltmdb.db.schema import init_db
+
+
+class _ImmediateCoordinator:
+    def __init__(self, conn):
+        self.conn = conn
+        self.submissions = []
+
+    def submit(self, name, operation, *, priority, wait=True):
+        self.submissions.append((name, priority, wait))
+        return operation(self.conn)
+
+    def telemetry(self):
+        return {}
 
 
 class TestDaemonStateConcurrency(unittest.TestCase):
@@ -42,6 +59,384 @@ class TestDaemonStateConcurrency(unittest.TestCase):
         self.assertTrue(resp["ok"])
         self.assertIn(1, state._sessions)
 
+    def test_agent_hello_records_owner_and_initial_activity_synchronously(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            coordinator = _ImmediateCoordinator(conn)
+            state.coordinator = coordinator
+            params = {
+                "agent_session_id": "session-1",
+                "cwd": "/workspace/project",
+                "owner_id": "agent_qa",
+            }
+            response = state.handle_request(
+                protocol.build_request("hello", params, token="tok"), session_id=7
+            )
+            self.assertTrue(response["ok"])
+            row = conn.execute(
+                "SELECT owner_id, started_at, last_activity_at, ended_at "
+                "FROM _agent_sessions WHERE session_id = 'session-1'"
+            ).fetchone()
+            self.assertEqual(row[0], "agent_qa")
+            self.assertEqual(row[1], row[2])
+            self.assertIsNone(row[3])
+            self.assertEqual(
+                coordinator.submissions[0], ("record_agent_session", "foreground", True)
+            )
+            conn.close()
+
+    def test_hello_registration_retries_locked_write_and_then_registers(self):
+        class RetryingCoordinator(_ImmediateCoordinator):
+            def __init__(self, conn):
+                super().__init__(conn)
+                self.attempts = 0
+
+            def submit(self, name, operation, *, priority, wait=True):
+                self.submissions.append((name, priority, wait))
+                self.attempts += 1
+                if self.attempts == 1:
+                    try:
+                        raise sqlite3.OperationalError("database is locked")
+                    except sqlite3.OperationalError:
+                        self.attempts += 1
+                return operation(self.conn)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            coordinator = RetryingCoordinator(conn)
+            state.coordinator = coordinator
+            response = state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "locked-then-ok", "cwd": "/workspace"},
+                    token="tok",
+                ),
+                session_id=41,
+            )
+            self.assertTrue(response["ok"])
+            self.assertIn(41, state._sessions)
+            self.assertIn(41, state._agent_sessions)
+            self.assertEqual(coordinator.attempts, 2)
+            conn.close()
+
+    def test_exhausted_registration_failure_rolls_back_live_session(self):
+        class ExhaustedCoordinator(_ImmediateCoordinator):
+            def submit(self, name, operation, *, priority, wait=True):
+                self.submissions.append((name, priority, wait))
+                raise sqlite3.OperationalError("database is locked")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = ExhaustedCoordinator(conn)
+            response = state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "locked-forever", "cwd": "/workspace"},
+                    token="tok",
+                ),
+                session_id=42,
+            )
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"]["code"], protocol.INTERNAL_ERROR)
+            self.assertNotIn(42, state._sessions)
+            self.assertNotIn(42, state._agent_sessions)
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM _agent_sessions WHERE session_id = ?",
+                    ("locked-forever",),
+                ).fetchone()
+            )
+            conn.close()
+
+    def test_agent_hello_without_cwd_still_records_nullable_session_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            response = state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "session-no-cwd", "owner_id": "codex"},
+                    token="tok",
+                ),
+                session_id=6,
+            )
+            self.assertTrue(response["ok"])
+            row = conn.execute(
+                "SELECT cwd, started_at, last_activity_at FROM _agent_sessions "
+                "WHERE session_id = ?",
+                ("session-no-cwd",),
+            ).fetchone()
+            self.assertEqual(row[0], None)
+            self.assertEqual(row[1], row[2])
+            conn.close()
+
+    def test_tool_receipt_validates_active_session_and_queues_background_touch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            coordinator = _ImmediateCoordinator(conn)
+            state.coordinator = coordinator
+            hello_response = state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "session-2", "cwd": "/workspace", "owner_id": "codex"},
+                    token="tok",
+                ),
+                session_id=8,
+            )
+            capability = hello_response["result"]["caller_agent_session_capability"]
+            response = state.handle_request(
+                protocol.build_request(
+                    "tool_call",
+                    {
+                        "tool": "search_tags",
+                        "kwargs": {"domain": None, "limit": 5},
+                        "caller_agent_session_id": "session-2",
+                        "caller_agent_session_capability": capability,
+                    },
+                    token="tok",
+                )
+            )
+            self.assertTrue(response["ok"])
+            self.assertIn(("touch_agent_session", "background", False), coordinator.submissions)
+
+            rejected = state.handle_request(
+                protocol.build_request(
+                    "tool_call",
+                    {
+                        "tool": "search_tags",
+                        "kwargs": {},
+                        "caller_agent_session_id": "not-active",
+                    },
+                    token="tok",
+                )
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], protocol.MALFORMED_REQUEST)
+            conn.close()
+
+    def test_active_adapter_tool_call_requires_non_empty_string_caller_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "session-required", "cwd": "/workspace"},
+                    token="tok",
+                ),
+                session_id=21,
+            )
+            for invalid in (None, "", [], 0):
+                with self.subTest(invalid=invalid):
+                    response = state.handle_request(
+                        protocol.build_request(
+                            "tool_call",
+                            {
+                                "tool": "search_tags",
+                                "kwargs": {},
+                                "caller_agent_session_id": invalid,
+                                "caller_agent_session_capability": "capability",
+                            },
+                            token="tok",
+                        ),
+                        session_id=21,
+                    )
+                    self.assertFalse(response["ok"])
+                    self.assertEqual(response["error"]["code"], protocol.MALFORMED_REQUEST)
+            conn.close()
+
+    def test_wrong_capability_is_invalid_and_goodbye_waits_for_accepted_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            hello = state.handle_request(
+                protocol.build_request(
+                    "hello",
+                    {"agent_session_id": "session-fenced", "cwd": "/workspace"},
+                    token="tok",
+                ),
+                session_id=31,
+            )
+            capability = hello["result"]["caller_agent_session_capability"]
+            invalid = state.handle_request(
+                protocol.build_request(
+                    "tool_call",
+                    {
+                        "tool": "search_tags",
+                        "kwargs": {},
+                        "caller_agent_session_id": "session-fenced",
+                        "caller_agent_session_capability": "wrong",
+                    },
+                    token="tok",
+                )
+            )
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["error"]["code"], protocol.CALLER_SESSION_INVALID)
+
+            record, error = state._validate_caller_session(
+                "lease", {
+                    "caller_agent_session_id": "session-fenced",
+                    "caller_agent_session_capability": capability,
+                }, None
+            )
+            self.assertIsNone(error)
+            self.assertIsNotNone(record)
+            goodbye_result: list[dict] = []
+            goodbye_thread = threading.Thread(
+                target=lambda: goodbye_result.append(
+                    state.handle_request(
+                        protocol.build_request("goodbye", {}, token="tok"), session_id=31
+                    )
+                )
+            )
+            goodbye_thread.start()
+            time.sleep(0.02)
+            self.assertTrue(goodbye_thread.is_alive())
+            state._release_caller_lease(record)
+            goodbye_thread.join(timeout=1)
+            self.assertFalse(goodbye_thread.is_alive())
+            self.assertTrue(goodbye_result[0]["ok"])
+            late_call = state.handle_request(
+                protocol.build_request(
+                    "tool_call",
+                    {
+                        "tool": "search_tags",
+                        "kwargs": {},
+                        "caller_agent_session_id": "session-fenced",
+                        "caller_agent_session_capability": capability,
+                    },
+                    token="tok",
+                )
+            )
+            self.assertFalse(late_call["ok"])
+            self.assertEqual(late_call["error"]["code"], protocol.CALLER_SESSION_INVALID)
+            conn.close()
+
+    def test_crossed_session_id_and_capability_pair_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            state.handle_request(
+                protocol.build_request(
+                    "hello", {"agent_session_id": "session-a"}, token="tok"
+                ),
+                session_id=51,
+            )
+            hello_b = state.handle_request(
+                protocol.build_request(
+                    "hello", {"agent_session_id": "session-b"}, token="tok"
+                ),
+                session_id=52,
+            )
+            crossed = state.handle_request(
+                protocol.build_request(
+                    "tool_call",
+                    {
+                        "tool": "search_tags",
+                        "kwargs": {},
+                        "caller_agent_session_id": "session-a",
+                        "caller_agent_session_capability": hello_b["result"][
+                            "caller_agent_session_capability"
+                        ],
+                    },
+                    token="tok",
+                )
+            )
+            self.assertFalse(crossed["ok"])
+            self.assertEqual(crossed["error"]["code"], protocol.CALLER_SESSION_INVALID)
+            conn.close()
+
+    def test_one_shot_cli_tool_call_without_session_metadata_remains_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            response = state.handle_request(
+                protocol.build_request(
+                    "tool_call", {"tool": "search_tags", "kwargs": {}}, token="tok"
+                ),
+                session_id=22,
+            )
+            self.assertTrue(response["ok"])
+            conn.close()
+
+    def test_only_explicit_close_sets_ended_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = init_db(os.path.join(tmp, "sessions.db"))
+            state = self._state(foreground=True)
+            state.coordinator = _ImmediateCoordinator(conn)
+            hello = {"agent_session_id": "session-3", "cwd": "/workspace", "owner_id": "codex"}
+            state.handle_request(protocol.build_request("hello", hello, token="tok"), session_id=9)
+            state.unregister_session(9)
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT ended_at FROM _agent_sessions WHERE session_id = 'session-3'"
+                ).fetchone()[0]
+            )
+
+            state.handle_request(protocol.build_request("hello", hello, token="tok"), session_id=10)
+            state.close_agent_session(10)
+            state.unregister_session(10)
+            self.assertIsNotNone(
+                conn.execute(
+                    "SELECT ended_at FROM _agent_sessions WHERE session_id = 'session-3'"
+                ).fetchone()[0]
+            )
+            conn.close()
+
+    def test_session_loop_closes_before_acknowledging_goodbye(self):
+        events = []
+
+        class FakeState:
+            def handle_request(self, request, session_id=None):
+                return protocol.build_ok_response(request.get("id"), {"status": "ok"})
+
+            def close_agent_session(self, session_id):
+                events.append(("close", session_id))
+
+            def unregister_session(self, session_id):
+                events.append(("unregister", session_id))
+
+        goodbye = protocol.build_request("goodbye", {}, token="tok")
+        handler = _RpcRequestHandler.__new__(_RpcRequestHandler)
+        with (
+            patch(
+                "saltmdb.daemon.server.protocol.recv_frame",
+                side_effect=[goodbye, OSError("socket closed")],
+            ),
+            patch(
+                "saltmdb.daemon.server.protocol.send_frame",
+                side_effect=lambda _sock, _response: events.append(("ack", 1)),
+            ),
+        ):
+            handler._session_loop(object(), FakeState(), 1)
+        self.assertEqual(events, [("close", 1), ("ack", 1), ("unregister", 1)])
+
+    def test_session_loop_raw_disconnect_does_not_close(self):
+        events = []
+
+        class FakeState:
+            def close_agent_session(self, session_id):
+                events.append(("close", session_id))
+
+            def unregister_session(self, session_id):
+                events.append(("unregister", session_id))
+
+        handler = _RpcRequestHandler.__new__(_RpcRequestHandler)
+        with patch(
+            "saltmdb.daemon.server.protocol.recv_frame", side_effect=OSError("socket closed")
+        ):
+            handler._session_loop(object(), FakeState(), 2)
+        self.assertEqual(events, [("unregister", 2)])
+
     def test_hello_rejected_while_draining_does_not_register(self):
         """Codex round-1 claim #4: hello approval and session registration must be atomic with
         the draining check, closing the gap where a hello could be acknowledged "ok" right as the
@@ -52,6 +447,22 @@ class TestDaemonStateConcurrency(unittest.TestCase):
         self.assertFalse(resp["ok"])
         self.assertEqual(resp["error"]["code"], protocol.DAEMON_SHUTTING_DOWN)
         self.assertNotIn(1, state._sessions)
+
+    def test_failed_initial_hello_response_unregisters_session(self):
+        state = self._state(foreground=True)
+        handler = _RpcRequestHandler.__new__(_RpcRequestHandler)
+        handler.request = object()
+        handler.server = SimpleNamespace(daemon_state=state)
+        hello = protocol.build_request("hello", {}, token="tok")
+        with (
+            patch("saltmdb.daemon.server.protocol.recv_frame", return_value=hello),
+            patch(
+                "saltmdb.daemon.server.protocol.send_frame",
+                side_effect=OSError("peer closed before hello acknowledgement"),
+            ),
+        ):
+            handler.handle()
+        self.assertEqual(state._sessions, set())
 
     def test_grace_fire_defers_while_session_active(self):
         state = self._state()
@@ -139,13 +550,16 @@ class TestDaemonStateConcurrency(unittest.TestCase):
         state = self._state()
         state.viewer_port = 8080
         resp = state.handle_request(protocol.build_request("viewer_status", {}, token="tok"))
-        self.assertEqual(resp["result"], {"enabled": True, "port": 8080})
+        self.assertTrue(resp["result"]["enabled"])
+        self.assertEqual(resp["result"]["port"], 8080)
+        self.assertEqual(resp["result"]["active_agent_session_ids"], [])
 
     def test_viewer_status_reports_disabled_daemon_state(self):
         resp = self._state().handle_request(
             protocol.build_request("viewer_status", {}, token="tok")
         )
-        self.assertEqual(resp["result"], {"enabled": False, "port": None})
+        self.assertFalse(resp["result"]["enabled"])
+        self.assertIsNone(resp["result"]["port"])
 
     def test_acquire_inflight_rejected_once_draining(self):
         """Codex round-2 finding: _acquire_inflight() must itself atomically check draining --
@@ -256,7 +670,7 @@ class TestDaemonStateRealConcurrency(unittest.TestCase):
 
     def test_hello_with_agent_session_id_and_cwd_records_session(self):
         """hello with agent_session_id and cwd params records the agent session when coordinator
-        is available (best-effort bookkeeping, never blocks hello RPC)."""
+        is available before the successful hello response is returned."""
         import os
         import shutil
         import tempfile
@@ -296,11 +710,6 @@ class TestDaemonStateRealConcurrency(unittest.TestCase):
 
                 self.assertTrue(resp["ok"])
                 self.assertIn(1, state._sessions)
-
-                # Give the coordinator time to process the write
-                import time
-
-                time.sleep(0.5)
 
                 # Check the session was recorded
                 cursor = conn.execute(

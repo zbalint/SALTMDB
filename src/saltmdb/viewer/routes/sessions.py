@@ -29,10 +29,144 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _daemon_liveness(server) -> tuple[set[str], bool]:
+    """Return daemon-owned live IDs and whether that answer is authoritative.
+
+    The viewer can also run as a standalone process, without a daemon state object.  In that
+    case persisted rows remain useful, but no status may be inferred from their timestamps.
+    """
+    daemon_state = getattr(server, "daemon_state", None)
+    if daemon_state is None:
+        return set(), False
+    try:
+        snapshot = daemon_state.viewer_snapshot()
+    except Exception:
+        logger.warning("Could not read daemon liveness for viewer sessions", exc_info=True)
+        return set(), False
+    return set(snapshot.get("active_agent_session_ids", [])), True
+
+
+def _merge_memory_rows(sessions: dict[str, dict], rows) -> None:
+    for row in rows:
+        sessions[row["sid"]] = {
+            "session_id": row["sid"],
+            "memory_count": row["memory_count"],
+            "event_count": 0,
+            "first_seen": row["first_seen"],
+            "last_seen": row["last_seen"],
+        }
+
+
+def _merge_event_rows(sessions: dict[str, dict], rows) -> None:
+    for row in rows:
+        sid = row["sid"]
+        entry = sessions.setdefault(
+            sid,
+            {
+                "session_id": sid,
+                "memory_count": 0,
+                "event_count": 0,
+                "first_seen": None,
+                "last_seen": None,
+            },
+        )
+        entry["event_count"] = row["event_count"]
+        first_event, last_event = row["first_event"], row["last_event"]
+        if first_event and (entry["first_seen"] is None or first_event < entry["first_seen"]):
+            entry["first_seen"] = first_event
+        if last_event and (entry["last_seen"] is None or last_event > entry["last_seen"]):
+            entry["last_seen"] = last_event
+
+
+def _merge_lifecycle_rows(
+    sessions: dict[str, dict], rows, active_session_ids: set[str], liveness_known: bool
+) -> None:
+    for row in rows:
+        sid = row["session_id"]
+        entry = sessions.setdefault(
+            sid,
+            {
+                "session_id": sid,
+                "memory_count": 0,
+                "event_count": 0,
+                "first_seen": row["started_at"],
+                "last_seen": row["last_activity_at"],
+            },
+        )
+        entry.update(
+            {
+                "cwd": row["cwd"],
+                "owner_id": row["owner_id"],
+                "started_at": row["started_at"],
+                "last_activity_at": row["last_activity_at"],
+                "ended_at": row["ended_at"],
+                "liveness": (
+                    "active"
+                    if sid in active_session_ids
+                    else ("ended" if row["ended_at"] else "unknown")
+                    if liveness_known
+                    else "unknown"
+                ),
+            }
+        )
+        if row["started_at"] and (
+            entry["first_seen"] is None or row["started_at"] < entry["first_seen"]
+        ):
+            entry["first_seen"] = row["started_at"]
+        if row["last_activity_at"] and (
+            entry["last_seen"] is None or row["last_activity_at"] > entry["last_seen"]
+        ):
+            entry["last_seen"] = row["last_activity_at"]
+
+
+def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> list[dict]:
+    memory_rows = conn.execute(
+        """
+        SELECT sid, COUNT(DISTINCT id) AS memory_count,
+               MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
+        FROM (
+            SELECT agent_session_id AS sid, id, created_at AS first_seen,
+                   updated_at AS last_seen
+            FROM entities WHERE agent_session_id IS NOT NULL
+            UNION ALL
+            SELECT last_touched_session_id AS sid, id, created_at AS first_seen,
+                   updated_at AS last_seen
+            FROM entities WHERE last_touched_session_id IS NOT NULL
+        )
+        GROUP BY sid
+        """
+    ).fetchall()
+    event_rows = conn.execute(
+        """
+        SELECT agent_session_id AS sid, COUNT(*) AS event_count,
+               MIN(timestamp) AS first_event, MAX(timestamp) AS last_event
+        FROM events WHERE agent_session_id IS NOT NULL
+        GROUP BY agent_session_id
+        """
+    ).fetchall()
+    lifecycle_rows = conn.execute(
+        "SELECT session_id, cwd, owner_id, started_at, last_activity_at, ended_at "
+        "FROM _agent_sessions"
+    ).fetchall()
+
+    sessions: dict[str, dict] = {}
+    _merge_memory_rows(sessions, memory_rows)
+    _merge_event_rows(sessions, event_rows)
+    _merge_lifecycle_rows(sessions, lifecycle_rows, active_session_ids, liveness_known)
+    for entry in sessions.values():
+        entry.setdefault("cwd", None)
+        entry.setdefault("owner_id", None)
+        entry.setdefault("started_at", None)
+        entry.setdefault("last_activity_at", None)
+        entry.setdefault("ended_at", None)
+        entry.setdefault("liveness", "unknown")
+    return list(sessions.values())
+
+
 class SessionsMixin(ViewerHandlerProtocol):
     """Provides get_sessions(); mixed into the final SALTMDBHandler elsewhere."""
 
-    def get_sessions(self, query):  # noqa: C901
+    def get_sessions(self, query):
         conn = None
         try:
             page = _bounded_query_int(query, "page", 1, 1, 1_000_000)
@@ -41,58 +175,8 @@ class SessionsMixin(ViewerHandlerProtocol):
             id_prefix = query.get("id_prefix", [None])[0]
 
             conn = self.get_db_connection()
-            memory_rows = conn.execute("""
-                SELECT sid, COUNT(DISTINCT id) AS memory_count,
-                       MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
-                FROM (
-                    SELECT agent_session_id AS sid, id, created_at AS first_seen,
-                           updated_at AS last_seen
-                    FROM entities WHERE agent_session_id IS NOT NULL
-                    UNION ALL
-                    SELECT last_touched_session_id AS sid, id, created_at AS first_seen,
-                           updated_at AS last_seen
-                    FROM entities WHERE last_touched_session_id IS NOT NULL
-                )
-                GROUP BY sid
-            """).fetchall()
-            event_rows = conn.execute("""
-                SELECT agent_session_id AS sid, COUNT(*) AS event_count,
-                       MIN(timestamp) AS first_event, MAX(timestamp) AS last_event
-                FROM events WHERE agent_session_id IS NOT NULL
-                GROUP BY agent_session_id
-            """).fetchall()
-
-            sessions: dict[str, dict] = {}
-            for row in memory_rows:
-                sessions[row["sid"]] = {
-                    "session_id": row["sid"],
-                    "memory_count": row["memory_count"],
-                    "event_count": 0,
-                    "first_seen": row["first_seen"],
-                    "last_seen": row["last_seen"],
-                }
-            for row in event_rows:
-                sid = row["sid"]
-                entry = sessions.setdefault(
-                    sid,
-                    {
-                        "session_id": sid,
-                        "memory_count": 0,
-                        "event_count": 0,
-                        "first_seen": None,
-                        "last_seen": None,
-                    },
-                )
-                entry["event_count"] = row["event_count"]
-                first_event, last_event = row["first_event"], row["last_event"]
-                if first_event and (
-                    entry["first_seen"] is None or first_event < entry["first_seen"]
-                ):
-                    entry["first_seen"] = first_event
-                if last_event and (entry["last_seen"] is None or last_event > entry["last_seen"]):
-                    entry["last_seen"] = last_event
-
-            all_sessions = list(sessions.values())
+            active_session_ids, liveness_known = _daemon_liveness(self.server)
+            all_sessions = _load_sessions(conn, active_session_ids, liveness_known)
             if id_prefix:
                 all_sessions = [s for s in all_sessions if s["session_id"].startswith(id_prefix)]
             all_sessions.sort(key=lambda s: s["last_seen"] or "", reverse=True)

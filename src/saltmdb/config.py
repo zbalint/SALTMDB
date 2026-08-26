@@ -1,6 +1,32 @@
 import os
+import re
 
-__version__ = "0.1.0-alpha.86"
+__version__ = "0.1.0-alpha.87"
+
+_OWNER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def validate_owner_id(owner_id: str) -> str:
+    """Validate and return one deployment-configured adapter identity.
+
+    The MCP adapter has one immutable owner for its entire process lifetime.  Keeping the
+    validation primitive separate from :func:`get_owner_id` lets startup wiring and isolated
+    tests use the exact same contract without reintroducing a tool-call identity binding path.
+    """
+    if not isinstance(owner_id, str):
+        owner_id = ""
+    owner_id = owner_id.strip()
+    if not _OWNER_ID_RE.fullmatch(owner_id):
+        raise RuntimeError(
+            "SALTMDB_OWNER_ID is required and must match ^[a-z][a-z0-9_-]{0,63}$. "
+            "Configure it in the MCP server environment before starting SALTMDB."
+        )
+    return owner_id
+
+
+def get_owner_id() -> str:
+    """Return the required, deployment-configured adapter identity."""
+    return validate_owner_id(os.environ.get("SALTMDB_OWNER_ID", ""))
 
 
 def get_db_path() -> str:
@@ -322,6 +348,13 @@ DAEMON_IDENTIFY_READ_TIMEOUT_S = 1.0
 # cancel_futures + prompt listener close), kept as a named constant in case a future bounded-wait
 # step is added.
 DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S = 5.0
+
+# _DaemonState.begin_goodbye()'s lease-drain wait (daemon/server.py, fix for a 2026-08-26 review
+# finding): bounded so a lease that is never released -- a hung dispatch_tool call, or a future
+# bug that skips _release_caller_lease's finally -- cannot wedge the session-closing thread (and
+# the client's goodbye RPC with it) forever. Chosen shorter than DAEMON_RPC_CALL_TIMEOUT_S so the
+# daemon gives up and logs before the client's own goodbye-ack read would have timed out anyway.
+DAEMON_GOODBYE_LEASE_DRAIN_TIMEOUT_S = 10.0
 
 # ensure_daemon_running()'s discovery-retry loop (daemon/client.py).
 DAEMON_DISCOVERY_RETRY_ATTEMPTS = 40  # 40 * 0.25s = 10s bounded window

@@ -2682,6 +2682,30 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         ).fetchone()
         self.assertEqual(event[0], "agent_custom_owner")
 
+    def test_bulk_store_relations_uses_batch_owner_for_override_audit_event(self):
+        """A daemon/MCP batch default must reach the relation-gate audit event."""
+        a, _ = self._mk_vector_entity("Bulk Owner A", _axis_vector(0))
+        b, _ = self._mk_vector_entity("Bulk Owner B", _axis_vector(1))
+
+        results = bulk_store_relations(
+            relations=[
+                {
+                    "source_id": a,
+                    "target_id": b,
+                    "predicate": "elaborates_on",
+                    "override_justification": "bulk relation owner attribution regression coverage",
+                }
+            ],
+            owner_id="agent_batch_owner",
+            db_connection=self.conn,
+        )
+
+        self.assertEqual(results[0]["status"], "success", results)
+        event = self.conn.execute(
+            "SELECT agent_id FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "agent_batch_owner")
+
     def test_store_relation_override_audit_event_defaults_to_system_owner(self):
         a, _ = self._mk_vector_entity("Owner Default A", _axis_vector(0))
         b, _ = self._mk_vector_entity("Owner Default B", _axis_vector(1))

@@ -15,11 +15,13 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -31,7 +33,6 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             title="Drift Flagged Memory Test",
             content="This memory cites file src/foo.py:42 which drifted.",
             tags=["#test"],
-            owner_id="user1",
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
@@ -49,7 +50,6 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             title="Drift Flagged Memory Test",
             content="This memory cites file src/foo.py:42 which drifted.",
             tags=["#test"],
-            owner_id="user1",
             metadata={"drift_flag": drift_flag_data},
         )
         self.assertEqual(update_res["status"], "ok")
@@ -59,15 +59,12 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             title="Clean Memory Test",
             content="This memory has no drift flag in metadata.",
             tags=["#test"],
-            owner_id="user1",
         )
         self.assertEqual(clean_res["status"], "ok")
         clean_id = clean_res["data"]["id"]
 
         # Search mode="broad" (default)
-        search_res = tools.search_memory(
-            query_keywords="Memory Test", mode="broad", owner_id="user1"
-        )
+        search_res = tools.search_memory(query_keywords="Memory Test", mode="broad")
         results_by_id = {item["id"]: item for item in search_res}
 
         # (a) memory with drift_flag -> item has drift_flag matching input

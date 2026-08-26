@@ -13,7 +13,9 @@ import os
 import socket
 import subprocess  # nosec B404 -- daemon spawn uses a fixed module argv and never shell input.
 import sys
+import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from saltmdb.config import (
@@ -179,7 +181,16 @@ def ensure_daemon_running(db_path: str) -> dict[str, Any]:
     raise DaemonStartupError(_classify_startup_failure(db_path, key))
 
 
-def call_method(db_path: str, method: str, params: dict[str, Any], _retry: bool = True) -> Any:
+def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine is intentionally centralized
+    db_path: str,
+    method: str,
+    params: dict[str, Any],
+    _retry: bool = True,
+    *,
+    _session: "SessionConnection | None" = None,
+    _caller_agent_session_id: str | None = None,
+    _caller_agent_session_capability: str | None = None,
+) -> Any:
     """The short-lived RPC primitive: connect, send one frame, read one response, close. Every
     other client-side operation (call()/tool_call, ping, run_librarian_now, ...) is built on this.
 
@@ -193,38 +204,87 @@ def call_method(db_path: str, method: str, params: dict[str, Any], _retry: bool 
        _backend_or_raise().call() classifies by protocol.WRITE_TOOLS/READ_TOOLS and decides
        whether to retry transparently or surface the structured result -- see tools.py).
     """
-    info = ensure_daemon_running(db_path)
+    # Adapter-bound calls hold the session state lock from refresh through metadata snapshot and
+    # the complete one-shot RPC.  This prevents close() or a concurrent reconnect from replacing
+    # the capability between validation and send.  Legacy direct call_method callers retain the
+    # old best-effort current-session refresh behavior.
+    if _session is not None and not hasattr(_session, "_state_lock"):
+        _session._state_lock = threading.RLock()
+    session_lock = _session._state_lock if _session is not None else nullcontext()
+    with session_lock:
+        if _session is not None:
+            _session.ensure_fresh(db_path)
+            if _caller_agent_session_id == _session._agent_session_id:
+                # Always overwrite the envelope from the post-refresh snapshot.  A recursive
+                # retry may have re-helloed and minted a new capability after the first request
+                # was rejected; retaining the prior local argument would pair new auth with the
+                # old capability.  If the daemon did not provide one, remove any stale field.
+                _, current_capability = _session.session_metadata
+                params = {**params}
+                if current_capability is None:
+                    params.pop("caller_agent_session_capability", None)
+                else:
+                    params["caller_agent_session_capability"] = current_capability
+        elif _current_session is not None:
+            _current_session.ensure_fresh(db_path)
+        # Refresh discovery after ensure_fresh(): a reconnect may have replaced the daemon token
+        # and service port.  Sending with the pre-refresh snapshot would use stale auth.
+        info = ensure_daemon_running(db_path)
 
-    # Round-4 fix: if our SessionConnection's cached identity is stale (daemon restarted since we
-    # last said hello), reconnect/re-hello before proceeding.
-    if _current_session is not None:
-        _current_session.ensure_fresh(db_path)
+        try:
+            with socket.create_connection(
+                ("127.0.0.1", info["service_port"]), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
+            ) as sock:
+                sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
+                request = protocol.build_request(method, params, token=info["auth_token"])
+                try:
+                    protocol.send_frame(sock, request)
+                    response = protocol.recv_frame(sock)
+                except (OSError, protocol.FrameError) as e:
+                    raise _MidCallFailure(str(e)) from e
+        except (ConnectionRefusedError, TimeoutError, OSError) as e:
+            if not _retry:
+                raise DaemonRpcError("CONNECT_FAILED", str(e)) from e
+            return call_method(
+                db_path,
+                method,
+                params,
+                _retry=False,
+                _session=_session,
+                _caller_agent_session_id=_caller_agent_session_id,
+                _caller_agent_session_capability=_caller_agent_session_capability,
+            )
+        except _MidCallFailure as e:
+            raise DaemonRpcError("MID_CALL_FAILURE", str(e)) from e
 
-    try:
-        with socket.create_connection(
-            ("127.0.0.1", info["service_port"]), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
-        ) as sock:
-            sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
-            request = protocol.build_request(method, params, token=info["auth_token"])
-            try:
-                protocol.send_frame(sock, request)
-                response = protocol.recv_frame(sock)
-            except (OSError, protocol.FrameError) as e:
-                raise _MidCallFailure(str(e)) from e
-    except (ConnectionRefusedError, TimeoutError, OSError) as e:
-        if not _retry:
-            raise DaemonRpcError("CONNECT_FAILED", str(e)) from e
-        return call_method(db_path, method, params, _retry=False)
-    except _MidCallFailure as e:
-        raise DaemonRpcError("MID_CALL_FAILURE", str(e)) from e
-
-    if not response.get("ok"):
-        error = response.get("error") or {}
-        code = error.get("code", protocol.INTERNAL_ERROR)
-        if _retry and code in (protocol.DAEMON_SHUTTING_DOWN, protocol.AUTH_FAILED):
-            return call_method(db_path, method, params, _retry=False)
-        raise DaemonRpcError(code, error.get("message", ""))
-    return response.get("result")
+        if not response.get("ok"):
+            error = response.get("error") or {}
+            code = error.get("code", protocol.INTERNAL_ERROR)
+            if _retry and code in (
+                protocol.DAEMON_SHUTTING_DOWN,
+                protocol.AUTH_FAILED,
+                protocol.CALLER_SESSION_INVALID,
+            ):
+                # Fix (2026-08-26 review finding): CALLER_SESSION_INVALID means the daemon has
+                # already dropped our capability -- e.g. the persistent hello socket died
+                # silently (network blip, or the daemon's own session loop erroring out and
+                # unregistering us) while the daemon process itself kept running. The daemon's
+                # auth_token never changed in that case, so ensure_fresh()'s cheap token
+                # comparison can never detect it on its own, and the retry below would otherwise
+                # resend the exact same stale capability forever. Force a real re-hello first.
+                if _session is not None and code == protocol.CALLER_SESSION_INVALID:
+                    _session.force_reconnect(db_path)
+                return call_method(
+                    db_path,
+                    method,
+                    params,
+                    _retry=False,
+                    _session=_session,
+                    _caller_agent_session_id=_caller_agent_session_id,
+                    _caller_agent_session_capability=_caller_agent_session_capability,
+                )
+            raise DaemonRpcError(code, error.get("message", ""))
+        return response.get("result")
 
 
 class _MidCallFailure(Exception):
@@ -232,9 +292,35 @@ class _MidCallFailure(Exception):
     call_method()'s single try/except -- never escapes this module."""
 
 
-def call(db_path: str, tool_name: str, kwargs: dict[str, Any]) -> Any:
-    """Convenience wrapper: call_method("tool_call", {"tool": tool_name, "kwargs": kwargs})."""
-    return call_method(db_path, "tool_call", {"tool": tool_name, "kwargs": kwargs})
+def call(
+    db_path: str,
+    tool_name: str,
+    kwargs: dict[str, Any],
+    *,
+    caller_agent_session_id: str | None = None,
+    caller_agent_session_capability: str | None = None,
+) -> Any:
+    """Call one daemon tool, with optional adapter-only session metadata."""
+    params: dict[str, Any] = {"tool": tool_name, "kwargs": kwargs}
+    if caller_agent_session_id is not None:
+        params["caller_agent_session_id"] = caller_agent_session_id
+        if caller_agent_session_capability is not None:
+            params["caller_agent_session_capability"] = caller_agent_session_capability
+    session = None
+    if _current_session is not None:
+        # The logical ID is immutable for the adapter lifetime.  Passing the session into
+        # call_method lets it acquire the lock before refreshing and deciding which capability to
+        # attach; an explicitly mismatched caller ID is never silently rewritten.
+        if caller_agent_session_id == _current_session._agent_session_id:
+            session = _current_session
+    return call_method(
+        db_path,
+        "tool_call",
+        params,
+        _session=session,
+        _caller_agent_session_id=caller_agent_session_id,
+        _caller_agent_session_capability=caller_agent_session_capability,
+    )
 
 
 class SessionConnection:
@@ -247,87 +333,201 @@ class SessionConnection:
         db_path: str,
         session_id: str | None = None,
         cwd: str | None = None,
+        owner_id: str | None = None,
     ):
         self.db_path = discovery.resolve_canonical_db_path(db_path)
         self._sock: socket.socket | None = None
         self._auth_token: str | None = None
         self._agent_session_id = session_id
         self._cwd = cwd
+        self._owner_id = owner_id
+        self._session_capability: str | None = None
+        self._state_lock = threading.RLock()
 
-    def open(self) -> None:
-        info = ensure_daemon_running(self.db_path)
-        sock = socket.create_connection(
-            ("127.0.0.1", info["service_port"]), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
-        )
-        try:
-            sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
-            hello_params = {"pid": os.getpid(), "client_label": "saltmdb-adapter"}
-            if self._agent_session_id is not None:
-                hello_params["agent_session_id"] = self._agent_session_id
-            if self._cwd is not None:
-                hello_params["cwd"] = self._cwd
-            protocol.send_frame(
-                sock,
-                protocol.build_request(
-                    "hello",
-                    hello_params,
-                    token=info["auth_token"],
-                ),
-            )
-            response = protocol.recv_frame(sock)
-            # Codex round-1 finding: the response was previously read and discarded unchecked, so
-            # a well-formed AUTH_FAILED/DAEMON_SHUTTING_DOWN error response was silently treated
-            # as a successfully-opened session.
-            if not response.get("ok"):
-                error = response.get("error") or {}
-                raise DaemonRpcError(
-                    error.get("code", "HELLO_FAILED"), error.get("message", "hello rejected")
-                )
-        except Exception:
-            # Any failure past this point (framing error, rejected hello) must not leak the
-            # socket this function itself opened -- there was previously no cleanup path here.
-            sock.close()
-            raise
-        self._sock = sock
-        self._auth_token = info["auth_token"]
-        global _current_session
-        _current_session = self
+    @property
+    def session_metadata(self) -> tuple[str | None, str | None]:
+        """Return the current logical session ID and daemon-minted capability atomically."""
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.RLock()
+        with self._state_lock:
+            return self._agent_session_id, getattr(self, "_session_capability", None)
 
-    def close(self) -> None:
-        if self._sock is not None:
-            try:
-                protocol.send_frame(
-                    self._sock, protocol.build_request("goodbye", {}, token=self._auth_token)
-                )
-            except (OSError, protocol.FrameError) as e:
-                logger.debug("Best-effort goodbye failed (daemon likely already gone): %s", e)
-            try:
-                self._sock.close()
-            except OSError:
-                pass
+    def open(self) -> None:  # noqa: C901, PLR0912 -- bounded two-attempt hello state machine
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.RLock()
+        if not hasattr(self, "_session_capability"):
+            self._session_capability = None
+        with self._state_lock:
+            if self._sock is not None and self._auth_token is not None:
+                return
+            last_error: Exception | None = None
+            for attempt in range(2):
+                info = ensure_daemon_running(self.db_path)
+                sock: socket.socket | None = None
+                try:
+                    sock = socket.create_connection(
+                        ("127.0.0.1", info["service_port"]),
+                        timeout=DAEMON_RPC_CONNECT_TIMEOUT_S,
+                    )
+                    sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
+                    hello_params = {"pid": os.getpid(), "client_label": "saltmdb-adapter"}
+                    if self._agent_session_id is not None:
+                        hello_params["agent_session_id"] = self._agent_session_id
+                    if self._cwd is not None:
+                        hello_params["cwd"] = self._cwd
+                    if self._owner_id is not None:
+                        hello_params["owner_id"] = self._owner_id
+                    protocol.send_frame(
+                        sock,
+                        protocol.build_request("hello", hello_params, token=info["auth_token"]),
+                    )
+                    response = protocol.recv_frame(sock)
+                    if not response.get("ok"):
+                        error = response.get("error") or {}
+                        raise DaemonRpcError(
+                            error.get("code", "HELLO_FAILED"),
+                            error.get("message", "hello rejected"),
+                        )
+                    result = response.get("result") or {}
+                    capability = result.get("caller_agent_session_capability")
+                    if self._agent_session_id is not None and (
+                        not isinstance(capability, str) or not capability
+                    ):
+                        raise DaemonRpcError(
+                            protocol.INTERNAL_ERROR,
+                            "daemon hello omitted caller session capability",
+                        )
+                except (OSError, protocol.FrameError, DaemonRpcError) as exc:
+                    last_error = exc
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except OSError:
+                            pass
+                    retryable = not isinstance(exc, DaemonRpcError) or exc.code in (
+                        protocol.AUTH_FAILED,
+                        protocol.DAEMON_SHUTTING_DOWN,
+                    )
+                    if attempt == 0 and retryable:
+                        logger.info("Session hello failed; refreshing daemon discovery before retry")
+                        continue
+                    raise
+                self._sock = sock
+                self._auth_token = info["auth_token"]
+                self._session_capability = capability if self._agent_session_id is not None else None
+                global _current_session
+                _current_session = self
+                return
+            assert last_error is not None
+            raise last_error
+
+    def close(self, *, send_goodbye: bool = True) -> None:
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.RLock()
+        if not hasattr(self, "_session_capability"):
+            self._session_capability = None
+        with self._state_lock:
+            sock = self._sock
+            if sock is not None:
+                if send_goodbye:
+                    try:
+                        protocol.send_frame(
+                            sock, protocol.build_request("goodbye", {}, token=self._auth_token)
+                        )
+                        # The daemon persists ended_at (foreground, synchronous) before sending
+                        # this acknowledgement, so reading it back is a genuine confirmation, not
+                        # a courtesy. Fix (2026-08-26 review finding): close() previously sent
+                        # goodbye and tore down the socket without ever attempting to read the
+                        # response, so a server-side persistence failure -- reported back as an
+                        # INTERNAL_ERROR ack -- was silently indistinguishable from success.
+                        # Bounded by the socket's existing call timeout; deliberately not
+                        # retried here, since this is exit-time cleanup, not a call worth
+                        # blocking shutdown over.
+                        ack = protocol.recv_frame(sock)
+                        if not ack.get("ok"):
+                            ack_error = ack.get("error") or {}
+                            logger.warning(
+                                "Daemon failed to durably close agent session %s: %s",
+                                self._agent_session_id,
+                                ack_error.get("message", ack_error.get("code", "unknown error")),
+                            )
+                    except (OSError, protocol.FrameError) as e:
+                        logger.debug("Best-effort goodbye failed (daemon likely already gone): %s", e)
+                try:
+                    sock.close()
+                except OSError:
+                    pass
             self._sock = None
-        global _current_session
-        if _current_session is self:
-            _current_session = None
+            self._auth_token = None
+            self._session_capability = None
+            global _current_session
+            if _current_session is self:
+                _current_session = None
 
     def ensure_fresh(self, db_path: str) -> None:
         """Cheap local comparison (re-reads the discovery file, no network) against the cached
         auth_token -- reconnects and re-hellos on mismatch (daemon restarted since our last hello,
         even if PID/port happen to coincide with the prior instance, round-2 fix)."""
-        key = discovery.daemon_key(self.db_path)
-        info = discovery.read(key)
-        if info is None:
-            return
-        current_token = info.get("auth_token")
-        if (
-            current_token
-            and self._auth_token
-            and hmac.compare_digest(current_token, self._auth_token)
-        ):
-            return
-        logger.info("Daemon restart detected for %s; reconnecting session.", self.db_path)
-        self.close()
-        try:
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.RLock()
+        if not hasattr(self, "_session_capability"):
+            self._session_capability = None
+        with self._state_lock:
+            key = discovery.daemon_key(self.db_path)
+            info = discovery.read(key)
+            if info is None:
+                # Missing discovery is a stale/starting daemon, not permission to use the old
+                # socket.  Refreshing here also makes the next call retryable after a failed open.
+                info = ensure_daemon_running(self.db_path)
+            current_token = info.get("auth_token")
+            if (
+                self._sock is not None
+                and current_token
+                and self._auth_token
+                and hmac.compare_digest(current_token, self._auth_token)
+            ):
+                return
+            logger.info("Daemon restart detected for %s; reconnecting session.", self.db_path)
+            # A daemon-token change is a transport reconnect, not the end of the logical agent
+            # session.  Keep its ID/cwd/owner while discarding only stale transport state.
+            self._close_transport_locked()
+            try:
+                self.open()
+            except Exception:
+                # Deliberately propagate: callers must not dispatch with stale authentication.
+                # The logical identity remains intact, so the next call can retry the refresh.
+                raise
+
+    def force_reconnect(self, db_path: str) -> None:
+        """Unconditionally close the transport and re-hello, bypassing ensure_fresh()'s cheap
+        auth_token comparison entirely.
+
+        Fix (2026-08-26 review finding): a raw disconnect of the persistent hello socket -- a
+        network blip, or the daemon's own session loop erroring out on recv and unregistering us
+        in its `finally` -- leaves the daemon process (and therefore its auth_token) completely
+        unchanged, so ensure_fresh()'s token check can never observe it. The client would
+        otherwise keep believing the session is fresh and resend a capability the daemon has
+        already dropped, failing every subsequent tool_call with CALLER_SESSION_INVALID forever.
+        call_method() calls this specifically on that error code to force a real re-hello and
+        mint a fresh capability before retrying.
+        """
+        if not hasattr(self, "_state_lock"):
+            self._state_lock = threading.RLock()
+        with self._state_lock:
+            logger.info(
+                "Forcing session reconnect for %s after CALLER_SESSION_INVALID.", self.db_path
+            )
+            self._close_transport_locked()
             self.open()
-        except Exception as e:
-            logger.warning("Session reconnect failed (will retry on next call): %s", e)
+
+    def _close_transport_locked(self) -> None:
+        """Close only the socket/token, retaining the logical session for reconnect."""
+        sock = self._sock
+        self._sock = None
+        self._auth_token = None
+        self._session_capability = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass

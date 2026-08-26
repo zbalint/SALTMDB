@@ -40,7 +40,7 @@ REVIEW_PROMPT = (
     "surgical text diff (a few changed/added lines, never a full rewrite) targeting the single "
     "implicated file. Hard constraint: do not call any file-editing tool (never auto-apply file "
     "edits) -- the proposed diff is text output only, to be embedded in the memory in step 5.\n"
-    "5. Gate: Call mcp__saltmdb__store_memory (owner_id='agent_hook_skillreview', "
+    "5. Gate: Call mcp__saltmdb__store_memory ("
     "memory_type='fact') to record findings as a single memory titled "
     "'[SALTMDB Skill-Review Sweep] <ISO date> -- N pattern(s) found, M diff(s) proposed' (or '0 "
     "patterns found' if nothing qualified). Include mined event counts, date range, causal "

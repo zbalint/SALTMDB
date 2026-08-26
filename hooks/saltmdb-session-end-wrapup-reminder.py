@@ -22,7 +22,7 @@ from _saltmdb_hook_common import emit  # noqa: E402
 
 REASON = (
     "SALTMDB session wrap-up reminder: before this session closes, check "
-    "get_events(context_id=<your thread handle>) or get_events(agent_id=<your owner_id>, "
+    "get_events(context_id=<your thread handle>) or get_events(agent_id=<configured SALTMDB_OWNER_ID>, "
     'order="oldest_first") for anything durable (a decision, a fix, a rule) that was logged as '
     "an event this session but never promoted to store_memory. The event ledger is not itself "
     "long-term memory."
