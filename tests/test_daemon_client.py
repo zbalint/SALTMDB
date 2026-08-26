@@ -7,7 +7,10 @@ connect (rejected hello, a framing error) leaked the socket open() itself create
 no cleanup path.
 """
 
+import os
+import shutil
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -577,6 +580,66 @@ class TestSessionConnectionOpen(unittest.TestCase):
             logs.output,
         )
         self.assertIsNone(session._sock)
+
+
+class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
+    """Regression coverage for the Windows job-object hard-kill finding (2026-08-26, reported live
+    by a user running the adapter under Windows/Copilot): a daemon spawned without
+    CREATE_BREAKAWAY_FROM_JOB stays a member of whatever Job Object its ancestor belongs to (VS
+    Code/Copilot's extension host commonly assigns its whole child-process tree to a job with
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE), so it gets force-killed the instant that job closes --
+    bypassing shutdown_watcher/goodbye/the grace timer entirely, no different from SIGKILL."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_win32_spawn_includes_create_breakaway_from_job(self):
+        with (
+            patch.object(client.sys, "platform", "win32"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_subprocess(self.db_path)
+        mock_popen.assert_called_once()
+        _, kwargs = mock_popen.call_args
+        self.assertEqual(kwargs["creationflags"], 0x08000000 | 0x01000000)
+
+    def test_win32_spawn_falls_back_without_breakaway_on_oserror(self):
+        seen_creationflags = []
+
+        def _fake_popen(_args, **kwargs):
+            seen_creationflags.append(kwargs.get("creationflags"))
+            if len(seen_creationflags) == 1:
+                raise OSError("job object disallows breakaway")
+            return MagicMock()
+
+        with (
+            patch.object(client.sys, "platform", "win32"),
+            patch.object(client.subprocess, "Popen", side_effect=_fake_popen),
+        ):
+            client._spawn_daemon_subprocess(self.db_path)
+        self.assertEqual(seen_creationflags, [0x08000000 | 0x01000000, 0x08000000])
+
+    def test_posix_spawn_unaffected_still_uses_start_new_session(self):
+        with (
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_subprocess(self.db_path)
+        _, kwargs = mock_popen.call_args
+        self.assertNotIn("creationflags", kwargs)
+        self.assertTrue(kwargs["start_new_session"])
+
+    def test_posix_spawn_oserror_propagates_not_silently_retried(self):
+        with (
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen", side_effect=OSError("boom")),
+        ):
+            with self.assertRaises(OSError):
+                client._spawn_daemon_subprocess(self.db_path)
 
 
 if __name__ == "__main__":

@@ -141,14 +141,34 @@ def _spawn_daemon_subprocess(db_path: str) -> None:
         "env": env,
     }
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        # CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB -- the latter is the Windows analogue of
+        # start_new_session's setsid() below: without it, the daemon stays a member of whatever
+        # Job Object its ancestor belongs to (VS Code/Copilot's extension host commonly assigns
+        # its whole child-process tree to a job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, to avoid
+        # orphaned processes), so the daemon gets force-killed the instant that job closes --
+        # bypassing shutdown_watcher/goodbye/the grace timer entirely, no different from SIGKILL.
+        popen_kwargs["creationflags"] = 0x08000000 | 0x01000000
     else:
         popen_kwargs["start_new_session"] = True
 
+    args = [sys.executable, "-m", "saltmdb.daemon.server"]
     try:
-        subprocess.Popen(  # nosec B603 -- fixed argv, shell=False, and environment contains only the DB path.
-            [sys.executable, "-m", "saltmdb.daemon.server"], **popen_kwargs
-        )
+        try:
+            subprocess.Popen(  # nosec B603 -- fixed argv, shell=False, and environment contains only the DB path.
+                args, **popen_kwargs
+            )
+        except OSError:
+            if sys.platform != "win32":
+                raise
+            # Some job objects explicitly disallow breakaway (no JOB_OBJECT_LIMIT_BREAKAWAY_OK /
+            # SILENT_BREAKAWAY_OK) and CreateProcess then fails outright instead of silently
+            # ignoring the flag. Retry without it -- the daemon still starts (just remains tied
+            # to the parent's job/process tree, same exposure as before this fix), which beats
+            # never starting at all.
+            popen_kwargs["creationflags"] = 0x08000000
+            subprocess.Popen(  # nosec B603 -- see above.
+                args, **popen_kwargs
+            )
     finally:
         log_file.close()
 
