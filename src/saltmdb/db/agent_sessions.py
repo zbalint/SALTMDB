@@ -58,6 +58,34 @@ def close_session(conn: sqlite3.Connection, session_id: str, ended_at: str) -> N
     )
 
 
+def reconcile_orphaned_sessions(conn: sqlite3.Connection) -> int:
+    """Close out every session an unclean prior daemon death left dangling.
+
+    A freshly started daemon has zero live sessions by definition -- nothing has
+    hello'd to *this* process instance yet -- so any row with ended_at IS NULL at
+    this exact moment is guaranteed orphaned from a dead prior incarnation (crashed,
+    OOM-killed, or hard-killed by an OS mechanism such as a Windows Job Object none
+    of which give close_session a chance to run). Backdates ended_at to the row's
+    own last_activity_at (falling back to started_at, which is never NULL, if
+    last_activity_at is itself still NULL) rather than "now", so a session doesn't
+    appear to have lived on well past whatever it actually last did.
+
+    Call once, early in daemon startup, before any adapter can re-register a
+    session_id via record_session -- otherwise a genuinely-reconnecting adapter's
+    freshly-touched row could race this and get closed out from under it.
+
+    Returns the number of rows closed, for startup logging.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE _agent_sessions
+        SET ended_at = COALESCE(last_activity_at, started_at)
+        WHERE ended_at IS NULL
+        """
+    )
+    return cursor.rowcount
+
+
 def get_last_session_for_cwd(conn: sqlite3.Connection, cwd: str) -> dict | None:
     """Look up the most recent _agent_sessions row for this exact cwd string.
 

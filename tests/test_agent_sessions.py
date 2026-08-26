@@ -13,6 +13,7 @@ from saltmdb.db.agent_sessions import (
     get_recent_sessions_for_cwd,
     touch_session,
     close_session,
+    reconcile_orphaned_sessions,
 )
 
 
@@ -159,6 +160,47 @@ class TestAgentSessions(unittest.TestCase):
             ("/enriched", "2024-01-01T10:00:00+00:00", "codex", "2024-01-01T11:00:00+00:00", None),
         )
         reopened.close()
+
+    def test_reconcile_orphaned_sessions_closes_open_rows_using_last_activity(self):
+        """A row left with ended_at NULL by an unclean death is backdated to last_activity_at."""
+        record_session(self.conn, "orphan-1", "/project", "2024-01-01T10:00:00+00:00", "codex")
+        touch_session(self.conn, "orphan-1", "2024-01-01T10:30:00+00:00")
+
+        closed = reconcile_orphaned_sessions(self.conn)
+
+        self.assertEqual(closed, 1)
+        row = self.conn.execute(
+            "SELECT last_activity_at, ended_at FROM _agent_sessions WHERE session_id = ?",
+            ("orphan-1",),
+        ).fetchone()
+        self.assertEqual(row, ("2024-01-01T10:30:00+00:00", "2024-01-01T10:30:00+00:00"))
+
+    def test_reconcile_orphaned_sessions_falls_back_to_started_at(self):
+        """A session that never received a touch has no last_activity_at to backdate to."""
+        record_session(self.conn, "orphan-2", "/project", "2024-01-01T09:00:00+00:00", "codex")
+
+        closed = reconcile_orphaned_sessions(self.conn)
+
+        self.assertEqual(closed, 1)
+        row = self.conn.execute(
+            "SELECT ended_at FROM _agent_sessions WHERE session_id = ?", ("orphan-2",)
+        ).fetchone()
+        self.assertEqual(row[0], "2024-01-01T09:00:00+00:00")
+
+    def test_reconcile_orphaned_sessions_leaves_already_closed_rows_untouched(self):
+        record_session(self.conn, "closed-1", "/project", "2024-01-01T09:00:00+00:00", "codex")
+        close_session(self.conn, "closed-1", "2024-01-01T09:15:00+00:00")
+
+        closed = reconcile_orphaned_sessions(self.conn)
+
+        self.assertEqual(closed, 0)
+        row = self.conn.execute(
+            "SELECT ended_at FROM _agent_sessions WHERE session_id = ?", ("closed-1",)
+        ).fetchone()
+        self.assertEqual(row[0], "2024-01-01T09:15:00+00:00")
+
+    def test_reconcile_orphaned_sessions_returns_zero_on_empty_table(self):
+        self.assertEqual(reconcile_orphaned_sessions(self.conn), 0)
 
     def test_get_last_session_returns_most_recent(self):
         """When multiple sessions share a cwd, get_last_session_for_cwd returns the most recent."""

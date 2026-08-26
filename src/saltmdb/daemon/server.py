@@ -831,6 +831,27 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             reconciled,
             retrieval_reconciled,
         )
+
+        # Close out any session an unclean prior daemon death left with ended_at still NULL --
+        # this daemon has accepted zero hellos yet, so every such row is guaranteed orphaned
+        # (see reconcile_orphaned_sessions docstring). Must run before Step 5's listener starts,
+        # so no genuinely-reconnecting adapter's hello can race it.
+        from saltmdb.db import agent_sessions
+
+        orphaned_closed = cast(
+            int,
+            state.coordinator.submit(
+                "reconcile_orphaned_sessions",
+                agent_sessions.reconcile_orphaned_sessions,
+                priority="background",
+            ),
+        )
+        if orphaned_closed:
+            logger.info(
+                "Reconciled %d orphaned agent session(s) left open by an unclean prior daemon exit.",
+                orphaned_closed,
+            )
+
         state.embedding_scheduler = EmbedJobScheduler(state.coordinator)
         state.embedding_scheduler.start()
     except Exception as e:
