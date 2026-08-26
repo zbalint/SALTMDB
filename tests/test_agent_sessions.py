@@ -49,10 +49,13 @@ class TestAgentSessions(unittest.TestCase):
         close_session(self.conn, "session-life", "2024-01-01T12:00:00+00:00")
         close_session(self.conn, "session-life", "2024-01-01T13:00:00+00:00")
         row = self.conn.execute(
-            "SELECT owner_id, last_activity_at, ended_at FROM _agent_sessions WHERE session_id = ?",
+            "SELECT owner_id, last_activity_at, ended_at, ended_reason "
+            "FROM _agent_sessions WHERE session_id = ?",
             ("session-life",),
         ).fetchone()
-        self.assertEqual(row, ("codex", "2024-01-01T11:00:00+00:00", "2024-01-01T12:00:00+00:00"))
+        self.assertEqual(
+            row, ("codex", "2024-01-01T11:00:00+00:00", "2024-01-01T12:00:00+00:00", "goodbye")
+        )
 
     def test_rehello_same_id_preserves_identity_and_history(self):
         """Daemon reconnects may re-register a live adapter without duplicating its row."""
@@ -72,11 +75,14 @@ class TestAgentSessions(unittest.TestCase):
             "antigravity",
         )
         row = self.conn.execute(
-            "SELECT COUNT(*), owner_id, started_at, last_activity_at, ended_at "
+            "SELECT COUNT(*), owner_id, started_at, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("session-reconnect",),
         ).fetchone()
-        self.assertEqual(row, (1, "codex", "2024-01-01T10:00:00+00:00", "2024-01-01T12:00:00+00:00", None))
+        self.assertEqual(
+            row,
+            (1, "codex", "2024-01-01T10:00:00+00:00", "2024-01-01T12:00:00+00:00", None, None),
+        )
 
     def test_rehello_does_not_move_activity_backwards(self):
         record_session(self.conn, "session-monotonic", "/project", "2024-01-01T12:00:00+00:00", "codex")
@@ -110,20 +116,22 @@ class TestAgentSessions(unittest.TestCase):
         columns = {
             row[1] for row in migrated.execute("PRAGMA table_info(_agent_sessions)").fetchall()
         }
-        self.assertTrue({"owner_id", "last_activity_at", "ended_at"}.issubset(columns))
+        self.assertTrue(
+            {"owner_id", "last_activity_at", "ended_at", "ended_reason"}.issubset(columns)
+        )
         cwd_column = next(
             row for row in migrated.execute("PRAGMA table_info(_agent_sessions)").fetchall()
             if row[1] == "cwd"
         )
         self.assertEqual(cwd_column[3], 0, "cwd must be nullable for incomplete registrations")
         row = migrated.execute(
-            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at "
+            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("legacy-session",),
         ).fetchone()
         self.assertEqual(
             row,
-            ("/legacy", "2024-01-01T10:00:00+00:00", None, None, None),
+            ("/legacy", "2024-01-01T10:00:00+00:00", None, None, None, None),
         )
         migrated.close()
 
@@ -151,13 +159,16 @@ class TestAgentSessions(unittest.TestCase):
         cwd_column = next(row for row in columns if row[1] == "cwd")
         self.assertEqual(cwd_column[3], 0)
         row = reopened.execute(
-            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at "
+            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("legacy-no-cwd",),
         ).fetchone()
         self.assertEqual(
             row,
-            ("/enriched", "2024-01-01T10:00:00+00:00", "codex", "2024-01-01T11:00:00+00:00", None),
+            (
+                "/enriched", "2024-01-01T10:00:00+00:00", "codex",
+                "2024-01-01T11:00:00+00:00", None, None,
+            ),
         )
         reopened.close()
 
@@ -170,10 +181,13 @@ class TestAgentSessions(unittest.TestCase):
 
         self.assertEqual(closed, 1)
         row = self.conn.execute(
-            "SELECT last_activity_at, ended_at FROM _agent_sessions WHERE session_id = ?",
+            "SELECT last_activity_at, ended_at, ended_reason FROM _agent_sessions "
+            "WHERE session_id = ?",
             ("orphan-1",),
         ).fetchone()
-        self.assertEqual(row, ("2024-01-01T10:30:00+00:00", "2024-01-01T10:30:00+00:00"))
+        self.assertEqual(
+            row, ("2024-01-01T10:30:00+00:00", "2024-01-01T10:30:00+00:00", "orphaned")
+        )
 
     def test_reconcile_orphaned_sessions_falls_back_to_started_at(self):
         """A session that never received a touch has no last_activity_at to backdate to."""
@@ -183,9 +197,10 @@ class TestAgentSessions(unittest.TestCase):
 
         self.assertEqual(closed, 1)
         row = self.conn.execute(
-            "SELECT ended_at FROM _agent_sessions WHERE session_id = ?", ("orphan-2",)
+            "SELECT ended_at, ended_reason FROM _agent_sessions WHERE session_id = ?",
+            ("orphan-2",),
         ).fetchone()
-        self.assertEqual(row[0], "2024-01-01T09:00:00+00:00")
+        self.assertEqual(row, ("2024-01-01T09:00:00+00:00", "orphaned"))
 
     def test_reconcile_orphaned_sessions_leaves_already_closed_rows_untouched(self):
         record_session(self.conn, "closed-1", "/project", "2024-01-01T09:00:00+00:00", "codex")
@@ -195,9 +210,13 @@ class TestAgentSessions(unittest.TestCase):
 
         self.assertEqual(closed, 0)
         row = self.conn.execute(
-            "SELECT ended_at FROM _agent_sessions WHERE session_id = ?", ("closed-1",)
+            "SELECT ended_at, ended_reason FROM _agent_sessions WHERE session_id = ?",
+            ("closed-1",),
         ).fetchone()
-        self.assertEqual(row[0], "2024-01-01T09:15:00+00:00")
+        self.assertEqual(
+            row, ("2024-01-01T09:15:00+00:00", "goodbye"),
+            "reconcile must not overwrite a real goodbye's ended_reason",
+        )
 
     def test_reconcile_orphaned_sessions_returns_zero_on_empty_table(self):
         self.assertEqual(reconcile_orphaned_sessions(self.conn), 0)

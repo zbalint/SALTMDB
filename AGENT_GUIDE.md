@@ -168,11 +168,13 @@ with its real working directory and configured owner. The durable `_agent_sessio
 * Every daemon-received MCP tool call records its receipt time as a best-effort background,
   monotonic `last_activity_at` update through the same writer. It is intentionally updated on every
   call; monitor writer telemetry if many parallel sessions make this volume material.
-* Both a normal adapter `goodbye` (clean EOF close) and a signal-triggered shutdown (SIGTERM/SIGINT, which now also sends `goodbye` synchronously before exit) write `ended_at`, synchronously. A raw connection loss does not:
-  the same adapter may reconnect after a daemon restart, so fabricating an end time would be wrong.
-* The Viewer derives `active` from the daemon's live hello-connection registry, `ended` from a
-  stored `ended_at`, and `unknown` when neither fact is known or daemon liveness is unavailable.
-  No guessed status or end reason is persisted.
+* Both a normal adapter `goodbye` (clean EOF close) and a signal-triggered shutdown (SIGTERM/SIGINT, which now also sends `goodbye` synchronously before exit) write `ended_at` synchronously, tagged `ended_reason='goodbye'`. A raw connection loss does neither:
+  the same adapter may reconnect after a daemon restart (which clears both `ended_at` and `ended_reason` again), so fabricating an end time would be wrong.
+* A row still open (`ended_at IS NULL`) when a *different* daemon incarnation starts up is backdated by `reconcile_orphaned_sessions` and tagged `ended_reason='orphaned'` instead -- this doesn't claim a specific cause (crash, hard-kill, or the daemon itself dying under a still-healthy session that simply reconnects and reopens the row), only that no goodbye happened and the incarnation that could say more is gone.
+* The Viewer derives `active` from the daemon's live hello-connection registry; among rows it
+  isn't currently live for, a stored `ended_at` renders as `ended` (`ended_reason='goodbye'` or
+  unset, e.g. legacy rows) or `lost` (`ended_reason='orphaned'`); no `ended_at` yet, or daemon
+  liveness itself unavailable, renders as `unknown`.
 * Session rows are retained indefinitely. Historical rows created before a field existed keep
   `NULL`; migrations never invent provenance.
 

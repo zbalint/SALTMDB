@@ -386,6 +386,66 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.assertEqual(row["last_activity_at"], "2026-08-25T09:00:00+00:00")
         self.assertEqual(row["liveness"], "unknown")
 
+    def _handler_with_known_empty_liveness(self):
+        """A daemon IS reachable (liveness_known=True) but reports zero active sessions --
+        needed because ended/lost only ever surface when liveness_known is True; self._handler()'s
+        bare DummyServer has no daemon_state at all, which always reads as liveness_known=False."""
+        class EmptyLiveState:
+            @staticmethod
+            def viewer_snapshot():
+                return {"active_agent_session_ids": []}
+
+        server = DummyServer()
+        server.daemon_state = EmptyLiveState()
+        return SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), server)
+
+    def test_get_sessions_shows_ended_for_a_clean_goodbye(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
+            ("goodbye-session", "/project", "2026-08-25T08:00:00+00:00",
+             "2026-08-25T09:00:00+00:00", "goodbye"),
+        )
+        handler = self._handler_with_known_empty_liveness()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(
+            s for s in captured["data"]["sessions"] if s["session_id"] == "goodbye-session"
+        )
+        self.assertEqual(row["liveness"], "ended")
+
+    def test_get_sessions_shows_ended_for_a_legacy_row_with_no_ended_reason(self):
+        """A row closed before ended_reason existed (or by a pre-migration daemon) must not be
+        misread as "lost" -- absence of a reason defaults to the plain clean-ended reading."""
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            ("legacy-ended-session", "/project", "2026-08-25T08:00:00+00:00",
+             "2026-08-25T09:00:00+00:00"),
+        )
+        handler = self._handler_with_known_empty_liveness()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(
+            s for s in captured["data"]["sessions"] if s["session_id"] == "legacy-ended-session"
+        )
+        self.assertEqual(row["liveness"], "ended")
+
+    def test_get_sessions_shows_lost_for_an_orphaned_session(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
+            ("orphaned-session", "/project", "2026-08-25T08:00:00+00:00",
+             "2026-08-25T09:00:00+00:00", "orphaned"),
+        )
+        handler = self._handler_with_known_empty_liveness()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+        row = next(
+            s for s in captured["data"]["sessions"] if s["session_id"] == "orphaned-session"
+        )
+        self.assertEqual(row["liveness"], "lost")
+        self.assertEqual(row["ended_reason"], "orphaned")
+
     def test_get_sessions_derives_active_only_from_daemon_registry(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",

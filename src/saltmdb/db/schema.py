@@ -160,7 +160,8 @@ def _ensure_agent_sessions_table(conn) -> None:
                 started_at DATETIME NOT NULL,
                 owner_id TEXT,
                 last_activity_at DATETIME,
-                ended_at DATETIME
+                ended_at DATETIME,
+                ended_reason TEXT
             )
             """
         )
@@ -187,7 +188,8 @@ def _ensure_agent_sessions_table(conn) -> None:
             started_at DATETIME NOT NULL,
             owner_id TEXT,
             last_activity_at DATETIME,
-            ended_at DATETIME
+            ended_at DATETIME,
+            ended_reason TEXT
         )
         """
     )
@@ -200,11 +202,12 @@ def _ensure_agent_sessions_table(conn) -> None:
             "owner_id",
             "last_activity_at",
             "ended_at",
+            "ended_reason",
         )
     ]
     conn.execute(
         "INSERT INTO _agent_sessions "
-        "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+        "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason) "
         "SELECT "
         + ", ".join(select_expr)
         + " FROM _agent_sessions_legacy"
@@ -845,6 +848,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "owner_id TEXT",
             "last_activity_at DATETIME",
             "ended_at DATETIME",
+            "ended_reason TEXT",
         ):
             try:
                 conn.execute(f"ALTER TABLE _agent_sessions ADD COLUMN {column}")

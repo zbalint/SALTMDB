@@ -34,7 +34,8 @@ def record_session(
                 THEN excluded.last_activity_at
                 ELSE _agent_sessions.last_activity_at
             END,
-            ended_at = NULL
+            ended_at = NULL,
+            ended_reason = NULL
         """,
         (session_id, cwd, started_at, owner_id, started_at),
     )
@@ -51,15 +52,22 @@ def touch_session(conn: sqlite3.Connection, session_id: str, received_at: str) -
 
 
 def close_session(conn: sqlite3.Connection, session_id: str, ended_at: str) -> None:
-    """Record only a definitive normal goodbye; raw disconnects remain historically unknown."""
+    """Record a definitive normal goodbye, tagged ended_reason='goodbye'.
+
+    This is the only path that ever sets 'goodbye' -- a raw disconnect (socket dropped,
+    no goodbye) leaves ended_at/ended_reason untouched here; see reconcile_orphaned_sessions
+    for how those eventually get closed out, tagged 'orphaned' instead, so the viewer can
+    distinguish a clean end from one a later daemon incarnation had to infer.
+    """
     conn.execute(
-        "UPDATE _agent_sessions SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL",
+        "UPDATE _agent_sessions SET ended_at = ?, ended_reason = 'goodbye' "
+        "WHERE session_id = ? AND ended_at IS NULL",
         (ended_at, session_id),
     )
 
 
 def reconcile_orphaned_sessions(conn: sqlite3.Connection) -> int:
-    """Close out every session an unclean prior daemon death left dangling.
+    """Close out every session an unclean prior daemon death left dangling, tagged 'orphaned'.
 
     A freshly started daemon has zero live sessions by definition -- nothing has
     hello'd to *this* process instance yet -- so any row with ended_at IS NULL at
@@ -70,6 +78,13 @@ def reconcile_orphaned_sessions(conn: sqlite3.Connection) -> int:
     last_activity_at is itself still NULL) rather than "now", so a session doesn't
     appear to have lived on well past whatever it actually last did.
 
+    ended_reason is set to 'orphaned', not 'goodbye' -- this deliberately does not claim
+    a specific cause (crash vs. hard-kill vs. the *daemon* dying under a still-healthy
+    session, which just reopens the row via record_session's ON CONFLICT once it
+    reconnects). It only asserts what's actually known: no goodbye happened, and the
+    daemon incarnation that could have said more about why is itself gone. The viewer
+    surfaces this as a distinct "lost" liveness state, separate from a clean "ended".
+
     Call once, early in daemon startup, before any adapter can re-register a
     session_id via record_session -- otherwise a genuinely-reconnecting adapter's
     freshly-touched row could race this and get closed out from under it.
@@ -79,7 +94,7 @@ def reconcile_orphaned_sessions(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         """
         UPDATE _agent_sessions
-        SET ended_at = COALESCE(last_activity_at, started_at)
+        SET ended_at = COALESCE(last_activity_at, started_at), ended_reason = 'orphaned'
         WHERE ended_at IS NULL
         """
     )

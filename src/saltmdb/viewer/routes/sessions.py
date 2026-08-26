@@ -78,6 +78,23 @@ def _merge_event_rows(sessions: dict[str, dict], rows) -> None:
             entry["last_seen"] = last_event
 
 
+def _liveness_for(row, sid: str, active_session_ids: set[str], liveness_known: bool) -> str:
+    """active > lost > ended > unknown, in that priority order.
+
+    "lost" (ended_reason='orphaned', via reconcile_orphaned_sessions) is deliberately
+    distinct from a clean "ended" (ended_reason='goodbye', via close_session) -- the row
+    still says a session is no longer active, but not that it ended the way it was meant
+    to. A row that's disconnected from the *current* daemon but not yet reconciled by any
+    daemon (ended_at still NULL) stays "unknown" -- genuinely ambiguous, since the same
+    agent_session_id could still reconnect and reopen this exact row.
+    """
+    if sid in active_session_ids:
+        return "active"
+    if not liveness_known or not row["ended_at"]:
+        return "unknown"
+    return "lost" if row["ended_reason"] == "orphaned" else "ended"
+
+
 def _merge_lifecycle_rows(
     sessions: dict[str, dict], rows, active_session_ids: set[str], liveness_known: bool
 ) -> None:
@@ -100,13 +117,8 @@ def _merge_lifecycle_rows(
                 "started_at": row["started_at"],
                 "last_activity_at": row["last_activity_at"],
                 "ended_at": row["ended_at"],
-                "liveness": (
-                    "active"
-                    if sid in active_session_ids
-                    else ("ended" if row["ended_at"] else "unknown")
-                    if liveness_known
-                    else "unknown"
-                ),
+                "ended_reason": row["ended_reason"],
+                "liveness": _liveness_for(row, sid, active_session_ids, liveness_known),
             }
         )
         if row["started_at"] and (
@@ -145,7 +157,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
         """
     ).fetchall()
     lifecycle_rows = conn.execute(
-        "SELECT session_id, cwd, owner_id, started_at, last_activity_at, ended_at "
+        "SELECT session_id, cwd, owner_id, started_at, last_activity_at, ended_at, ended_reason "
         "FROM _agent_sessions"
     ).fetchall()
 
@@ -159,6 +171,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
         entry.setdefault("started_at", None)
         entry.setdefault("last_activity_at", None)
         entry.setdefault("ended_at", None)
+        entry.setdefault("ended_reason", None)
         entry.setdefault("liveness", "unknown")
     return list(sessions.values())
 

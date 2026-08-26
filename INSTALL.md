@@ -68,12 +68,16 @@ be retried on the next call. Re-registering the same session reopens its row whi
 earliest start time and first known `cwd`/owner, advancing activity monotonically, and clearing
 `ended_at`.
 
-Goodbye fences new calls, waits for already accepted calls to finish, persists `ended_at`, then
-acknowledges and unregisters. A raw disconnect unregisters without writing `ended_at`; reconnect
-with the same logical session is allowed. The Viewer derives live `active` state from the daemon
-connection registry and reports `unknown` when daemon liveness cannot be established. Session rows
-are retained indefinitely. Initializing an older `_agent_sessions` table that lacks nullable
-`cwd` adds that column without discarding historical rows.
+Goodbye fences new calls, waits for already accepted calls to finish, persists `ended_at` tagged
+`ended_reason='goodbye'`, then acknowledges and unregisters. A raw disconnect unregisters without
+writing `ended_at`; reconnect with the same logical session is allowed and clears any prior
+`ended_at`/`ended_reason`. A row still unclosed when a later daemon incarnation starts up instead
+gets backdated and tagged `ended_reason='orphaned'` by `reconcile_orphaned_sessions`. The Viewer
+derives live `active` state from the daemon connection registry, renders a stored `ended_at` as
+`ended` or `lost` depending on `ended_reason`, and reports `unknown` when daemon liveness cannot
+be established or no `ended_at` is set yet. Session rows are retained indefinitely. Initializing
+an older `_agent_sessions` table that lacks nullable `cwd` adds that column without discarding
+historical rows.
 
 Bulk relation calls use the configured owner as their batch default. Per-item owner overrides are
 for trusted in-process callers only; the public MCP wrapper strips them. Bulk consolidation keeps
