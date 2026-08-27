@@ -391,9 +391,8 @@
           render();
         }));
       }
-      metadata.append(metadataActions);
       const metadataSection = node('div');
-      metadataSection.append(identity, metadata);
+      metadataSection.append(identity, metadata, metadataActions);
       const memoryRows = memoriesData.entities.map(entity => {
         const row = node('tr'); const lifecycleCell = node('td'); lifecycleCell.append(statusBadge(entity.status));
         const roles = []; if (entity.agent_session_id === sessionId) roles.push('created'); if (entity.last_touched_session_id === sessionId) roles.push('touched');
