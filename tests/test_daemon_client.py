@@ -612,10 +612,12 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         args, kwargs = mock_popen.call_args
         self.assertIn("--spawn-detached", args[0])
         self.assertIn(self.db_path, args[0])
-        # Same DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP combo as
-        # the daemon spawn itself -- the intermediary needs the same console/job isolation to
-        # survive long enough to spawn its own child.
-        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200)
+        # Same DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP |
+        # CREATE_NO_WINDOW combo as the daemon spawn itself -- the intermediary needs the same
+        # console/job isolation to survive long enough to spawn its own child.
+        self.assertEqual(
+            kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000
+        )
 
     def test_win32_intermediary_spawn_falls_back_to_direct_on_oserror(self):
         """If even the intermediary fails to spawn (e.g. job disallows breakaway outright), fall
@@ -637,11 +639,15 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             client._spawn_daemon_process(self.db_path)
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
-        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- DETACHED_
-        # PROCESS (not CREATE_NEW_PROCESS_GROUP alone, alpha.94's disproven attempt) is what
-        # actually stops console CTRL_CLOSE_EVENT delivery, per Microsoft's docs: that signal
-        # goes to every process attached to the console regardless of process group.
-        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200)
+        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP |
+        # CREATE_NO_WINDOW -- DETACHED_PROCESS (not CREATE_NEW_PROCESS_GROUP alone, alpha.94's
+        # disproven attempt) is what actually stops console CTRL_CLOSE_EVENT delivery, per
+        # Microsoft's docs: that signal goes to every process attached to the console regardless
+        # of process group. CREATE_NO_WINDOW is restored defense-in-depth (Win11/Copilot visible-
+        # terminal-window bug, 2026-08-27).
+        self.assertEqual(
+            kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000
+        )
 
     def test_win32_direct_spawn_falls_back_without_breakaway_on_oserror(self):
         seen_creationflags = []
@@ -657,11 +663,15 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             patch.object(client.subprocess, "Popen", side_effect=_fake_popen),
         ):
             client._spawn_daemon_process(self.db_path)
-        # DETACHED_PROCESS (0x00000008) and CREATE_NEW_PROCESS_GROUP (0x00000200) are unrelated
-        # to job-breakaway policy, so they survive the OSError fallback retry; only
-        # CREATE_BREAKAWAY_FROM_JOB is dropped.
+        # DETACHED_PROCESS (0x00000008), CREATE_NEW_PROCESS_GROUP (0x00000200), and
+        # CREATE_NO_WINDOW (0x08000000) are unrelated to job-breakaway policy, so they survive
+        # the OSError fallback retry; only CREATE_BREAKAWAY_FROM_JOB is dropped.
         self.assertEqual(
-            seen_creationflags, [0x00000008 | 0x01000000 | 0x00000200, 0x00000008 | 0x00000200]
+            seen_creationflags,
+            [
+                0x00000008 | 0x01000000 | 0x00000200 | 0x08000000,
+                0x00000008 | 0x00000200 | 0x08000000,
+            ],
         )
 
     def test_posix_spawn_unaffected_still_uses_start_new_session(self):

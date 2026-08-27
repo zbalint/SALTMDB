@@ -147,8 +147,8 @@ def _spawn_daemon_via_intermediary(db_path: str) -> None:
     from that snapshot, so the walk cannot traverse through it to discover the daemon as a
     grandchild. This is the Windows analogue of the POSIX double-fork orphaning trick. The
     intermediary itself is spawned with the same DETACHED_PROCESS/CREATE_BREAKAWAY_FROM_JOB/
-    CREATE_NEW_PROCESS_GROUP flags as the daemon, for the same console/job reasons -- it just
-    also needs to survive long enough to finish spawning its own child."""
+    CREATE_NEW_PROCESS_GROUP/CREATE_NO_WINDOW flags as the daemon, for the same console/job
+    reasons -- it just also needs to survive long enough to finish spawning its own child."""
     env = dict(os.environ)
     env["SALTMDB_DB_PATH"] = db_path
     args = [sys.executable, "-m", "saltmdb.daemon.client", "--spawn-detached", db_path]
@@ -157,9 +157,9 @@ def _spawn_daemon_via_intermediary(db_path: str) -> None:
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "env": env,
-        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP -- same combo
-        # and same rationale as _spawn_daemon_process's win32 branch below.
-        "creationflags": 0x00000008 | 0x01000000 | 0x00000200,
+        # DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_
+        # WINDOW -- same combo and same rationale as _spawn_daemon_process's win32 branch below.
+        "creationflags": 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000,
     }
     try:
         proc = subprocess.Popen(args, **popen_kwargs)  # nosec B603 -- fixed argv, shell=False.
@@ -218,13 +218,21 @@ def _spawn_daemon_process(db_path: str) -> None:
         #    group (learn.microsoft.com/windows/console/ctrl-close-signal). Without CREATE_NEW_
         #    CONSOLE or DETACHED_PROCESS, a child attaches to its parent's console by default, so
         #    the daemon was never actually detached at all. DETACHED_PROCESS gives it no console
-        #    to be attached to, which is the only thing that stops CTRL+CLOSE delivery. (Unlike
-        #    CREATE_NEW_CONSOLE, this doesn't pop a visible window, so CREATE_NO_WINDOW -- which
-        #    the docs say is ignored when paired with DETACHED_PROCESS anyway -- is dropped here.)
+        #    to be attached to, which is the only thing that stops CTRL+CLOSE delivery.
         #  - CREATE_NEW_PROCESS_GROUP: kept as defense-in-depth against CTRL_C/CTRL_BREAK
         #    specifically, in case the daemon process ever ends up console-attached again (e.g.
         #    a future AllocConsole/AttachConsole call); harmless, ignored where irrelevant.
-        popen_kwargs["creationflags"] = 0x00000008 | 0x01000000 | 0x00000200
+        #  - CREATE_NO_WINDOW: previously dropped here on the theory that it's a no-op once
+        #    DETACHED_PROCESS is set (Microsoft's docs say DETACHED_PROCESS alone means the child
+        #    has no console to pop a window for in the first place). Live evidence on a Win11
+        #    machine with Windows Terminal as the default terminal app disproved that in practice
+        #    (SALTMDB memory: Win11/Copilot visible-terminal-window bug, 2026-08-27) -- a visible
+        #    console window still appeared. Root cause on that machine was actually one level
+        #    deeper (a `py.exe` launcher-stub venv silently relaunching an uncontrolled grandchild
+        #    our flags never reached), but CREATE_NO_WINDOW is cheap, harmless in combination with
+        #    DETACHED_PROCESS, and hardens this spawn against that whole class of environment, so
+        #    it's restored as defense-in-depth even though it isn't the primary fix for that bug.
+        popen_kwargs["creationflags"] = 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -256,7 +264,7 @@ def _spawn_daemon_process(db_path: str) -> None:
                 "Primary daemon spawn failed (%s); retrying without CREATE_BREAKAWAY_FROM_JOB "
                 "-- daemon will remain tied to this process's Job Object if one exists", e,
             )
-            popen_kwargs["creationflags"] = 0x00000008 | 0x00000200
+            popen_kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
             proc = subprocess.Popen(  # nosec B603 -- see above.
                 args, **popen_kwargs
             )
