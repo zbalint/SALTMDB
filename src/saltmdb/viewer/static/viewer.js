@@ -5,7 +5,7 @@
     view: 'overview', renderController: null, detailController: null, poller: null,
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
-    sessionsPage: 1, sessionsIdPrefix: '', sessionDetailId: '',
+    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '',
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -337,10 +337,10 @@
   const sessionRow = (item) => {
     const row = node('tr');
     const idCell = node('td'); const idLine = node('div', undefined, 'id-prefix');
-    idLine.append(node('code', (item.session_id || '').slice(0, 12)), button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
-    idCell.append(button(item.session_id, 'row-button', () => openSessionDetail(item.session_id)), idLine);
+    idLine.append(button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
+    idCell.append(button((item.session_id || '').slice(0, 12), 'row-button', () => openSessionDetail(item.session_id)), idLine);
     const stateCell = node('td'); stateCell.append(statusBadge(item.liveness));
-    row.append(idCell, node('td', item.owner_id || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
+    row.append(idCell, node('td', item.owner_id || '—'), node('td', item.cwd || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
     return row;
   };
 
@@ -360,10 +360,40 @@
     view.replaceChildren(back, section(sessionId, 'Memories created or touched by this session, and its logged events.'), result);
     setBusy(result, true);
     try {
-      const [memoriesData, eventsData] = await Promise.all([
+      const [sessionData, memoriesData, eventsData] = await Promise.all([
+        api(`/api/sessions/${encodeURIComponent(sessionId)}`),
         api(`/api/entities?session_id=${encodeURIComponent(sessionId)}&limit=100`),
         api(`/api/events?agent_session_id=${encodeURIComponent(sessionId)}&limit=100`),
       ]);
+      const identity = node('div', undefined, 'detail-identity');
+      identity.append(statusBadge(sessionData.liveness));
+      const metadata = node('section', undefined, 'metadata-panel');
+      metadata.append(section('Session metadata'));
+      const metadataGrid = node('dl', undefined, 'metadata-grid');
+      [
+        ['Owner', sessionData.owner_id || '—'],
+        ['CWD', sessionData.cwd || '—'],
+        ['Started', formatTimestamp(sessionData.started_at)],
+        ['Last activity', formatTimestamp(sessionData.last_activity_at)],
+        ['Ended', formatTimestamp(sessionData.ended_at)],
+        ['Ended reason', sessionData.ended_reason || '—'],
+        ['Memories', String(sessionData.memory_count)],
+        ['Events', String(sessionData.event_count)],
+      ].forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
+      metadata.append(metadataGrid);
+      const metadataActions = node('div', undefined, 'detail-actions');
+      metadataActions.append(button('Copy CWD', '', () => copyText(sessionData.cwd || '', 'Working directory')));
+      if (sessionData.cwd) {
+        metadataActions.append(button('Browse sessions with this cwd', '', () => {
+          state.sessionsPreset = { cwd: sessionData.cwd };
+          state.sessionsPage = 1;
+          state.sessionDetailId = '';
+          render();
+        }));
+      }
+      metadata.append(metadataActions);
+      const metadataSection = node('div');
+      metadataSection.append(identity, metadata);
       const memoryRows = memoriesData.entities.map(entity => {
         const row = node('tr'); const lifecycleCell = node('td'); lifecycleCell.append(statusBadge(entity.status));
         const roles = []; if (entity.agent_session_id === sessionId) roles.push('created'); if (entity.last_touched_session_id === sessionId) roles.push('touched');
@@ -388,36 +418,53 @@
         details.append(summary, renderTable(['Time', 'Agent', 'Event', 'Action'], rows));
         eventsSection.append(details);
       });
-      result.replaceChildren(memorySection, eventsSection);
+      result.replaceChildren(metadataSection, memorySection, eventsSection);
     } finally { setBusy(result, false); }
   };
 
   const sessions = async () => {
     if (state.sessionDetailId) { await sessionDetail(state.sessionDetailId); return; }
     const form = node('form', undefined, 'toolbar');
-    const prefixField = inputField('Session ID prefix', 'Filter by session ID prefix', state.sessionsIdPrefix);
-    const resetFilter = button('Reset filter', '', () => { state.sessionsIdPrefix = ''; state.sessionsPage = 1; render(); });
-    form.append(prefixField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
+    const prefixField = inputField('Session ID prefix', 'Filter by session ID prefix', state.sessionsPreset.id_prefix || '');
+    const stateField = select('State', [['', 'All states'], ['active', 'Active'], ['lost', 'Lost'], ['ended', 'Ended'], ['unknown', 'Unknown']], state.sessionsPreset.state || '');
+    const ownerField = inputField('Owner', 'Owner id (partial match)', state.sessionsPreset.owner_id || '');
+    const cwdField = inputField('CWD', 'Working directory (partial match)', state.sessionsPreset.cwd || '');
+    const dateField = select('Date field', [['started_at', 'Started'], ['last_activity_at', 'Last activity'], ['ended_at', 'Ended']], state.sessionsPreset.date_field || 'last_activity_at');
+    const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_from || ''); dateFrom.element.type = 'date';
+    const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_to || ''); dateTo.element.type = 'date';
+    const sortField = select('Sort', [['recent', 'Most recent activity'], ['oldest', 'Oldest activity'], ['started_desc', 'Started: newest'], ['started_asc', 'Started: oldest']], state.sessionsPreset.sort || 'recent');
+    const resetFilter = button('Reset filter', '', () => { state.sessionsPreset = {}; state.sessionsPage = 1; render(); });
+    form.append(prefixField.wrap, stateField.wrap, ownerField.wrap, cwdField.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, sortField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
     const result = node('div');
-    let currentPrefix = state.sessionsIdPrefix;
     const list = async (page = 1) => {
       setBusy(result, true);
       try {
-        const params = new URLSearchParams({ page: String(page), limit: '50' });
-        if (currentPrefix) params.set('id_prefix', currentPrefix);
+        const params = new URLSearchParams(state.sessionsPreset);
+        params.set('page', String(page)); params.set('limit', '50');
         const data = await api(`/api/sessions?${params}`);
         const rows = data.sessions.map(sessionRow);
         const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Session pages');
         const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
         const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
-        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Sorted by most recent activity. Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'State', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
+        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
         state.sessionsPage = page;
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', event => {
-      event.preventDefault(); currentPrefix = prefixField.element.value.trim();
-      state.sessionsIdPrefix = currentPrefix; state.sessionsPage = 1; list(1);
+      event.preventDefault();
+      const params = new URLSearchParams();
+      [
+        ['id_prefix', prefixField.element.value.trim()],
+        ['state', stateField.element.value],
+        ['owner_id', ownerField.element.value.trim()],
+        ['cwd', cwdField.element.value.trim()],
+        ['date_field', dateField.element.value],
+        ['date_from', dateFrom.element.value],
+        ['date_to', dateTo.element.value],
+        ['sort', sortField.element.value],
+      ].forEach(([key, value]) => { if (value) params.set(key, value); });
+      state.sessionsPreset = Object.fromEntries(params); state.sessionsPage = 1; list(1);
     });
     view.replaceChildren(section('Agent sessions', 'Browse memories and events grouped by the MCP session that created or touched them.'), form, result);
     await list(state.sessionsPage);

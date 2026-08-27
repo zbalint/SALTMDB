@@ -19,7 +19,7 @@ path only) matches -- the same OR semantics as the ``session_id`` filter added t
 import logging
 from typing import TYPE_CHECKING
 
-from saltmdb.viewer.routes._shared import MAX_SESSION_LIMIT, _bounded_query_int
+from saltmdb.viewer.routes._shared import MAX_SESSION_LIMIT, _bounded_query_int, _utc_day_bound
 
 if TYPE_CHECKING:
     from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
@@ -27,6 +27,13 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+
+_SESSION_SORTS = {
+    "recent": ("last_seen", "DESC"),
+    "oldest": ("last_seen", "ASC"),
+    "started_desc": ("started_at", "DESC"),
+    "started_asc": ("started_at", "ASC"),
+}
 
 
 def _daemon_liveness(server) -> tuple[set[str], bool]:
@@ -179,20 +186,57 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
 class SessionsMixin(ViewerHandlerProtocol):
     """Provides get_sessions(); mixed into the final SALTMDBHandler elsewhere."""
 
-    def get_sessions(self, query):
+    def get_sessions(self, query):  # noqa: C901, PLR0912, PLR0915
         conn = None
         try:
             page = _bounded_query_int(query, "page", 1, 1, 1_000_000)
             limit = _bounded_query_int(query, "limit", 50, 1, MAX_SESSION_LIMIT)
             offset = (page - 1) * limit
             id_prefix = query.get("id_prefix", [None])[0]
+            state = query.get("state", [None])[0]
+            owner_id = query.get("owner_id", [None])[0]
+            cwd = query.get("cwd", [None])[0]
+            date_field = query.get("date_field", [None])[0]
+            date_from = query.get("date_from", [None])[0]
+            date_to = query.get("date_to", [None])[0]
+            sort = query.get("sort", ["recent"])[0] or "recent"
+
+            if state and state not in ("active", "lost", "ended", "unknown"):
+                raise ValueError("state must be active, lost, ended, or unknown")
+            if date_field and date_field not in ("started_at", "last_activity_at", "ended_at"):
+                raise ValueError("date_field must be started_at, last_activity_at, or ended_at")
+            if (date_from or date_to) and not date_field:
+                raise ValueError("date_field is required when a date bound is supplied")
+            if date_from and date_to and date_from > date_to:
+                raise ValueError("date_from must not be after date_to")
+            if sort not in _SESSION_SORTS:
+                raise ValueError("sort must be recent, oldest, started_desc, or started_asc")
 
             conn = self.get_db_connection()
             active_session_ids, liveness_known = _daemon_liveness(self.server)
             all_sessions = _load_sessions(conn, active_session_ids, liveness_known)
             if id_prefix:
                 all_sessions = [s for s in all_sessions if s["session_id"].startswith(id_prefix)]
-            all_sessions.sort(key=lambda s: s["last_seen"] or "", reverse=True)
+            if state:
+                all_sessions = [s for s in all_sessions if s["liveness"] == state]
+            if owner_id:
+                all_sessions = [
+                    s for s in all_sessions if s["owner_id"] and owner_id in s["owner_id"]
+                ]
+            if cwd:
+                all_sessions = [s for s in all_sessions if s["cwd"] and cwd in s["cwd"]]
+            if date_from:
+                bound = _utc_day_bound(date_from, end_exclusive=False)
+                all_sessions = [s for s in all_sessions if s[date_field] and s[date_field] >= bound]
+            if date_to:
+                bound = _utc_day_bound(date_to, end_exclusive=True)
+                all_sessions = [s for s in all_sessions if s[date_field] and s[date_field] < bound]
+
+            field, direction = _SESSION_SORTS[sort]
+            with_value = [s for s in all_sessions if s.get(field)]
+            without_value = [s for s in all_sessions if not s.get(field)]
+            with_value.sort(key=lambda s: s[field], reverse=(direction == "DESC"))
+            all_sessions = with_value + without_value
 
             total_count = len(all_sessions)
             total_pages = (total_count + limit - 1) // limit if limit > 0 else 0
@@ -204,6 +248,13 @@ class SessionsMixin(ViewerHandlerProtocol):
                     "limit": limit,
                     "total_count": total_count,
                     "total_pages": total_pages,
+                    "sort": sort,
+                    "state": state,
+                    "owner_id": owner_id,
+                    "cwd": cwd,
+                    "date_field": date_field,
+                    "date_from": date_from,
+                    "date_to": date_to,
                     "pagination": {
                         "page": page,
                         "per_page": limit,
@@ -215,6 +266,74 @@ class SessionsMixin(ViewerHandlerProtocol):
             )
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
+        except Exception as e:
+            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
+            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+        finally:
+            if conn:
+                conn.close()
+
+    def get_session_detail(self, session_id):
+        conn = None
+        try:
+            conn = self.get_db_connection()
+            lifecycle_row = conn.execute(
+                "SELECT cwd, owner_id, started_at, last_activity_at, ended_at, ended_reason "
+                "FROM _agent_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+
+            memory_count = conn.execute(
+                """
+                SELECT COUNT(DISTINCT id) FROM (
+                    SELECT id FROM entities WHERE agent_session_id = ?
+                    UNION
+                    SELECT id FROM entities WHERE last_touched_session_id = ?
+                )
+                """,
+                (session_id, session_id),
+            ).fetchone()[0]
+
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE agent_session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+
+            if lifecycle_row is None and memory_count == 0 and event_count == 0:
+                self.send_json({"error": "Session not found"}, 404)
+                return
+
+            active_session_ids, liveness_known = _daemon_liveness(self.server)
+            if lifecycle_row is None:
+                row_for_liveness = {"ended_at": None, "ended_reason": None}
+                cwd = owner_id = started_at = last_activity_at = ended_at = ended_reason = None
+            else:
+                row_for_liveness = lifecycle_row
+                cwd = lifecycle_row["cwd"]
+                owner_id = lifecycle_row["owner_id"]
+                started_at = lifecycle_row["started_at"]
+                last_activity_at = lifecycle_row["last_activity_at"]
+                ended_at = lifecycle_row["ended_at"]
+                ended_reason = lifecycle_row["ended_reason"]
+
+            liveness = _liveness_for(
+                row_for_liveness, session_id, active_session_ids, liveness_known
+            )
+
+            self.send_json(
+                {
+                    "session_id": session_id,
+                    "owner_id": owner_id,
+                    "cwd": cwd,
+                    "liveness": liveness,
+                    "started_at": started_at,
+                    "last_activity_at": last_activity_at,
+                    "ended_at": ended_at,
+                    "ended_reason": ended_reason,
+                    "memory_count": memory_count,
+                    "event_count": event_count,
+                }
+            )
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
             self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)

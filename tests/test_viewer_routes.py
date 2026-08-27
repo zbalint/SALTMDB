@@ -390,6 +390,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         """A daemon IS reachable (liveness_known=True) but reports zero active sessions --
         needed because ended/lost only ever surface when liveness_known is True; self._handler()'s
         bare DummyServer has no daemon_state at all, which always reads as liveness_known=False."""
+
         class EmptyLiveState:
             @staticmethod
             def viewer_snapshot():
@@ -403,15 +404,18 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
             "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
-            ("goodbye-session", "/project", "2026-08-25T08:00:00+00:00",
-             "2026-08-25T09:00:00+00:00", "goodbye"),
+            (
+                "goodbye-session",
+                "/project",
+                "2026-08-25T08:00:00+00:00",
+                "2026-08-25T09:00:00+00:00",
+                "goodbye",
+            ),
         )
         handler = self._handler_with_known_empty_liveness()
         captured = self._capture(handler)
         handler.get_sessions({})
-        row = next(
-            s for s in captured["data"]["sessions"] if s["session_id"] == "goodbye-session"
-        )
+        row = next(s for s in captured["data"]["sessions"] if s["session_id"] == "goodbye-session")
         self.assertEqual(row["liveness"], "ended")
 
     def test_get_sessions_shows_ended_for_a_legacy_row_with_no_ended_reason(self):
@@ -419,8 +423,12 @@ class TestViewerAgentSessions(unittest.TestCase):
         misread as "lost" -- absence of a reason defaults to the plain clean-ended reading."""
         self.conn.execute(
             "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",
-            ("legacy-ended-session", "/project", "2026-08-25T08:00:00+00:00",
-             "2026-08-25T09:00:00+00:00"),
+            (
+                "legacy-ended-session",
+                "/project",
+                "2026-08-25T08:00:00+00:00",
+                "2026-08-25T09:00:00+00:00",
+            ),
         )
         handler = self._handler_with_known_empty_liveness()
         captured = self._capture(handler)
@@ -434,15 +442,18 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
             "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
-            ("orphaned-session", "/project", "2026-08-25T08:00:00+00:00",
-             "2026-08-25T09:00:00+00:00", "orphaned"),
+            (
+                "orphaned-session",
+                "/project",
+                "2026-08-25T08:00:00+00:00",
+                "2026-08-25T09:00:00+00:00",
+                "orphaned",
+            ),
         )
         handler = self._handler_with_known_empty_liveness()
         captured = self._capture(handler)
         handler.get_sessions({})
-        row = next(
-            s for s in captured["data"]["sessions"] if s["session_id"] == "orphaned-session"
-        )
+        row = next(s for s in captured["data"]["sessions"] if s["session_id"] == "orphaned-session")
         self.assertEqual(row["liveness"], "lost")
         self.assertEqual(row["ended_reason"], "orphaned")
 
@@ -487,6 +498,304 @@ class TestViewerAgentSessions(unittest.TestCase):
             s for s in captured["data"]["sessions"] if s["session_id"] == "unavailable-session"
         )
         self.assertEqual(row["liveness"], "unknown")
+
+    def test_get_sessions_state_filter(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
+            (
+                "ended-session",
+                "/project/ended",
+                "2026-08-24T08:00:00+00:00",
+                "2026-08-24T09:00:00+00:00",
+                "goodbye",
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, ended_at, ended_reason) VALUES (?, ?, ?, ?, ?)",
+            (
+                "lost-session",
+                "/project/lost",
+                "2026-08-25T08:00:00+00:00",
+                "2026-08-25T09:00:00+00:00",
+                "orphaned",
+            ),
+        )
+        self.conn.commit()
+
+        handler = self._handler_with_known_empty_liveness()
+        captured = self._capture(handler)
+        handler.get_sessions({"state": ["lost"]})
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual([s["session_id"] for s in captured["data"]["sessions"]], ["lost-session"])
+
+    def test_get_sessions_state_filter_rejects_invalid_value(self):
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"state": ["bogus"]})
+        self.assertEqual(captured["status"], 400)
+
+    def test_get_sessions_owner_id_substring_filter(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "claude-session",
+                "/project/claude",
+                "2026-08-24T08:00:00+00:00",
+                "claude",
+                "2026-08-24T09:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "antigravity-session",
+                "/project/antigravity",
+                "2026-08-25T08:00:00+00:00",
+                "antigravity",
+                "2026-08-25T09:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"owner_id": ["clau"]})
+        self.assertEqual(
+            [s["session_id"] for s in captured["data"]["sessions"]], ["claude-session"]
+        )
+
+    def test_get_sessions_cwd_substring_filter(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "project-a-session",
+                "/home/user/project-a",
+                "2026-08-24T08:00:00+00:00",
+                "tester",
+                "2026-08-24T09:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "project-b-session",
+                "/home/user/project-b",
+                "2026-08-25T08:00:00+00:00",
+                "tester",
+                "2026-08-25T09:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"cwd": ["project-a"]})
+        self.assertEqual(
+            [s["session_id"] for s in captured["data"]["sessions"]], ["project-a-session"]
+        )
+
+    def test_get_sessions_date_range_filter(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "early-session",
+                "/project/early",
+                "2026-08-20T10:00:00+00:00",
+                "tester",
+                "2026-08-20T11:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "late-session",
+                "/project/late",
+                "2026-08-25T10:00:00+00:00",
+                "tester",
+                "2026-08-25T11:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions(
+            {
+                "date_field": ["started_at"],
+                "date_from": ["2026-08-24"],
+                "date_to": ["2026-08-26"],
+            }
+        )
+        self.assertEqual([s["session_id"] for s in captured["data"]["sessions"]], ["late-session"])
+
+    def test_get_sessions_date_filter_rejects_bound_without_field(self):
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"date_from": ["2026-08-24"]})
+        self.assertEqual(captured["status"], 400)
+
+    def test_get_sessions_sort_started_asc_and_desc(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "earliest-session",
+                "/project/earliest",
+                "2026-08-20T10:00:00+00:00",
+                "tester",
+                "2026-08-20T11:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "latest-session",
+                "/project/latest",
+                "2026-08-25T10:00:00+00:00",
+                "tester",
+                "2026-08-25T11:00:00+00:00",
+                None,
+            ),
+        )
+        self.conn.commit()
+        self._insert_entity(
+            "no-started-memory",
+            "2026-08-24T10:00:00+00:00",
+            "2026-08-24T10:00:00+00:00",
+            agent_session_id="no-started-session",
+        )
+
+        handler = self._handler()
+        captured_asc = self._capture(handler)
+        handler.get_sessions({"sort": ["started_asc"]})
+        self.assertEqual(
+            [s["session_id"] for s in captured_asc["data"]["sessions"]],
+            ["earliest-session", "latest-session", "no-started-session"],
+        )
+
+        captured_desc = self._capture(handler)
+        handler.get_sessions({"sort": ["started_desc"]})
+        self.assertEqual(
+            [s["session_id"] for s in captured_desc["data"]["sessions"]],
+            ["latest-session", "earliest-session", "no-started-session"],
+        )
+
+    def test_get_sessions_sort_rejects_invalid_value(self):
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({"sort": ["bogus"]})
+        self.assertEqual(captured["status"], 400)
+
+    def test_get_session_detail_not_found(self):
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_session_detail("does-not-exist")
+        self.assertEqual(captured["status"], 404)
+
+    def test_get_session_detail_legacy_session_with_no_lifecycle_row(self):
+        self._insert_entity(
+            "legacy-memory",
+            "2026-08-24T10:00:00+00:00",
+            "2026-08-24T10:00:00+00:00",
+            agent_session_id="legacy-sess",
+        )
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_session_detail("legacy-sess")
+        self.assertEqual(captured["status"], 200)
+        self.assertIsNone(captured["data"]["cwd"])
+        self.assertIsNone(captured["data"]["owner_id"])
+        self.assertEqual(captured["data"]["memory_count"], 1)
+
+    def test_get_session_detail_full_lifecycle_row(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions "
+            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "full-session",
+                "/project/full",
+                "2026-08-25T08:00:00+00:00",
+                "owner-full",
+                "2026-08-25T09:00:00+00:00",
+                "2026-08-25T10:00:00+00:00",
+                "goodbye",
+            ),
+        )
+        self.conn.commit()
+        self._insert_entity(
+            "full-memory",
+            "2026-08-25T08:30:00+00:00",
+            "2026-08-25T08:30:00+00:00",
+            agent_session_id="full-session",
+        )
+        self._insert_event(
+            "full-event",
+            "2026-08-25T08:45:00+00:00",
+            "decision",
+            agent_session_id="full-session",
+        )
+
+        handler = self._handler_with_known_empty_liveness()
+        captured = self._capture(handler)
+        handler.get_session_detail("full-session")
+        data = captured["data"]
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(data["session_id"], "full-session")
+        self.assertEqual(data["owner_id"], "owner-full")
+        self.assertEqual(data["cwd"], "/project/full")
+        self.assertEqual(data["liveness"], "ended")
+        self.assertEqual(data["started_at"], "2026-08-25T08:00:00+00:00")
+        self.assertEqual(data["last_activity_at"], "2026-08-25T09:00:00+00:00")
+        self.assertEqual(data["ended_at"], "2026-08-25T10:00:00+00:00")
+        self.assertEqual(data["ended_reason"], "goodbye")
+        self.assertEqual(data["memory_count"], 1)
+        self.assertEqual(data["event_count"], 1)
+
+    def test_get_session_detail_active_session(self):
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            ("active-session", "/project/active", "2026-08-25T08:00:00+00:00", None),
+        )
+        self.conn.commit()
+
+        class LiveState:
+            @staticmethod
+            def viewer_snapshot():
+                return {"active_agent_session_ids": ["active-session"]}
+
+        server = DummyServer()
+        server.daemon_state = LiveState()
+        handler = SALTMDBHandler(DummyRequest(), ("127.0.0.1", 8080), server)
+        captured = self._capture(handler)
+        handler.get_session_detail("active-session")
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["data"]["liveness"], "active")
 
     def test_get_sessions_rejects_invalid_pagination(self):
         handler = self._handler()
