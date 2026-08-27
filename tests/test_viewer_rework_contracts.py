@@ -3,7 +3,7 @@ import re
 import shutil
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -142,12 +142,56 @@ class TestViewerReworkContracts(unittest.TestCase):
         handler.get_quality({})
         self.assertEqual(quality["status"], 200)
         self.assertIn("orphan_raw", quality["data"])
-
         operations = self._capture(handler)
         handler.get_operations()
         self.assertEqual(operations["status"], 200)
         self.assertEqual(operations["data"]["api_version"], 1)
         self.assertIn("active_hello_sessions", operations["data"]["daemon"])
+
+    def test_stats_provides_overview_activity_health_and_session_aggregates(self):
+        self._insert_entity("linked")
+        self._insert_entity("target")
+        self._insert_entity("orphan")
+        self._insert_relation("linked", "target")
+        self.conn.execute("UPDATE entities SET agent_session_id = ? WHERE id = ?", ("memory-session", "linked"))
+        now = datetime.now(UTC)
+        self.conn.execute(
+            "INSERT INTO events (id, timestamp, agent_id, type, content, agent_session_id) VALUES (?, ?, ?, ?, ?, ?)",
+            ("recent-event", now.isoformat(), "viewer_test", "decision", "Recent event", "event-session"),
+        )
+        self.conn.execute(
+            "INSERT INTO events (id, timestamp, agent_id, type, content) VALUES (?, ?, ?, ?, ?)",
+            ("old-event", (now - timedelta(hours=25)).isoformat(), "viewer_test", "decision", "Old event"),
+        )
+        self.conn.execute(
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at) VALUES (?, ?, ?)",
+            ("lifecycle-session", "/project", now.isoformat()),
+        )
+        self.conn.commit()
+
+        class LiveState:
+            @staticmethod
+            def viewer_snapshot():
+                return {"active_agent_session_ids": ["memory-session", "not-visible"]}
+
+        handler = self._handler(LiveState())
+        captured = self._capture(handler)
+        handler.get_stats()
+        stats = captured["data"]
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(stats["events_last_24h"], 1)
+        self.assertEqual(stats["total_relations"], 1)
+        self.assertEqual(stats["orphan_raw_count"], 1)
+        self.assertEqual(stats["total_agent_sessions"], 3)
+        self.assertTrue(stats["agent_session_liveness_available"])
+        self.assertEqual(stats["active_agent_sessions"], 1)
+        self.assertEqual(stats["db_size_bytes"], os.path.getsize(self.db_path))
+
+        unavailable_handler = self._handler()
+        unavailable = self._capture(unavailable_handler)
+        unavailable_handler.get_stats()
+        self.assertFalse(unavailable["data"]["agent_session_liveness_available"])
+        self.assertIsNone(unavailable["data"]["active_agent_sessions"])
 
     def test_explorer_filters_status_and_memory_type(self):
         now = datetime.now(UTC).isoformat()
@@ -260,6 +304,16 @@ class TestViewerReworkContracts(unittest.TestCase):
             "formatTimestamp(data.updated_at)",
             "formatTimestamp(data.last_accessed_at)",
             "formatTimestamp(data.valid_from)",
+            "Unconsolidated memories",
+            "Events (last 24 hours)",
+            "Active agent sessions",
+            "All agent sessions",
+            "Stored relations",
+            "Orphaned raw memories",
+            "Primary database size",
+            "data.agent_session_liveness_available",
+            "state.sessionsPreset = { state: 'active' }",
+            "state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();",
         ):
             self.assertIn(expected, script)
         self.assertNotIn("source_id", script)
@@ -283,6 +337,8 @@ class TestViewerReworkContracts(unittest.TestCase):
             "max-height: 95dvh",
             "text-align: left",
             ".predicate-pill",
+            ".overview-actions { display: grid;",
+            ".action-card { display: flex;",
         ):
             self.assertIn(expected, stylesheet)
 

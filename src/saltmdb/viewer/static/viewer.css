@@ -41,8 +41,12 @@ main > header { display: flex; gap: 1rem; justify-content: space-between; align-
 .section-heading h3 { margin-bottom: .15rem; }
 .section-heading p { margin-bottom: 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: .85rem; margin-bottom: 1.6rem; }
+.overview-group > .section-heading { margin-bottom: .8rem; }
+.overview-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: .85rem; }
 .card, .table-wrap, .metadata-panel, .graph-canvas, .scatterplot { border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(135deg, #17233ad9, #111a2bd9); box-shadow: var(--shadow); }
 .card { padding: 1rem; }
+.action-card { display: flex; flex-wrap: wrap; gap: .55rem; align-content: flex-start; }
+.action-card .section-heading { width: 100%; }
 .metric-card { min-height: 112px; display: flex; flex-direction: column; justify-content: space-between; border-top: 2px solid var(--accent); }
 .metric-card.raw { border-top-color: var(--lifecycle-raw); }.metric-card.consolidated { border-top-color: var(--lifecycle-consolidated); }.metric-card.archived { border-top-color: var(--lifecycle-archived); }.metric-card.warning { border-top-color: var(--state-warning); }.metric-card.ok { border-top-color: var(--state-ready); }.metric-card.pending { border-top-color: var(--state-pending); }.metric-card.failed { border-top-color: var(--state-failed); }
 .metric { font-size: 1.9rem; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }

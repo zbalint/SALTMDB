@@ -222,16 +222,41 @@
 
   const overview = async () => {
     const data = await api('/api/stats'); const fragment = document.createDocumentFragment();
-    const heading = section('Memory at a glance', 'A quick read of the current knowledge base.');
-    const grid = node('div', undefined, 'grid');
-    [['Active memories', data.active_entities, ''], ['Raw memories', data.raw_count, 'raw'], ['Consolidated', data.consolidated_count, 'consolidated'], ['Archived', data.archived_count, 'archived'], ['Pending embeddings', data.embeddings_pending, 'warning']]
-      .forEach(item => grid.append(metric(...item)));
-    fragment.append(heading, grid);
-    const lifecycle = node('div', undefined, 'card lifecycle-summary'); lifecycle.append(section('Lifecycle', 'Open a focused explorer view.'));
+    const metricGroup = (heading, description, items) => {
+      const group = node('section', undefined, 'overview-group'); const grid = node('div', undefined, 'grid');
+      items.forEach(item => grid.append(metric(...item))); group.append(section(heading, description), grid); return group;
+    };
+    fragment.append(
+      metricGroup('Knowledge base', 'The current composition of the memory graph.', [
+        ['Active memories', data.active_entities], ['Unconsolidated memories', data.raw_count, 'raw'],
+        ['Consolidated', data.consolidated_count, 'consolidated'], ['Archived', data.archived_count, 'archived'],
+      ]),
+      metricGroup('Activity & connections', 'Recent operational activity and graph reach.', [
+        ['Events (last 24 hours)', data.events_last_24h], ['Active agent sessions', data.active_agent_sessions, 'ok'],
+        ['All agent sessions', data.total_agent_sessions], ['Stored relations', data.total_relations],
+      ]),
+      metricGroup('Health & storage', 'Signals that may need maintenance attention.', [
+        ['Pending embeddings', data.embeddings_pending, 'warning'], ['Orphaned raw memories', data.orphan_raw_count, 'warning'],
+        ['Primary database size', formatBytes(data.db_size_bytes)],
+      ]),
+    );
+    const actions = node('div', undefined, 'overview-actions');
+    const lifecycle = node('section', undefined, 'card action-card'); lifecycle.append(section('Memory lifecycle', 'Open a focused Memory Explorer view.'));
     [['All memories', ''], ['Raw', 'raw'], ['Consolidated', 'consolidated'], ['Archived', 'archived']].forEach(([label, value]) => lifecycle.append(button(label, `filter-link ${value ? `status-${value}` : ''}`, () => {
       state.explorerPreset = { status: value }; state.explorerPage = 1; state.view = 'explorer'; render();
     })));
-    fragment.append(lifecycle); view.replaceChildren(fragment);
+    const sessions = node('section', undefined, 'card action-card'); sessions.append(section('Agent sessions', 'Inspect live and historical agent work.'));
+    const activeSessions = button('Active sessions', 'filter-link status-active', () => {
+      state.sessionsPreset = { state: 'active' }; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();
+    });
+    if (!data.agent_session_liveness_available) {
+      activeSessions.disabled = true;
+      activeSessions.title = 'Live session status is unavailable.';
+    }
+    sessions.append(activeSessions, button('All sessions', 'filter-link', () => {
+      state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();
+    }));
+    actions.append(lifecycle, sessions); fragment.append(actions); view.replaceChildren(fragment);
   };
 
   const explorer = async () => {

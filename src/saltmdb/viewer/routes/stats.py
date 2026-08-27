@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from saltmdb.db.vector_schema import try_load_vector_extension
 from saltmdb.viewer.routes._shared import MAX_ENTITY_LIMIT, _bounded_query_int
+from saltmdb.viewer.routes.sessions import _daemon_liveness, _load_sessions
 
 if TYPE_CHECKING:
     from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
@@ -43,8 +44,20 @@ class StatsMixin(ViewerHandlerProtocol):
 
         cur = conn.execute("SELECT COUNT(*) FROM events")
         stats["total_events"] = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM events "
+            "WHERE datetime(timestamp) >= datetime('now', '-24 hours')"
+        )
+        stats["events_last_24h"] = cur.fetchone()[0]
         cur = conn.execute("SELECT COUNT(*) FROM relations")
         stats["total_relations"] = cur.fetchone()[0]
+        cur = conn.execute(
+            """SELECT COUNT(*) FROM entities e WHERE e.status = 'raw'
+               AND NOT EXISTS (
+                   SELECT 1 FROM relations r WHERE r.source_id = e.id OR r.target_id = e.id
+               )"""
+        )
+        stats["orphan_raw_count"] = cur.fetchone()[0]
         cur = conn.execute("SELECT COUNT(*) FROM tags")
         stats["total_tags"] = cur.fetchone()[0]
         for emb_status in ["ready", "pending", "failed"]:
@@ -56,10 +69,17 @@ class StatsMixin(ViewerHandlerProtocol):
 
         gateway = getattr(self.server, "viewer_gateway", None)
         db_path = getattr(gateway, "db_path", None)
-        stats["db_size_mb"] = (
-            round(os.path.getsize(db_path) / (1024 * 1024), 2)
-            if db_path and os.path.exists(db_path)
-            else 0.0
+        stats["db_size_bytes"] = os.path.getsize(db_path) if db_path and os.path.exists(db_path) else 0
+        stats["db_size_mb"] = round(stats["db_size_bytes"] / (1024 * 1024), 2)
+
+        active_session_ids, liveness_known = _daemon_liveness(self.server)
+        sessions = _load_sessions(conn, active_session_ids, liveness_known)
+        stats["total_agent_sessions"] = len(sessions)
+        stats["agent_session_liveness_available"] = liveness_known
+        stats["active_agent_sessions"] = (
+            sum(session["session_id"] in active_session_ids for session in sessions)
+            if liveness_known
+            else None
         )
         return stats
 
