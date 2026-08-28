@@ -30,12 +30,12 @@ def get_frontend_html(db_path: str = None) -> str:
 <body><a class="skip-link" href="#main">Skip to content</a><div class="app-shell">
 <aside class="sidebar"><div><h1>SALTMDB</h1><p class="sidebar-kicker">Memory workspace</p><nav aria-label="Viewer">
 <button data-view="overview" class="nav-item is-active">Overview</button>
-<button data-view="explorer" class="nav-item">Memory Explorer</button>
+<button data-view="explorer" class="nav-item">Memories</button>
 <button data-view="activity" class="nav-item">Activity</button>
 <button data-view="sessions" class="nav-item">Agent Sessions</button>
-<button data-view="relationships" class="nav-item">Relationships</button>
-<button data-view="quality" class="nav-item">Quality</button>
-<button data-view="operations" class="nav-item">Operations</button>
+<button data-view="relationships" class="nav-item">Memory Map</button>
+<button data-view="quality" class="nav-item">Memory Quality</button>
+<button data-view="operations" class="nav-item">System Health</button>
 <button data-view="tags" class="nav-item">Tags</button>
 <button data-view="diagnostics" class="nav-item">Diagnostics</button>
 </nav></div><div id="connection-indicator" class="connection-indicator" role="status" aria-live="polite"><span class="connection-dot" aria-hidden="true"></span><span>Checking connection…</span></div></aside><main id="main"><header><div><p class="eyebrow">Knowledge operations</p><h2 id="view-title">Overview</h2></div>

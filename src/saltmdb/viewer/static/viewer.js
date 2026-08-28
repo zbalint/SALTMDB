@@ -17,9 +17,9 @@
   const eventDialog = document.querySelector('#event-detail');
   const eventDetail = document.querySelector('#event-detail-content');
   const names = {
-    overview: 'Overview', explorer: 'Memory Explorer', activity: 'Activity', sessions: 'Agent Sessions',
-    relationships: 'Relationships', quality: 'Quality & Lifecycle', operations: 'Operations',
-    tags: 'Tags & Taxonomy', diagnostics: 'Diagnostics',
+    overview: 'Overview', explorer: 'Memories', activity: 'Activity', sessions: 'Agent Sessions',
+    relationships: 'Memory Map', quality: 'Memory Quality', operations: 'System Health',
+    tags: 'Tags', diagnostics: 'Diagnostics',
   };
 
   const node = (tag, text, className) => {
@@ -241,7 +241,7 @@
       ]),
     );
     const actions = node('div', undefined, 'overview-actions');
-    const lifecycle = node('section', undefined, 'card action-card'); lifecycle.append(section('Memory lifecycle', 'Open a focused Memory Explorer view.'));
+    const lifecycle = node('section', undefined, 'card action-card'); lifecycle.append(section('Memory lifecycle', 'Open a focused Memories view.'));
     [['All memories', ''], ['Raw', 'raw'], ['Consolidated', 'consolidated'], ['Archived', 'archived']].forEach(([label, value]) => lifecycle.append(button(label, `filter-link ${value ? `status-${value}` : ''}`, () => {
       state.explorerPreset = { status: value }; state.explorerPage = 1; state.view = 'explorer'; render();
     })));
@@ -556,7 +556,7 @@
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', async event => { event.preventDefault(); await load(input.value.trim()); });
-    view.replaceChildren(section('Relationship graph', 'A bounded visual neighborhood centered on one memory.'), form, result);
+    view.replaceChildren(section('Memory Map', 'A bounded visual neighborhood centered on one memory.'), form, result);
     if (state.focusRelationshipInput) { state.focusRelationshipInput = false; input.focus(); }
     if (state.relationRoot) await load(state.relationRoot);
   };
@@ -566,13 +566,13 @@
     const attention = node('div', undefined, 'grid'); attention.append(metric('Quality signals', data.items.length, 'warning'), metric('Orphaned raw memories', data.orphan_raw.length, 'raw'));
     const qualityRows = data.items.map(item => { const row = node('tr'); const lifecycle = node('td'); lifecycle.append(statusBadge(item.status)); const embedding = node('td'); embedding.append(statusBadge(item.embedding_status || 'pending')); const flags = node('td'); flags.append(tagList(item.quality_flags)); row.append(memoryCell(item), lifecycle, embedding, node('td', item.quality_status || 'Not evaluated'), flags); return row; });
     const orphanRows = data.orphan_raw.map(item => { const row = node('tr'); row.append(memoryCell(item)); return row; });
-    fragment.append(section('Quality & lifecycle', 'Read-only signals to focus maintenance work.'), attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), section('Raw memories without relations'), renderTable(['Memory'], orphanRows)); view.replaceChildren(fragment);
+    fragment.append(section('Memory Quality', 'Read-only signals to focus maintenance work.'), attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), section('Raw memories without relations'), renderTable(['Memory'], orphanRows)); view.replaceChildren(fragment);
   };
 
   const operations = async () => {
     const data = await api('/api/operations'); const grid = node('div', undefined, 'grid');
     [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches], ['Database size', formatBytes(data.database.files.db_bytes)], ['Schema version', data.database.schema_version]].forEach(item => grid.append(metric(...item)));
-    view.replaceChildren(section('Operations', 'Point-in-time daemon and database health supplied by the daemon.'), grid);
+    view.replaceChildren(section('System Health', 'Point-in-time daemon and database health supplied by the daemon.'), grid);
   };
 
   const tags = async () => {

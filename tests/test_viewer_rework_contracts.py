@@ -102,6 +102,21 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn("/static/vendor/marked-18.0.7.umd.js", shell)
         self.assertNotIn("onclick=", shell)
         self.assertIn('id="event-detail"', shell)
+        expected_navigation = (
+            ("overview", "nav-item is-active", "Overview"),
+            ("explorer", "nav-item", "Memories"),
+            ("activity", "nav-item", "Activity"),
+            ("sessions", "nav-item", "Agent Sessions"),
+            ("relationships", "nav-item", "Memory Map"),
+            ("quality", "nav-item", "Memory Quality"),
+            ("operations", "nav-item", "System Health"),
+            ("tags", "nav-item", "Tags"),
+            ("diagnostics", "nav-item", "Diagnostics"),
+        )
+        for view, class_name, label in expected_navigation:
+            self.assertIn(f'<button data-view="{view}" class="{class_name}">{label}</button>', shell)
+        for obsolete_label in ("Memory Explorer", "Relationships", "Operations"):
+            self.assertNotIn(f'class="nav-item">{obsolete_label}</button>', shell)
 
     def test_neighborhood_validates_time_and_reports_real_truncation(self):
         self._insert_entity("root")
@@ -323,6 +338,25 @@ class TestViewerReworkContracts(unittest.TestCase):
             script,
         )
         self.assertNotIn("New data may be available", script)
+        for expected in (
+            "explorer: 'Memories'",
+            "relationships: 'Memory Map'",
+            "quality: 'Memory Quality'",
+            "operations: 'System Health'",
+            "tags: 'Tags'",
+            "section('Memory Map'",
+            "section('Memory Quality'",
+            "section('System Health'",
+        ):
+            self.assertIn(expected, script)
+        for obsolete in (
+            "explorer: 'Memory Explorer'",
+            "relationships: 'Relationships'",
+            "quality: 'Quality & Lifecycle'",
+            "operations: 'Operations'",
+            "tags: 'Tags & Taxonomy'",
+        ):
+            self.assertNotIn(obsolete, script)
         for expected in (
             "--lifecycle-raw",
             "--lifecycle-consolidated",
