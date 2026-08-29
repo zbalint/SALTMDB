@@ -5,6 +5,7 @@ import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.db.connection import write_transaction_retrying
 from saltmdb.domain.services.memory_service import resolve_or_create_tag, normalize_tag_name
+from saltmdb.domain.services.memory_service.tags import sanitize_tag_body, validate_tag_names
 from saltmdb.domain.services import event_service
 
 
@@ -18,6 +19,33 @@ class TestNormalizeTagName(unittest.TestCase):
     def test_empty_or_none_returns_empty_string(self):
         self.assertEqual(normalize_tag_name(""), "")
         self.assertEqual(normalize_tag_name(None), "")
+
+
+class TestSanitizeTagBody(unittest.TestCase):
+    def test_single_separator_collapses_to_one_hyphen(self):
+        for raw_body in ("foo bar", "foo:bar", "foo_bar", "foo/bar"):
+            with self.subTest(raw_body=raw_body):
+                self.assertEqual(sanitize_tag_body(raw_body), ("foo-bar", None))
+
+    def test_leading_and_trailing_separator_is_trimmed(self):
+        self.assertEqual(sanitize_tag_body(":foo"), ("foo", None))
+        self.assertEqual(sanitize_tag_body("foo:"), ("foo", None))
+
+    def test_non_adjacent_separators_collapse_independently(self):
+        self.assertEqual(sanitize_tag_body("foo:bar baz"), ("foo-bar-baz", None))
+
+    def test_adjacent_separators_are_rejected(self):
+        for raw_body in ("foo::bar", "foo-:bar", "foo- bar", "foo--bar"):
+            with self.subTest(raw_body=raw_body):
+                sanitized, rejection = sanitize_tag_body(raw_body)
+                self.assertIsNone(sanitized)
+                self.assertIsInstance(rejection, str)
+                self.assertTrue(rejection)
+                self.assertIn("adjacent", rejection.lower())
+
+    def test_validate_tag_names_rejects_list_when_any_tag_has_adjacent_separators(self):
+        self.assertIsNotNone(validate_tag_names(["#ok", "#foo::bar"]))
+        self.assertIsNone(validate_tag_names(["#ok", "#foo:bar"]))
 
 
 class TestResolveOrCreateTag(unittest.TestCase):

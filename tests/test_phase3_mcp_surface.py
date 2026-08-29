@@ -28,9 +28,11 @@ class TestPhase3McpSurface(unittest.TestCase):
 
     def test_tool_count_and_registration(self):
         # Phase 6 removed dismiss_event (19 -> 18); Phase 7 removed ephemeral_memory and
-        # export_corpus_snapshot (18 -> 16, the plan's §2 target). See test_mcp_tools.py's
-        # test_mcp_tool_count_regression_guard for the authoritative count guard.
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 16)
+        # export_corpus_snapshot (18 -> 16, the plan's §2 target). update_memory_metadata was
+        # added afterward (16 -> 17, API-ergonomics Gap 1), then inspect_memory (17 -> 18,
+        # API-ergonomics Gap 2). See test_mcp_tools.py's test_mcp_tool_count_regression_guard
+        # for the authoritative count guard.
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 18)
         self.assertIn("get_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("get_lineage", dispatch.DISPATCH_TABLE)
         self.assertIn("get_related_memories", dispatch.DISPATCH_TABLE)
@@ -49,7 +51,7 @@ class TestPhase3McpSurface(unittest.TestCase):
         )
         self.assertEqual(
             list(inspect.signature(tools.get_related_memories).parameters),
-            ["entity_id", "max_depth", "direction"],
+            ["entity_id", "max_depth", "direction", "include_inspect"],
         )
 
     def test_graph_tools_forward_normalized_calls(self):
@@ -68,6 +70,23 @@ class TestPhase3McpSurface(unittest.TestCase):
             self.assertIn(name, protocol.READ_TOOLS)
             self.assertNotIn(name, protocol.WRITE_TOOLS)
         self.assertNotIn("inspect_graph", protocol.READ_TOOLS)
+
+    def test_protocol_classifies_api_ergonomics_gap_tools_correctly(self):
+        # API-ergonomics Gap 1/2: both new tools must land in the daemon's crash/in-flight-write
+        # classification (protocol.py's READ_TOOLS/WRITE_TOOLS), or a MID_CALL_FAILURE during
+        # either falls through RpcBackend's exception handler to a raw re-raise instead of the
+        # correct retry (reads) / DAEMON_CONNECTION_LOST_DURING_WRITE advisory (writes) -- see
+        # SALTMDB memory 70cbcfc1 for the real gap this regression-guards against.
+        self.assertIn("update_memory_metadata", protocol.WRITE_TOOLS)
+        self.assertNotIn("update_memory_metadata", protocol.READ_TOOLS)
+        self.assertIn("inspect_memory", protocol.READ_TOOLS)
+        self.assertNotIn("inspect_memory", protocol.WRITE_TOOLS)
+        # Both must also be registered for real dispatch, and inspect_memory must not be a
+        # coordinator-serialized mutating call (matches get_memory's own read-only treatment).
+        self.assertIn("update_memory_metadata", dispatch.DISPATCH_TABLE)
+        self.assertIn("inspect_memory", dispatch.DISPATCH_TABLE)
+        self.assertIn("update_memory_metadata", dispatch.MUTATING_TOOLS)
+        self.assertNotIn("inspect_memory", dispatch.MUTATING_TOOLS)
 
 
 if __name__ == "__main__":

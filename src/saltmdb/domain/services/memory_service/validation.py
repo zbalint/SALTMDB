@@ -174,8 +174,10 @@ def _validate_cross_encoder_controls(
     return cap, text_cap
 
 
-def validate_memory_input(title: str, content: str, metadata: dict | None) -> None:
-    """Validates memory input to enforce title length bounds."""
+def validate_memory_input(
+    title: str, content: str, metadata: dict | None, tags: list[str] | None = None
+) -> None:
+    """Validates memory input to enforce title length bounds and tag-name shape."""
     if title:
         stripped_title = title.strip()
         if len(stripped_title) > TITLE_MAX_LENGTH:
@@ -188,3 +190,10 @@ def validate_memory_input(title: str, content: str, metadata: dict | None) -> No
             raise ValueError(
                 f"Error: Title is too short (minimum {TITLE_MIN_LENGTH} characters). Provide a descriptive, canonical title."
             )
+
+    if tags:
+        from .tags import validate_tag_names
+
+        tag_error = validate_tag_names(tags)
+        if tag_error:
+            raise ValueError(f"Error: {tag_error}")

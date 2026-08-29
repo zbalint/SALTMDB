@@ -588,13 +588,14 @@ def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
     """
 
 
-def analyze_dependencies(
+def analyze_dependencies(  # noqa: C901, PLR0912
     root_entity_id: str = None,
     max_depth: int = 5,
     point_in_time: str = None,
     direction: Literal["outbound", "inbound", "both"] = "outbound",
     db_connection=None,
     db_path: str = None,
+    include_inspect: bool = False,
 ) -> dict:
     """Recursively traces relational paths using SQL CTEs.
 
@@ -657,6 +658,20 @@ def analyze_dependencies(
         tagged_rows.sort(key=lambda item: item[1][6])  # row[6] == depth
 
         nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
+        if include_inspect:
+            from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
+
+            root_inspect = _assemble_memory_record(
+                conn,
+                root_id,
+                root_id,
+                include_content=False,
+                include_lineage=False,
+                touch=False,
+                max_depth=max_depth,
+            )
+            if root_inspect is not None:
+                nodes[0].update(root_inspect)
         seen_nodes = {root_id}
 
         # dt.path (last column) is only needed by the SQL cycle guard (see CTE above) --
@@ -680,7 +695,20 @@ def analyze_dependencies(
                 (tgt_id, tgt_title) if d == "outbound" else (src_id, src_title)
             )
             if reached_id not in seen_nodes:
-                nodes.append({"id": reached_id, "title": reached_title, "depth": depth})
+                node = {"id": reached_id, "title": reached_title, "depth": depth}
+                if include_inspect:
+                    inspected = _assemble_memory_record(
+                        conn,
+                        reached_id,
+                        reached_id,
+                        include_content=False,
+                        include_lineage=False,
+                        touch=False,
+                        max_depth=max_depth,
+                    )
+                    if inspected is not None:
+                        node.update(inspected)
+                nodes.append(node)
                 seen_nodes.add(reached_id)
 
             # Multiple converging paths in a diamond-shaped graph can revisit the same
@@ -952,6 +980,7 @@ def get_related_memories(
     direction: Literal["outbound", "inbound", "both"] = "both",
     db_connection=None,
     db_path: str = None,
+    include_inspect: bool = False,
 ) -> dict:
     """Named graph API for semantic neighbours, backed by ``analyze_dependencies``.
 
@@ -966,6 +995,7 @@ def get_related_memories(
         max_depth=max_depth,
         point_in_time=point_in_time,
         direction=direction,
+        include_inspect=include_inspect,
         db_connection=db_connection,
         db_path=db_path,
     )
@@ -1175,6 +1205,15 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if should_close:
             close_connection(conn)
         return _consolidation_rejected(parent_error["code"], parent_error["message"])
+
+    # Same pre-BEGIN, zero-side-effects convention as the parent_ids check above.
+    from saltmdb.domain.services.memory_service.tags import validate_tag_names
+
+    tag_error = validate_tag_names(tags)
+    if tag_error is not None:
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected("INVALID_TAG_NAME", tag_error)
 
     # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
     # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted

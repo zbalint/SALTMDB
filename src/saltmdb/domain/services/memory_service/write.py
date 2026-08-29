@@ -674,7 +674,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             return "Error: title is mandatory and cannot be empty."
 
         try:
-            validation.validate_memory_input(title, redacted_content, metadata)
+            validation.validate_memory_input(title, redacted_content, metadata, tags)
         except ValueError as e:
             return str(e)
 

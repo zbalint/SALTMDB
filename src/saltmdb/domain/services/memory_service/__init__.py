@@ -78,12 +78,14 @@ from .ranking import (
 from .orchestrator import search_memory
 from .lifecycle import (
     get_memory,
+    inspect_memory,
     fetch_memory_chunk,
     touch_memory_access,
     archive_memory,
     detect_orphaned_memories,
     revise_memory,
     supersede_memory,
+    update_memory_metadata,
 )
 from .duplicates import check_duplicate_memories, scan_memories, bulk_archive_memory
 
@@ -136,11 +138,13 @@ __all__ = [
     "search_memory",
     "fetch_memory_chunk",
     "get_memory",
+    "inspect_memory",
     "touch_memory_access",
     "archive_memory",
     "detect_orphaned_memories",
     "revise_memory",
     "supersede_memory",
+    "update_memory_metadata",
     "check_duplicate_memories",
     "scan_memories",
     "bulk_archive_memory",

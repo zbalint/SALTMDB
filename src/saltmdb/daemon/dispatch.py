@@ -204,6 +204,11 @@ def _dispatch_get_memory(**kw):
     return memory_service.fetch_memory_chunk(entity_id=entity_id)
 
 
+def _dispatch_inspect_memory(**kw):
+    entity_id = _required_str(kw, "entity_id")
+    return memory_service.inspect_memory(entity_id=entity_id)
+
+
 def _dispatch_archive_memory(**kw):
     # archive_memory's bulk/single/none decision depends on the ORIGINAL request shape (did the
     # caller pass a list, even a 1-item one?), which is pre-normalization information -- mcp/
@@ -342,6 +347,14 @@ def _dispatch_review_core_memory(**kw):
     )
 
 
+def _dispatch_update_memory_metadata(**kw):
+    return memory_service.update_memory_metadata(
+        entity_id=_required_str(kw, "entity_id"),
+        metadata=kw.get("metadata"),
+        agent_session_id=kw.get("agent_session_id"),
+    )
+
+
 def _dispatch_get_core_bootstrap_digest(**kw):
     from saltmdb.config import get_db_path
     from saltmdb.db.connection import get_connection
@@ -381,11 +394,25 @@ def _dispatch_get_related_memories(**kw):
     entity_id = _required_str(kw, "entity_id")
     max_depth = _optional_int(kw, "max_depth", 5)
     direction = _optional_direction(kw)
+    related_kwargs = {
+        "entity_id": entity_id,
+        "max_depth": max_depth,
+        "direction": direction,
+    }
+    if "include_inspect" in kw:
+        related_kwargs["include_inspect"] = _optional_bool(kw, "include_inspect", False)
     get_related = getattr(relation_service, "get_related_memories", None)
     if get_related is not None:
-        return get_related(entity_id=entity_id, max_depth=max_depth, direction=direction)
+        return get_related(**related_kwargs)
     return relation_service.analyze_dependencies(
-        root_entity_id=entity_id, max_depth=max_depth, direction=direction
+        root_entity_id=entity_id,
+        max_depth=max_depth,
+        direction=direction,
+        **(
+            {"include_inspect": related_kwargs["include_inspect"]}
+            if "include_inspect" in related_kwargs
+            else {}
+        ),
     )
 
 
@@ -411,6 +438,7 @@ DISPATCH_TABLE = {
     "store_memory": _dispatch_store_memory,
     "search_memory": _dispatch_search_memory,
     "get_memory": _dispatch_get_memory,
+    "inspect_memory": _dispatch_inspect_memory,
     "archive_memory": _dispatch_archive_memory,
     "manage_relation": _dispatch_manage_relation,
     "revise_memory": _dispatch_revise_memory,
@@ -420,6 +448,7 @@ DISPATCH_TABLE = {
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
     "review_core_memory": _dispatch_review_core_memory,
+    "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
     "get_last_session_digest": _dispatch_get_last_session_digest,
 }
@@ -438,6 +467,7 @@ MUTATING_TOOLS = frozenset(
         "supersede_memory",
         "consolidate_memories",
         "review_core_memory",
+        "update_memory_metadata",
     }
 )
 

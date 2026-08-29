@@ -67,6 +67,74 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertTrue(any(item["code"] == "TAG_NEAR_MISS" for item in result["warnings"]))
         self.assertEqual(result["effective"]["owner_id"], "test_agent")
 
+    def test_store_memory_rejects_adjacent_separator_tag_before_any_write(self):
+        result = tools.store_memory(
+            title="[Test] Adjacent separator tag",
+            tags=["#foo::bar"],
+            content="Some sufficiently long content body for the quality gate to accept without issue here.",
+        )
+
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("Error: "))
+        self.assertIn("adjacent", result.lower())
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
+
+    def test_store_memory_collapses_single_separator_tag_and_still_warns_near_miss(self):
+        result = tools.store_memory(
+            title="[Test] Single separator tag",
+            tags=["#wayfinder:task"],
+            content="Some sufficiently long content body for the quality gate to accept without issue here.",
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("#wayfinder-task", result["data"]["effective_tags"])
+        self.assertTrue(any(item["code"] == "TAG_NEAR_MISS" for item in result["warnings"]))
+
+    def test_revise_memory_rejects_adjacent_separator_tag(self):
+        stored = tools.store_memory(
+            title="[Test] Revision source",
+            tags=["#testing"],
+            content="Some sufficiently long source content body for the quality gate to accept without issue here.",
+        )
+        self.assertEqual(stored["status"], "ok")
+
+        result = tools.revise_memory(
+            entity_id=stored["data"]["id"],
+            title="[Test] Revised",
+            content="Different content body long enough to pass quality checks easily.",
+            tags=["#foo::bar"],
+            reason="testing adjacent separator rejection",
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("adjacent", result["errors"][0]["message"].lower())
+
+    def test_consolidate_memories_rejects_adjacent_separator_tag(self):
+        first = tools.store_memory(
+            title="[Test] Related parent A",
+            tags=["#testing"],
+            content="Parent A content for a closely related consolidation tag validation test.",
+        )
+        second = tools.store_memory(
+            title="[Test] Related parent B",
+            tags=["#testing"],
+            content="Parent B content, closely related, for the same consolidation tag validation test.",
+        )
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(second["status"], "ok")
+
+        result = tools.consolidate_memories(
+            parent_ids=[first["data"]["id"], second["data"]["id"]],
+            title="[Test] Consolidated",
+            content="Consolidated content body long enough to pass quality checks easily.",
+            tags=["#foo::bar"],
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("adjacent", result["errors"][0]["message"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

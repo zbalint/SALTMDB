@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import os
 import shutil
+import json
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
 from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -595,6 +596,187 @@ class TestMCPToolsWrapper(unittest.TestCase):
         lineage_now = tools.get_lineage(entity_id=c_id)
         self.assertEqual(lineage_now["total"], 2)
 
+    def test_inspect_memory_returns_snippet_not_content_with_lineage(self):
+        content = (
+            "# Inspect Snippet Heading\n\n"
+            "First body line here.\n"
+            "Second body line here.\n"
+            "Third body line here.\n"
+            "Fourth unique body line excluded from the snippet."
+        )
+        stored = tools.store_memory(
+            content=content,
+            title="Inspect Snippet Memory",
+            tags=["#inspect"],
+        )
+        self.assertEqual(stored["status"], "ok")
+
+        result = tools.inspect_memory(entity_id=stored["data"]["id"])
+
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("content", result["data"])
+        self.assertIn("snippet", result["data"])
+        self.assertIsInstance(result["data"]["snippet"], str)
+        self.assertTrue(result["data"]["snippet"])
+        self.assertNotIn("Fourth unique body line excluded", result["data"]["snippet"])
+        self.assertIn("lineage", result["data"])
+
+    def test_inspect_memory_field_parity_with_get_memory_minus_content(self):
+        stored = tools.store_memory(
+            content=(
+                "# Field Parity Heading\n\n"
+                "First parity body line.\n"
+                "Second parity body line.\n"
+                "Third parity body line.\n"
+                "Fourth parity body line."
+            ),
+            title="Inspect Field Parity Memory",
+            tags=["#inspect"],
+        )
+        self.assertEqual(stored["status"], "ok")
+        entity_id = stored["data"]["id"]
+
+        get_result = tools.get_memory(entity_id=entity_id)
+        inspect_result = tools.inspect_memory(entity_id=entity_id)
+
+        self.assertEqual(
+            set(get_result["data"].keys()) - {"content"},
+            set(inspect_result["data"].keys()) - {"snippet"},
+        )
+
+    def test_inspect_memory_unknown_entity_id_rejected(self):
+        result = tools.inspect_memory(entity_id="totally-fake-id-000")
+
+        self.assertEqual(result["status"], "rejected")
+
+    def test_inspect_memory_ambiguous_prefix_returns_candidates_never_content(self):
+        # No tags on these two: entity_tags rows carry a foreign key to entities.id, which
+        # would block the raw `UPDATE entities SET id = ...` below used to force the collision
+        # (mirrors test_entity_id_prefix_resolution.py's own tag-free collision fixture).
+        stored_a = tools.store_memory(
+            content="Secret content A that must not leak via an ambiguous prefix.",
+            title="Inspect Collision Entity A",
+            tags=[],
+        )
+        id_a = stored_a["data"]["id"]
+        shared_prefix = id_a[:8]
+        stored_b = tools.store_memory(
+            content="Secret content B that must not leak via an ambiguous prefix.",
+            title="Inspect Collision Entity B",
+            tags=[],
+        )
+        id_b = stored_b["data"]["id"]
+        forced_id_b = shared_prefix + id_b[8:]
+        self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
+        self.conn.commit()
+
+        result = tools.inspect_memory(entity_id=shared_prefix)
+
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "AMBIGUOUS_ID_PREFIX")
+        candidates = result["errors"][0]["candidates"]
+        candidate_ids = {c["id"] for c in candidates}
+        self.assertEqual(candidate_ids, {id_a, forced_id_b})
+        self.assertNotIn("snippet", result)
+        self.assertNotIn("Secret content A", str(result))
+        self.assertNotIn("Secret content B", str(result))
+
+    def test_get_related_memories_include_inspect_false_is_unchanged_by_default(self):
+        stored_a = tools.store_memory(
+            content="Default related-memory source content for inspect regression testing.",
+            title="Default Related Source",
+            tags=["#related"],
+        )
+        stored_b = tools.store_memory(
+            content="Default related-memory target content for inspect regression testing.",
+            title="Default Related Target",
+            tags=["#related"],
+        )
+        a_id = stored_a["data"]["id"]
+        b_id = stored_b["data"]["id"]
+
+        relation = tools.manage_relation(
+            source_id=a_id,
+            target_id=b_id,
+            predicate="related_to",
+        )
+        self.assertIn("Relation successfully stored", relation)
+
+        result = tools.get_related_memories(entity_id=a_id, direction="outbound")
+
+        self.assertTrue(result["related_memories"])
+        for item in result["related_memories"]:
+            self.assertEqual(set(item.keys()), {"id", "title", "depth"})
+
+    def test_get_related_memories_include_inspect_true_embeds_fields_without_lineage(self):
+        stored_a = tools.store_memory(
+            content="Embedded inspect source content for related-memory regression testing.",
+            title="Embedded Inspect Source",
+            tags=["#related"],
+        )
+        stored_b = tools.store_memory(
+            content="Embedded inspect target content for related-memory regression testing.",
+            title="Embedded Inspect Target",
+            tags=["#related"],
+        )
+        a_id = stored_a["data"]["id"]
+        b_id = stored_b["data"]["id"]
+
+        relation = tools.manage_relation(
+            source_id=a_id,
+            target_id=b_id,
+            predicate="related_to",
+        )
+        self.assertIn("Relation successfully stored", relation)
+
+        result = tools.get_related_memories(
+            entity_id=a_id,
+            direction="outbound",
+            include_inspect=True,
+        )
+        target = next(item for item in result["related_memories"] if item["id"] == b_id)
+
+        for field in ("snippet", "status", "tags", "metadata"):
+            self.assertIn(field, target)
+        self.assertNotIn("lineage", target)
+        self.assertNotIn("content", target)
+
+    def test_get_related_memories_include_inspect_does_not_bump_last_accessed_at(self):
+        stored_a = tools.store_memory(
+            content="Access-time source content for related-memory regression testing.",
+            title="Access-Time Source",
+            tags=["#related"],
+        )
+        stored_b = tools.store_memory(
+            content="Access-time target content for related-memory regression testing.",
+            title="Access-Time Target",
+            tags=["#related"],
+        )
+        a_id = stored_a["data"]["id"]
+        b_id = stored_b["data"]["id"]
+
+        relation = tools.manage_relation(
+            source_id=a_id,
+            target_id=b_id,
+            predicate="related_to",
+        )
+        self.assertIn("Relation successfully stored", relation)
+
+        before = self.conn.execute(
+            "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
+        ).fetchone()[0]
+        result = tools.get_related_memories(
+            entity_id=a_id,
+            direction="outbound",
+            include_inspect=True,
+        )
+        after = self.conn.execute(
+            "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
+        ).fetchone()[0]
+
+        self.assertTrue(any(item["id"] == b_id for item in result["related_memories"]))
+        self.assertEqual(after, before)
+
     def test_manage_relation_invalidate_mode(self):
         res1 = tools.store_memory(
             content="Source entity for relation invalidation test",
@@ -889,8 +1071,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            16,
-            f"MCP server tool count must be exactly 16 after Phase 7 (ephemeral_memory and "
+            18,
+            f"MCP server tool count must be exactly 18 after the metadata update and "
+            f"inspect_memory tools were added "
+            f"(ephemeral_memory and "
             f"export_corpus_snapshot removed, following Phase 6's dismiss_event removal), "
             f"got {registered_count}",
         )
@@ -1082,6 +1266,175 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         # No prior session recorded
         digest = dispatch.DISPATCH_TABLE["get_last_session_digest"](cwd="/unknown/path")
         self.assertEqual(digest, "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>")
+
+
+class TestUpdateMemoryMetadataTool(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
+        self.conn.close()
+        if "SALTMDB_DB_PATH" in os.environ:
+            del os.environ["SALTMDB_DB_PATH"]
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _store_memory(self, metadata=None):
+        result = tools.store_memory(
+            title="Metadata Update Memory",
+            content="Sufficiently long content body for the quality gate to accept without issue here.",
+            tags=["#metadata-test"],
+            metadata=metadata,
+        )
+        self.assertEqual(result["status"], "ok")
+        return result
+
+    def _store_core(self, title):
+        result = tools.store_memory(
+            content=f"Distinct fixture content body for {title}, not a near-duplicate.",
+            title=title,
+            tags=["#core-test"],
+            is_core=True,
+            core_reason="A" * 20,
+            core_exit_condition="B" * 20,
+            metadata={"note": "initial"},
+        )
+        self.assertEqual(result["status"], "ok")
+        return result["data"]["id"]
+
+    def test_shallow_merge_overwrites_and_preserves_keys(self):
+        stored = self._store_memory(metadata={"a": 1, "b": 2})
+        entity_id = stored["data"]["id"]
+
+        result = tools.update_memory_metadata(
+            entity_id=entity_id, metadata={"b": 99, "c": 3}
+        )
+        self.assertIsInstance(result, str)
+        self.assertIn("updated", result)
+
+        fetched = tools.get_memory(entity_id=entity_id)
+        self.assertEqual(
+            json.loads(fetched["data"]["metadata"]),
+            {"a": 1, "b": 99, "c": 3},
+        )
+
+    def test_empty_patch_is_a_noop_and_reports_unchanged(self):
+        stored = self._store_memory(metadata={"a": 1, "b": 2})
+        entity_id = stored["data"]["id"]
+
+        result = tools.update_memory_metadata(entity_id=entity_id, metadata={})
+        self.assertIsInstance(result, str)
+        self.assertIn("unchanged", result)
+
+        fetched = tools.get_memory(entity_id=entity_id)
+        self.assertEqual(json.loads(fetched["data"]["metadata"]), {"a": 1, "b": 2})
+
+    def test_nonexistent_entity_id_returns_error_string(self):
+        result = tools.update_memory_metadata(
+            entity_id="definitely-not-a-real-id-00000", metadata={"x": 1}
+        )
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_non_dict_metadata_returns_error_string(self):
+        stored = self._store_memory()
+        entity_id = stored["data"]["id"]
+
+        result = tools.update_memory_metadata(entity_id=entity_id, metadata="not-a-dict")
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("Error:"))
+
+    def test_ambiguous_prefix_returns_error_string_naming_both_candidates(self):
+        # No tags on these two: entity_tags rows carry a foreign key to entities.id, which
+        # would block the raw `UPDATE entities SET id = ...` below used to force the collision
+        # (mirrors test_entity_id_prefix_resolution.py's own tag-free collision fixture).
+        stored_a = tools.store_memory(
+            title="Metadata Update Collision Entity A",
+            content="Distinct content body for collision entity A, not a near-duplicate of B.",
+            tags=[],
+            metadata={"a": 1},
+        )
+        self.assertEqual(stored_a["status"], "ok")
+        id_a = stored_a["data"]["id"]
+        shared_prefix = id_a[:8]
+        stored_b = tools.store_memory(
+            title="Metadata Update Collision Entity B",
+            content="Distinct content body for collision entity B, not a near-duplicate of A.",
+            tags=[],
+            metadata={"b": 2},
+        )
+        self.assertEqual(stored_b["status"], "ok")
+        id_b = stored_b["data"]["id"]
+        forced_id_b = shared_prefix + id_b[8:]
+        self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
+        self.conn.commit()
+
+        result = tools.update_memory_metadata(entity_id=shared_prefix, metadata={"x": 1})
+
+        self.assertIsInstance(result, str)
+        self.assertTrue(result.startswith("Error:"))
+        self.assertIn("multiple memories", result)
+
+        # No partial/unintended write happened to either candidate.
+        meta_a = self.conn.execute(
+            "SELECT metadata FROM entities WHERE id = ?", (id_a,)
+        ).fetchone()[0]
+        meta_b = self.conn.execute(
+            "SELECT metadata FROM entities WHERE id = ?", (forced_id_b,)
+        ).fetchone()[0]
+        self.assertEqual(json.loads(meta_a), {"a": 1})
+        self.assertEqual(json.loads(meta_b), {"b": 2})
+
+    def test_works_on_core_memory_without_touching_core_governance_fields(self):
+        entity_id = self._store_core("Metadata Update Core")
+        before = self.conn.execute(
+            "SELECT is_core, core_reason, core_exit_condition, core_review_after "
+            "FROM entities WHERE id = ?",
+            (entity_id,),
+        ).fetchone()
+
+        result = tools.update_memory_metadata(
+            entity_id=entity_id, metadata={"note": "changed", "extra": True}
+        )
+        self.assertIsInstance(result, str)
+        self.assertIn("updated", result)
+
+        after = self.conn.execute(
+            "SELECT is_core, core_reason, core_exit_condition, core_review_after "
+            "FROM entities WHERE id = ?",
+            (entity_id,),
+        ).fetchone()
+        self.assertEqual(after, before)
+
+        fetched = tools.get_memory(entity_id=entity_id)
+        self.assertEqual(
+            json.loads(fetched["data"]["metadata"]),
+            {"note": "changed", "extra": True},
+        )
+
+    def test_store_memory_entity_id_metadata_path_still_works_unchanged(self):
+        title = "Legacy Metadata Path Memory"
+        content = "Sufficiently long content body for the quality gate to accept without issue here."
+        tags = ["#metadata-test"]
+        stored = tools.store_memory(title=title, content=content, tags=tags)
+        self.assertEqual(stored["status"], "ok")
+
+        result = tools.store_memory(
+            entity_id=stored["data"]["id"],
+            title=title,
+            content=content,
+            tags=tags,
+            metadata={"z": 42},
+        )
+        self.assertEqual(result["status"], "ok")
 
 
 class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):

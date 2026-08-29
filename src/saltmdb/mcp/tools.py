@@ -108,6 +108,7 @@ _OWNER_INJECTED_TOOLS = frozenset(
         "revise_memory",
         "supersede_memory",
         "get_memory",
+        "inspect_memory",
         "get_lineage",
         "get_related_memories",
         "review_core_memory",
@@ -154,6 +155,7 @@ class RpcBackend:
             "consolidate_memories",
             "revise_memory",
             "supersede_memory",
+            "update_memory_metadata",
         }:
             kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
 
@@ -887,6 +889,18 @@ def get_memory(entity_id: str) -> dict:
 
 
 @mcp.tool()
+def inspect_memory(entity_id: str) -> dict:
+    """Lighter-weight sibling to get_memory: same field set minus `content`, replaced by a
+    `snippet` (first ~3 non-heading lines, truncated). Lineage is included. Use this when you
+    want to check other fields or aren't sure this is the memory you want, without pulling the
+    full body -- get_memory remains the only path to full content."""
+    owner_id_ = _effective_owner()
+    return _backend_or_raise().call(
+        "inspect_memory", {"entity_id": entity_id, "owner_id": owner_id_}
+    )
+
+
+@mcp.tool()
 def get_lineage(
     entity_id: str,
     direction: Literal["ancestors", "descendants"] = "ancestors",
@@ -915,6 +929,7 @@ def get_related_memories(
     entity_id: str,
     max_depth: int = 5,
     direction: Literal["outbound", "inbound", "both"] = "both",
+    include_inspect: bool = False,
 ) -> dict:
     """Traverses semantic relations from one memory for up to ``max_depth`` hops.
 
@@ -924,6 +939,9 @@ def get_related_memories(
     not a true mixed-direction graph walk: pass direction="outbound" for the original
     downstream-only behavior, or direction="inbound" for upstream-only.
 
+    Set include_inspect=True to inline the inspect_memory fields for every returned node, without
+    full content or lineage.
+
     """
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
@@ -932,6 +950,7 @@ def get_related_memories(
             "entity_id": entity_id,
             "max_depth": max_depth,
             "direction": direction,
+            "include_inspect": include_inspect,
             "owner_id": owner_id_,
         },
     )
@@ -1002,5 +1021,24 @@ def review_core_memory(
             "review_rationale": review_rationale,
             "owner_id": _effective_owner(),
             "core_review_after": core_review_after,
+        },
+    )
+
+
+@mcp.tool()
+def update_memory_metadata(entity_id: str, metadata: dict) -> str:
+    """Shallow-merges `metadata` into an existing memory without requiring title/content/tags
+    to be restated (unlike store_memory(entity_id=..., metadata=...), which needs those fields
+    byte-identical for a metadata-only edit). Submitted keys overwrite/add; keys not mentioned
+    are preserved untouched. There is no key-deletion sentinel -- submit a key with value null
+    to mark it cleared (the key itself stays present with a null value, it is not stripped).
+    Works uniformly on core and non-core memories; core lifecycle fields (outcome,
+    core_review_after, review_rationale) are governed exclusively by review_core_memory, not
+    this tool."""
+    return _backend_or_raise().call(
+        "update_memory_metadata",
+        {
+            "entity_id": entity_id,
+            "metadata": metadata,
         },
     )

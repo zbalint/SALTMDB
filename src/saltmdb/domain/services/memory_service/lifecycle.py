@@ -337,7 +337,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             from .validation import validate_memory_input
 
             validate_memory_input(
-                new_title, new_content, metadata if metadata is not None else before.get("metadata")
+                new_title, new_content, metadata if metadata is not None else before.get("metadata"), tags
             )
         except ValueError as exc:
             return _replacement_error("INVALID_MEMORY", str(exc))
@@ -610,6 +610,110 @@ def supersede_memory(
     )
 
 
+def _assemble_memory_record(
+    conn,
+    resolved_id: str,
+    entity_id: str,
+    *,
+    include_content: bool,
+    include_lineage: bool,
+    touch: bool = True,
+    max_depth: int = 10,
+) -> dict | None:
+    """Shared field-assembly for get_memory / inspect_memory / get_related_memories's
+    include_inspect=True embedding. Returns None if resolved_id no longer resolves to a row
+    (caller already resolved it moments earlier via resolve_entity_ref -- this guards a rare
+    concurrent-delete race, mirroring get_memory's own pre-existing "not row" check).
+
+    include_content=True includes the full `content` field (get_memory's contract);
+    include_content=False includes a `snippet` field instead, via the same
+    extract_title_and_snippet() heuristic search_memory already falls back to when it has no
+    query to center a snippet on (inspect_memory's contract -- no query at all, always this
+    path).
+
+    include_lineage=True runs the (potentially expensive, two bounded graph queries)
+    _memory_lineage() computation -- an already-accepted cost for a standalone get_memory or
+    inspect_memory call. include_lineage=False skips it entirely -- used only when this helper
+    is embedded once per related entity inside a get_related_memories traversal, where running
+    lineage per-entity would multiply that cost by however many related entities were found.
+
+    touch=True bumps last_accessed_at (get_memory's and inspect_memory's own standalone-call
+    contract: "explicit retrieval is still a memory access"). touch=False skips it -- used only
+    by the get_related_memories embedding, where bumping last_accessed_at on every related
+    entity as a side effect of one traversal call would be a surprising, unrequested side
+    effect entirely separate from actually looking at that entity.
+    """
+    row = conn.execute(
+        """
+        SELECT id, title, full_content, status, created_at, updated_at,
+               last_accessed_at, owner_id, scope, is_core, parent_ids,
+               valid_from, valid_to, metadata, context_id, memory_type,
+               quality_score, quality_status, quality_flags,
+               agent_session_id, last_touched_session_id
+        FROM entities WHERE id = ?
+        """,
+        (resolved_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    accessed_at = row[6]
+    if touch:
+        accessed_at = datetime.now(UTC).isoformat()
+        try:
+            conn.execute(
+                "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+                (accessed_at, resolved_id),
+            )
+            if not is_coordinator_connection(conn):
+                conn.commit()
+        except sqlite3.OperationalError as touch_exc:
+            if "readonly database" not in str(touch_exc).lower():
+                raise
+            accessed_at = row[6]  # touch skipped; report the untouched stored value
+            logger.debug(
+                "_assemble_memory_record: skipped last_accessed_at touch on read-only "
+                "connection for %s",
+                resolved_id,
+            )
+
+    from . import tags as tag_ops
+
+    data = {
+        "id": row[0],
+        "title": row[1],
+        "status": row[3],
+        "created_at": row[4],
+        "updated_at": row[5],
+        "last_accessed_at": accessed_at,
+        "owner_id": row[7],
+        "scope": row[8],
+        "is_core": bool(row[9]),
+        "parent_ids": row[10],
+        "valid_from": row[11],
+        "valid_to": row[12],
+        "metadata": row[13],
+        "context_id": row[14],
+        "memory_type": row[15],
+        "quality_score": row[16],
+        "quality_status": row[17],
+        "quality_flags": row[18],
+        "agent_session_id": row[19],
+        "last_touched_session_id": row[20],
+        "tags": tag_ops.list_entity_tags(conn, resolved_id),
+    }
+    if include_content:
+        data["content"] = row[2]
+    else:
+        from saltmdb.utils.text import extract_title_and_snippet
+
+        _, snippet = extract_title_and_snippet(row[2])
+        data["snippet"] = snippet
+    if include_lineage:
+        data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth)
+    return data
+
+
 def get_memory(
     entity_id: str = None,
     db_connection=None,
@@ -658,18 +762,65 @@ def get_memory(
                 ]
             )
 
-        row = conn.execute(
-            """
-            SELECT id, title, full_content, status, created_at, updated_at,
-                   last_accessed_at, owner_id, scope, is_core, parent_ids,
-                   valid_from, valid_to, metadata, context_id, memory_type,
-                   quality_score, quality_status, quality_flags,
-                   agent_session_id, last_touched_session_id
-            FROM entities WHERE id = ?
-            """,
-            (resolved_id,),
-        ).fetchone()
-        if not row:
+        data = _assemble_memory_record(
+            conn,
+            resolved_id,
+            entity_id,
+            include_content=True,
+            include_lineage=True,
+            touch=True,
+            max_depth=max_depth,
+        )
+        if data is None:
+            return rejected(
+                [
+                    envelope_error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{entity_id}'.",
+                        "entity_id",
+                    )
+                ]
+            )
+        return envelope_ok(data)
+    except Exception as exc:
+        logger.error("Error getting memory: %s", exc)
+        return rejected([envelope_error("MEMORY_READ_FAILED", str(exc))])
+    finally:
+        if should_close:
+            close_connection(conn)
+
+
+def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, max_depth: int = 10) -> dict:
+    """Lighter-weight sibling to get_memory: identical field set minus `content` (replaced by a
+    `snippet`). Lineage IS included here (matching get_memory's own already-accepted cost for a
+    standalone call) -- only get_related_memories's include_inspect=True embedding drops it.
+    There is no full-content escape hatch on this tool by design: a caller who decides they need
+    the body after seeing the snippet calls get_memory next.
+    """
+    if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
+        return rejected(
+            [envelope_error("MISSING_ENTITY_ID", "entity_id is mandatory.", "entity_id")]
+        )
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        conn = get_connection(db_path or get_db_path())
+        should_close = True
+
+    try:
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        if candidates:
+            item = envelope_error(
+                "AMBIGUOUS_ID_PREFIX",
+                f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
+                "entity_id",
+            )
+            item["candidates"] = candidates
+            if truncated:
+                item["candidates_truncated"] = True
+            return rejected([item])
+        if not resolved_id:
             return rejected(
                 [
                     envelope_error(
@@ -680,64 +831,108 @@ def get_memory(
                 ]
             )
 
-        # Explicit retrieval is still a memory access. Preserve the old
-        # search_memory(entity_id=...) contract's access-time bookkeeping while
-        # moving the read to its dedicated Phase 3 tool. Best-effort: on a
-        # genuinely read-only connection (the daemon's single-writer boundary --
-        # connection.py's open_read_connection, used for every non-coordinator
-        # dispatch once enable_daemon_connection_boundary() is active) this write
-        # is expected to fail. get_memory is a READ_TOOLS/non-MUTATING_TOOLS entry
-        # by design (protocol.py, dispatch.py), so skip the touch rather than
-        # turning an already-successful read into MEMORY_READ_FAILED.
-        accessed_at = datetime.now(UTC).isoformat()
-        try:
-            conn.execute(
-                "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
-                (accessed_at, resolved_id),
+        data = _assemble_memory_record(
+            conn,
+            resolved_id,
+            entity_id,
+            include_content=False,
+            include_lineage=True,
+            touch=True,
+            max_depth=max_depth,
+        )
+        if data is None:
+            return rejected(
+                [
+                    envelope_error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{entity_id}'.",
+                        "entity_id",
+                    )
+                ]
             )
-            if not is_coordinator_connection(conn):
-                conn.commit()
-        except sqlite3.OperationalError as touch_exc:
-            if "readonly database" not in str(touch_exc).lower():
-                raise
-            accessed_at = row[6]  # touch skipped; report the untouched stored value
-            logger.debug(
-                "get_memory: skipped last_accessed_at touch on read-only connection for %s",
-                resolved_id,
-            )
-
-        from . import tags as tag_ops
-
-        lineage = _memory_lineage(resolved_id, conn, max_depth=max_depth)
-        data = {
-            "id": row[0],
-            "title": row[1],
-            "content": row[2],
-            "status": row[3],
-            "created_at": row[4],
-            "updated_at": row[5],
-            "last_accessed_at": accessed_at,
-            "owner_id": row[7],
-            "scope": row[8],
-            "is_core": bool(row[9]),
-            "parent_ids": row[10],
-            "valid_from": row[11],
-            "valid_to": row[12],
-            "metadata": row[13],
-            "context_id": row[14],
-            "memory_type": row[15],
-            "quality_score": row[16],
-            "quality_status": row[17],
-            "quality_flags": row[18],
-            "agent_session_id": row[19],
-            "last_touched_session_id": row[20],
-            "tags": tag_ops.list_entity_tags(conn, resolved_id),
-            "lineage": lineage,
-        }
         return envelope_ok(data)
     except Exception as exc:
-        logger.error("Error getting memory: %s", exc)
+        logger.error("Error inspecting memory: %s", exc)
         return rejected([envelope_error("MEMORY_READ_FAILED", str(exc))])
+    finally:
+        if should_close:
+            close_connection(conn)
+
+
+def update_memory_metadata(
+    entity_id: str,
+    metadata: dict,
+    agent_session_id: str | None = None,
+    db_connection=None,
+    db_path: str = None,
+) -> str:
+    """Shallow-merges `metadata` into an existing memory's metadata dict without touching
+    title/content/tags/content_hash/parent_ids -- coexists with (does not deprecate)
+    store_memory(entity_id=..., metadata=...), which requires those fields restated
+    byte-identical for the same intent. Works uniformly on core and non-core memories;
+    core-lifecycle governance fields (outcome/core_review_after/review_rationale) remain owned
+    exclusively by review_core_memory, not this tool. No key-deletion sentinel: submitting a
+    key with value null overwrites it to null (caller convention for "cleared") -- it is never
+    stripped from the stored dict.
+    """
+    if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
+        return "Error: entity_id is mandatory."
+    if not isinstance(metadata, dict):
+        return "Error: metadata must be an object (dict)."
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        conn = get_connection(db_path or get_db_path())
+        should_close = True
+
+    try:
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        if candidates:
+            msg = (
+                f"Error: ID prefix '{entity_id}' matches multiple memories; "
+                "provide a longer prefix or full UUID."
+            )
+            if truncated:
+                msg += " (candidate list truncated)"
+            return msg
+        if not resolved_id:
+            return f"Error: No memory matches entity_id '{entity_id}'."
+
+        result_holder: dict[str, str] = {}
+
+        def _write(c):
+            row = c.execute(
+                "SELECT metadata FROM entities WHERE id = ?", (resolved_id,)
+            ).fetchone()
+            if not row:
+                result_holder["msg"] = f"Error: Memory '{resolved_id}' not found."
+                return
+            try:
+                current = json.loads(row[0]) if row[0] else {}
+                if not isinstance(current, dict):
+                    current = {}
+            except (json.JSONDecodeError, TypeError):
+                current = {}
+            merged = {**current, **metadata}
+            now = datetime.now(UTC).isoformat()
+            c.execute(
+                "UPDATE entities SET metadata = ?, updated_at = ?, last_touched_session_id = ? "
+                "WHERE id = ?",
+                (json.dumps(merged), now, agent_session_id, resolved_id),
+            )
+            changed_keys = sorted(metadata.keys())
+            result_holder["msg"] = (
+                f"Memory '{resolved_id}' metadata updated "
+                f"({len(changed_keys)} key(s): {', '.join(changed_keys)})."
+                if changed_keys
+                else f"Memory '{resolved_id}' metadata unchanged (empty patch)."
+            )
+
+        write_transaction_retrying(conn, _write)
+        return result_holder.get(
+            "msg", f"Error: metadata update for '{resolved_id}' did not complete."
+        )
     finally:
         if should_close:
             close_connection(conn)

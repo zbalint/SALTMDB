@@ -27,6 +27,40 @@ def normalize_tag_name(tag_name: str) -> str:
     return name
 
 
+_SEPARATOR_RUN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def sanitize_tag_body(raw_body_lower: str) -> tuple[str | None, str | None]:
+    """Returns (sanitized_body, rejection_message). Exactly one is non-None.
+
+    Any single character outside [a-z0-9] is collapsed to '-'; any run of 2+ such
+    characters (including an existing '-' adjacent to another separator) is rejected
+    rather than guessed at. Leading/trailing '-' are trimmed after collapsing.
+    """
+    for match in _SEPARATOR_RUN_RE.finditer(raw_body_lower):
+        if len(match.group(0)) >= 2:
+            return None, (
+                f"tag '#{raw_body_lower}' contains adjacent separator characters "
+                f"('{match.group(0)}') -- this usually means a typo; check the intended tag name."
+            )
+    sanitized = _SEPARATOR_RUN_RE.sub("-", raw_body_lower).strip("-")
+    return sanitized, None
+
+
+def validate_tag_names(tags: list[str] | None) -> str | None:
+    """Pre-transaction check: returns an error message if any tag has 2+ adjacent
+    separator characters, else None. Call before write_transaction_retrying begins."""
+    for tag_name in tags or []:
+        if not isinstance(tag_name, str) or not tag_name.strip():
+            continue
+        name = normalize_tag_name(tag_name)
+        raw_body_lower = name[1:].lower() if name.startswith("#") else name.lower()
+        _, rejection = sanitize_tag_body(raw_body_lower)
+        if rejection:
+            return rejection
+    return None
+
+
 def list_entity_tags(conn, entity_id: str, *, include_core: bool = False) -> list[str]:
     """Returns the canonical tag names attached to `entity_id`, sorted.
 
@@ -79,9 +113,26 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
     if not name or name == "#":
         return None
 
-    # Step 1: shape-sanitize -- lowercase, strip anything outside [a-z0-9-] after '#'.
+    # Step 1: shape-sanitize -- collapse a single disallowed character to '-'; a rejection
+    # here should be unreachable (validate_tag_names already rejects pre-transaction), but
+    # never let an unexpected rejection crash mid-transaction -- fall back to legacy delete
+    # behavior and log a warning instead.
     raw_body = name[1:]
-    sanitized_body = re.sub(r"[^a-z0-9-]", "", raw_body.lower())
+    sanitized_body, rejection = sanitize_tag_body(raw_body.lower())
+    if rejection:
+        sanitized_body = re.sub(r"[^a-z0-9-]", "", raw_body.lower())
+        try:
+            from saltmdb.domain.services.event_service import log_event
+
+            log_event(
+                agent_id=agent_id or "system",
+                type="issue",
+                content=f"Unexpected tag rejection reached resolve_or_create_tag (should have been caught pre-transaction): {rejection}",
+                db_connection=conn,
+                _in_transaction=True,
+            )
+        except Exception:
+            pass
     sanitized_name = ("#" + sanitized_body) if sanitized_body else name
 
     if sanitized_name != name:
