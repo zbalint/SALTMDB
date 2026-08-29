@@ -45,7 +45,12 @@ from _saltmdb_hook_common import (  # noqa: E402
 
 MANAGE_RELATION_PATTERN = "manage_relation"
 STORE_MEMORY_PATTERN = "store_memory"
-DUPLICATE_PATTERN = re.compile(r'"(duplicate_candidates|NEAR_DUPLICATE)"')
+# Fallback only, when the response couldn't be parsed as JSON: require at least one object
+# inside the array, not just the bare key -- store_memory's response schema always carries
+# `"duplicate_candidates": []` even when empty, so matching the key alone false-positived on
+# ~88% of calls in practice (see memory 3929f211-fd5c-4682-801f-1761d7fac1b9).
+DUPLICATE_FALLBACK_PATTERN = re.compile(r'"duplicate_candidates"\s*:\s*\[\s*\{')
+NEAR_DUPLICATE_PATTERN = re.compile(r'"NEAR_DUPLICATE"')
 EMPTY_RESULT_PATTERN = re.compile(r'"result"\s*:\s*\[\]\s*[,}]')
 
 
@@ -69,8 +74,41 @@ def response_text(data: dict) -> str:
     return json.dumps(data)
 
 
+def response_object(data: dict):
+    """Return the parsed tool response as a dict when available, else None. Native object on
+    Claude Code; a raw JSON string on some other harnesses (parsed here); None if neither
+    yields a dict, in which case callers fall back to text matching."""
+    for field in ("tool_response", "toolResponse", "response"):
+        val = data.get(field)
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, str) and val:
+            try:
+                parsed = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def has_real_duplicate_candidates(data: dict, resp_text: str) -> bool:
+    """True only when duplicate_candidates is a genuinely non-empty list (or the NEAR_DUPLICATE
+    warning code is present) -- not just because the response's always-present
+    `"duplicate_candidates": []` key was matched as a bare substring."""
+    obj = response_object(data)
+    if isinstance(obj, dict):
+        nested = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+        for candidates in (obj.get("duplicate_candidates"), nested.get("duplicate_candidates")):
+            if isinstance(candidates, list) and candidates:
+                return True
+        return bool(NEAR_DUPLICATE_PATTERN.search(resp_text))
+    # Couldn't parse the response as an object -- fall back to a tightened regex that requires
+    # at least one object inside the array, rather than matching the bare (always-present) key.
+    return bool(DUPLICATE_FALLBACK_PATTERN.search(resp_text) or NEAR_DUPLICATE_PATTERN.search(resp_text))
+
+
 def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> None:
-    if DUPLICATE_PATTERN.search(resp_text):
+    if has_real_duplicate_candidates(data, resp_text):
         emit_nudge(
             "SALTMDB nudge: this store_memory call returned duplicate_candidates. Before "
             "moving on, either call supersede_memory (one clear replacement) or "
