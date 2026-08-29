@@ -133,7 +133,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         ) as bulk_store:
             dispatch._dispatch_manage_relation(relations=relations, owner_id="test_agent")
 
-        bulk_store.assert_called_once_with(relations=relations, owner_id="test_agent")
+        bulk_store.assert_called_once_with(
+            relations=relations, owner_id="test_agent", invalidate=False
+        )
 
     def test_registered_mcp_schemas_have_no_kwargs_catchall(self):
         """The generated FastMCP schema and Python signatures must agree on explicit fields."""
@@ -372,6 +374,38 @@ class TestMCPToolsWrapper(unittest.TestCase):
             relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}],
         )
         self.assertIsInstance(bulk_rel_res, list)
+
+    def test_bulk_manage_relation_invalidate_per_item(self):
+        res1 = tools.store_memory(
+            content="Source entity for bulk relation invalidation",
+            title="Bulk Invalidate Source",
+            tags=["#relation"],
+        )
+        res2 = tools.store_memory(
+            content="Target entity for bulk relation invalidation",
+            title="Bulk Invalidate Target",
+            tags=["#relation"],
+        )
+        id1 = res1["data"]["id"]
+        id2 = res2["data"]["id"]
+
+        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
+        self.assertIn("Relation successfully stored", rel_res)
+
+        inv_res = tools.manage_relation(
+            relations=[
+                {
+                    "source_id": id1,
+                    "target_id": id2,
+                    "predicate": "part_of",
+                    "invalidate": True,
+                }
+            ]
+        )
+        self.assertIsInstance(inv_res, list)
+        self.assertEqual(len(inv_res), 1)
+        self.assertEqual(inv_res[0]["status"], "success")
+        self.assertEqual(inv_res[0]["action"], "invalidate")
 
     def test_list_predicates_tool(self):
         results = tools.list_predicates(query="elaborates")

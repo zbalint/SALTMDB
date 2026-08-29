@@ -1823,13 +1823,20 @@ def bulk_store_relations(
     db_connection=None,
     db_path: str = None,
     owner_id: str | None = None,
+    invalidate: bool = False,
 ) -> list:
-    """Executes multiple relation insertions atomically in a single transaction -- all-or-nothing.
+    """Executes multiple relation insertions or invalidations atomically -- all-or-nothing.
 
     ``owner_id`` is the default attribution for the batch.  Trusted in-process callers may
     provide an ``owner_id`` on an individual item to intentionally mix ownership; the MCP
     adapter strips those per-item fields before dispatch, so public callers cannot override the
     configured adapter identity.
+
+    Each item may set its own ``"invalidate": true`` key to invalidate that specific edge instead
+    of creating it, using the item's ``source_id``/``target_id``/``predicate`` and an optional
+    per-item ``"invalid_at"`` invalidation timestamp.  If an item omits ``"invalidate"``, it
+    falls back to the batch-wide ``invalidate`` parameter.  This supports invalidation in the
+    bulk shape, which previously could only create relations.
 
     If any item raises (or would otherwise be reported as an error), the whole batch rolls
     back, so no partial set of relations is ever left committed. Because a single failure
@@ -1861,6 +1868,31 @@ def bulk_store_relations(
                 # the item-level override here supports trusted in-process callers.
                 override_justification = r.get("override_justification")
                 item_owner_id = r.get("owner_id", owner_id)
+                item_invalidate = bool(r.get("invalidate", invalidate))
+                invalid_at = r.get("invalid_at")
+                if item_invalidate:
+                    res = invalidate_relation(
+                        source_id=src,
+                        target_id=tgt,
+                        predicate=pred,
+                        invalid_at=invalid_at,
+                        db_connection=conn,
+                        _in_transaction=True,
+                    )
+                    if res.startswith("Error"):
+                        raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
+                    status = "duplicate" if res.startswith("Relation already invalidated") else "success"
+                    results.append(
+                        {
+                            "status": status,
+                            "source": src,
+                            "target": tgt,
+                            "predicate": pred,
+                            "action": "invalidate",
+                            "result": res,
+                        }
+                    )
+                    continue
                 res = store_relation(
                     source_id=src,
                     target_id=tgt,
@@ -1880,6 +1912,7 @@ def bulk_store_relations(
                         "source": src,
                         "target": tgt,
                         "predicate": pred,
+                        "action": "store",
                         "result": res,
                     }
                 )

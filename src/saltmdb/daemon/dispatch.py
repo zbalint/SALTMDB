@@ -233,6 +233,7 @@ def _dispatch_manage_relation(**kw):
         return relation_service.bulk_store_relations(
             relations=_required_list(kw, "relations"),
             owner_id=kw.get("owner_id"),
+            invalidate=bool(kw.get("invalidate")),
         )
     if kw.get("invalidate"):
         return relation_service.invalidate_relation(

@@ -608,6 +608,15 @@ def manage_relation(
     force it through -- the override is atomically audited. For the bulk (`relations`) shape,
     put `override_justification` on each individual item that needs it.
 
+    The bulk (`relations`) shape now supports invalidation, not just creation: set `invalidate:
+    true` on an individual item dict to invalidate that specific edge instead of creating it (an
+    optional per-item `invalid_at` sets the invalidation timestamp); an item that omits its own
+    `invalidate` key falls back to the top-level `invalidate` parameter as a batch-wide default.
+    Previously the bulk shape silently ignored `invalidate` entirely and always attempted to
+    create every item regardless of intent, with no error and no signal that invalidation never
+    happened -- this is now fixed. All-or-nothing batch semantics are unchanged: an invalidate
+    target that cannot be found aborts the whole batch exactly like a failing create does.
+
     Core-memory governance: a NEW `elaborates_on` edge whose target is an active core memory is
     rejected (`REJECT_CORE_ELABORATES_ON`) -- only that core's own `detail_memory_ids`
     declaration (via `store_memory`/`consolidate_memories`) may create one. Re-submitting an

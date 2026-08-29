@@ -463,6 +463,81 @@ class TestStoreRelationDedup(unittest.TestCase):
         self.assertEqual(results[0]["status"], "duplicate")
         self.assertEqual(self._relation_count(self.id1, self.id2, "related_to"), 1)
 
+    def test_bulk_store_relations_invalidate_per_item(self):
+        store_relation(
+            source_id=self.id1,
+            target_id=self.id2,
+            predicate="related_to",
+            db_connection=self.conn,
+        )
+
+        results = bulk_store_relations(
+            relations=[
+                {
+                    "source_id": self.id1,
+                    "target_id": self.id2,
+                    "predicate": "related_to",
+                    "invalidate": True,
+                }
+            ],
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "success")
+        self.assertEqual(results[0]["action"], "invalidate")
+
+        row = self._relation_row(self.id1, self.id2, "related_to")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row[1])
+        self.assertIsNotNone(row[2])
+
+    def test_bulk_store_relations_invalidate_batch_default(self):
+        store_relation(
+            source_id=self.id1,
+            target_id=self.id2,
+            predicate="related_to",
+            db_connection=self.conn,
+        )
+        store_relation(
+            source_id=self.id1,
+            target_id=self.id3,
+            predicate="part_of",
+            db_connection=self.conn,
+        )
+
+        results = bulk_store_relations(
+            relations=[
+                {"source_id": self.id1, "target_id": self.id2, "predicate": "related_to"},
+                {"source_id": self.id1, "target_id": self.id3, "predicate": "part_of"},
+            ],
+            invalidate=True,
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(item["status"] == "success" for item in results), results)
+        self.assertTrue(all(item["action"] == "invalidate" for item in results), results)
+
+    def test_bulk_store_relations_invalidate_not_found_aborts_batch(self):
+        results = bulk_store_relations(
+            relations=[
+                {"source_id": self.id1, "target_id": self.id2, "predicate": "related_to"},
+                {
+                    "source_id": self.id2,
+                    "target_id": self.id3,
+                    "predicate": "part_of",
+                    "invalidate": True,
+                },
+            ],
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "error")
+        self.assertIn("relation not found", results[0]["error"])
+        self.assertIsNone(
+            self._relation_row(self.id1, self.id2, "related_to"),
+            "a failing invalidate must roll back the earlier create",
+        )
+
     def test_bulk_store_relations_rejects_aliased_predicate_and_reports_error(self):
         # Phase 6 write-time gate (plan §5.8): store_relation now rejects a drifted alias
         # spelling outright instead of silently canonicalizing it, and bulk_store_relations
