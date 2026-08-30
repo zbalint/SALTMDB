@@ -13,6 +13,7 @@ deferred follow-up work, see the refactor plan's section 3.
 """
 
 import json
+import re
 from typing import Any, Literal
 
 from saltmdb.config import get_db_path, STRICT_OVERFETCH_CANDIDATE_CAP
@@ -21,6 +22,11 @@ from saltmdb.utils.text import sanitize_fts_query, extract_title_and_snippet
 
 from . import ranking, search_primitives, tags, validation
 from ._shared import logger
+
+# metadata_filter keys are interpolated into a json_extract('$.<key>') SQL path -- only the
+# value is bound as a parameter, so the key itself must be allowlisted before interpolation
+# to prevent SQL predicate injection (e.g. a key like "safe') OR 1=1 OR json_extract(e.metadata, '$.safe").
+_METADATA_FILTER_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def search_memory(  # noqa: C901, PLR0912, PLR0915
@@ -215,6 +221,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
 
         if metadata_filter and isinstance(metadata_filter, dict):
             for mk, mv in metadata_filter.items():
+                if not _METADATA_FILTER_KEY_RE.match(mk):
+                    raise ValueError(
+                        f"metadata_filter key {mk!r} is invalid; keys must match "
+                        f"{_METADATA_FILTER_KEY_RE.pattern!r}"
+                    )
                 where_clauses.append(f"json_extract(e.metadata, '$.{mk}') = ?")
                 params.append(str(mv))
 
