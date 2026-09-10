@@ -90,9 +90,11 @@ def get_recent_events(
     agent_id: str = None,
     type_filter: str = None,
     agent_session_id: str = None,
+    event_id: str = None,
     order: str = "newest_first",
     limit: int = 20,
     offset: int = 0,
+    full_content: bool = False,
     db_connection=None,
     db_path: str = None,
 ) -> list:
@@ -105,6 +107,14 @@ def get_recent_events(
     is gone) and no more dismissed-event/entity-status derivation loop (§3.5's `status_filter`
     is gone): this is now exactly one `SELECT ... LIMIT ? OFFSET ?`, ordered by `timestamp`
     ascending ("oldest_first") or descending ("newest_first", default).
+
+    `event_id` is an exact-match filter on the primary key (at most one row). Content is never
+    truncated for a row matched by `event_id`, mirroring `get_memory`'s explicit-ID contract:
+    an explicit single-ID ask is a deliberate full-content retrieval, never a preview.
+
+    `full_content`, when True, disables the 1000-char truncation (see below) for every row in
+    the result, not only an `event_id` match. Default False preserves today's truncated-preview
+    behavior for ordinary list/discovery calls.
     """
     should_close = False
     conn = db_connection
@@ -128,6 +138,9 @@ def get_recent_events(
         if agent_session_id:
             where_clauses.append("agent_session_id = ?")
             params.append(agent_session_id)
+        if event_id:
+            where_clauses.append("id = ?")
+            params.append(event_id)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         direction = "ASC" if order == "oldest_first" else "DESC"
@@ -146,7 +159,12 @@ def get_recent_events(
         results = []
         for r in cursor.fetchall():
             eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
-            display_content = econtent[:1000] + " [TRUNCATED]" if len(econtent) > 1000 else econtent
+            skip_truncation = full_content or bool(event_id)
+            display_content = (
+                econtent
+                if skip_truncation or len(econtent) <= 1000
+                else econtent[:1000] + " [TRUNCATED]"
+            )
             results.append(
                 {
                     "id": eid,

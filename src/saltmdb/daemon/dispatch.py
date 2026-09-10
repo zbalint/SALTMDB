@@ -423,9 +423,11 @@ def _dispatch_get_events(**kw):
         agent_id=kw.get("agent_id"),
         type_filter=kw.get("event_type"),
         agent_session_id=kw.get("agent_session_id"),
+        event_id=kw.get("event_id"),
         order=kw.get("order") or "newest_first",
         limit=kw.get("limit") or 20,
         offset=kw.get("offset") or 0,
+        full_content=bool(kw.get("full_content")),
     )
 
 
