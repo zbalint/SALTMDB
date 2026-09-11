@@ -210,6 +210,16 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
     {frozenset({"supersedes", "elaborates_on"})}
 )
 
+# Milestone A slice A1 (wayfinder ticket G4, memory 5d578d13) -- retrieve_context's graph-expansion
+# fan-out bound: max_out_of_network_neighbors = CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS *
+# num_primary_hits, adopting GraphRAG local-search's own formula/default as-is (verified against
+# GraphRAG source during wayfinder research ticket 5a3694d1). PLACEHOLDER: not yet benchmarked
+# against SALTMDB's own corpus -- recalibrate in Milestone B per the project's live-usage-first
+# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
+# replace this comment with the benchmark citation once a real value is locked, matching the
+# treatment already given to RELATION_GATE_MIN_SIMILARITY_THRESHOLD/SUPERSESSION_MIN_SIMILARITY_THRESHOLD.
+CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
+
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
 # Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching
