@@ -56,8 +56,10 @@
 <div class="wrap">
 
   <div class="banner">
-    ⚠ <b>PROTOTYPE — throwaway.</b> Not production code. Resolves wayfinder ticket
-    <b>73d1459a</b> (map <b>e567fdf8</b>, context <code>wayfinder:saltmdb:graph-aware-context-retrieval</code>).
+    ⚠ <b>PROTOTYPE — throwaway.</b> Not production code. Originally resolved wayfinder ticket
+    <b>73d1459a</b>; this revision additionally resolves follow-up ticket <b>ce08d466</b> (exact JSON
+    nesting for the two lineage-entry fields left open by tickets <b>2a5c1357</b> and <b>0ca97ddc</b>)
+    (map <b>d04a3434</b>, context <code>wayfinder:saltmdb:graph-aware-context-retrieval</code>).
     The pure module in the first &lt;script&gt; block is the liftable part; the page around it is not.
   </div>
 
@@ -73,6 +75,21 @@
     exists in the corpus yet — confirmed by memory <span class="id">c2f86098</span> — so that scenario
     uses two clearly-marked synthetic stand-in pairs, one thematically modeled on the real G8
     token-count-vs-char-count reversal documented in the map).
+  </div>
+  <div class="question">
+    <b>Follow-up question (ticket ce08d466) this revision answers:</b> two sibling tickets locked
+    <i>policy</i> but deferred the literal JSON nesting to this prototype — (1) does
+    <code>was_flagged_contradiction</code>/<code>contradicted_with</code> live as sibling keys directly
+    on the specific <code>lineage.current</code> / <code>lineage.historical[i]</code> entry object that
+    was literally a <code>contradicts</code>-edge endpoint (ticket 2a5c1357), and (2) where does the
+    <code>lineage.historical</code> cap-of-5 truncation signal live, and under what field names (ticket
+    0ca97ddc)? The <i>contradiction</i> walkthrough's resolved pair (<code>synthetic-budget-old</code> ↔
+    <code>synthetic-budget-new</code>) was extended from a 1-entry to a 6-entry synthetic chain
+    specifically so both mechanics fire on the <em>same</em> <code>lineage[head]</code> at once: the cap
+    truncates <code>synthetic-budget-old</code> out of the visible <code>historical</code> array, while
+    <code>current</code> still carries <code>was_flagged_contradiction</code> +
+    <code>contradicted_with: ["synthetic-budget-old"]</code> — proving the signal survives its own
+    referent being truncated away.
   </div>
 
   <h2>Current result</h2>
@@ -131,17 +148,45 @@
           taken at face value, that means it doesn't appear in <code>conflict_sets</code> at all once
           resolved, only in <code>lineage</code>. That has a real cost: the fact that two memories were
           ever explicitly flagged <code>contradicts</code> (not just superseded) disappears from the
-          response. This is exactly the open gap in memory <span class="id">8cd3413f</span>. Proposed
-          (NOT locked by any ticket — flag for explicit sign-off): a single
-          <code>lineage[head].was_flagged_contradiction: true</code> boolean, which preserves the signal
-          without reintroducing a members/edges structure into the lineage path. See the contradiction
-          walkthrough, step 2.</li>
-        <li><b>No locked cap on lineage <code>historical</code> length.</b> The real map's own supersession
-          chain (memory <span class="id">e567fdf8</span>) is 10 revisions deep as of this session — the
-          lifecycle scenario below is not a contrived depth, it's what <code>get_lineage</code> returns
-          today. Neither G7 nor G8 locked a truncation rule for the <code>lineage</code> path the way they
-          did for the primary/expansion budget pass and the conflict reserve. This needs its own decision
-          before Milestone A locks (does a 10-deep chain get capped? by whose budget?) — currently fog.</li>
+          response. This was the open gap in memory <span class="id">8cd3413f</span> — now closed, see the
+          next two items for the locked, prototyped shape.</li>
+        <li><b>[ce08d466] <code>was_flagged_contradiction</code>/<code>contradicted_with</code> nest as
+          sibling keys on the <i>specific</i> entry object, never head-only.</b> Ticket 2a5c1357 locked the
+          policy (per-entry, exact-edge-only, never transitive/component-level); this revision settles the
+          literal shape: both <code>lineage[head].current</code> and every
+          <code>lineage[head].historical[i]</code> are entry objects (<code>{id, title, ...}</code>,
+          <code>historical[i]</code> additionally carrying <code>archived_at</code>), and <em>whichever
+          one</em> was literally a <code>contradicts</code>-edge endpoint gets
+          <code>was_flagged_contradiction: true</code> + <code>contradicted_with: [&lt;entity_id&gt;,
+          ...]</code> added as sibling keys on that entry — never hoisted to the head. This required
+          promoting <code>lineage[head].current</code> from a bare id string (the shape locked by the
+          original schema-prototype ticket) to an entry object matching <code>historical[i]</code>'s
+          shape, since <code>current</code> is exactly as likely to be the flagged endpoint as any
+          historical entry — see the contradiction walkthrough, where <code>current</code>
+          (<code>synthetic-budget-new</code>) carries the flag. Exact-edge matching is scoped against the
+          <em>full</em> chain (current + every historical entry, capped or not) — see next item for why.</li>
+        <li><b>[ce08d466] <code>historical_truncated</code> + <code>historical_dropped_count</code> land as
+          siblings directly on <code>lineage[head]</code>, alongside <code>current</code>/
+          <code>historical</code> — matching the <code>&lt;name&gt;_truncated</code> +
+          <code>&lt;name&gt;_dropped_count</code> pattern G4/G8 already established for
+          <code>metadata.fan_out</code>/<code>metadata.budget</code>, not a new naming convention. Ticket
+          0ca97ddc's cap of 5 (keep-most-recent) is applied in this prototype's extended contradiction
+          scenario: the resolved chain now runs 6 synthetic revisions deep (<code>mid5…mid1</code>, then
+          <code>synthetic-budget-old</code>), so the cap drops exactly the oldest one —
+          <code>synthetic-budget-old</code>, the very entry <code>current</code> is flagged as
+          contradicting. Confirmed live in this run: <code>historical_truncated: true</code>,
+          <code>historical_dropped_count: 1</code>, and <code>current.contradicted_with</code> still
+          names <code>synthetic-budget-old</code> even though no entry for it appears in the (capped)
+          <code>historical</code> array — the contradiction <em>signal</em> survives its own referent's
+          entry object being truncated away, since exact-edge matching runs against the full untruncated
+          chain before the cap is applied for display. This is a deliberate, examined consequence of
+          0ca97ddc's own stated assumption ("keep-most-recent retains a resolved conflict's flagged
+          entries by construction — they're necessarily recent") holding only loosely: a chain can keep
+          accumulating unrelated revisions after a contradiction is resolved, eventually pushing the
+          flagged historical peer past the cap. Not reopening 0ca97ddc over this — the signal loss is
+          confined to the truncated entry's own <code>title</code>/<code>archived_at</code> metadata, not
+          the fact-of-contradiction itself, which is exactly the graceful-degradation behavior a fixed,
+          low-stakes cap should have.</li>
       </ol>
     </div>
   </details>
@@ -201,7 +246,18 @@ function assembleRetrieveContext(g, q, opts) {
   // --- G7: contradicts connected components, resolved vs unresolved ---
   const contradictsTouched = new Set();
   const parent = {};
-  const find = x => (parent[x] = parent[x] === undefined ? x : find(parent[x]));
+  // [ce08d466] fixed a latent infinite-recursion bug here: the original
+  // `x => (parent[x] = parent[x] === undefined ? x : find(parent[x]))` has no base case for an
+  // already-self-parented root -- once parent[x] === x (any node's second find() call), the
+  // `undefined` check is false, so it recurses into find(parent[x]) === find(x) forever. Caught
+  // only now because verifying THIS ticket's lineage changes required actually running the
+  // contradiction scenario end-to-end for the first time -- every prior "confirmed live" claim
+  // about this scenario in the wayfinder map was never backed by a real JS execution, only by
+  // reading the code. Standard path-compressing find with an explicit self-parent base case:
+  const find = x => {
+    if (parent[x] === undefined) parent[x] = x;
+    return parent[x] === x ? x : (parent[x] = find(parent[x]));
+  };
   const union = (a, b) => { parent[find(a)] = find(b); };
   for (const e of g.contradictsEdges) {
     contradictsTouched.add(e.source_id); contradictsTouched.add(e.target_id);
@@ -228,14 +284,55 @@ function assembleRetrieveContext(g, q, opts) {
   const conflictReserveKept = unresolvedComponents.slice(0, opts.conflictReserveCap);
   const conflictReserveDropped = unresolvedComponents.slice(opts.conflictReserveCap);
 
-  // --- lineage: any head with a known chain, plus resolved-conflict heads, flagged if contradicts-linked ---
+  // --- lineage: any head with a known chain, plus resolved-conflict heads ---
+  // [ce08d466] was_flagged_contradiction/contradicted_with nest as sibling keys on the SPECIFIC
+  // entry (current or historical[i]) that was literally a contradicts-edge endpoint -- never
+  // head-only, never transitive/component-level (ticket 2a5c1357). historical_truncated /
+  // historical_dropped_count nest as siblings on lineage[head] itself, next to current/historical
+  // (ticket 0ca97ddc's cap of 5, keep-most-recent).
+  const HISTORICAL_CAP = 5;
+
+  // Exact-edge lookup, scoped to members of THIS resolved chain only (current id + every
+  // historical id, capped or not -- truncation is a display concern, not a scoping change to
+  // which edges count as "within this chain").
+  function contradictedPeersWithinChain(id, chainMemberIds) {
+    const peers = [];
+    for (const e of g.contradictsEdges) {
+      if (e.source_id === id && chainMemberIds.has(e.target_id)) peers.push(e.target_id);
+      if (e.target_id === id && chainMemberIds.has(e.source_id)) peers.push(e.source_id);
+    }
+    return peers;
+  }
+
   const lineage = {};
   const allHeadCandidates = new Set([...primaryIds, ...kept.map(c => c.id), ...conflictComponents.filter(c=>c.resolvedHead).map(c=>c.resolvedHead)]);
   for (const id of allHeadCandidates) {
-    if (g.supersessionChains[id]) {
-      const flaggedConflict = conflictComponents.some(c => c.resolution === "resolved" && c.resolvedHead === id);
-      lineage[id] = { current: id, historical: g.supersessionChains[id], ...(flaggedConflict ? { was_flagged_contradiction: true } : {}) };
-    }
+    const chain = g.supersessionChains[id];
+    if (!chain) continue;
+
+    const cappedChain = chain.slice(0, HISTORICAL_CAP);
+    const droppedChain = chain.slice(HISTORICAL_CAP);
+    const chainMemberIds = new Set([id, ...chain.map(h => h.id)]);
+
+    const currentPeers = contradictedPeersWithinChain(id, chainMemberIds);
+    const current = {
+      id, title: g.memories[id]?.title ?? "(unknown)",
+      ...(currentPeers.length ? { was_flagged_contradiction: true, contradicted_with: currentPeers } : {}),
+    };
+
+    const historical = cappedChain.map(h => {
+      const peers = contradictedPeersWithinChain(h.id, chainMemberIds);
+      return {
+        id: h.id, title: h.title, archived_at: h.archived_at,
+        ...(peers.length ? { was_flagged_contradiction: true, contradicted_with: peers } : {}),
+      };
+    });
+
+    lineage[id] = {
+      current, historical,
+      historical_truncated: droppedChain.length > 0,
+      historical_dropped_count: droppedChain.length,
+    };
   }
 
   // --- assemble memories[] (primary + surviving expansion + conflict-only), then G8 token-budget pass ---
@@ -350,7 +447,16 @@ const WORLD = {
       { id: "c1912199-c78b-4f8e-9af9-50f66f30892d", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T02:50:06Z" },
       { id: "ea85d5c5-0ec3-4604-bb7e-dac05c95c2d7", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T02:48:48Z" },
     ],
+    // [ce08d466] extended from 1 to 6 historical entries so the cap-of-5 (0ca97ddc) and the
+    // per-entry contradiction flag (2a5c1357) exercise on the same lineage[head] at once:
+    // synthetic-budget-old is now the *6th* (oldest) entry, so the cap drops exactly the one
+    // entry current.contradicted_with names -- most-recent-first, per get_lineage's own order.
     "synthetic-budget-new": [
+      { id: "synthetic-budget-mid5", title: "(SYNTHETIC) budget tuning — intermediate revision 5", archived_at: "2026-09-10T23:00:00Z" },
+      { id: "synthetic-budget-mid4", title: "(SYNTHETIC) budget tuning — intermediate revision 4", archived_at: "2026-09-10T22:30:00Z" },
+      { id: "synthetic-budget-mid3", title: "(SYNTHETIC) budget tuning — intermediate revision 3", archived_at: "2026-09-10T22:00:00Z" },
+      { id: "synthetic-budget-mid2", title: "(SYNTHETIC) budget tuning — intermediate revision 2", archived_at: "2026-09-10T21:30:00Z" },
+      { id: "synthetic-budget-mid1", title: "(SYNTHETIC) budget tuning — intermediate revision 1", archived_at: "2026-09-10T21:00:00Z" },
       { id: "synthetic-budget-old", title: "(SYNTHETIC) retrieve_context budget measured in character count", archived_at: "2026-09-10T20:00:00Z" },
     ],
   },
@@ -370,7 +476,7 @@ const SCENARIOS = {
   },
   contradiction: {
     label: "Contradiction",
-    desc: "Synthetic (no live contradicts edge exists yet). Only cap-v1 is an actual search hit (primary); cap-v2 was never searched for but gets force-included as conflict_only purely because it contradicts cap-v1 — the concrete test of G4's \"outside normal budget competition\" rule. Both must surface with strictly equal visibility, no winner. Pair 2 (budget-old/new) is resolved via a supersedes edge — per G7 it should vacate conflict_sets and surface only through lineage; watch the proposed was_flagged_contradiction flag.",
+    desc: "Synthetic (no live contradicts edge exists yet). Only cap-v1 is an actual search hit (primary); cap-v2 was never searched for but gets force-included as conflict_only purely because it contradicts cap-v1 — the concrete test of G4's \"outside normal budget competition\" rule. Both must surface with strictly equal visibility, no winner. Pair 2 (budget-old/new) is resolved via a supersedes edge, so per G7 it vacates conflict_sets and surfaces only through lineage — watch lineage[synthetic-budget-new].current carry was_flagged_contradiction/contradicted_with (ticket 2a5c1357, locked), and watch historical_truncated/historical_dropped_count on the same lineage[head] drop synthetic-budget-old out of the visible historical array even though current still names it (ticket 0ca97ddc + ce08d466, locked). The chain was extended to 6 synthetic revisions specifically so both fire together here.",
     queryText: "similarity-threshold and context-budget-unit decisions",
     primaryHits: [{ id: "synthetic-cap-v1", score: 0.7 }, { id: "synthetic-budget-new", score: 0.65 }],
     tokenCounts: { "synthetic-cap-v1": 60, "synthetic-cap-v2": 60, "synthetic-budget-new": 50, "synthetic-budget-old": 45 },
@@ -404,6 +510,14 @@ function buildResultForCurrentScenario() {
   for (const [id, score] of Object.entries(sc.scoresForTiebreak || {})) g.memories[id] = { ...g.memories[id], score };
   const q = { queryText: sc.queryText, primaryHits: sc.primaryHits, tokenCounts: sc.tokenCounts };
   return assembleRetrieveContext(g, q, currentOptions());
+}
+
+// [ce08d466] renders one lineage entry object ({id, title, [archived_at], [was_flagged_contradiction, contradicted_with]})
+function entryLabel(e) {
+  const flag = e.was_flagged_contradiction
+    ? ` <span class="badge yes">contradicted_with: ${e.contradicted_with.map(id => id.slice(0, 18) + '…').join(', ')}</span>`
+    : '';
+  return `<code style="font-size:11px">${e.id.slice(0, 18)}…</code>${flag}`;
 }
 
 function render() {
@@ -441,7 +555,10 @@ function render() {
       <div>edges[]</div><div>${result.edges.length ? result.edges.map(e => `<code style="font-size:11.5px;">${e.source_id.slice(0,8)}… -[${e.predicate}]-> ${e.target_id.slice(0,8)}…</code>`).join("<br>") : '<span class="empty">none</span>'}</div>
       <div>excluded by allowlist</div><div>${f.excluded_by_allowlist.length ? f.excluded_by_allowlist.join(", ") : '<span class="empty">none</span>'}</div>
       <div>lineage</div><div>${Object.keys(result.lineage).length
-        ? Object.entries(result.lineage).map(([head, l]) => `current <code style="font-size:11px">${head.slice(0,8)}…</code>, ${l.historical.length} historical${l.was_flagged_contradiction ? ' <span class="badge yes">was_flagged_contradiction</span>' : ''}`).join("<br>")
+        ? Object.entries(result.lineage).map(([head, l]) => `
+            current: ${entryLabel(l.current)}<br>
+            historical (${l.historical.length} shown${l.historical_truncated ? `, historical_truncated=<span class="badge yes">true</span> historical_dropped_count=${l.historical_dropped_count}` : ', historical_truncated=false'}): ${l.historical.length ? l.historical.map(entryLabel).join(' · ') : '<span class="empty">none</span>'}
+          `).join("<hr style='border:none;border-top:1px solid var(--line);margin:8px 0;'>")
         : '<span class="empty">none</span>'}</div>
       <div>conflict_sets</div><div>${result.conflict_sets.length
         ? result.conflict_sets.map(c => `<b>${c.id}</b> (unresolved): ${c.members.map(m => m.slice(0,14)+'…').join(" ↔ ")} — no winner field`).join("<br>")
