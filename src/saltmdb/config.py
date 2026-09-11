@@ -220,6 +220,17 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
 # treatment already given to RELATION_GATE_MIN_SIMILARITY_THRESHOLD/SUPERSESSION_MIN_SIMILARITY_THRESHOLD.
 CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
 
+# Milestone A slice A2 (wayfinder ticket G7, memory 0cb1d191) -- retrieve_context's contradicts-
+# conflict-set reserve: bounds how many net-new (conflict_only) entities an unresolved contradicts
+# conflict set may pull in, additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's
+# general fan-out cap above. Deliberately a FLAT constant, not scaled by num_primary_hits like the
+# fan-out cap -- G3's "small-but-nonzero" framing is an absolute visibility floor for conflicts,
+# not a proportional budget. PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus (zero
+# live contradicts edges exist today) -- recalibrate in Milestone B per the project's live-usage-first
+# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
+# replace this comment with the benchmark citation once a real value is locked.
+CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
+
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
 # Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching
