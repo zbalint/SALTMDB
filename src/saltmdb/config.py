@@ -239,6 +239,19 @@ CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
 # candidate unsubstituted) rather than being treated as trustworthy.
 SUPERSESSION_CHAIN_MAX_DEPTH = 10
 
+# Milestone A slice A3 (wayfinder standing constraint 15, memory 0ca97ddc) -- retrieve_context's
+# lineage.historical display cap: the number of most-recent supersession-chain entries shown by
+# default per lineage[head]. Deliberately decoupled from get_lineage's own general-purpose
+# max_depth=10 traversal bound above (a different, downstream concern -- display size, not
+# traversal depth). UNLIKE CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/CONTEXT_EXPANSION_CONTRADICTS_CAP,
+# this is NOT a Milestone-B placeholder -- constraint 15 already fixed this number now (getting it
+# wrong is low-stakes and reversible, one extra get_lineage call recovers the full chain), so do
+# not add placeholder framing here or flag it for recalibration. An ancestor beyond this cap can
+# still appear in lineage[head].historical when it is force-included as a resolved contradicts-edge
+# endpoint (Milestone A slice A3, wayfinder gap 4cbf26ac) -- this constant bounds only the normal,
+# non-force-included window.
+LINEAGE_HISTORICAL_CAP = 5
+
 # NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone
 # RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE-style raw-cosine-distance constant. An earlier version of

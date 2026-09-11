@@ -456,3 +456,296 @@ worked instance (the `consolidated_from` merge case) was traced through the conn
 specifically to surface §1 decision 7 as an explicit, user-confirmed limitation rather than an
 undocumented gap — this is what produced grilling round 2's Q7, not something discovered after
 locking.
+
+## Amendment 1 — Extract `classify_contradicts_components`; fix the Q7 merge-diamond blind spot
+
+**Adjudicated decision (2026-09-12, with zbalint, during Milestone A slice A3's grilling round)**:
+§1 decision 7 above — "accepted, documented limitation" for the `consolidated_from` merge-diamond
+blind spot — is **reversed**. zbalint set a new standing rule this session (memory `74f6b4c0`):
+*"we do not accept anything as limitation as long we can implement or fix it and does not require
+anything beyond our jurisdiction."* The original "low-stakes, reversible" framing that justified
+accepting this gap was actually solving for the wrong risk (avoiding touching already-shipped
+code) — this module is still unmerged (`feature/context-retrieval-a2` @ `295e715`, not on
+`master`), so there is no real backward-compatibility cost to fixing it properly. This amendment
+does that, and simultaneously extracts the classification logic into its own function so that
+Milestone A slice A3 (lineage assembly, `SPEC-CONTEXT-RETRIEVAL-A3-LINEAGE-ASSEMBLY.md`) can reuse
+the exact same resolved/unresolved verdict rather than re-deriving a second, possibly-divergent
+one — closing a related gap surfaced in A3's own grilling round (a component A2 classifies
+`unresolved` must never simultaneously get flagged inside A3's `lineage` output; sharing this one
+function is what guarantees that by construction, not by two independently-written checks agreeing
+by luck).
+
+**Why extraction, not just a bugfix in place**: A3 needs the identical "is this contradicts pair
+lifecycle-resolved" answer A2 already computes. Two independently-written versions of the same
+30-line union-find + connectivity + archived-count check is exactly what Coding Standards rule 16
+("don't copy-paste logic that already exists elsewhere — import/reuse it") forecloses. Pulling it
+out to a shared function, called by both A2's `assemble_conflict_sets` and A3's `assemble_lineage`,
+is the only version of "fix Q7" that also serves A3 without duplication.
+
+### A. Before — current `assemble_conflict_sets` (lines 40-136 of the committed file)
+
+The committed function currently does everything itself, inline, after its early-empty-return
+(lines 29-38, **unchanged by this amendment**): opens a connection; resolves `pit`; builds
+`primary_hit_ids`/`primary_hit_score`/`expansion_candidate_ids`; runs the union-find over
+`contradicts_edges` to build `components_by_root`; does one batched `entity_info` fetch (`title`,
+`status`) over every id appearing in any edge; then, in a single loop over
+`components_by_root.values()` (lines 99-178), computes the connectivity check **from one anchor
+only** (`anchor = min(component_member_ids)`, one pair of `get_lineage` ancestors/descendants
+calls), decides resolved-vs-unresolved inline, and — for unresolved components only — immediately
+builds the `members`/`edges`/`conflict_only_count`/`tiebreak_score` shape used by the later
+ranking/cap steps (7-9, unchanged, see part C).
+
+### B. After — `classify_contradicts_components`, new public function in the same file
+
+Insert this as a new top-level function, placed before `assemble_conflict_sets` in the file (so
+`assemble_conflict_sets` can call it without a forward reference). `assemble_conflict_sets` itself
+is reduced to a thin caller from this point in its algorithm onward — see part C for its new shape.
+
+```python
+def classify_contradicts_components(
+    contradicts_edges: list[dict[str, Any]],
+    *,
+    point_in_time: str | None = None,
+    db_connection: sqlite3.Connection | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Group contradicts_edges into connected components via union-find and classify each as
+    lifecycle-resolved or unresolved. The single source of truth for this classification, shared by
+    assemble_conflict_sets (this module) and lineage_assembly_service.assemble_lineage (Milestone A
+    slice A3) -- callers must never re-derive their own version of this check, so the two slices can
+    never disagree about the same component (a component this function marks unresolved appearing in
+    A2's conflict_sets must never also be flagged inside A3's lineage output, and vice versa).
+
+    Returns one entry per contradicts-connected component:
+    {"member_ids": set[str], "edges": list[dict], "resolved": bool}
+    Order is not significant -- callers that need a deterministic order (A2's own ranking step) sort
+    the entries they keep themselves, as this function's own caller already did before this
+    extraction.
+
+    An empty contradicts_edges list returns [] immediately without opening a connection (mirrors
+    assemble_conflict_sets's own existing empty-input short-circuit, unaffected by this amendment).
+    """
+    if not contradicts_edges:
+        return []
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        conn = get_connection(db_path or get_db_path())
+        should_close = True
+
+    try:
+        pit = point_in_time or datetime.now(UTC).isoformat()
+
+        # Union-find grouping -- moved verbatim from the original inline logic, unchanged.
+        parent: dict[str, str] = {}
+
+        def find(entity_id: str) -> str:
+            if entity_id not in parent:
+                parent[entity_id] = entity_id
+            if parent[entity_id] != entity_id:
+                parent[entity_id] = find(parent[entity_id])
+            return parent[entity_id]
+
+        def union(first: str, second: str) -> None:
+            first_root = find(first)
+            second_root = find(second)
+            if first_root != second_root:
+                parent[second_root] = first_root
+
+        for edge in contradicts_edges:
+            union(edge["source_id"], edge["target_id"])
+
+        components_by_root: dict[str, dict[str, Any]] = {}
+        for edge in contradicts_edges:
+            source_id = edge["source_id"]
+            target_id = edge["target_id"]
+            root = find(source_id)
+            component = components_by_root.setdefault(root, {"member_ids": set(), "edges": []})
+            component["member_ids"].update((source_id, target_id))
+            component["edges"].append(edge)
+
+        # Batched entity-STATUS fetch for this function's own classification purposes only.
+        # Deliberately separate from assemble_conflict_sets's own entity_info fetch (title+status,
+        # needed for its conflict_only member-shaping) -- keeping this function self-contained and
+        # independently testable is worth one extra small query; contradicts-connected components
+        # are tiny (zero live edges in the corpus today), so this is not a real cost (Coding
+        # Standards rule 12 -- no speculative optimization without measured need).
+        member_ids = set(parent)
+        status_by_id: dict[str, str] = {}
+        placeholders = ",".join("?" for _ in member_ids)
+        rows = conn.execute(
+            f"SELECT id, status FROM entities WHERE id IN ({placeholders})",
+            tuple(member_ids),
+        ).fetchall()
+        status_by_id = {row[0]: row[1] for row in rows}
+        for entity_id in member_ids:
+            status_by_id.setdefault(entity_id, "unknown")  # _lineage_node's missing-row convention
+
+        results: list[dict[str, Any]] = []
+        for component in components_by_root.values():
+            component_member_ids: set[str] = component["member_ids"]
+            resolved = _component_lifecycle_resolved(
+                component_member_ids, status_by_id, pit, conn
+            )
+            results.append(
+                {
+                    "member_ids": component_member_ids,
+                    "edges": component["edges"],
+                    "resolved": resolved,
+                }
+            )
+        return results
+    finally:
+        if should_close:
+            close_connection(conn)
+
+
+def _component_lifecycle_resolved(
+    member_ids: set[str],
+    status_by_id: dict[str, str],
+    point_in_time: str,
+    conn: sqlite3.Connection,
+) -> bool:
+    """Q7 FIX: multi-round BFS-to-closure connectivity check, seeded from one anchor
+    (`min(member_ids)`, same deterministic choice as before) but — unlike the original single-call
+    check — continuing to expand from every NEWLY discovered node too, not just the anchor. This is
+    what actually closes the merge-diamond gap: for A and D each `consolidated_from`-merged into a
+    new entity B, round 1 (querying only the anchor, say A) discovers B; the original code stopped
+    there and never found D. This version's round 2 queries B (newly discovered in round 1) and
+    finds D via B's own ancestors/descendants -- exactly the extra hop the old check was missing.
+
+    Bounded to SUPERSESSION_CHAIN_MAX_DEPTH rounds (reusing the existing constant, not a new one):
+    each round can only usefully extend the closure by one more get_lineage hop-set from a
+    previously-undiscovered node, and get_lineage's own single call is already bounded to
+    max_depth=SUPERSESSION_CHAIN_MAX_DEPTH hops in each direction -- needing more than
+    SUPERSESSION_CHAIN_MAX_DEPTH rounds of "a brand new node needs its own full traversal" to reach
+    closure would mean a supersession/consolidation graph far deeper and more convoluted than
+    anything else in this codebase is designed to handle. Hitting the round cap without covering
+    every member abstains (returns False / unresolved) -- the same conservative default this
+    function already uses for a get_lineage error, and the same "never silently drop a real
+    conflict" philosophy §1 decision 7 originally established.
+    """
+    anchor = min(member_ids)
+    visited: set[str] = {anchor}
+    frontier: set[str] = {anchor}
+    for _ in range(SUPERSESSION_CHAIN_MAX_DEPTH):
+        if not frontier:
+            break
+        newly_discovered: set[str] = set()
+        for entity_id in frontier:
+            ancestors_result = get_lineage(
+                entity_id,
+                direction="ancestors",
+                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
+                point_in_time=point_in_time,
+                db_connection=conn,
+            )
+            descendants_result = get_lineage(
+                entity_id,
+                direction="descendants",
+                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
+                point_in_time=point_in_time,
+                db_connection=conn,
+            )
+            if "error" in ancestors_result or "error" in descendants_result:
+                logger.warning(
+                    "Could not check lifecycle connectivity for entity %s in component %s: %s",
+                    entity_id,
+                    sorted(member_ids),
+                    ancestors_result.get("error") or descendants_result.get("error"),
+                )
+                continue
+            reached = {node["id"] for node in ancestors_result["nodes"]} | {
+                node["id"] for node in descendants_result["nodes"]
+            }
+            newly_discovered |= reached - visited
+        visited |= newly_discovered
+        if member_ids <= visited:
+            break
+        frontier = newly_discovered
+    if not (member_ids <= visited):
+        return False  # connectivity not confirmed within the round cap -> unresolved
+
+    non_archived = [m for m in member_ids if status_by_id.get(m, "unknown") != "archived"]
+    return len(non_archived) == 1
+```
+
+### C. After — `assemble_conflict_sets` becomes a thin caller
+
+Replace the union-find/component-building/connectivity block (the current lines 54-136) with:
+
+```python
+components = classify_contradicts_components(
+    contradicts_edges, point_in_time=pit, db_connection=conn
+)
+member_ids = set().union(*(c["member_ids"] for c in components)) if components else set()
+# ... existing batched entity_info (title+status) fetch over member_ids, UNCHANGED ...
+
+unresolved_components: list[dict[str, Any]] = []
+for component in components:
+    if component["resolved"]:
+        continue
+    component_member_ids: set[str] = component["member_ids"]
+    # ... existing members/edges/conflict_only_count/tiebreak_score construction (original
+    # lines 138-178), UNCHANGED -- it never referenced the connectivity check directly, only
+    # component_member_ids and component["edges"] ...
+```
+
+Everything from this point onward — the sort, the cap-admission loop, the output-shaping, the
+`contradicts_cap` bookkeeping (original lines 180-209) — is **unchanged**, byte-for-byte. `pit`,
+`primary_hit_ids`, `primary_hit_score`, `expansion_candidate_ids`, and the existing `entity_info`
+(title+status) batched fetch are all still computed by `assemble_conflict_sets` itself, exactly as
+before — only the union-find and connectivity-check portion moves out.
+
+**Output contract of `assemble_conflict_sets` is unchanged.** This is a refactor plus a bugfix to
+an internal helper, not a reshaping of A2's own locked contract from §3.1 — every one of the 15
+existing scenarios in `tests/test_conflict_set_service.py` must still pass unmodified.
+
+### D. New required test scenario
+
+Add to `tests/test_conflict_set_service.py` (or a new `tests/test_conflict_set_classification.py`
+if that reads more cleanly for `classify_contradicts_components`'s own unit-level coverage — either
+file placement is acceptable, but the scenario itself is mandatory):
+
+16. **Merge-diamond connectivity, proving the Q7 fix**: create three entities A, B, D. `A
+    contradicts D` (the only `contradicts` edge — the component under test is exactly
+    `{A, D}`; B is not itself a contradicts-edge member). Separately: `B consolidated_from A` and
+    `B consolidated_from D` (B is a new entity that independently absorbed both A and D). Archive A
+    only; leave B and D live. Neither A's own nor D's own direct `get_lineage` ancestors/descendants
+    call reaches the other (each reaches only itself and B) — the pre-fix single-anchor check would
+    classify this component `unresolved` (connectivity never confirmed, so the archived-count check
+    is never even reached). Assert the fixed check classifies it `resolved`: round 1 (from anchor
+    `min({A, D})`) discovers B; round 2 queries B itself and discovers the other member via B's own
+    ancestors/descendants — closing `member_ids <= visited` — and exactly one of `{A, D}` (D) is
+    non-archived. Name this test so its own docstring/test name states the pre-fix behavior it
+    regresses against (e.g. `test_merge_diamond_connectivity_requires_multi_round_bfs`), so a future
+    reader can confirm the fix is real without having to reconstruct this reasoning from scratch.
+
+### E. Amendment acceptance
+
+```bash
+PYTHONPATH=src uv run pytest tests/test_conflict_set_service.py -v
+```
+must exit 0, all 15 original scenarios plus new scenario 16 passing.
+
+```bash
+PYTHONPATH=src uv run pytest tests/ -q
+```
+must exit 0, no regression anywhere else in the suite.
+
+```bash
+uv run ruff check src/saltmdb/domain/services/conflict_set_service.py tests/test_conflict_set_service.py && \
+uv run ruff format --check src/saltmdb/domain/services/conflict_set_service.py tests/test_conflict_set_service.py && \
+uv run mypy src/saltmdb/domain/services/conflict_set_service.py
+```
+must exit 0.
+
+**Scope for this amendment**: may edit `src/saltmdb/domain/services/conflict_set_service.py` (the
+extraction + fix above) and `tests/test_conflict_set_service.py` (new scenario 16, and only the
+minimal fixture/import changes the extraction itself requires — e.g. importing
+`classify_contradicts_components` if any existing test calls the internals directly, which none of
+the original 15 scenarios do per A2's own original spec's black-box testing convention). Does not
+touch `config.py` (no new constant — `SUPERSESSION_CHAIN_MAX_DEPTH` is reused, not redefined),
+`context_expansion_service.py`, `relation_service.py`, or any other file untouched by A2's original
+spec.
