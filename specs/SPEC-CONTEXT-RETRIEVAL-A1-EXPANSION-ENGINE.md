@@ -224,8 +224,8 @@ candidates" shape below with all lists empty and `fan_out.cap == 0`.
         ...  # ranked order (highest-ranked first), already capped
     ],
     "contradicts_edges": [
-        {"relation_id": str, "source_id": str, "target_id": str},
-        ...
+        {"relation_id": str, "source_id": str, "target_id": str, "predicate": str},
+        ...  # predicate is always the literal string "contradicts" here (see Amendment 1)
     ],
     "fan_out": {
         "cap": int,
@@ -293,8 +293,9 @@ implementation guidance for a scenario OMP is free to skip):
     different included predicates (or from two different primary hits) carries a
     `retrieval_provenance` list with one entry per distinct reaching triple, not just one.
 12. **`contradicts` edges bypass the allowlist and the cap entirely**: a primary hit connected via
-    `contradicts` to a non-primary node appears in `contradicts_edges` (raw, as specified in §3.2),
-    does NOT appear in `expansion_candidates`, and does not count toward `fan_out.eligible_count`
+    `contradicts` to a non-primary node appears in `contradicts_edges` as a raw
+    `{relation_id, source_id, target_id, predicate}` dict (predicate == "contradicts", per
+    Amendment 1), does NOT appear in `expansion_candidates`, and does not count toward `fan_out.eligible_count`
     or `fan_out.dropped_count` — even when the general cap is already exceeded by unrelated
     candidates.
 13. **Unresolvable primary-hit id is skipped, not fatal**: a `primary_hits` entry whose `id` does
@@ -348,3 +349,51 @@ uv run mypy src/saltmdb/domain/services/context_expansion_service.py
 ```
 must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md` §on pre-commit
 checks).
+
+## Amendment 1 — `contradicts_edges` entry shape (adjudicated after OMP BLOCKED)
+
+OMP correctly flagged a genuine internal contradiction in the original §3.2, not a false positive:
+step 10's algorithm text specified raw `contradicts_edges` dicts as `{relation_id, source_id,
+target_id, predicate}` (4 keys), while the "exact keys, exact types" Output contract JSON block
+immediately below it specified only `{relation_id, source_id, target_id}` (3 keys, no
+`predicate`). §4 scenario 12 referenced "raw, as specified in §3.2" without resolving which of the
+two shapes that meant. These are mutually exclusive under the spec's own "exact keys, exact types"
+requirement, so OMP was right to stop rather than silently pick one.
+
+**Adjudicated decision: `contradicts_edges` entries carry all four keys** —
+`{relation_id, source_id, target_id, predicate}` — matching step 10's dict literal and
+`in_network_edges`'s shape exactly. `predicate` is always the literal string `"contradicts"` for
+every entry in this list, since step 10's own collection criterion (`predicate == "contradicts"`)
+guarantees it — the field carries no variable information, only a constant label.
+
+**Why 4 keys over 3, given the field is provably constant:**
+1. **Shape uniformity.** Both `in_network_edges` and `contradicts_edges` are "raw, undecorated edge"
+   lists in the same output contract; giving them different key sets means a consumer (A2, A5, or a
+   future caller) iterating generically over "the raw edge lists in this payload" hits an
+   unnecessary special case. `in_network_edges` needs `predicate` because its value varies across
+   the 5 allowlisted predicates; `contradicts_edges` doesn't need it for that reason, but including
+   it costs nothing and removes the asymmetry.
+2. **Zero marginal cost.** `analyze_dependencies`'s edge dicts already carry `predicate`; this is a
+   dict-comprehension key, not a new query, computation, or abstraction — it doesn't trip Coding
+   Standards rule 14 (no single-use helpers) since nothing new is being built.
+3. **Self-documentation.** A raw JSON dump of `contradicts_edges` (e.g. during debugging or in a
+   log) reads as self-describing edge records without requiring the reader to already know, purely
+   from the list's key name, what predicate every entry implicitly has.
+4. **Forward safety under uncertainty.** Slice A2 (which consumes this list for conflict-set
+   assembly) is not yet specced. Preserving a field that's free to keep and cheap to ignore is lower
+   risk than omitting it and potentially reopening this shape once A2's actual needs are known —
+   consistent with this spec's existing precision-over-latency/conservative bias (§1 decision 3).
+
+This was a user-adjudicated call (not clerically self-evident from the existing text alone) — both
+shapes were defensible before this amendment; 4 keys is now the single locked answer.
+
+**Changes made** (both in this same commit):
+- §3.2 Output contract: `contradicts_edges` entries now specify
+  `{"relation_id": str, "source_id": str, "target_id": str, "predicate": str}`.
+- §4 scenario 12: replaced the ambiguous "raw, as specified in §3.2" with the explicit 4-key dict
+  shape and the `predicate == "contradicts"` invariant, so the test file can be written without
+  re-deriving this decision from a now-fixed §3.2.
+
+No other section of this spec is affected. §3.2 step 10's original 4-key wording was already
+correct and required no change; the fix was solely to the Output contract block and the scenario-12
+cross-reference that both disagreed with it.
