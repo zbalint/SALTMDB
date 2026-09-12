@@ -154,13 +154,27 @@ gets — not re-derived or overridden here, per Coding Standards rule 3/4, reuse
    exactly the same class of speculative-knob violation the `entity_ids` seed parameter was
    rejected for in §1 above.
 
-   `search_memory`'s own internal-exception path returns `{"results": [...], "diagnostics": ...,
-   "error": ...}` instead of a plain list (only reachable when `return_diagnostics=False` and an
-   unhandled exception occurs inside it — see `orchestrator.py`'s `except Exception` branch). Guard
-   for this defensively, mirroring A1's own "log and treat as empty, don't fail the whole call"
-   posture for a bad primary hit: if `search_result` is a `dict` rather than a `list`, log a
-   `logger.warning` naming the error and treat `search_hits = []`; otherwise `search_hits =
-   search_result` directly.
+   **Corrected by Amendment 3** — see that section for the verified real shape: with
+   `return_diagnostics=False` (as called above), `search_memory`'s own internal-exception path
+   returns `[{"error": str(e)}]` — a **list** containing one sentinel dict with only an `"error"`
+   key, never a bare dict (the dict-shaped `{"results": [...], "diagnostics": ..., "error": ...}`
+   return is `orchestrator.py`'s `return_diagnostics=True` branch only, which this call never
+   takes). Guard for this defensively, mirroring A1's own "log and treat as empty, don't fail the
+   whole call" posture for a bad primary hit:
+   ```python
+   search_hits = search_result
+   if search_hits and "id" not in search_hits[0]:
+       logger.warning(
+           "search_memory reported an internal error for query %r: %s",
+           query, search_hits[0].get("error"),
+       )
+       search_hits = []
+   ```
+   The check is `"id" not in search_hits[0]` rather than a length/shape check on the whole list,
+   because that is the one property that reliably distinguishes the error sentinel from a real
+   result item: every real item `orchestrator.py`'s success path constructs always carries an
+   `"id"` key (verified directly against its literal `item = {...}` dict-literal construction),
+   while the error sentinel never does.
 4. Build, from `search_hits` (before any later truncation/dropping):
    - `primary_hits: list[dict] = [{"id": h["id"], "score": h["score"]} for h in search_hits]` — the
      exact `{id, score}` shape A1/A2/A3/A4 all require.
@@ -412,8 +426,45 @@ the caller received.
 
 ## 3. `src/saltmdb/mcp/tools.py`
 
-Add a new `@mcp.tool()` function, placed after `get_related_memories` (after line 965, before the
-`get_events` tool at line 968) — pure insertion, no existing tool's line range is touched:
+**Corrected by Amendment 3 — this section now has two parts, not one.** The original text below
+("pure insertion, no existing tool's line range is touched") was wrong: `retrieve_context` also
+needs one line added to the existing `_OWNER_INJECTED_TOOLS` frozenset (lines 94-116). See
+Amendment 3 for why this is a real, production-significant requirement, not an optional
+enhancement.
+
+**Part A — add `"retrieve_context"` to `_OWNER_INJECTED_TOOLS`** (line 94's frozenset literal),
+in alphabetical-ish position matching the existing list's own ordering (grouped after
+`review_core_memory`, since the existing list is not strictly alphabetical — e.g. `get_memory`
+precedes `inspect_memory` which precedes `get_lineage` — so this addition is placed at the end of
+the literal, after `review_core_memory`, rather than forcing a new ordering convention onto an
+existing list this slice does not otherwise touch):
+
+```python
+_OWNER_INJECTED_TOOLS = frozenset(
+    {
+        # ... existing 12 entries, unchanged ...
+        "review_core_memory",
+        "retrieve_context",
+    }
+)
+```
+
+This is required because `RpcBackend.call()` (the only backend used in real production adapter
+runtime) strips the `owner_id` key entirely from any tool's kwargs unless that tool's name is in
+this set (`tools.py:150`), re-injecting a freshly-computed, trustworthy value only for members of
+the set (`tools.py:147-148`). `retrieve_context` calls `search_memory` internally with a real
+`owner_id` — without this addition, every production call to `retrieve_context` would silently run
+with `owner_id=None`, changing which memories are visible to it, with no error and no test
+(`DirectDispatchBackend`, used by every test that doesn't specifically target `RpcBackend`, never
+strips or re-injects this key, so it would have masked the bug indefinitely). `retrieve_context`
+is not a candidate for the `log_event`-style exception (the one documented reason a tool might
+legitimately stay out of this set): it has no ownership-neutral contract, and its own dispatch
+function (§4) has a real `owner_id` parameter with nothing else binding ownership before that
+point, unlike `log_event`'s own tools.py wrapper which binds `agent_id` itself.
+
+**Part B — add the new `@mcp.tool()` function**, placed after `get_related_memories` (after line
+965, before the `get_events` tool at line 968) — this part remains a pure insertion, no existing
+tool's line range is touched:
 
 ```python
 @mcp.tool()
@@ -565,9 +616,12 @@ implementation guidance OMP is free to skip beyond):
    False, "dropped_count": 0}}`, and `metadata["budget"]["used"] == 0` — produced by composing
    A1-A4's own already-tested empty-input shapes, not any special-cased branch in this slice's own
    code (confirm no such branch exists by reading the implementation, not just the test outcome).
-2. **`search_memory`'s internal-exception dict shape is treated as empty, not fatal**: mock
-   `search_memory` to return `{"results": [], "diagnostics": {}, "error": "boom"}"`; assert the call
-   does not raise and produces the same zero-hits envelope as scenario 1.
+2. **`search_memory`'s internal-error sentinel is treated as empty, not fatal** (corrected by
+   Amendment 3 — the real shape, not the originally-specified one): mock `search_memory` to return
+   `[{"error": "boom"}]` (a one-item list, matching `orchestrator.py`'s actual
+   `return_diagnostics=False` exception path — NOT a bare dict); assert the call does not raise
+   (no `KeyError` from the `h["id"]`/`h["score"]` comprehensions in step 4) and produces the same
+   zero-hits envelope as scenario 1.
 3. **Single dependency chain, no conflicts**: one primary hit with a `depends_on` edge to a
    non-primary node (mirrors A1 scenario 2). Assert `memories` has exactly 2 entries — the primary
    (`inclusion: "primary"`, `retrieval_provenance == [{"reason": "primary_search", "rank": 1}]`,
@@ -658,6 +712,21 @@ smoke test matching `tests/test_dispatch_types.py`'s style:
    the call succeeds end-to-end and returns the `{query, memories, edges, lineage, conflict_sets,
    metadata}` top-level key set exactly.
 
+**Added by Amendment 3** — `DirectDispatchBackend` (scenario 5 above) cannot exercise
+`_OWNER_INJECTED_TOOLS` at all (it never strips or re-injects `owner_id`; see Amendment 3), so the
+one behavior Part A of §3 exists to fix needs its own test against the actual backend that has the
+bug surface:
+
+6. **`RpcBackend` re-injects `owner_id` for `retrieve_context`, and `DirectDispatchBackend`'s own
+   pass-through does not mask this**: added to `tests/test_session_identity.py`'s
+   `TestRpcBackendIdentityWiring` (not the new `test_retrieve_context_wiring.py` file — this class
+   already owns every other tool's version of this exact test, and `retrieve_context` belongs
+   alongside them, not in a separate file), mirroring `test_backend_does_not_bind_owner_from_
+   dispatch_kwargs`'s existing pattern exactly: configure `SESSION_IDENTITY` to a known owner,
+   patch `saltmdb.daemon.client.call`, call `RpcBackend().call("retrieve_context", {"query": "q"})`,
+   and assert the forwarded kwargs' `owner_id` equals the configured owner — proving §3 Part A's
+   frozenset addition actually takes effect, not just that it reads correctly in the source.
+
 ## 8. Out of scope
 
 - Recalibrating any Milestone-B-deferred numeric constant (`CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS`,
@@ -727,13 +796,20 @@ frozenset it landed in).
 
 **Scope**: may create `src/saltmdb/domain/services/retrieve_context_service.py`,
 `tests/test_retrieve_context_service.py`, and `tests/test_retrieve_context_wiring.py`. May edit
-`src/saltmdb/mcp/tools.py` (§3 insertion only), `src/saltmdb/daemon/dispatch.py` (§4's import,
+`src/saltmdb/mcp/tools.py` (§3 Parts A and B — both the `_OWNER_INJECTED_TOOLS` frozenset addition
+and the new tool function, per Amendment 3), `src/saltmdb/daemon/dispatch.py` (§4's import,
 function, and `DISPATCH_TABLE` insertions only), and `src/saltmdb/daemon/protocol.py` (§5's
-`READ_TOOLS` insertion only). Does not touch: `src/saltmdb/domain/services/context_expansion_service.py`,
-`conflict_set_service.py`, `lineage_assembly_service.py`, `context_budget_service.py`,
-`src/saltmdb/config.py`, `src/saltmdb/mcp/server.py`, `src/saltmdb/daemon/server.py`,
-`src/saltmdb/daemon/client.py`, `src/saltmdb/daemon/db_write_coordinator.py`, any existing test
-file, or any file under `specs/` other than this one.
+`READ_TOOLS` insertion only). Per Amendments 1 and 3, may also edit exactly these four existing
+test files, at exactly the locations each amendment enumerates and nowhere else in them:
+`tests/test_mcp_tools.py` (Amendment 1's count-guard fix), `tests/test_phase3_mcp_surface.py`
+(Amendment 1), `tests/test_phase4_mcp_surface.py` (Amendment 1), and `tests/test_session_identity.py`
+(Amendment 3's new `RpcBackend` owner-injection test method, §7 scenario 6). Does not touch:
+`src/saltmdb/domain/services/context_expansion_service.py`, `conflict_set_service.py`,
+`lineage_assembly_service.py`, `context_budget_service.py`, `src/saltmdb/config.py`,
+`src/saltmdb/mcp/server.py`, `src/saltmdb/daemon/server.py`, `src/saltmdb/daemon/client.py`,
+`src/saltmdb/daemon/db_write_coordinator.py`, any existing test file other than the four
+enumerated above (and, within those four, any location other than what their amendment names), or
+any file under `specs/` other than this one.
 
 **Pre-lock gate run against the current tree (2026-09-12)**:
 1. Every other section was drafted before this one (standard for this workspace's spec-writing
@@ -993,3 +1069,132 @@ came back. Same loose-thread pattern as Amendment 1's unresolvable memory id; no
 for the same reason (the report's own file:line/code evidence was independently verified as
 accurate against the real worktree regardless of whether its own log entry is retrievable from
 here).
+
+## Amendment 3 — Owner-propagation gap and a wrong search_memory error-shape claim (two contradictions, one round)
+
+**Adjudicated 2026-09-13, after OMP's third `BLOCKED — SPEC ADJUDICATION REQUIRED` report.** Both
+claims were verified directly against the real worktree source before adjudicating, in full, before
+any fix was written — not patched from OMP's report text alone.
+
+### Contradiction 1 — `retrieve_context` never reaches `_OWNER_INJECTED_TOOLS`, so production silently loses `owner_id`
+
+§3 (as originally written) had `tools.retrieve_context` resolve `owner_id_ = _effective_owner()`
+and add it to the kwargs dict passed to `_backend_or_raise().call(...)`, and called this "pure
+insertion, no existing tool's line range touched." That framing was wrong. `tools.py`'s
+`RpcBackend.call()` — confirmed by reading it directly, not summarized —
+```python
+if tool_name in _OWNER_INJECTED_TOOLS:
+    kwargs = {**kwargs, "owner_id": _effective_owner()}
+else:
+    kwargs = {key: value for key, value in kwargs.items() if key != "owner_id"}
+```
+strips `owner_id` from any tool's kwargs entirely unless that tool's name is a member of
+`_OWNER_INJECTED_TOOLS` (`tools.py:94-116`, confirmed to hold exactly 12 entries, `retrieve_context`
+absent from all of them). `retrieve_context` was never added to that set anywhere in the original
+spec — meaning the one backend actually used in production (`RpcBackend`; `DirectDispatchBackend`
+is for tests and the in-process daemon RPC handler only) would silently dispatch every real
+`retrieve_context` call with `owner_id=None`, changing which memories the tool can see, with no
+error raised anywhere. `DirectDispatchBackend`'s own `call()` is a bare `dispatch.DISPATCH_TABLE[
+tool_name](**kwargs)` forward — it never strips or re-injects this key at all — so every test this
+spec originally required (§7 scenario 5, and the whole of §6) would have passed cleanly while the
+real production path was broken, exactly OMP's own diagnosis.
+
+**Fix**: §3 above is corrected to two parts — Part A adds `"retrieve_context"` to
+`_OWNER_INJECTED_TOOLS`; Part B is the original tool-function insertion, otherwise unchanged. §7
+gained a new scenario 6, in `tests/test_session_identity.py` (not the new wiring test file — that
+existing file already owns this exact test shape for every other owner-injected tool, via its
+`TestRpcBackendIdentityWiring` class, and `retrieve_context` belongs there, not in a parallel
+one-off), directly exercising `RpcBackend.call()` — the one backend whose behavior actually
+depends on this fix — so this specific regression cannot recur silently a second time.
+
+**Why this wasn't caught before locking**: §3's original text asserted "pure insertion" as a
+factual claim about the blast radius of adding a new tool, but that claim was never checked against
+`RpcBackend.call()`'s actual body — it was inferred from "a new `@mcp.tool()` function doesn't
+require editing any other function," which is true for the function itself but false for the
+tool's *registration surface*, which (as this project's own established pattern shows for every
+comparable owner-scoped tool) spans more than the two files+one frozenset already accounted for in
+§4/§5. Grepped every string-literal occurrence of `"search_memory"` (a known-working, fully
+owner-scoped precedent) across all of `src/` as the ground truth for what a comparable tool
+actually needs, rather than reasoning from the `DISPATCH_TABLE`/`READ_TOOLS` pair alone:
+`memory_service/__init__.py` (a package-level `__all__` re-export, irrelevant here —
+`retrieve_context_service` is not part of the `memory_service` package), `dispatch.py`
+(`DISPATCH_TABLE`), `protocol.py` (`READ_TOOLS`), and **two** separate hits in `tools.py`
+(`_OWNER_INJECTED_TOOLS`, and the tool's own `.call(...)` site) — confirming `_OWNER_INJECTED_TOOLS`
+is a real, load-bearing fourth registration point this project's own precedent already establishes
+for every owner-scoped tool, not a one-off. Also grepped for every other tool-name-keyed
+frozenset/dict across `tools.py`, `dispatch.py`, `protocol.py`, `client.py`, `server.py`, and
+`db_write_coordinator.py` to confirm no *sixth* registry exists beyond the five now accounted for
+(`DISPATCH_TABLE`, `MUTATING_TOOLS`, `READ_TOOLS`, `WRITE_TOOLS`, `_OWNER_INJECTED_TOOLS`) — none
+found. **Standing lesson**: for a new MCP tool, enumerate every *string-literal* occurrence of an
+existing, comparable tool's name across the whole `src/` tree first, and require the new tool to
+appear at the same set of sites (explicable exceptions named individually), rather than assuming
+the registration surface is fully described by the sections already drafted for it.
+
+### Contradiction 2 — the specified `search_memory` internal-error shape was never the real one
+
+§2.1 step 3 (as originally written) said `search_memory`'s internal-exception path (with
+`return_diagnostics=False`, as this call uses) returns a bare dict,
+`{"results": [], "diagnostics": ..., "error": ...}`, and specified guarding for it via `isinstance(
+search_result, dict)`. That claim was wrong — re-reading `orchestrator.py`'s actual `except
+Exception` branch line by line:
+```python
+except Exception as e:
+    logger.error("Error searching memory: %s", e)
+    diagnostics["error"] = str(e)
+    validation._set_search_diagnostics(diagnostics)
+    if return_diagnostics:
+        return {"results": [], "diagnostics": diagnostics, "error": str(e)}
+    return [{"error": str(e)}]
+```
+the dict-shaped return is the `return_diagnostics=True` branch — unreachable here, since this
+slice's own §2.1 step 3 call always passes `return_diagnostics=False`. The branch this call
+actually takes returns `[{"error": str(e)}]` — **a list**, containing one sentinel dict with only
+an `"error"` key. The originally-specified `isinstance(search_result, dict)` guard could therefore
+never fire for the one real failure mode this call can hit, and step 4's `h["id"]`/`h["score"]`
+dict-comprehensions would raise `KeyError` on `{"error": str(e)}`'s missing `"id"` key — a crash on
+a real upstream failure, the opposite of the "log and treat as empty" resilience §2.1 claimed to
+provide.
+
+**Fix**: §2.1 step 3 above is corrected to check `"id" not in search_hits[0]` (the property that
+actually, verifiably distinguishes the error sentinel from every real result item — confirmed
+against the success path's own literal `item = {"id": eid, "title": etitle, ...}` construction a
+few lines above the exception handler) rather than a type check on the whole return value, since
+`return_diagnostics=False` makes the return value always a list; the dict-shaped branch is dead
+code for this call and the spec no longer claims otherwise. §6 scenario 2 is corrected to mock the
+real `[{"error": "boom"}]` shape, not the fictitious dict one.
+
+**Why this wasn't caught before locking**: this was a plain misreading of `orchestrator.py`'s
+source during the original grounding pass — the two branches of the same `if return_diagnostics:
+... / return ...` statement were read together and only the first (dict) branch's shape was
+carried into the spec, without re-confirming which branch actually applies given this call's own
+fixed `return_diagnostics=False` argument three lines above at the call site. **Standing lesson**:
+when a cited function has an `if <flag>: return X \n return Y` shape and the calling code fixes
+`<flag>` to a specific literal value, the spec must quote the *specific branch that literal value
+selects*, not the general shape of the conditional — re-read the exact branch reached by the exact
+arguments used, every time, rather than trusting an earlier read of "the error path" as a single
+undifferentiated shape.
+
+### Combined re-verification before re-locking (both contradictions, plus a broader sweep)
+
+Beyond the two fixes above, re-ran the following before treating this amendment as complete, given
+this is the third adjudication round on this spec and a fourth was not acceptable:
+
+- Re-read `context_expansion_service.py`'s, `conflict_set_service.py`'s, `lineage_assembly_service.py`'s,
+  and `context_budget_service.py`'s actual `except`/error-path handling (all four): none of them has
+  an analogous "successful call returns list, exceptional call returns a differently-shaped
+  sentinel" branch the way `search_memory` does — each either raises normally (uncaught, matching
+  Coding Standards rule 15) or has the single documented defensive branch already described
+  accurately elsewhere in this spec (A1's per-hit `analyze_dependencies` `"error"` key,
+  independently confirmed already correct in the original §2.1 text and unaffected by this
+  amendment).
+- Re-confirmed (via the `search_memory`-string-literal sweep above) that no other cross-cutting
+  registry beyond the five named ones exists anywhere in `mcp/`, `daemon/`, or the service layer
+  this slice touches.
+- Re-diffed §2.1's corrected step 3 against §6's corrected scenario 2, word for word, to confirm
+  the code and the test now describe the identical shape (gate step 7).
+
+No other section of this spec is affected by either fix. §9's acceptance bar is unchanged by
+either fix in this amendment.
+
+**Note on OMP's own blocker log**: OMP's third report did not name a SALTMDB entity id this time
+(unlike the first two rounds) — nothing to check for resolvability here.
