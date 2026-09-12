@@ -477,13 +477,17 @@ from saltmdb.domain.services import (
 
 **New dispatch function**, placed after `_dispatch_get_events` (after line 420, before the
 `DISPATCH_TABLE` literal at line 439) — mirrors `_dispatch_search_memory`'s style (explicit
-per-field resolution via the existing `_optional_*`/`_required_str` helpers, not a raw `**kw`
-forward):
+per-field resolution, not a raw `**kw` forward) for `limit`/`budget_tokens` via the existing
+`_optional_int_or_none` helper. **`query` is validated inline, NOT via `_required_str`** — see
+Amendment 2 below for why `_required_str` is the wrong helper for this specific field:
 
 ```python
 def _dispatch_retrieve_context(**kw):
+    query = kw.get("query")
+    if not isinstance(query, str):
+        raise ValueError("query is required")
     return retrieve_context_service.assemble_retrieve_context(
-        query=_required_str(kw, "query"),
+        query=query,
         owner_id=kw.get("owner_id"),
         limit=_optional_int_or_none(kw, "limit"),
         budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
@@ -635,9 +639,13 @@ smoke test matching `tests/test_dispatch_types.py`'s style:
    omitted, and assert the patched call received `limit=None, budget_tokens=None` (not `0` or a
    hardcoded default — confirming dispatch.py does not shadow `assemble_retrieve_context`'s own
    default resolution, per §4's stated rationale).
-3. **Missing `query` raises**: `dispatch._dispatch_retrieve_context(owner_id="owner")` (no `query`
-   kwarg) raises via `_required_str`'s existing contract, matching every other required-field
-   dispatch function's behavior.
+3. **Missing/non-string `query` raises, but empty-string `query` does NOT**: `dispatch.
+   _dispatch_retrieve_context(owner_id="owner")` (no `query` kwarg) and `dispatch.
+   _dispatch_retrieve_context(query=123, owner_id="owner")` (wrong type) both raise `ValueError`
+   via the inline check in §4 (Amendment 2) — but `dispatch._dispatch_retrieve_context(query="",
+   owner_id="owner")` does NOT raise; patch `assemble_retrieve_context` and assert it receives
+   `query=""` unchanged. This is a deliberate divergence from `_required_str`'s own non-empty
+   contract, not an oversight — see Amendment 2 for why.
 4. **Tool schema has no `owner_id`**: `tools.retrieve_context` is covered automatically by the
    existing generic `test_owner_id_is_absent_from_every_public_schema`
    (`tests/test_mcp_tools.py:63`) once registered — this scenario just asserts that existing test
@@ -889,3 +897,99 @@ here since OMP's own report (file:line, exact contradiction) was independently v
 against the worktree and found accurate, and this amendment additionally covers two sites OMP's
 own report did not name; flagging only so a future session doesn't waste time assuming that id is
 retrievable.
+
+## Amendment 2 — `query`'s empty-string contract: §2.1 vs. the originally-specified `_required_str` dispatch call
+
+**Adjudicated 2026-09-13, after OMP's second `BLOCKED — SPEC ADJUDICATION REQUIRED` report.**
+
+**The contradiction, verified against the actual worktree tree before adjudicating**: §2.1's input
+contract states `query` is passed to `search_memory` "unchanged... including when falsy (`\"\"\"`)"
+— a deliberate choice, reusing `search_memory`'s own existing browse-mode behavior for a falsy
+query rather than this slice inventing new validation (§2.1's own stated rationale: "this slice
+adds no query validation or special-casing of its own"). But §4's originally-specified
+`_dispatch_retrieve_context` body called `query=_required_str(kw, "query")`, and
+`dispatch.py`'s actual `_required_str` (lines 97-101) is:
+```python
+def _required_str(kw: dict[str, Any], key: str) -> str:
+    value = kw.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} is required")
+    return value
+```
+`not value` rejects `""` — so the originally-specified §4 code, if implemented exactly as written,
+would raise on every empty-query call through the daemon/MCP route, directly contradicting §2.1's
+own "including when falsy" guarantee for that same route. A direct call to
+`assemble_retrieve_context(query="", ...)` bypassing dispatch entirely could still honor §2.1, but
+the tool's actual public surface (`tools.retrieve_context` → `_dispatch_retrieve_context`) could
+not — OMP correctly identified this as two incompatible public-API behaviors, not a rewording
+question, and correctly refused to silently pick one.
+
+**Why this wasn't caught before locking**: gate step 7 ("for any data shape, contract, or value
+stated in more than one place... diff the two statements against each other, word for word") was
+run for every *data shape* repeated across sections (A1-A4's output contracts, the envelope shape),
+but `query`'s *validation behavior* was stated once in prose (§2.1) and once as literal, executable
+code (§4's `_required_str` call) — two different *kinds* of statement about the same fact, which
+step 7's own "diffed... word for word" framing was read too narrowly to catch (a prose guarantee
+and a concrete function call are harder to visually diff against each other than two JSON blocks
+are). **Standing lesson, alongside Amendment 1's**: when a spec states a behavioral guarantee in
+prose in one section and then locks in the literal code that must (or must not) produce it in
+another, that pairing needs the same explicit side-by-side check §7 already requires for two
+prose/JSON restatements of one shape — reading the code block's actual runtime behavior, not just
+its surface plausibility as "the existing helper for a required field."
+
+**Decision: Option 1 — empty query is supported end-to-end**, matching §2.1's original intent
+(unchanged) rather than narrowing it. Rationale: §2.1's reuse-`search_memory`'s-own-behavior
+rationale was the deliberate design choice this slice was built around from the start (Coding
+Standards rule 3/4 — reuse over reinvention; don't add validation `search_memory` itself doesn't
+need); `_required_str`'s non-empty semantics fits fields like `entity_id`/`title`, where an empty
+value is never meaningful, but `query` is different by construction — `search_memory` already
+treats a falsy `query_keywords` as a legitimate, meaningful input (its existing tags/filters-only
+browse mode), so rejecting `""` here would be inventing a restriction `search_memory` itself
+doesn't have, solely because `_required_str` happened to be the nearest-looking existing helper.
+Narrowing §2.1 instead (Option 2) would mean `retrieve_context`'s query-only tool cannot reach a
+`search_memory` behavior its own direct-service layer explicitly promises support for — a real,
+user-visible capability gap for zero benefit, since nothing about the daemon/MCP boundary requires
+rejecting an empty string.
+
+**Fix, already applied above in §4 and §7 (this amendment records why, not a second copy of the
+diff)**: `_dispatch_retrieve_context` validates `query` inline —
+```python
+query = kw.get("query")
+if not isinstance(query, str):
+    raise ValueError("query is required")
+```
+— instead of calling `_required_str(kw, "query")`. This keeps "the argument must be present and
+must be a string" (still a real, enforced requirement — `None`, a missing kwarg, or a non-string
+value all still raise) while dropping only the "and must be non-empty" clause `_required_str` adds
+on top, which is the one clause that contradicted §2.1. This is a **local, inline** check inside
+`_dispatch_retrieve_context` only — not a new shared helper function — per Coding Standards rule 14
+("don't create single-use helper abstractions for something used exactly once inline"): no other
+field in this dispatch call, and no other tool's dispatch function anywhere in `dispatch.py`, needs
+this exact "string-typed but empty-allowed" contract, so a new named helper (e.g.
+`_required_str_allow_empty`) would be a single-caller abstraction this project's own standards
+already rule out. **`_required_str` itself is untouched** — every other caller in `dispatch.py`
+(all of which genuinely do need non-empty semantics, e.g. `entity_id`, `title`) keeps its existing
+behavior exactly as shipped; this amendment changes zero lines outside `_dispatch_retrieve_context`
+and its own two test scenarios.
+
+**§9's acceptance bar is unchanged** by this amendment either — no new file, no relaxed test
+command; §7 scenario 3 (already corrected above) is the concrete proof this contract holds, and
+must pass under the same `pytest tests/ -q` run as everything else.
+
+**Amendment gate re-run**: re-checked every other `kw.get(...)`/`_required_*`/`_optional_*` call
+in §4's dispatch function against this same prose-vs-code mismatch pattern (`owner_id`, `limit`,
+`budget_tokens`) — none of the other three has a prose guarantee anywhere in §2.1-§3 that its
+corresponding dispatch-layer helper would contradict (`owner_id` is never validated as
+required/non-empty by design; `limit`/`budget_tokens` are genuinely optional end-to-end with no
+falsy-value special case asserted anywhere), so no fourth site needs the same fix. Also
+re-diffed §2.1's own restated "query is passed to search_memory as query_keywords unchanged... even
+when falsy" line against the corrected §4 code above, word for word, confirming they now agree.
+
+**Note on OMP's own blocker log**: OMP's second report named a SALTMDB event id
+(`321faf36-409d-4366-b7b8-b49392ba4fc9`). A `get_events` sweep of this project's own
+`wayfinder:saltmdb:graph-aware-context-retrieval` context (filtered `event_type="issue"`,
+newest-first) did not surface it — only an unrelated 2026-09-11 event predating this slice entirely
+came back. Same loose-thread pattern as Amendment 1's unresolvable memory id; not chased further
+for the same reason (the report's own file:line/code evidence was independently verified as
+accurate against the real worktree regardless of whether its own log entry is retrievable from
+here).
