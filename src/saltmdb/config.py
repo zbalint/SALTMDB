@@ -277,6 +277,22 @@ SUPERSESSION_CHAIN_MAX_DEPTH = 10
 # endpoint (Milestone A slice A3, wayfinder gap 4cbf26ac) -- this constant bounds only the normal,
 # non-force-included window.
 LINEAGE_HISTORICAL_CAP = 5
+# Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
+# packing: the default real-token-count ceiling (via fastembed's TextEmbedding.token_count(), see
+# context_budget_service.py) applied when a caller does not supply their own budget_tokens value.
+# PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- recalibrate in Milestone B per
+# the project's live-usage-first evaluation posture (memory 5d3f073c). Do not remove the
+# placeholder framing when tuning this; replace this comment with the benchmark citation once a
+# real value is locked, matching the treatment already given to CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/
+# CONTEXT_EXPANSION_CONTRADICTS_CAP.
+CONTEXT_BUDGET_DEFAULT_TOKENS = 4000
+
+# Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
+# packing: the hard ceiling a caller-supplied budget_tokens is clamped DOWN to if it exceeds this
+# value (never clamped up -- a caller requesting less than this gets exactly what they asked for).
+# Same PLACEHOLDER status as CONTEXT_BUDGET_DEFAULT_TOKENS above -- recalibrate together in
+# Milestone B, do not remove the placeholder framing independently of that constant.
+CONTEXT_BUDGET_MAX_TOKENS = 16000
 
 # NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone
