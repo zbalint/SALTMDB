@@ -236,6 +236,27 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
     {frozenset({"supersedes", "elaborates_on"})}
 )
 
+# Milestone A slice A1 (wayfinder ticket G4, memory 5d578d13) -- retrieve_context's graph-expansion
+# fan-out bound: max_out_of_network_neighbors = CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS *
+# num_primary_hits, adopting GraphRAG local-search's own formula/default as-is (verified against
+# GraphRAG source during wayfinder research ticket 5a3694d1). PLACEHOLDER: not yet benchmarked
+# against SALTMDB's own corpus -- recalibrate in Milestone B per the project's live-usage-first
+# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
+# replace this comment with the benchmark citation once a real value is locked, matching the
+# treatment already given to RELATION_GATE_MIN_SIMILARITY_THRESHOLD/SUPERSESSION_MIN_SIMILARITY_THRESHOLD.
+CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
+
+# Milestone A slice A2 (wayfinder ticket G7, memory 0cb1d191) -- retrieve_context's contradicts-
+# conflict-set reserve: bounds how many net-new (conflict_only) entities an unresolved contradicts
+# conflict set may pull in, additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's
+# general fan-out cap above. Deliberately a FLAT constant, not scaled by num_primary_hits like the
+# fan-out cap -- G3's "small-but-nonzero" framing is an absolute visibility floor for conflicts,
+# not a proportional budget. PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus (zero
+# live contradicts edges exist today) -- recalibrate in Milestone B per the project's live-usage-first
+# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
+# replace this comment with the benchmark citation once a real value is locked.
+CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
+
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
 # Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching
@@ -243,6 +264,19 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
 # Policy choice, not benchmarked -- a `supersedes` chain longer than 10 hops abstains (leaves the
 # candidate unsubstituted) rather than being treated as trustworthy.
 SUPERSESSION_CHAIN_MAX_DEPTH = 10
+
+# Milestone A slice A3 (wayfinder standing constraint 15, memory 0ca97ddc) -- retrieve_context's
+# lineage.historical display cap: the number of most-recent supersession-chain entries shown by
+# default per lineage[head]. Deliberately decoupled from get_lineage's own general-purpose
+# max_depth=10 traversal bound above (a different, downstream concern -- display size, not
+# traversal depth). UNLIKE CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/CONTEXT_EXPANSION_CONTRADICTS_CAP,
+# this is NOT a Milestone-B placeholder -- constraint 15 already fixed this number now (getting it
+# wrong is low-stakes and reversible, one extra get_lineage call recovers the full chain), so do
+# not add placeholder framing here or flag it for recalibration. An ancestor beyond this cap can
+# still appear in lineage[head].historical when it is force-included as a resolved contradicts-edge
+# endpoint (Milestone A slice A3, wayfinder gap 4cbf26ac) -- this constant bounds only the normal,
+# non-force-included window.
+LINEAGE_HISTORICAL_CAP = 5
 
 # NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone
