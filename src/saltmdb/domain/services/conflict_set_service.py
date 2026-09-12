@@ -16,6 +16,142 @@ from saltmdb.domain.services.relation_service import get_lineage
 logger = logging.getLogger(__name__)
 
 
+def classify_contradicts_components(  # noqa: C901
+    contradicts_edges: list[dict[str, Any]],
+    *,
+    point_in_time: str | None = None,
+    db_connection: sqlite3.Connection | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Group contradicts_edges into connected components via union-find and classify each as
+    lifecycle-resolved or unresolved.
+
+    Returns one entry per contradicts-connected component:
+    {"member_ids": set[str], "edges": list[dict], "resolved": bool}
+
+    An empty contradicts_edges list returns [] immediately without opening a connection.
+    """
+    if not contradicts_edges:
+        return []
+
+    should_close = False
+    conn = db_connection
+    if not conn:
+        conn = get_connection(db_path or get_db_path())
+        should_close = True
+
+    try:
+        pit = point_in_time or datetime.now(UTC).isoformat()
+
+        parent: dict[str, str] = {}
+
+        def find(entity_id: str) -> str:
+            if entity_id not in parent:
+                parent[entity_id] = entity_id
+            if parent[entity_id] != entity_id:
+                parent[entity_id] = find(parent[entity_id])
+            return parent[entity_id]
+
+        def union(first: str, second: str) -> None:
+            first_root = find(first)
+            second_root = find(second)
+            if first_root != second_root:
+                parent[second_root] = first_root
+
+        for edge in contradicts_edges:
+            union(edge["source_id"], edge["target_id"])
+
+        components_by_root: dict[str, dict[str, Any]] = {}
+        for edge in contradicts_edges:
+            source_id = edge["source_id"]
+            target_id = edge["target_id"]
+            root = find(source_id)
+            component = components_by_root.setdefault(
+                root,
+                {"member_ids": set(), "edges": []},
+            )
+            component["member_ids"].update((source_id, target_id))
+            component["edges"].append(edge)
+
+        member_ids = set(parent)
+        placeholders = ",".join("?" for _ in member_ids)
+        rows = conn.execute(
+            f"SELECT id, status FROM entities WHERE id IN ({placeholders})",
+            tuple(member_ids),
+        ).fetchall()
+        status_by_id = {row[0]: row[1] for row in rows}
+        for entity_id in member_ids:
+            status_by_id.setdefault(entity_id, "unknown")
+
+        results: list[dict[str, Any]] = []
+        for component in components_by_root.values():
+            component_member_ids: set[str] = component["member_ids"]
+            resolved = _component_lifecycle_resolved(component_member_ids, status_by_id, pit, conn)
+            results.append(
+                {
+                    "member_ids": component_member_ids,
+                    "edges": component["edges"],
+                    "resolved": resolved,
+                }
+            )
+        return results
+    finally:
+        if should_close:
+            close_connection(conn)
+
+
+def _component_lifecycle_resolved(
+    member_ids: set[str],
+    status_by_id: dict[str, str],
+    point_in_time: str,
+    conn: sqlite3.Connection,
+) -> bool:
+    """Check lifecycle connectivity with bounded multi-round BFS-to-closure."""
+    anchor = min(member_ids)
+    visited: set[str] = {anchor}
+    frontier: set[str] = {anchor}
+    for _ in range(SUPERSESSION_CHAIN_MAX_DEPTH):
+        if not frontier:
+            break
+        newly_discovered: set[str] = set()
+        for entity_id in frontier:
+            ancestors_result = get_lineage(
+                entity_id,
+                direction="ancestors",
+                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
+                point_in_time=point_in_time,
+                db_connection=conn,
+            )
+            descendants_result = get_lineage(
+                entity_id,
+                direction="descendants",
+                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
+                point_in_time=point_in_time,
+                db_connection=conn,
+            )
+            if "error" in ancestors_result or "error" in descendants_result:
+                logger.warning(
+                    "Could not check lifecycle connectivity for entity %s in component %s: %s",
+                    entity_id,
+                    sorted(member_ids),
+                    ancestors_result.get("error") or descendants_result.get("error"),
+                )
+                continue
+            reached = {node["id"] for node in ancestors_result["nodes"]} | {
+                node["id"] for node in descendants_result["nodes"]
+            }
+            newly_discovered |= reached - visited
+        visited |= newly_discovered
+        if member_ids <= visited:
+            break
+        frontier = newly_discovered
+    if not (member_ids <= visited):
+        return False
+
+    non_archived = [m for m in member_ids if status_by_id.get(m, "unknown") != "archived"]
+    return len(non_archived) == 1
+
+
 def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
     expansion_result: dict[str, Any],
     primary_hits: list[dict[str, Any]],
@@ -51,37 +187,10 @@ def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
             candidate["entity_id"] for candidate in expansion_result["expansion_candidates"]
         }
 
-        parent: dict[str, str] = {}
-
-        def find(entity_id: str) -> str:
-            if entity_id not in parent:
-                parent[entity_id] = entity_id
-            if parent[entity_id] != entity_id:
-                parent[entity_id] = find(parent[entity_id])
-            return parent[entity_id]
-
-        def union(first: str, second: str) -> None:
-            first_root = find(first)
-            second_root = find(second)
-            if first_root != second_root:
-                parent[second_root] = first_root
-
-        for edge in contradicts_edges:
-            union(edge["source_id"], edge["target_id"])
-
-        components_by_root: dict[str, dict[str, Any]] = {}
-        for edge in contradicts_edges:
-            source_id = edge["source_id"]
-            target_id = edge["target_id"]
-            root = find(source_id)
-            component = components_by_root.setdefault(
-                root,
-                {"member_ids": set(), "edges": []},
-            )
-            component["member_ids"].update((source_id, target_id))
-            component["edges"].append(edge)
-
-        member_ids = set(parent)
+        components = classify_contradicts_components(
+            contradicts_edges, point_in_time=pit, db_connection=conn
+        )
+        member_ids = set().union(*(c["member_ids"] for c in components)) if components else set()
         entity_info: dict[str, dict[str, str | None]] = {}
         if member_ids:
             placeholders = ",".join("?" for _ in member_ids)
@@ -97,43 +206,10 @@ def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
                 )
 
         unresolved_components: list[dict[str, Any]] = []
-        for component in components_by_root.values():
+        for component in components:
+            if component["resolved"]:
+                continue
             component_member_ids: set[str] = component["member_ids"]
-            anchor = min(component_member_ids)
-            ancestors_result = get_lineage(
-                anchor,
-                direction="ancestors",
-                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
-                point_in_time=pit,
-                db_connection=conn,
-            )
-            descendants_result = get_lineage(
-                anchor,
-                direction="descendants",
-                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
-                point_in_time=pit,
-                db_connection=conn,
-            )
-
-            if "error" in ancestors_result or "error" in descendants_result:
-                error = ancestors_result.get("error") or descendants_result.get("error")
-                logger.warning(
-                    "Could not check lifecycle connectivity for conflict component %s: %s",
-                    sorted(component_member_ids),
-                    error,
-                )
-            else:
-                anchor_lineage_ids = {node["id"] for node in ancestors_result["nodes"]} | {
-                    node["id"] for node in descendants_result["nodes"]
-                }
-                if component_member_ids <= anchor_lineage_ids:
-                    non_archived = [
-                        entity_id
-                        for entity_id in component_member_ids
-                        if entity_info[entity_id]["status"] != "archived"
-                    ]
-                    if len(non_archived) == 1:
-                        continue
 
             members: list[dict[str, Any]] = []
             for entity_id in sorted(component_member_ids):

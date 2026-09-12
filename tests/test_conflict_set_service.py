@@ -396,6 +396,25 @@ class TestConflictSetService(unittest.TestCase):
         self.assertEqual(first_tuples, expected)
         self.assertEqual(second_tuples, expected)
 
+    def test_merge_diamond_connectivity_requires_multi_round_bfs(self):
+        """The pre-fix anchor-only traversal misses the second merged parent."""
+        a = self._memory("Merge diamond archived parent A")
+        b = self._memory("Merge diamond consolidated entity B")
+        d = self._memory("Merge diamond live parent D")
+        edge = self._edge(a, d)
+        self._raw_relation(b, a, "consolidated_from")
+        self._raw_relation(b, d, "consolidated_from")
+        self._archive(a)
+
+        result = assemble_conflict_sets(
+            self._expansion([edge]),
+            [{"id": a, "score": 0.9}],
+            db_connection=self.conn,
+        )
+
+        self.assertEqual(result["conflict_sets"], [])
+        self.assertEqual(result["contradicts_cap"]["eligible_count"], 0)
+
     def test_missing_entity_row_falls_back_to_unknown(self):
         primary = self._memory("Primary")
         missing = str(uuid.uuid4())
