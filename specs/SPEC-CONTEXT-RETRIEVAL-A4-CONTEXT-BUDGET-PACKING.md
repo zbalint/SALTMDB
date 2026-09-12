@@ -2,7 +2,9 @@
 
 ## 0. Status
 
-**LOCKED**
+**LOCKED, with Amendment 1** (see bottom of this document) — §3 step 4/5 and §4 scenario 9 are
+superseded by Amendment 1's empty-text normalization; read those sections together with the
+amendment, not in isolation.
 
 **Scope**: may create `src/saltmdb/domain/services/context_budget_service.py` (new file) and
 `tests/test_context_budget_service.py` (new file); may edit `src/saltmdb/config.py` (add exactly
@@ -47,6 +49,13 @@ were verified live against the actually-installed `fastembed` version before loc
 Also confirmed live: the `entities` table's actual content column is `full_content` (`schema.py`
 line 412) — not `content`. §3's token accounting reads this column by name; a spec or implementer
 assuming a `content` column would silently query a nonexistent one.
+
+**Note (Amendment 1)**: this pre-lock gate did not itself run `token_count("")` against the
+installed tokenizer — it verified the batching-sum quirk (finding 2 above) and the `full_content`
+column name, but §3 step 4's original claim that "token count of an empty string is `0`" was an
+unverified assumption, not a third grounded finding alongside 1-2 above. OMP's worker ran the
+missing gate check and found the installed tokenizer returns `2` for `""` (BOS/EOS special-token
+overhead), which is what Amendment 1 resolves.
 
 ## 1. Why
 
@@ -239,15 +248,22 @@ has no time-sensitive query.
    content_by_id = {row[0]: row[1] for row in rows}
    ```
    An id with no matching row (a stale reference — same defensive posture A2 gives a missing entity
-   row) falls back to `""` via `content_by_id.get(entity_id, "")` — token count of an empty string is
-   `0` (does not fail the tokenizer call, does not silently inflate or crash the pack).
-5. Compute `token_counts: dict[str, int] = {}` — **one `get_model().token_count(text)` call per
-   distinct id** (never a single batched call across multiple ids, per §0's critical finding):
+   row) falls back to `""` via `content_by_id.get(entity_id, "")`. **See Amendment 1**: the installed
+   tokenizer does not return `0` for an empty string (it returns a nonzero BOS/EOS overhead), so step
+   5 below normalizes empty text to `0` explicitly rather than passing it through the raw tokenizer
+   call — this does not fail the tokenizer call, does not silently inflate or crash the pack.
+5. Compute `token_counts: dict[str, int] = {}` — **one call per distinct id**, either
+   `get_model().token_count(text)` for non-empty text or the explicit `0` normalization for empty
+   text (never a single batched `token_count` call across multiple ids, per §0's critical finding).
+   **Per Amendment 1**, empty text (whether from a missing row's `""` fallback or a real row whose
+   `full_content` is itself an empty string) is defined as costing exactly `0` tokens, overriding
+   whatever the raw tokenizer returns for `""`:
    ```python
    from saltmdb.domain.services.embedding_service import get_model
    model = get_model()
    for entity_id in all_ids:
-       token_counts[entity_id] = model.token_count(content_by_id.get(entity_id, ""))
+       text = content_by_id.get(entity_id, "")
+       token_counts[entity_id] = 0 if text == "" else model.token_count(text)
    ```
 6. Greedy pack (§1 decisions 6-7, implementing the prototype's exact loop): walk `primary_ids` then
    `expansion_ids`, concatenated, in that order, as one continuous pass:
@@ -378,7 +394,10 @@ Coding Standards rule 19):
 9. **Missing entity row falls back to empty content, zero tokens, no crash**: include an id in
    `primary_hits` that has no corresponding `entities` row. Assert `token_counts[that_id] == 0`, the
    id is packed (an empty/zero-cost candidate always fits), and no exception is raised — mirrors A2's
-   own `test_missing_entity_row_falls_back_to_unknown` precedent for the same defensive posture.
+   own `test_missing_entity_row_falls_back_to_unknown` precedent for the same defensive posture. **Per
+   Amendment 1**, this `0` is the explicit empty-text normalization, not a coincidental raw-tokenizer
+   result — do not assert this by mocking or stubbing `token_count`; the real tokenizer must actually
+   be bypassed by the `text == ""` check in the implementation, not merely happen to agree with it.
 10. **No overlap assumption exercised, not re-verified**: a realistic multi-pool scenario (some
     primary hits, some expansion candidates, some conflict-only members, all distinct real ids from
     fixtures built via the actual `expand_context_candidates`/`assemble_conflict_sets` calls, not
@@ -436,3 +455,71 @@ uv run ruff format --check src/saltmdb/domain/services/context_budget_service.py
 uv run mypy src/saltmdb/domain/services/context_budget_service.py
 ```
 must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md`).
+
+## Amendment 1 — Explicit empty-text-to-zero-tokens normalization (§3 steps 4-5, §4 scenario 9)
+
+**Adjudicated decision (2026-09-12, with zbalint, in response to OMP's `BLOCKED — SPEC
+ADJUDICATION REQUIRED` report on agent session `01a096f0-0e90-7444-9ecc-d72f1cfe8c1f`)**: §3 step
+4's original claim — "token count of an empty string is `0`" — was an unverified assumption baked
+into the locked spec text, not a grounded finding like §0's two verified `fastembed` facts. OMP's
+worker ran the missing check and found the installed tokenizer returns `token_count("") == 2`
+(BOS/EOS special-token overhead the tokenizer adds to every input, empty or not), directly
+contradicting §3 step 5's original unconditional `model.token_count(...)` assignment and §4
+scenario 9's `token_counts[that_id] == 0` requirement. The worker's own uncommitted patch
+(`0 if text == "" else count`) independently arrived at the same fix proposed below, but was
+correctly left uncommitted pending adjudication rather than assumed authorized.
+
+**Contract chosen: semantic empty-content accounting.** Any candidate whose resolved text is `""`
+— whether from a missing `entities` row's `content_by_id.get(entity_id, "")` fallback, or from a
+real row whose `full_content` column is itself stored as an empty string — is defined as costing
+exactly `0` tokens. This normalization explicitly overrides the raw tokenizer's return value for
+that one case; every non-empty text is still tokenized via the real, unbatched
+`model.token_count(text)` call exactly as already locked, with no other special-casing.
+
+**Why this contract over the alternative** (preserving the literal unconditional tokenizer call
+and amending §4 scenario 9 to expect `2` instead): §1 decision 1's "no predicate/type-based
+discount" principle is about not hand-tuning the budget by content *category* — it does not
+require treating a tokenizer's BOS/EOS wrapper overhead on a genuinely empty string as real
+content size. The missing-row fallback path exists specifically to degrade gracefully (mirrors
+A2's own `test_missing_entity_row_falls_back_to_unknown` precedent: a stale/absent reference
+should cost nothing, not accrue a tokenizer implementation artifact). The normalization is a single
+uniformly-applied rule keyed only on the resolved text being empty, not on *why* it's empty or
+*which* pool the candidate came from — it does not reopen the door §1 decision 1 was closing.
+
+**Changes made by this amendment** (all other sections and all other locked decisions in §1
+unchanged):
+
+1. §3 step 4: corrected the false "token count of an empty string is `0`" claim to state the real
+   installed tokenizer's actual nonzero return for `""`, and to point forward to this amendment's
+   explicit normalization as the reason step 5 no longer performs a bare direct assignment.
+2. §3 step 5: replaced the unconditional `token_counts[entity_id] = model.token_count(...)`
+   assignment with:
+   ```python
+   from saltmdb.domain.services.embedding_service import get_model
+   model = get_model()
+   for entity_id in all_ids:
+       text = content_by_id.get(entity_id, "")
+       token_counts[entity_id] = 0 if text == "" else model.token_count(text)
+   ```
+   Still exactly one call site per distinct id (the `token_count` call itself remains unbatched,
+   per §0 finding 2 — this amendment changes what gets fed into it, not the one-call-per-id shape).
+3. §4 scenario 9: added a note that the asserted `token_counts[that_id] == 0` is this amendment's
+   explicit normalization, not a coincidental raw-tokenizer result — implementers/reviewers must
+   not satisfy this scenario by mocking or stubbing `token_count` to return `0`; the real bundled
+   tokenizer must still be called for every non-empty text elsewhere in the same test file (per
+   §4's existing "do not mock `get_model()` or `token_count()`" rule, unchanged).
+
+**New scenario implied, not yet in §4's numbered list**: a real `entities` row whose `full_content`
+is itself an empty string (distinct from scenario 9's *missing* row) must also normalize to `0`
+tokens under this amendment's contract — the implementer should add this as an eleventh scenario
+(or fold it into scenario 9 as a second sub-case within the same test) rather than leaving it
+untested; the amendment's contract explicitly covers this case even though the original scenario 9
+prose only exercised the missing-row path.
+
+**Pre-lock re-check of this amendment against the spec-writing skill's gate**: the amended step 5
+code was traced against scenario 2 (everything fits) and scenario 3 (primary hits alone exceed
+budget) — both already assume non-empty fixture content, so `text == ""` is never true for those
+paths and the amendment changes nothing about their expected outcomes. Scenario 5 (conflict-only
+large-content member) and scenario 6/7/8 (budget clamping) are likewise unaffected — none of them
+depend on empty content. No other section references `token_count` or the empty-string case, so no
+further amendment is needed elsewhere in the document.
