@@ -112,6 +112,7 @@ _OWNER_INJECTED_TOOLS = frozenset(
         "get_lineage",
         "get_related_memories",
         "review_core_memory",
+        "retrieve_context",
     }
 )
 
@@ -960,6 +961,41 @@ def get_related_memories(
             "max_depth": max_depth,
             "direction": direction,
             "include_inspect": include_inspect,
+            "owner_id": owner_id_,
+        },
+    )
+
+
+@mcp.tool()
+def retrieve_context(
+    query: str,
+    limit: int | None = None,
+    budget_tokens: int | None = None,
+) -> dict:
+    """Assembles graph-aware, budget-bounded local context for a query in one call: primary search
+    hits, one-hop predicate-allowlisted graph expansion, contradiction/conflict-set surfacing,
+    lifecycle/supersession history, and deterministic token-budget packing -- everything
+    search_memory + get_related_memories + get_lineage would otherwise require composing by hand.
+
+    Returns one memories[] array (each item tagged inclusion: "primary"|"expansion"|
+    "conflict_only", plus a retrieval_provenance explaining how it entered the result), the
+    in-network edges directly connecting primary hits, a lineage map for every surfaced head with a
+    known supersession chain (contradiction-flagged where relevant), conflict_sets for any
+    unresolved contradiction touching this result (a lifecycle-resolved one surfaces via lineage,
+    never here), and metadata.fan_out/metadata.budget truncation accounting.
+
+    limit controls how many primary search hits seed expansion (default 5, matching search_memory's
+    own default). budget_tokens caps the total token payload of memories[] (server default and hard
+    ceiling apply if omitted). All other traversal behavior -- which relation predicates expand
+    context, how far, and in which direction -- is fixed for this tool and not caller-configurable.
+    """
+    owner_id_ = _effective_owner()
+    return _backend_or_raise().call(
+        "retrieve_context",
+        {
+            "query": query,
+            "limit": limit,
+            "budget_tokens": budget_tokens,
             "owner_id": owner_id_,
         },
     )
