@@ -113,10 +113,21 @@ gets — not re-derived or overridden here, per Coding Standards rule 3/4, reuse
 1. Open one connection (`db_connection` if given, else `get_connection(db_path or get_db_path())`,
    closing it at the end only if this function opened it) — mirror A1-A4's own `should_close`
    pattern exactly. Thread this same connection through **every** call below, including the
-   internal `search_memory` call (its own signature already accepts `db_connection`) — this is the
-   one place in the whole `retrieve_context` pipeline where a single request can otherwise open five
-   separate connections, and A1-A4 already established the "one caller opens, everyone else
-   reuses" precedent this slice must not break.
+   internal `search_memory` call (its own signature already accepts `db_connection`) — A1-A4
+   already established the "one caller opens, everyone else reuses" precedent this slice must not
+   break for its own four calls. **Corrected by Amendment 4** — also resolve `effective_db_path`
+   here (see Amendment 4 for why this is a separate, additional value from the raw `db_path`
+   parameter, and why `search_memory` itself, unlike A1-A4's own primitives, cannot fully collapse
+   to this one connection regardless):
+   ```python
+   if db_path is not None:
+       effective_db_path = db_path
+   elif db_connection is not None:
+       row = conn.execute("PRAGMA database_list").fetchone()
+       effective_db_path = row[2] or None
+   else:
+       effective_db_path = db_path or get_db_path()
+   ```
 2. `pit = datetime.now(UTC).isoformat()` — one shared point-in-time for this entire call, passed
    to every A1/A2/A3 call below (A4 takes no `point_in_time` parameter — it does no traversal).
    Mirrors A1's own "every per-hit traversal sees the same bitemporal snapshot" rationale, extended
@@ -138,9 +149,13 @@ gets — not re-derived or overridden here, per Coding Standards rule 3/4, reuse
        include_related=False,
        return_diagnostics=False,
        db_connection=conn,
-       db_path=db_path,
+       db_path=effective_db_path,
    )
    ```
+   **Corrected by Amendment 4**: this passes `effective_db_path` (step 1), not the raw `db_path`
+   parameter — see Amendment 4 for the real bug this closes (a caller supplying `db_connection`
+   without `db_path` would otherwise silently point `search_memory`'s own internal semantic/
+   vector/chunk/topic-scoring sub-searches at the wrong database).
    `mode="strict"` (not `search_memory`'s own tool-level default `"broad"`) is a deliberate choice:
    `strict` applies `search_memory`'s existing relevance-abstention behavior (memory `c27792a1`),
    returning `[]` for a query with no sufficiently-relevant candidate rather than padding
@@ -677,7 +692,18 @@ implementation guidance OMP is free to skip beyond):
 14. **One connection for the whole call**: patch `get_connection` (or count calls via a connection-
     counting fixture) and assert it is called at most once across the entire `assemble_retrieve_context`
     invocation, including the internal `search_memory` call — proving §2.1 step 1's "thread one
-    connection through everything" requirement actually holds, not just reads as intended in prose.
+    connection through everything" requirement actually holds for A1-A4's own four calls, not just
+    reads as intended in prose. (Does not assert anything about connections opened *inside*
+    `search_memory`'s own semantic/vector/chunk/topic-scoring sub-searches — see Amendment 4 for why
+    those are out of this slice's jurisdiction to collapse.)
+15. **Added by Amendment 4 — `search_memory` receives the connection's own database path, not a
+    divergent default**: call `assemble_retrieve_context(..., db_connection=self.conn)` (the
+    existing fixture pattern this suite already uses throughout, `db_path` omitted); patch
+    `memory_service.search_memory` and assert the `db_path` kwarg it receives equals `self.db_path`
+    (the fixture's own file, via `PRAGMA database_list` on `self.conn`) — **not** whatever
+    `get_db_path()` would return. This is the regression test for the bug Amendment 4 fixes; without
+    it, the fix could silently regress back to forwarding the raw, possibly-`None` `db_path`
+    parameter a second time.
 
 ## 7. `tests/test_retrieve_context_wiring.py` (new file)
 
@@ -777,10 +803,33 @@ uv run ruff format --check src/saltmdb/domain/services/retrieve_context_service.
   src/saltmdb/daemon/dispatch.py src/saltmdb/daemon/protocol.py \
   tests/test_retrieve_context_service.py tests/test_retrieve_context_wiring.py && \
 uv run mypy src/saltmdb/domain/services/retrieve_context_service.py src/saltmdb/mcp/tools.py \
-  src/saltmdb/daemon/dispatch.py src/saltmdb/daemon/protocol.py
+  src/saltmdb/daemon/protocol.py
 ```
-must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md` §on pre-commit
-checks).
+must exit 0.
+
+```bash
+uv run mypy src/saltmdb/daemon/dispatch.py
+```
+**Corrected by Amendment 4** — must produce *exactly* these three pre-existing errors and no others
+(confirmed unrelated to A5, present on `context-aware-search` @ `a2bf8fd` before this slice's own
+changes, at what were then lines 354/413 and are now 355/414 purely because A5's own import
+addition shifts every later line down by one):
+```
+src/saltmdb/daemon/dispatch.py:355: error: Argument "metadata" to "update_memory_metadata" has incompatible type "Any | None"; expected "dict[Any, Any]"  [arg-type]
+src/saltmdb/daemon/dispatch.py:414: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "str | None"  [arg-type]
+src/saltmdb/daemon/dispatch.py:414: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "bool"  [arg-type]
+Found 3 errors in 1 file (checked 1 source file)
+```
+A reviewer confirms this by running the same command against `context-aware-search` @ `a2bf8fd`
+(pre-A5) and diffing: the post-A5 output must be identical modulo the one-line shift. Any error at
+a different line, a different message, or a fourth error anywhere in the file fails this criterion
+— this bar accepts zero new mypy debt, it only declines to require this slice to fix debt that
+predates it and sits entirely outside §0's locked edit range for this file (the two pre-existing
+errors are in `_dispatch_update_memory_metadata`/`_dispatch_get_related_memories`; A5 may only edit
+this file's import block and the code from the new `_dispatch_retrieve_context` function onward).
+These three commands together match this repo's documented lint/type gate (`CONTRIBUTING.md` §4),
+applied per-file the way every other slice's own `mypy` acceptance criterion in this Milestone
+already has been.
 
 ```bash
 rg -n '"retrieve_context"' src/saltmdb/daemon/dispatch.py src/saltmdb/daemon/protocol.py
@@ -1198,3 +1247,164 @@ either fix in this amendment.
 
 **Note on OMP's own blocker log**: OMP's third report did not name a SALTMDB entity id this time
 (unlike the first two rounds) — nothing to check for resolvability here.
+
+## Amendment 4 — Pre-existing dispatch.py mypy debt collides with §9, and the single-connection invariant is unachievable as literally stated (two contradictions, fourth OMP block)
+
+**Adjudicated 2026-09-13, after OMP's fourth `BLOCKED — SPEC ADJUDICATION REQUIRED` report.** Both
+claims were verified directly (a live `mypy` run against the pre-A5 baseline commit, and a direct
+read of `memory_service/orchestrator.py`'s actual connection-handling code, plus one throwaway
+Python probe of `PRAGMA database_list`'s return shape) before writing either fix — no service code,
+wiring, or full-suite run was built or executed as part of this verification, per the standing
+adjudication-verification boundary (`19155275`) established after Amendment 3's own over-build.
+
+### Contradiction 1 — §9's `mypy dispatch.py` bar collides with pre-existing, unrelated debt
+
+`uv run mypy src/saltmdb/daemon/dispatch.py`, run against `context-aware-search` @ `a2bf8fd` (this
+worktree's own base commit, with **zero** A5 changes applied), already fails with 3 errors:
+```
+src/saltmdb/daemon/dispatch.py:354: error: Argument "metadata" to "update_memory_metadata" has incompatible type "Any | None"; expected "dict[Any, Any]"  [arg-type]
+src/saltmdb/daemon/dispatch.py:413: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "str | None"  [arg-type]
+src/saltmdb/daemon/dispatch.py:413: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "bool"  [arg-type]
+Found 3 errors in 1 file (checked 1 source file)
+```
+— exactly OMP's reported errors (at lines 355/414: A5's own new import line shifts everything below
+it down by one, but the errors themselves, their messages, and their originating functions
+(`_dispatch_update_memory_metadata`, `_dispatch_get_related_memories`) are unchanged and unrelated
+to any A5 edit). This is long-documented, deliberately-deferred technical debt: memory `50e45023`
+(2026-08-10) traces this exact `dispatch.py` `kw.get()` → `Any | None` cluster back to a prior
+production-readiness fix session that explicitly chose not to fix it (coercing away `Any | None`
+risks breaking falsy-but-valid values like `weight=0`; the real fix needs a `TypedDict`-based
+dispatch rewrite, out of scope for a lint-fix pass then and out of scope for A5 now). No prior slice
+in this Milestone ever collided with it: A1's, A3's, and A4's own `mypy` acceptance commands each
+scope to only their own single new service file (`context_expansion_service.py`,
+`lineage_assembly_service.py`, `context_budget_service.py` respectively — confirmed by grepping
+each spec's own §9) and never touched `dispatch.py` at all, because none of those slices registered
+a new MCP tool. A5 is the first slice in this Milestone whose own `dispatch.py` edit brings this
+file into an acceptance command's scope for the first time — so this is the first time this
+pre-existing defect has ever collided with any of this Milestone's own gates, not something A1-A4
+somehow already fixed or avoided.
+
+Fixing these two functions is not an option under §0's own locked scope: A5 may only edit
+`dispatch.py`'s import block and the code from `_dispatch_retrieve_context` onward (§0, corrected by
+Amendment 1 to note test-file exceptions elsewhere, unchanged here) — both broken lines are in
+unrelated, pre-existing, earlier functions. Requiring §9's literal "must exit 0" bar on this file
+would make it impossible to satisfy without silently expanding scope past the locked boundary, the
+same shape of contradiction Amendments 1-3 each found and fixed in a different part of this spec.
+
+This also matches an already-established pattern elsewhere in this project's own history, not a
+one-off exception invented for A5: memories `64579004` ("Full mypy and Bandit retain unrelated
+existing failures"), `4d8065e4` ("Scoped bandit on touched implementation files: only the same
+pre-existing... findings already present elsewhere... unrelated"), and `254c28f8` ("same pre-existing
+mypy error only") all record prior sessions accepting a diff-against-baseline bar instead of an
+absolute-zero bar specifically when a change's own gate check surfaces debt the change didn't
+introduce and isn't in scope to fix. `CONTRIBUTING.md` §4 itself documents that the project's real,
+full `uv run mypy src` gate already carries a nonzero baseline (memory `4d76dd05`: 9 known errors as
+of alpha.102) that no single slice is expected to zero out on its own.
+
+**Decision**: §9 is amended (see the corrected §9 above) from a single combined `mypy` invocation
+covering all four files to three files (`retrieve_context_service.py`, `tools.py`, `protocol.py`)
+that must still exit 0 with zero errors, plus a separate `dispatch.py` invocation whose acceptance
+bar is "produces exactly these three pre-existing errors, verified unchanged from the pre-A5
+baseline, and no others" — a diff-against-baseline bar, not a relaxation to "any number of errors is
+fine." Any new error, anywhere in `dispatch.py`, including inside A5's own newly-added code, still
+fails this criterion.
+
+### Contradiction 2 — the single-connection invariant is unachievable as literally stated, and one real correctness bug sits underneath it
+
+§2.1 step 1 (original text) claimed threading `db_connection` through the internal `search_memory`
+call collapses "a single request" to one connection "in the whole `retrieve_context` pipeline." Two
+independent problems, both confirmed directly against `memory_service/orchestrator.py`'s actual
+code (not summarized from OMP's report):
+
+1. **The literal invariant cannot hold, and this is `search_memory`'s own pre-existing
+   architecture, not a regression A5 introduces.** `orchestrator.py`'s `search_memory` does use
+   `conn` directly for its own top-level query construction (tag lookups, FTS row fetch, the
+   `where_clauses`/`params` path) — so passing `db_connection=conn` genuinely avoids one connection
+   open at that level, exactly as originally claimed for that part. But deeper in the same function
+   (lines 373-374 and every call site below them), its semantic/vector/chunk/topic-scoring helpers —
+   `search_primitives.semantic_search`, `chunk_candidate_search`, `retrieval_vector_search`,
+   `_score_topics_with_fallback` — each accept only a `db_path: str` parameter, never
+   `db_connection`, and each opens its own connection internally regardless of what
+   `assemble_retrieve_context` does. This is confirmed by direct inspection of
+   `orchestrator.py:373-618`: `if not db_path: db_path = get_db_path()` followed by five separate
+   calls passing `db_path` (never `conn`) into these helpers. `search_memory` is architecturally
+   different from A1-A4's own primitives here — it predates the "one caller opens, everyone else
+   reuses" precedent A1-A4 established, and its own deeper sub-searches were never built against
+   that contract. Making `search_memory`'s full call graph connection-transparent would mean adding
+   a `db_connection` parameter to `search_primitives.py`'s own semantic/vector/chunk/topic
+   functions — a change to files §0 already lists as untouched by this slice (`memory_service`
+   isn't even named in §0's edit-scope list at all), a cross-cutting change affecting every other
+   `search_memory` caller in the codebase (well beyond `retrieve_context`), and something no G1-G8
+   ticket has ever asked for. Per the standing "don't accept a limitation within our own
+   jurisdiction" rule (`74f6b4c0`) — this genuinely sits **outside** A5's jurisdiction, unlike A2's
+   own Q7 gap that rule was written for, which A2 could fix by editing its own already-in-scope
+   code. Accepted as a real, filed limitation, not silently absorbed: a follow-up wayfinder ticket
+   is warranted for a future milestone to decide whether `search_primitives.py` should ever gain a
+   `db_connection` parameter; it is not this slice's job to decide that now.
+
+2. **A real, independent correctness bug sits underneath the invariant, and this one *is* in A5's
+   own jurisdiction to fix.** The advisor's note is correct and confirmed: `assemble_retrieve_context`
+   (as originally specified, and as OMP's own current implementation shows) calls `search_memory`
+   with `db_connection=conn` and `db_path=db_path` — the **raw**, possibly-`None` parameter, not a
+   value resolved from wherever `conn` actually points. When a caller supplies `db_connection`
+   without `db_path` — which is exactly this suite's own established test-fixture pattern
+   throughout `tests/test_retrieve_context_service.py` (`db_connection=self.conn`, `db_path` always
+   omitted, confirmed by reading the file directly) — `orchestrator.py`'s own `if not db_path:
+   db_path = get_db_path()` fallback resolves to the **global default** database path, not the
+   fixture's own temp database, for every one of those five sub-search helper calls. This means
+   `search_memory`'s semantic/vector/chunk/topic-scoring paths could silently read a different
+   database than the one `conn` (and therefore the rest of `assemble_retrieve_context`'s own A1-A4
+   calls) is actually using — confirmed as a real, live discrepancy, not a hypothetical one, since
+   it reproduces on the test suite's own existing calling convention today. (It has not yet
+   surfaced as an observable test failure only because `mode="strict"`'s relevance-abstention and
+   this suite's own fixture queries apparently don't force these particular scenarios through the
+   affected sub-search paths in a way that changes their asserted outcome — that is luck, not a
+   reason to leave the bug in place.)
+
+   Fixed entirely within A5's own new file (no upstream signature change): §2.1 step 1 now also
+   resolves `effective_db_path` — trusting an explicit `db_path` if the caller gave one, deriving
+   the real file path from `conn` itself via `PRAGMA database_list` when only `db_connection` was
+   supplied (verified live: a throwaway probe against a real `init_db()`-opened connection returned
+   `[(0, 'main', '<the exact file path passed to init_db>')]`), and otherwise falling back to
+   exactly the same `db_path or get_db_path()` value already used to open `conn` in the no-connection-
+   supplied case. Step 3's `search_memory` call now passes `db_path=effective_db_path`, never the
+   raw parameter. §6 gains scenario 15, asserting `search_memory` receives the fixture's own
+   database path under the suite's existing `db_connection`-only calling convention — the regression
+   test for this specific bug, mirroring Amendment 3's own "this cannot recur silently a second
+   time" rationale.
+
+**Why this wasn't caught before locking (both contradictions)**: for contradiction 1, the
+"single connection" framing was carried over from A1-A4's own precedent without separately
+verifying that `search_memory` itself — a much older, larger, and more structurally complex
+function than any of A1-A4's own primitives — actually honors a caller-supplied `db_connection`
+all the way down its own call graph, rather than only at its own top level; the pre-lock gate's
+step 9 confirmed `search_memory` *accepts* a `db_connection` parameter at all (true), but never
+traced what that parameter actually reaches inside the function body. For contradiction 2, the
+`db_path=db_path` pass-through looked like the obviously-correct choice (forward the caller's own
+parameter unchanged) and was never checked against what happens when that parameter is `None` but
+`db_connection` is not — the same class of gap as Amendment 2's prose-vs-code mismatch, but here
+between two *sibling parameters* of the same function rather than between prose and one function's
+body. **Standing lesson, now the fourth logged on this one spec**: when this slice's own contract
+claims a downstream call is fully connection-transparent, verify that by reading every line the
+downstream function's own connection variable touches, not just confirming the parameter exists in
+its signature — and when two parameters of the same function can independently vary (`db_connection`
+present, `db_path` absent, or vice versa), check what happens in the cross case explicitly, not just
+the two "obviously consistent" cases (both given, or both absent).
+
+**§9's acceptance bar is otherwise unchanged** by contradiction 2's fix — same test commands, one
+additional required scenario (§6 item 15) folded into the existing "every scenario in §6/§7 must
+correspond to at least one passing test" bar. Contradiction 1's own §9 change is recorded above in
+the corrected §9 section directly, not duplicated here.
+
+**Amendment gate re-run**: re-checked §0's scope list against both fixes — contradiction 2's fix
+touches only `retrieve_context_service.py` and its own test file, both already in scope; no new
+file, no upstream signature change, nothing added to or removed from §0's edit-scope list.
+Re-confirmed (via the same `mypy`-on-baseline check used to verify contradiction 1) that no other
+file in this slice's four-file wiring surface (`tools.py`, `protocol.py`, the new service file)
+carries any pre-existing mypy debt of its own — both are clean at baseline, so §9's "exit 0" bar for
+those three files is unaffected and unchanged.
+
+**Note on OMP's own blocker log**: OMP's report named event id `186e9c2e-973b-416e-83a4-cf59064eb793`
+for the independent second blocker. Not separately re-verified for resolvability here since this
+round's evidentiary bar was met directly against source and a live probe regardless of whether that
+event id resolves in this session's own SALTMDB access scope.
