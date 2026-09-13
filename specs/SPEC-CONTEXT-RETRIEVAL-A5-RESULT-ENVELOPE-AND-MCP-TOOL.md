@@ -1408,3 +1408,126 @@ those three files is unaffected and unchanged.
 for the independent second blocker. Not separately re-verified for resolvability here since this
 round's evidentiary bar was met directly against source and a live probe regardless of whether that
 event id resolves in this session's own SALTMDB access scope.
+
+## Amendment 5 — §6 scenario 13's "real pipeline, no mocks" premise is architecturally unachievable; narrowed to one unavoidable mock
+
+**Adjudicated 2026-09-13, after OMP's fifth `BLOCKED — SPEC ADJUDICATION REQUIRED` report**, itself
+raised in response to a final-review instruction (not an OMP-native implementation choice) to
+rewrite §6 scenario 13's test away from mocking all four of `expand_context_candidates`/
+`assemble_conflict_sets`/`pack_context_budget`/`assemble_lineage` and toward exercising them for
+real, per §6's own preamble ("Real SQLite via `init_db`, no mocks for the graph/DB layer — mock
+only `memory_service.search_memory` itself..."). Both OMP's claim and the fix below were verified
+directly against the real worktree source — the actual SQL text and the actual A2 test file — not
+inferred from OMP's report or built as a throwaway implementation.
+
+**The contradiction, verified against the actual worktree source**: `relation_service.py`'s
+`analyze_dependencies` — the one function `expand_context_candidates` (A1) calls for its own
+traversal — ends its recursive-CTE query with:
+```sql
+SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
+FROM dependency_tree dt
+JOIN entities e1 ON dt.source_id = e1.id
+JOIN entities e2 ON dt.target_id = e2.id
+ORDER BY dt.depth ASC;
+```
+(`relation_service.py`, the `_build_dependency_query`-style CTE immediately preceding
+`analyze_dependencies`, confirmed by direct read). Both `INNER JOIN`s mean a relation row whose
+`target_id` has no matching `entities` row is silently excluded from every result `analyze_dependencies`
+ever returns — regardless of how the relation row itself was inserted (a real `store_relation` call,
+a raw INSERT, `PRAGMA foreign_keys = OFF` or not). A genuinely real, unmocked call to
+`expand_context_candidates` therefore **cannot**, by construction, ever surface a `contradicts` edge
+whose target is a nonexistent entity — the one input shape §6 scenario 13 exists to test. This is
+`analyze_dependencies`'s own pre-existing architecture (predates A1, let alone A5) — not a regression
+introduced by this slice, and not something A5 may fix: `relation_service.py` is not named anywhere
+in §0's edit scope, and no G-ticket asks for `analyze_dependencies`'s own JOIN behavior to change.
+Exactly the same category of limitation as Amendment 4 contradiction 1 (`search_primitives.py`'s
+sub-searches not being connection-transparent) — a real, filed, out-of-A5's-jurisdiction fact about
+an upstream function's existing behavior, confirmed by reading that function's actual body, not
+assumed compatible because "the advisor already showed a precedent for this."
+
+**The cited precedent does not actually demonstrate what it was cited for.** The advisor's own
+suggested fix pointed at `tests/test_conflict_set_service.py:418-446`
+(`test_missing_entity_row_falls_back_to_unknown`) as an existing "real stale edge via
+`PRAGMA foreign_keys = OFF`" example. Read directly: that test does insert a real, raw `contradicts`
+relation row with `PRAGMA foreign_keys = OFF` — but it never calls `expand_context_candidates` (A1)
+at all. It builds the `expansion_result` dict `assemble_conflict_sets` (A2) receives **by hand**, via
+the file's own `_expansion()` helper:
+```python
+def _expansion(
+    edges: list[dict[str, str]], candidates: list[str] | None = None
+) -> dict[str, Any]:
+    return {
+        "contradicts_edges": edges,
+        "expansion_candidates": [{"entity_id": entity_id} for entity_id in (candidates or [])],
+    }
+```
+— then passes `self._expansion([edge])` straight into `assemble_conflict_sets`, never through A1's
+own traversal. `conflict_set_service.py` confirms why this is a legitimate, real test of A2: A2
+consumes `expansion_result["contradicts_edges"]`/`["expansion_candidates"]` **verbatim** — it never
+independently re-derives them via its own DB traversal (confirmed by reading `assemble_conflict_sets`'s
+full body: no call to `analyze_dependencies` or `expand_context_candidates` appears anywhere in it).
+So A2's own "real, no-mocks" precedent already relies on a hand-built `expansion_result` as A2's
+*input* — it was never a demonstration that a real A1 call can produce this input, because A2's test
+suite has no need to prove that; it only needs to prove A2's own logic, given *some* expansion_result,
+handles a stale member correctly. Citing it as proof the full A1→A2 pipeline can do the same was the
+error, not the original advisor concern that mocking all four services was too broad — the concern
+that mocking all four is broader than necessary was and remains correct.
+
+**Decision**: §6 scenario 13's test technique is narrowed to the minimum mock surface that is
+actually achievable, mirroring A2's own precedent's real structure rather than its literal claim.
+Mock **only** `expand_context_candidates` (the one function whose real SQL structurally cannot
+produce this input) with a hand-built `expansion_result` dict matching its real Output contract's
+exact 4 keys (`in_network_edges`, `expansion_candidates`, `contradicts_edges`, `fan_out` — confirmed
+against `context_expansion_service.py`'s own literal `return {...}` block, no other key exists).
+The `contradicts_edges` entry's own `relation_id` still comes from a **real** relation row, inserted
+exactly as A2's precedent does (`PRAGMA foreign_keys = OFF`, a raw INSERT, `PRAGMA foreign_keys = ON`
+after — real SQLite state, not a fabricated id). `assemble_conflict_sets`, `pack_context_budget`, and
+`assemble_lineage` all run **for real**, unmocked, against that one hand-built `expansion_result` and
+the suite's real `self.conn` — confirmed sufficient by reading exactly which `expansion_result` keys
+each of those three functions actually reads (`context_budget_service.py:35` and
+`lineage_assembly_service.py:52,66` each read only `expansion_candidates`/`contradicts_edges`; no
+other field of `expansion_result` is consumed anywhere downstream of A1). This is a strictly smaller
+deviation from §6's "no mocks for the graph/DB layer" preamble than OMP's original all-four-mocked
+implementation — one function mocked instead of four, and the one function mocked is the one this
+amendment shows cannot, by its own pre-existing architecture, be exercised for real for this specific
+input — while three full real service calls (A2's real entity lookup producing the `"Unknown"`/
+`"unknown"` fallback title/status, A4's real budget packing, A3's real lineage assembly) now run
+against genuine SQLite state instead of being replaced by a fourth mock.
+
+**Corrected §6 scenario 13** (replaces the original text in full):
+
+> 13. **`memory_type` fallback for a stale conflict_only reference**: insert a real `contradicts`
+>     relation (`PRAGMA foreign_keys = OFF`, raw INSERT of the relation row, `PRAGMA foreign_keys = ON`
+>     immediately after — matching `test_conflict_set_service.py::test_missing_entity_row_falls_back_to_unknown`'s
+>     own technique) from a real primary-hit entity to a target id that has no matching `entities` row.
+>     Patch `saltmdb.domain.services.retrieve_context_service.expand_context_candidates` — **only this
+>     one function** — to return a hand-built `expansion_result` dict carrying that edge in
+>     `contradicts_edges`, an empty `expansion_candidates` list, an empty `in_network_edges` list, and
+>     a `fan_out` dict with `cap` set to `CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS * len(primary_hits)`
+>     and `eligible_count`/`truncated`/`dropped_count` reflecting zero real expansion candidates
+>     (`0`/`False`/`0`). Do not mock `assemble_conflict_sets`, `pack_context_budget`, or
+>     `assemble_lineage` — let all three run for real against the hand-built `expansion_result` and
+>     the suite's real connection. Assert the stale id's row in the final `memories[]` has
+>     `memory_type == "unknown"` rather than a `KeyError`, exactly as originally specified.
+
+**Why this wasn't caught in the previous review round**: the final-review pass that produced the
+original fix instruction verified §6's "no mocks for the graph/DB layer" text was violated (true)
+and pointed at the advisor's own cited precedent as the fix (not independently re-verified against
+`analyze_dependencies`'s actual SQL or against what `_expansion()` actually does in the cited
+precedent test) — the same class of gap Amendment 4's own "why this wasn't caught" note names for
+its own contradiction 1: trusting that a parameter/precedent existing (here, "a real stale-edge test
+exists elsewhere in this codebase") is the same as it demonstrating the specific claim being relied
+on (that a real, unmocked A1 call can produce this input) — rather than tracing what the precedent
+test's own body actually does, line by line, the way this amendment finally did.
+
+**Amendment gate re-run**: re-checked this amendment's own fix against §0's scope — touches only
+`tests/test_retrieve_context_service.py`'s one test method, already in scope, no new file, no
+production-code change, no other test file touched. Re-confirmed (grep) that no other §6/§7 scenario
+depends on `expand_context_candidates` producing a stale-entity edge the same way — scenario 6 (the
+other conflict-set scenario) uses a real, non-stale target reachable by a real relation, unaffected.
+§9's acceptance bar is unchanged — same test commands, same required scenario-to-test correspondence,
+this amendment only changes scenario 13's own internal technique.
+
+**Note on OMP's own blocker log**: OMP's fifth report (relayed via the user, not a direct SALTMDB
+event id this time) named the `analyze_dependencies` JOIN and the out-of-scope conclusion directly,
+with exact file/line evidence; no memory or event id was cited to check for resolvability.
