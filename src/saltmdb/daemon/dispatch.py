@@ -24,6 +24,7 @@ from saltmdb.domain.services import (
     librarian_service,
     memory_service,
     relation_service,
+    retrieve_context_service,
     telemetry_service,
 )
 from typing import Any, Literal
@@ -429,6 +430,18 @@ def _dispatch_get_events(**kw):
     )
 
 
+def _dispatch_retrieve_context(**kw):
+    query = kw.get("query")
+    if not isinstance(query, str):
+        raise ValueError("query is required")
+    return retrieve_context_service.assemble_retrieve_context(
+        query=query,
+        owner_id=kw.get("owner_id"),
+        limit=_optional_int_or_none(kw, "limit"),
+        budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
+    )
+
+
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
@@ -448,6 +461,7 @@ DISPATCH_TABLE = {
     "get_lineage": _dispatch_get_lineage,
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
+    "retrieve_context": _dispatch_retrieve_context,
     "review_core_memory": _dispatch_review_core_memory,
     "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,

@@ -42,6 +42,7 @@ READ_TOOLS = frozenset(
         "inspect_memory",
         "get_lineage",
         "get_related_memories",
+        "retrieve_context",
         "get_events",
         # Internal-only (no public MCP tool): returns the already-rendered core-memory bootstrap
         # digest via core_governance_service.render_bootstrap_response. Read-only -- classified

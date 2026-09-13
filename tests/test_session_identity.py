@@ -99,6 +99,13 @@ class TestRpcBackendIdentityWiring(unittest.TestCase):
             mcp_tools._set_backend_for_test(previous)
         self.assertEqual(capture.call.call_args.args[1]["owner_id"], "claude")
 
+    def test_retrieve_context_reinjects_configured_owner(self):
+        backend = mcp_tools.RpcBackend()
+        with patch("saltmdb.daemon.client.call", return_value="ok") as mock_call:
+            backend.call("retrieve_context", {"query": "q"})
+        forwarded_kwargs = mock_call.call_args[0][2]
+        self.assertEqual(forwarded_kwargs["owner_id"], "test_agent")
+
     def test_no_owner_id_key_at_all_is_left_untouched(self):
         # Tools without an owner_id concept (merge_tags, search_tags, get_events, ...) never
         # carry the key -- injection must not fabricate one.
