@@ -286,6 +286,42 @@ class TestRetrieveContextService(unittest.TestCase):
         )
         self.assertEqual(result["conflict_sets"], [])
 
+    def test_budget_dropped_expansion_head_pruned_from_lineage(self):
+        primary = self._memory(
+            "Lineage prune primary",
+            "lineage-prune-query primary content",
+        )
+        dropped_head = self._memory(
+            "Lineage prune dropped expansion",
+            "An expansion body deliberately sized to exceed the remaining budget.",
+        )
+        ancestor = self._memory("Lineage prune ancestor")
+        self._relation(primary, dropped_head, "depends_on")
+        self._raw_relation(dropped_head, ancestor, "supersedes")
+        primary_tokens = self._content_tokens(primary)
+        _, expansion_result, packed = self._real_budget_result(
+            "lineage-prune-query", primary_tokens
+        )
+        self.assertIn(
+            dropped_head,
+            {candidate["entity_id"] for candidate in expansion_result["expansion_candidates"]},
+        )
+        self.assertIn(dropped_head, packed["dropped_entity_ids"]["expansion"])
+
+        result = self._assemble(
+            "lineage-prune-query",
+            limit=1,
+            budget_tokens=primary_tokens,
+        )
+
+        visible_ids = {memory["entity_id"] for memory in result["memories"]}
+        self.assertNotIn(dropped_head, visible_ids)
+        self.assertNotIn(
+            dropped_head,
+            result["lineage"],
+            "a lineage entry survived for a head that budget truncation dropped from memories[]",
+        )
+
     def test_unresolved_contradiction_force_includes_conflict_only_member(self):
         primary = self._memory(
             "Unresolved contradiction primary",

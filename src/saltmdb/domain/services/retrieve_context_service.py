@@ -204,6 +204,10 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
                     ],
                 }
             )
+        surfaced_ids = {memory["entity_id"] for memory in memories}
+        lineage_result = {
+            head_id: entry for head_id, entry in lineage_result.items() if head_id in surfaced_ids
+        }
 
         edges = expansion_result["in_network_edges"]
         conflict_sets_output = [
