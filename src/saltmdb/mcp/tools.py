@@ -1091,7 +1091,11 @@ def retrieve_context(
     in-network edges directly connecting primary hits, a lineage map for every surfaced head with a
     known supersession chain (contradiction-flagged where relevant), conflict_sets for any
     unresolved contradiction touching this result (a lifecycle-resolved one surfaces via lineage,
-    never here), and metadata.fan_out/metadata.budget truncation accounting.
+    never here), and metadata.fan_out/metadata.budget truncation accounting. A primary-hit item may
+    also include relevance_preview/relevance_preview_meta -- the same query-focused extractive
+    preview search_memory returns, carried through unchanged (see search_memory's own description
+    for the field's exact semantics and budget-degradation contract); expansion/conflict_only items
+    never carry it, since they were never matched against the query directly.
 
     limit controls how many primary search hits seed expansion (default 5, matching search_memory's
     own default). budget_tokens caps the total token payload of memories[] (server default and hard

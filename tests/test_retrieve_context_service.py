@@ -9,13 +9,15 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from unittest.mock import patch
 
+import sqlite_vec
+
 from saltmdb import config
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
 from saltmdb.domain.services.conflict_set_service import assemble_conflict_sets
 from saltmdb.domain.services.context_budget_service import pack_context_budget
 from saltmdb.domain.services.context_expansion_service import PrimaryHit, expand_context_candidates
-from saltmdb.domain.services.embedding_service import get_model
+from saltmdb.domain.services.embedding_service import compute_entity_chunk_embeddings, get_model
 from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import store_relation
 from saltmdb.domain.services.retrieve_context_service import assemble_retrieve_context
@@ -237,6 +239,62 @@ class TestRetrieveContextService(unittest.TestCase):
         )
         self.assertEqual(result["edges"], [])
         self.assertEqual(result["conflict_sets"], [])
+
+    def test_primary_hit_surfaces_relevance_preview_expansion_hit_does_not(self):
+        long_content = (
+            "# Retrieve Context Preview Fixture\n\n"
+            "The retrieve-context-preview-needle sits in this opening section.\n\n"
+            + "\n\n".join(
+                f"## Supporting Section {index}\n\n"
+                f"Section {index} holds unrelated filler content for padding purposes."
+                for index in range(40)
+            )
+        )
+        primary = self._memory("Preview fixture primary", long_content)
+        expansion = self._memory("Preview fixture expansion")
+        self._relation(primary, expansion, "depends_on")
+
+        content_hash = self.conn.execute(
+            "SELECT content_hash FROM entities WHERE id = ?", (primary,)
+        ).fetchone()[0]
+        for row in compute_entity_chunk_embeddings(primary, long_content):
+            self.conn.execute(
+                "INSERT INTO entity_chunk_embeddings "
+                "(id,entity_id,embedding,chunk_index,char_start,char_end,content_hash) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    row["id"],
+                    row["entity_id"],
+                    sqlite_vec.serialize_float32(row["embedding"]),
+                    row["chunk_index"],
+                    row["char_start"],
+                    row["char_end"],
+                    content_hash,
+                ),
+            )
+        self.conn.commit()
+
+        result = self._assemble("retrieve-context-preview-needle")
+
+        memories_by_id = {memory["entity_id"]: memory for memory in result["memories"]}
+        primary_row = memories_by_id[primary]
+        expansion_row = memories_by_id[expansion]
+        self.assertEqual(primary_row["inclusion"], "primary")
+        self.assertIsInstance(primary_row["relevance_preview"], str)
+        self.assertTrue(primary_row["relevance_preview"])
+        self.assertIn(primary_row["relevance_preview"], long_content)
+        self.assertEqual(
+            primary_row["relevance_preview_meta"],
+            {
+                "auto_generated": True,
+                "extractive": True,
+                "query_specific": True,
+                "complete": False,
+            },
+        )
+        self.assertEqual(expansion_row["inclusion"], "expansion")
+        self.assertNotIn("relevance_preview", expansion_row)
+        self.assertNotIn("relevance_preview_meta", expansion_row)
 
     def test_in_network_edge_surfaces_verbatim_between_two_primary_hits(self):
         query = "in-network-shared-query"

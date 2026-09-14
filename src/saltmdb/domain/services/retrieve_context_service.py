@@ -76,7 +76,16 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
 
         primary_hits = [{"id": hit["id"], "score": hit["score"]} for hit in search_hits]
         primary_meta = {
-            hit["id"]: {"title": hit["title"], "memory_type": hit["memory_type"]}
+            hit["id"]: {
+                "title": hit["title"],
+                "memory_type": hit["memory_type"],
+                # relevance_preview/relevance_preview_meta are already computed by the internal
+                # search_memory call above (query-focused extractive preview, see orchestrator.py)
+                # -- surfaced here rather than discarded, per the same optional/budget-degraded
+                # contract search_memory itself uses (absent, not null, when preview was skipped).
+                "relevance_preview": hit.get("relevance_preview"),
+                "relevance_preview_meta": hit.get("relevance_preview_meta"),
+            }
             for hit in search_hits
         }
         original_rank = {hit["id"]: index + 1 for index, hit in enumerate(search_hits)}
@@ -160,17 +169,21 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
 
         memories: list[dict[str, Any]] = []
         for entity_id in final_primary_ids:
-            memories.append(
-                {
-                    "entity_id": entity_id,
-                    "title": primary_meta[entity_id]["title"],
-                    "memory_type": primary_meta[entity_id]["memory_type"],
-                    "inclusion": "primary",
-                    "retrieval_provenance": [
-                        {"reason": "primary_search", "rank": original_rank[entity_id]}
-                    ],
-                }
-            )
+            memory_item: dict[str, Any] = {
+                "entity_id": entity_id,
+                "title": primary_meta[entity_id]["title"],
+                "memory_type": primary_meta[entity_id]["memory_type"],
+                "inclusion": "primary",
+                "retrieval_provenance": [
+                    {"reason": "primary_search", "rank": original_rank[entity_id]}
+                ],
+            }
+            if primary_meta[entity_id]["relevance_preview"] is not None:
+                memory_item["relevance_preview"] = primary_meta[entity_id]["relevance_preview"]
+                memory_item["relevance_preview_meta"] = primary_meta[entity_id][
+                    "relevance_preview_meta"
+                ]
+            memories.append(memory_item)
 
         candidates_by_id = {
             candidate["entity_id"]: candidate
