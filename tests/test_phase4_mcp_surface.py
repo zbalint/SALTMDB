@@ -46,10 +46,21 @@ class TestPhase4McpSurface(unittest.TestCase):
         for function in (tools.revise_memory, tools.supersede_memory):
             params = list(inspect.signature(function).parameters)
             self.assertEqual(params[:5], ["entity_id", "title", "content", "tags", "reason"])
-            for required in params[:5]:
+            # entity_id/title stay unconditionally required (Parameter.empty). content, tags,
+            # and reason no longer are, at the bare Python-signature level: content_file_path is
+            # now a legitimate alternative to content (_resolve_content enforces that exactly
+            # one of the two is supplied, at runtime), which forces every trailing positional
+            # parameter -- tags and reason included -- to also carry a default. Domain-layer
+            # validation (_validate_replacement_inputs) still rejects a missing/empty tags or
+            # reason exactly as before; only the enforcement point moved.
+            for required in ("entity_id", "title"):
                 self.assertIs(
                     inspect.signature(function).parameters[required].default,
                     inspect.Parameter.empty,
+                )
+            for optional_at_signature_level in ("content", "tags", "reason"):
+                self.assertIsNone(
+                    inspect.signature(function).parameters[optional_at_signature_level].default
                 )
 
     def test_replacements_forward_identity_and_intent(self):
@@ -104,6 +115,7 @@ class TestPhase4McpSurface(unittest.TestCase):
             scope=None,
             memory_type=None,
             agent_session_id=None,
+            repoint_relations=False,
         )
 
     @patch("saltmdb.daemon.dispatch.memory_service.supersede_memory", return_value={"status": "ok"})

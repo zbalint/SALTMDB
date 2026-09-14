@@ -278,6 +278,7 @@ def _dispatch_replacement(**kw):
         scope=kw.get("scope"),
         memory_type=kw.get("memory_type"),
         agent_session_id=kw.get("agent_session_id"),
+        repoint_relations=bool(kw.get("repoint_relations", False)),
     )
 
 

@@ -36,6 +36,17 @@ def get_db_path() -> str:
     return os.environ.get("SALTMDB_DB_PATH", os.path.join(default_dir, "saltmdb.db"))
 
 
+def get_content_dump_dir() -> str:
+    """Resolve the local directory large-content dumps are written to (see
+    CONTENT_FILE_DUMP_THRESHOLD_CHARS), from SALTMDB_CONTENT_DUMP_DIR or default
+    ~/.saltmdb/content_dumps. Same-machine, same-user convention as get_db_path -- SALTMDB is
+    local-first, so the calling agent can always read a path under its own home directory."""
+    default_dir = os.path.join(os.path.expanduser("~/.saltmdb"), "content_dumps")
+    dump_dir = os.environ.get("SALTMDB_CONTENT_DUMP_DIR", default_dir)
+    os.makedirs(dump_dir, exist_ok=True)
+    return dump_dir
+
+
 def is_semantic_search_enabled() -> bool:
     """Check SALTMDB_ENABLE_SEMANTIC env var. Defaults to True (enabled).
 
@@ -187,6 +198,16 @@ QG_MULTI_HEADING_MIN_LENGTH = 4000
 # saltmdb-usage's "write rich, comprehensive memories" guidance may legitimately exceed this,
 # see AGENT_GUIDE.md/skills/saltmdb-usage/SKILL.md for the explicit "safe to ignore" note.
 QG_OVERSIZED_PAYLOAD_THRESHOLD = 8000
+
+# Large-content transport mitigation -- distinct from QG_OVERSIZED_PAYLOAD_THRESHOLD above, which
+# only flags content quality advisorily and never changes what is returned. When a memory's
+# content exceeds this many characters, get_memory/revise_memory/supersede_memory responses dump
+# it to a local file (see saltmdb.utils.text.large_content_descriptor) and return a
+# content_file_path instead of inlining the full string -- keeps a single large memory (e.g. a
+# growing wayfinder map) from tripping an MCP client's own response-size limit, confirmed live
+# 2026-09-14 when a ~94KB supersede_memory response for one exceeded the calling agent's own
+# tool-output limit.
+CONTENT_FILE_DUMP_THRESHOLD_CHARS = 20000
 
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"
