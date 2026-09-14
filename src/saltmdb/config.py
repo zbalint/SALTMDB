@@ -239,11 +239,11 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
 # Milestone A slice A1 (wayfinder ticket G4, memory 5d578d13) -- retrieve_context's graph-expansion
 # fan-out bound: max_out_of_network_neighbors = CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS *
 # num_primary_hits, adopting GraphRAG local-search's own formula/default as-is (verified against
-# GraphRAG source during wayfinder research ticket 5a3694d1). PLACEHOLDER: not yet benchmarked
-# against SALTMDB's own corpus -- recalibrate in Milestone B per the project's live-usage-first
-# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
-# replace this comment with the benchmark citation once a real value is locked, matching the
-# treatment already given to RELATION_GATE_MIN_SIMILARITY_THRESHOLD/SUPERSESSION_MIN_SIMILARITY_THRESHOLD.
+# GraphRAG source during wayfinder research ticket 5a3694d1). Milestone B calibration (memory
+# 4c0c77bd) benchmarked this against 14 real retrieve_context probes on the live corpus: fan_out
+# truncation (dropped_count) was 0 in every probe, including the densest (14 eligible expansion
+# candidates) -- the cap was never once the binding constraint, so no live evidence supports
+# changing it. Confirmed at its existing value, no longer a placeholder.
 CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
 
 # Milestone A slice A2 (wayfinder ticket G7, memory 0cb1d191) -- retrieve_context's contradicts-
@@ -251,10 +251,10 @@ CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
 # conflict set may pull in, additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's
 # general fan-out cap above. Deliberately a FLAT constant, not scaled by num_primary_hits like the
 # fan-out cap -- G3's "small-but-nonzero" framing is an absolute visibility floor for conflicts,
-# not a proportional budget. PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus (zero
-# live contradicts edges exist today) -- recalibrate in Milestone B per the project's live-usage-first
-# evaluation posture (memory 5d3f073c). Do not remove the placeholder framing when tuning this;
-# replace this comment with the benchmark citation once a real value is locked.
+# not a proportional budget. Milestone B calibration (memory 4c0c77bd) seeded the corpus's first
+# real contradicts edge (a genuine, source-verified conflict between two embedding-model-accuracy
+# memories) and confirmed the resulting conflict set (2 members) sits comfortably under this cap.
+# Confirmed at its existing value, no longer a placeholder.
 CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
 
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
@@ -280,19 +280,22 @@ LINEAGE_HISTORICAL_CAP = 5
 # Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
 # packing: the default real-token-count ceiling (via fastembed's TextEmbedding.token_count(), see
 # context_budget_service.py) applied when a caller does not supply their own budget_tokens value.
-# PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- recalibrate in Milestone B per
-# the project's live-usage-first evaluation posture (memory 5d3f073c). Do not remove the
-# placeholder framing when tuning this; replace this comment with the benchmark citation once a
-# real value is locked, matching the treatment already given to CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/
-# CONTEXT_EXPANSION_CONTRADICTS_CAP.
-CONTEXT_BUDGET_DEFAULT_TOKENS = 4000
+# Milestone B calibration (memory 4c0c77bd) benchmarked the old 4000 default against 11 ordinary
+# probes on the live corpus: usage ranged 1948-3952 tokens (several pinned at 97-99% of the
+# ceiling), with 7/11 probes hitting non-trivial expansion truncation (worst: 11/14 and 9/11
+# eligible candidates dropped) -- 4000 was simply too tight for this corpus's real memory sizes, not
+# evidence expansion itself needed bounding differently. Raised to 8000; re-verified this
+# eliminates truncation for ordinary queries and cuts it sharply (e.g. 11/14 dropped -> 3/14) even
+# on the densest probe in the sample. No longer a placeholder.
+CONTEXT_BUDGET_DEFAULT_TOKENS = 8000
 
 # Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
 # packing: the hard ceiling a caller-supplied budget_tokens is clamped DOWN to if it exceeds this
 # value (never clamped up -- a caller requesting less than this gets exactly what they asked for).
-# Same PLACEHOLDER status as CONTEXT_BUDGET_DEFAULT_TOKENS above -- recalibrate together in
-# Milestone B, do not remove the placeholder framing independently of that constant.
-CONTEXT_BUDGET_MAX_TOKENS = 16000
+# Milestone B calibration (memory 4c0c77bd) raised this alongside CONTEXT_BUDGET_DEFAULT_TOKENS,
+# keeping the same 4x default:ceiling ratio the original 4000/16000 pair had. No longer a
+# placeholder.
+CONTEXT_BUDGET_MAX_TOKENS = 32000
 
 # NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone
