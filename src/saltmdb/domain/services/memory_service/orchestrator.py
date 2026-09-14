@@ -16,7 +16,11 @@ import json
 import re
 from typing import Any, Literal
 
-from saltmdb.config import get_db_path, STRICT_OVERFETCH_CANDIDATE_CAP
+from saltmdb.config import (
+    get_db_path,
+    STRICT_OVERFETCH_CANDIDATE_CAP,
+    RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS,
+)
 from saltmdb.db.connection import get_connection, close_connection
 from saltmdb.utils.text import sanitize_fts_query, extract_title_and_snippet
 
@@ -918,6 +922,12 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                         {"predicate": bpred, "id": beid, "title": betitle}
                     )
 
+        preview_map: dict[str, dict[str, str]] = {}
+        if sanitized_query and rows:
+            preview_map = search_primitives.get_relevance_preview_data(
+                query_keywords, [r[0] for r in rows], db_path
+            )
+        cumulative_preview_chars = 0
         results = []
         for r in rows:
             (
@@ -970,6 +980,15 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if drift_flag:
                 item["drift_flag"] = drift_flag
 
+            if eid in preview_map and cumulative_preview_chars < RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS:
+                item["relevance_preview"] = preview_map[eid]["text"]
+                item["relevance_preview_meta"] = {
+                    "auto_generated": True,
+                    "extractive": True,
+                    "query_specific": True,
+                    "complete": False,
+                }
+                cumulative_preview_chars += len(preview_map[eid]["text"])
             results.append(item)
 
         if return_diagnostics:

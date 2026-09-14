@@ -503,6 +503,13 @@ def store_memory(
     memory; this field is advisory-only and never auto-corrected -- an agent seeing it should
     re-verify the citation itself, not blindly trust either the flag or the original claim.
 
+    A query-based result item may also include `relevance_preview` (a string) plus
+    `relevance_preview_meta` (an object with `auto_generated`, `extractive`, `query_specific`,
+    and `complete` booleans, `complete` always `false`) -- a small set of verbatim excerpts
+    pulled from that memory's own content, selected for relevance to this specific query. It
+    is a hint for deciding whether to call `get_memory`, never a substitute for it: absence of
+    a detail from the preview is never evidence that detail is absent from the memory itself.
+
     Explicit-ID retrieval is provided by the dedicated get_memory tool. Ranking stages cannot be
     changed per MCP call; benchmark controls for candidate channels, caps, lifecycle-family
     experiments, and diagnostics remain internal-only.
@@ -1109,9 +1116,11 @@ def get_events(
     agent_id: str | None = None,
     event_type: str | None = None,
     agent_session_id: str | None = None,
+    event_id: str | None = None,
     order: Literal["newest_first", "oldest_first"] = "newest_first",
     limit: int | None = None,
     offset: int | None = None,
+    full_content: bool = False,
 ) -> list:
     """Retrieves events from the append-only events ledger, for multi-agent coordination and
     wrap-up thread review.
@@ -1125,6 +1134,13 @@ def get_events(
 
     `order`: "newest_first" (default, for discovery) or "oldest_first" (for chronological
     wrap-up synthesis) -- always explicit, never inferred from which filter was passed.
+
+    Content over 1000 characters is truncated with a "[TRUNCATED]" suffix by default. Two ways
+    to get the full text back, mirroring get_memory's list-then-fetch-by-ID pattern:
+    `event_id` (exact match on the primary key, at most one row) always returns that row's
+    content in full, regardless of `full_content`. `full_content=True` disables truncation for
+    every row a broader query matches -- use it once the other filters (e.g. `context_id`)
+    already bound the result set to something you know is safe to receive in full.
     """
     return _backend_or_raise().call(
         "get_events",
@@ -1133,9 +1149,11 @@ def get_events(
             "agent_id": agent_id,
             "event_type": event_type,
             "agent_session_id": agent_session_id,
+            "event_id": event_id,
             "order": order,
             "limit": limit if limit is not None else 20,
             "offset": offset if offset is not None else 0,
+            "full_content": full_content,
         },
     )
 

@@ -15,6 +15,11 @@ from saltmdb.config import (
     SNIPPET_MATCH_START,
     SNIPPET_MATCH_END,
     SNIPPET_ELLIPSIS,
+    RELEVANCE_PREVIEW_CHUNK_PERCENT,
+    RELEVANCE_PREVIEW_MIN_CHUNKS,
+    RELEVANCE_PREVIEW_MAX_CHUNKS,
+    RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS,
+    RELEVANCE_PREVIEW_MERGE_GAP_CHARS,
 )
 from saltmdb.db.connection import get_connection, close_connection
 
@@ -528,6 +533,152 @@ def rerank_candidates_by_topic(
         return results
     except Exception as e:
         logger.warning("Cross-chunk topic reranking failed, falling back: %s", e)
+        return {}
+    finally:
+        if conn:
+            close_connection(conn)
+
+
+def get_relevance_preview_data(
+    query_text: str,
+    candidate_ids: list[str],
+    db_path: str,
+) -> dict[str, dict]:
+    """Returns {entity_id: {"text": str}} -- a query-focused extractive preview built
+    exclusively from verbatim spans of each candidate's own full_content, for candidates
+    scorable from PRECOMPUTED entity_chunk_embeddings rows (SALTMDB relevance-preview spec,
+    2026-09-14 grilling session).
+
+    Sibling to rerank_candidates_by_topic, NOT a modification of it -- kept as a separate
+    function so mode="strict"'s existing relevance-gate behavior (which depends on
+    rerank_candidates_by_topic's exact current contract) is never put at risk by this
+    purely-additive, best-effort feature. Shares its no-re-chunk/no-re-embed discipline:
+    reuses precomputed chunk vectors, same content_hash/status staleness guard.
+
+    IDs with zero (or all-stale) chunk rows are absent from the returned dict -- caller
+    (search_memory's orchestrator) treats an absent id as "no relevance_preview for this
+    result," never as an error.
+
+    On ANY failure (embedding call, DB error, sqlite_vec load failure) returns {} and logs a
+    warning -- mirrors rerank_candidates_by_topic's own try-except-log-and-return-{} shape.
+    This is a purely additive, best-effort UX feature; it must never turn a failure inside it
+    into a failed search_memory call.
+    """
+    if not candidate_ids:
+        return {}
+    conn = None
+    try:
+        import sqlite_vec
+        from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS
+        from saltmdb.utils.chunking import chunk_text
+        from saltmdb.domain.services import embedding_service
+
+        query_chunks = chunk_text(query_text or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+        if not query_chunks:
+            query_chunks = [{"text": query_text or ""}]
+        query_vectors = embedding_service.embed_query_texts([c["text"] for c in query_chunks])
+        if not query_vectors:
+            return {}
+
+        conn = get_connection(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        placeholders = ",".join("?" for _ in candidate_ids)
+        sql = f"""
+            SELECT c.entity_id, c.chunk_index, c.char_start, c.char_end,
+                   vec_distance_cosine(c.embedding, ?) AS distance
+            FROM entity_chunk_embeddings c
+            JOIN entities e ON e.id = c.entity_id
+            WHERE c.entity_id IN ({placeholders})
+              AND e.status != 'archived'
+              AND c.content_hash IS e.content_hash
+        """
+        # best[(entity_id, chunk_index)] = (min_distance_seen, char_start, char_end) -- min
+        # across every query chunk, mirroring rerank_candidates_by_topic's per-candidate
+        # MIN(distance) reduction but keyed per CHUNK, not aggregated per entity, since every
+        # individual chunk's own span is needed here, not just one rolled-up score.
+        best: dict[tuple[str, int], tuple[float, int, int]] = {}
+        for qv in query_vectors:
+            exec_params = [sqlite_vec.serialize_float32(qv)] + list(candidate_ids)
+            for entity_id, chunk_index, char_start, char_end, distance in conn.execute(
+                sql, exec_params
+            ).fetchall():
+                key = (entity_id, chunk_index)
+                if key not in best or distance < best[key][0]:
+                    best[key] = (distance, char_start, char_end)
+
+        if not best:
+            return {}
+
+        by_entity: dict[str, list[tuple[int, int, int, float]]] = {}
+        for (entity_id, chunk_index), (distance, char_start, char_end) in best.items():
+            by_entity.setdefault(entity_id, []).append(
+                (chunk_index, char_start, char_end, distance)
+            )
+
+        content_placeholders = ",".join("?" for _ in by_entity)
+        content_rows = conn.execute(
+            f"SELECT id, full_content FROM entities WHERE id IN ({content_placeholders})",
+            list(by_entity.keys()),
+        ).fetchall()
+        full_content_by_id = {row[0]: row[1] or "" for row in content_rows}
+
+        results: dict[str, dict[str, str]] = {}
+        for entity_id, chunks in by_entity.items():
+            full_content = full_content_by_id.get(entity_id, "")
+            total_chunks = len(chunks)
+            k = min(
+                RELEVANCE_PREVIEW_MAX_CHUNKS,
+                max(
+                    RELEVANCE_PREVIEW_MIN_CHUNKS,
+                    round(RELEVANCE_PREVIEW_CHUNK_PERCENT * total_chunks),
+                ),
+            )
+            by_score = sorted(chunks, key=lambda c: c[3])  # ascending distance = best match first
+            selected = list(by_score[:k])
+
+            # Opening-chunk guarantee: ADDS chunk_index 0 when it isn't already selected on
+            # merit, it never displaces the top-scoring pick -- so worst case this is K+1
+            # chunks selected, not a swap that could silently drop the single best match when
+            # K == 1. (Deliberate: displacing the top pick would defeat the point of a
+            # query-focused preview for exactly the K=1 case that RELEVANCE_PREVIEW_MIN_CHUNKS
+            # makes common.)
+            if total_chunks > k and not any(c[0] == 0 for c in selected):
+                opening = next((c for c in chunks if c[0] == 0), None)
+                if opening is not None:
+                    selected.append(opening)
+
+            # Boundary-expand each selected chunk's (char_start, char_end) outward to the
+            # nearest "\n\n" (or string boundary), capped at RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS
+            # per side.
+            expanded = []
+            for chunk_index, char_start, char_end, _distance in selected:
+                back_limit = max(0, char_start - RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
+                boundary = full_content.rfind("\n\n", back_limit, char_start)
+                expanded_start = boundary + 2 if boundary != -1 else back_limit
+                fwd_limit = min(len(full_content), char_end + RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
+                boundary = full_content.find("\n\n", char_end, fwd_limit)
+                expanded_end = boundary if boundary != -1 else fwd_limit
+                expanded.append([expanded_start, expanded_end])
+
+            # Merge overlapping/near-adjacent spans; sorting by start also yields document
+            # order for free, so no separate reorder step is needed afterward.
+            expanded.sort(key=lambda s: s[0])
+            merged: list[list[int]] = []
+            for start, end in expanded:
+                if merged and start <= merged[-1][1] + RELEVANCE_PREVIEW_MERGE_GAP_CHARS:
+                    merged[-1][1] = max(merged[-1][1], end)
+                else:
+                    merged.append([start, end])
+
+            text = SNIPPET_ELLIPSIS.join(full_content[s:e] for s, e in merged)
+            results[entity_id] = {"text": text}
+
+        return results
+    except Exception as e:
+        logger.warning("Relevance-preview chunk selection failed, falling back: %s", e)
         return {}
     finally:
         if conn:

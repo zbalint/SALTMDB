@@ -112,6 +112,23 @@ RERANK_SAME_TOPIC_THRESHOLD = 0.7680  # topic_score >= this -> "SAME_SPECIFIC_TO
 RERANK_BROAD_THEME_THRESHOLD = (
     0.5322  # topic_score >= this (and below SAME_TOPIC) -> "BROADLY_RELATED_THEMES"
 )
+# Query-focused extractive preview for search_memory results (relevance_preview /
+# relevance_preview_meta fields). Reuses entity_chunk_embeddings (CHUNK_SIZE_CHARS,
+# CHUNK_OVERLAP_CHARS above) via a new sibling function to rerank_candidates_by_topic --
+# see get_relevance_preview_data in search_primitives.py. NOT benchmarked -- these are
+# placeholder defaults pending real measurement (SALTMDB grilling session 2026-09-14,
+# search_memory design discussion); do not treat as final without new benchmark evidence,
+# matching this file's existing convention for RERANK_*/DEDUP_CROSS_ENCODER_THRESHOLD above.
+RELEVANCE_PREVIEW_CHUNK_PERCENT = 0.20  # fraction of a candidate's total chunk count selected
+RELEVANCE_PREVIEW_MIN_CHUNKS = 1  # floor on selected chunk count before the opening-chunk add
+RELEVANCE_PREVIEW_MAX_CHUNKS = 4  # ceiling on selected chunk count before the opening-chunk add
+RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS = 200  # per-side cap when expanding a selected chunk's
+# span outward to the nearest paragraph/block boundary in full_content
+RELEVANCE_PREVIEW_MERGE_GAP_CHARS = 50  # two expanded spans within this many chars of each
+# other (or overlapping) merge into one contiguous excerpt instead of staying separate
+RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS = 20000  # cumulative cap across one search_memory
+# response's previews combined; never removes a result row, only omits relevance_preview
+# on lower-ranked results once the running total would exceed this
 
 # Stage-2 chunk candidate generation (search_memory's opt-in
 # ``use_chunk_candidates`` path).  The values are intentionally a small, explicit experiment

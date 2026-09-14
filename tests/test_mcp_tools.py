@@ -1810,6 +1810,48 @@ class TestGetEventsEndToEnd(unittest.TestCase):
             with self.assertRaises(TypeError, msg=bad_kwargs):
                 tools.get_events(**bad_kwargs)
 
+    def test_full_content_flag_returns_untruncated_content(self):
+        long_content = "x" * 1500
+        tools.log_event(event_type="issue", content=long_content)
+
+        truncated = tools.get_events(agent_id="test_agent")
+        self.assertTrue(truncated[0]["content"].endswith("[TRUNCATED]"))
+        self.assertEqual(len(truncated[0]["content"]), len("x" * 1000 + " [TRUNCATED]"))
+
+        full = tools.get_events(agent_id="test_agent", full_content=True)
+        self.assertEqual(full[0]["content"], long_content)
+        self.assertNotIn("[TRUNCATED]", full[0]["content"])
+
+    def test_default_still_truncates_long_content(self):
+        # Regression guard: adding full_content/event_id must not change the existing default
+        # (full_content omitted) truncation behavior for ordinary list calls.
+        long_content = "y" * 2000
+        tools.log_event(event_type="issue", content=long_content)
+
+        events = tools.get_events(agent_id="test_agent")
+        self.assertTrue(events[0]["content"].endswith("[TRUNCATED]"))
+        self.assertLess(len(events[0]["content"]), len(long_content))
+
+    def test_event_id_filter_returns_single_full_content_event(self):
+        long_content = "z" * 1500
+        tools.log_event(event_type="issue", content=long_content)
+        tools.log_event(event_type="issue", content="short other event")
+
+        # Discover the long event's id the way a real caller would: from a truncated list result.
+        listed = tools.get_events(agent_id="test_agent", event_type="issue")
+        target_id = next(e["id"] for e in listed if e["content"].endswith("[TRUNCATED]"))
+
+        matched = tools.get_events(event_id=target_id)
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["id"], target_id)
+        self.assertEqual(matched[0]["content"], long_content)
+        self.assertNotIn("[TRUNCATED]", matched[0]["content"])
+
+    def test_event_id_filter_no_match_returns_empty_list(self):
+        tools.log_event(event_type="issue", content="irrelevant")
+        matched = tools.get_events(event_id="00000000-0000-0000-0000-000000000000")
+        self.assertEqual(matched, [])
+
 
 class TestLogEventEndToEnd(unittest.TestCase):
     """End-to-end coverage of log_event's Phase 6 reshaping (agent API redesign plan §5.7, item
