@@ -502,6 +502,13 @@ def store_memory(
     memory; this field is advisory-only and never auto-corrected -- an agent seeing it should
     re-verify the citation itself, not blindly trust either the flag or the original claim.
 
+    A query-based result item may also include `relevance_preview` (a string) plus
+    `relevance_preview_meta` (an object with `auto_generated`, `extractive`, `query_specific`,
+    and `complete` booleans, `complete` always `false`) -- a small set of verbatim excerpts
+    pulled from that memory's own content, selected for relevance to this specific query. It
+    is a hint for deciding whether to call `get_memory`, never a substitute for it: absence of
+    a detail from the preview is never evidence that detail is absent from the memory itself.
+
     Explicit-ID retrieval is provided by the dedicated get_memory tool. Ranking stages cannot be
     changed per MCP call; benchmark controls for candidate channels, caps, lifecycle-family
     experiments, and diagnostics remain internal-only.
