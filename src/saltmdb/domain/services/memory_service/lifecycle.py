@@ -19,6 +19,7 @@ from saltmdb.db.connection import (
 )
 from saltmdb.utils.text import resolve_entity_id, resolve_id_prefix
 from saltmdb.utils.text import resolve_entity_ref
+from saltmdb.utils.text import large_content_descriptor
 from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
@@ -255,6 +256,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
     agent_session_id: str | None = None,
     metadata: dict | None = None,
+    repoint_relations: bool = False,
     db_connection=None,
     db_path: str | None = None,
     _in_transaction: bool = False,
@@ -264,6 +266,25 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     All validation and inactive-target checks happen before the write transaction.  The callback
     repeats the status check under the write lock, then inserts the lifecycle edge *after* archiving
     the predecessor so that the new lineage edge remains active and semantic history is untouched.
+
+    ``repoint_relations=True`` (opt-in, default False) additionally repoints every active
+    semantic edge touching the predecessor onto the new entity, in the same transaction: each edge
+    `_semantic_edge_worklist` would otherwise only report as ``orphaned_semantic_edges`` is
+    invalidated and an equivalent edge recreated with the predecessor id swapped for the new id in
+    whichever endpoint (source and/or target) it occupied, using fresh timestamps rather than the
+    old edge's -- never backdating the new edge's validity window. No predicate or direction
+    filtering -- every non-lifecycle edge found is repointed unconditionally, since the caller's
+    own decision to pass this flag is already the safety gate. Skips the RELATION_GATE_*
+    similarity/contradiction governance in `relation_service.store_relation`: this is identity
+    continuity for an already-approved edge, not a new semantic claim being asserted.
+
+    This default-False/opt-in shape is deliberately compatible with the standing safe-degradation
+    law (saltmdb project's own SALTMDB memory `7af33335`: a lazy caller must get a correct-if-
+    sparse graph, never a richer-but-fabricated one) -- it is the "optional cooperative path" that
+    law's own corollary describes, not a reopening of the original no-auto-repoint decision. See
+    memory `60fca8c8` for the full rationale, including the related known gap `213f80c5` (the
+    previously-documented manual `orphaned_semantic_edges` workaround leaves the old edge
+    un-invalidated) that this flag closes for any caller who opts into it.
     """
     validation_error = _validate_replacement_inputs(
         entity_id, title, tags, content, reason, scope, memory_type
@@ -370,7 +391,6 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         changed: dict[str, Any] = {
             "title": new_title,
             "tags": list(tags),
-            "content": new_content,
             "reason": reason.strip(),
         }
         changed.update(
@@ -508,15 +528,76 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (relation_id, new_id, resolved_id, operation, now, now, now),
             )
-            return new_id, relation_id
+
+            repointed: list[dict[str, Any]] = []
+            still_orphaned_ids: set[str] = set()
+            if repoint_relations:
+                # Re-read under the write lock rather than trusting the pre-transaction
+                # `orphaned_edges` snapshot -- mirrors the frozen-column re-check above, so a
+                # relation created/invalidated concurrently between validation and this lock is
+                # not silently missed or double-handled.
+                for edge in _semantic_edge_worklist(c, resolved_id):
+                    new_source = new_id if edge["source_id"] == resolved_id else edge["source_id"]
+                    new_target = new_id if edge["target_id"] == resolved_id else edge["target_id"]
+                    if new_source == new_target:
+                        # A pre-existing self-loop on the predecessor would become a
+                        # self-referential edge on the new entity, which store_relation's own
+                        # guard forbids elsewhere. Leave this one edge completely untouched
+                        # (still an active edge on the archived predecessor, still reported as
+                        # orphaned) for the caller to resolve by hand, rather than fabricating a
+                        # disallowed edge or invalidating it with no replacement.
+                        still_orphaned_ids.add(edge["relation_id"])
+                        continue
+                    c.execute(
+                        "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+                        (now, now, edge["relation_id"]),
+                    )
+                    new_relation_id = str(uuid.uuid4())
+                    insert_cursor = c.execute(
+                        """
+                        INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
+                        """,
+                        (new_relation_id, new_source, new_target, edge["predicate"], now, now, now),
+                    )
+                    if insert_cursor.rowcount == 0:
+                        # An active edge with this exact (source, target, predicate) triple
+                        # already exists -- the old edge above is still correctly invalidated
+                        # (it's now redundant with the pre-existing one), but don't report a
+                        # new_relation_id that was never actually written.
+                        continue
+                    repointed.append(
+                        {
+                            "old_relation_id": edge["relation_id"],
+                            "new_relation_id": new_relation_id,
+                            "source_id": new_source,
+                            "target_id": new_target,
+                            "predicate": edge["predicate"],
+                        }
+                    )
+            return new_id, relation_id, repointed, still_orphaned_ids
 
         try:
             if _in_transaction:
-                new_id, relation_id = _write(conn)
+                new_id, relation_id, repointed_relations, still_orphaned_ids = _write(conn)
             else:
-                new_id, relation_id = write_transaction_retrying(conn, _write)
+                new_id, relation_id, repointed_relations, still_orphaned_ids = write_transaction_retrying(
+                    conn, _write
+                )
         except _LifecycleRejected as exc:
             return exc.payload
+        # A large new body echoed back verbatim risks tripping the calling MCP client's own
+        # response-size limit (confirmed live 2026-09-14 on a ~94KB supersede_memory response) --
+        # dump it to a file past the threshold, same as get_memory's full-content read path. Done
+        # only now, after the write has actually committed, so a rejected write (TARGET_CHANGED/
+        # INACTIVE_TARGET) never leaves an orphaned dump file with nothing referencing it.
+        changed.update(large_content_descriptor(new_content))
+        response_orphaned_edges = (
+            [edge for edge in orphaned_edges if edge["relation_id"] in still_orphaned_ids]
+            if repoint_relations
+            else orphaned_edges
+        )
         return envelope_ok(
             {
                 "old_id": resolved_id,
@@ -528,8 +609,9 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 "changed": changed,
                 "inherited_fields": list(inherited),
                 "changed_fields": list(changed),
-                "orphaned_semantic_edges": orphaned_edges,
-                "semantic_relations_repointed": False,
+                "orphaned_semantic_edges": response_orphaned_edges,
+                "semantic_relations_repointed": bool(repoint_relations),
+                "repointed_relations": repointed_relations,
             }
         )
     except Exception as exc:
@@ -552,11 +634,15 @@ def revise_memory(
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
     agent_session_id: str | None = None,
     metadata: dict = None,
+    repoint_relations: bool = False,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
 ) -> dict:
-    """Create a corrected representation with ``new --revises--> old`` lineage."""
+    """Create a corrected representation with ``new --revises--> old`` lineage.
+
+    See ``_replacement_operation`` for ``repoint_relations``.
+    """
     return _replacement_operation(
         "revises",
         entity_id=entity_id,
@@ -570,6 +656,7 @@ def revise_memory(
         memory_type=memory_type,
         agent_session_id=agent_session_id,
         metadata=metadata,
+        repoint_relations=repoint_relations,
         db_connection=db_connection,
         db_path=db_path,
         _in_transaction=_in_transaction,
@@ -588,10 +675,14 @@ def supersede_memory(
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
     agent_session_id: str | None = None,
     metadata: dict = None,
+    repoint_relations: bool = False,
     db_connection=None,
     db_path: str = None,
 ) -> dict:
-    """Create newer knowledge with ``new --supersedes--> old`` lineage."""
+    """Create newer knowledge with ``new --supersedes--> old`` lineage.
+
+    See ``_replacement_operation`` for ``repoint_relations``.
+    """
     return _replacement_operation(
         "supersedes",
         entity_id=entity_id,
@@ -605,6 +696,7 @@ def supersede_memory(
         memory_type=memory_type,
         agent_session_id=agent_session_id,
         metadata=metadata,
+        repoint_relations=repoint_relations,
         db_connection=db_connection,
         db_path=db_path,
     )
@@ -703,7 +795,7 @@ def _assemble_memory_record(
         "tags": tag_ops.list_entity_tags(conn, resolved_id),
     }
     if include_content:
-        data["content"] = row[2]
+        data.update(large_content_descriptor(row[2]))
     else:
         from saltmdb.utils.text import extract_title_and_snippet
 

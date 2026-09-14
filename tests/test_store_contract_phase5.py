@@ -47,6 +47,33 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertFalse(corrected["content"].startswith("---"))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
 
+    def test_yaml_identity_metadata_from_content_file_path_corrected_call_omits_file_path(self):
+        content_path = os.path.join(self.temp_dir, "note.md")
+        with open(content_path, "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                "title: Hidden title\n"
+                "tags: [auth]\n"
+                "---\n\n"
+                "OAuth refresh tokens rotate after each successful exchange."
+            )
+
+        result = tools.store_memory(
+            title="[Auth] Explicit title",
+            tags=["#auth"],
+            content_file_path=content_path,
+        )
+
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "IDENTITY_IN_YAML_FRONT_MATTER")
+        corrected = result["corrected_call"]
+        # content_file_path must not survive into the corrected_call alongside the now-resolved
+        # content -- pasting both back verbatim would otherwise immediately fail
+        # CONTENT_AND_FILE_PATH_BOTH_SET instead of succeeding.
+        self.assertNotIn("content_file_path", corrected)
+        self.assertFalse(corrected["content"].startswith("---"))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
+
     def test_success_reports_submitted_and_effective_tags_and_near_miss_warning(self):
         first = tools.store_memory(
             title="[Docs] Canonical seed",

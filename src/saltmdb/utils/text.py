@@ -198,3 +198,25 @@ def compute_content_hash(text: str) -> str:
     if not normalized:
         return ""
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+import os  # noqa: E402
+import uuid  # noqa: E402
+
+
+def large_content_descriptor(content: str) -> dict:
+    """Return ``{'content': content}`` unchanged for an ordinary-sized payload, or dump it to a
+    local file and return ``{'content_file_path': path, 'content_preview': content[:500]}`` once
+    it exceeds ``CONTENT_FILE_DUMP_THRESHOLD_CHARS`` -- keeps a single large memory from tripping
+    an MCP client's own response-size limit (see config.CONTENT_FILE_DUMP_THRESHOLD_CHARS)."""
+    from saltmdb.config import CONTENT_FILE_DUMP_THRESHOLD_CHARS, get_content_dump_dir
+
+    if not isinstance(content, str) or len(content) <= CONTENT_FILE_DUMP_THRESHOLD_CHARS:
+        return {"content": content}
+    # shortcut: no retention/cleanup policy for dumped files -- each oversized read/write leaves
+    # a new file in get_content_dump_dir() forever. Add a periodic sweep (age- or count-based) if
+    # disk usage under that directory becomes a real problem in practice.
+    path = os.path.join(get_content_dump_dir(), f"{uuid.uuid4()}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return {"content_file_path": path, "content_preview": content[:500]}

@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, cast
 import json
 import logging
 import re
@@ -64,6 +64,51 @@ def _normalize_list_or_str(val) -> list:
             return [s.strip() for s in val_str.split(",") if s.strip()]
         return [val_str]
     return [val]
+
+
+def _resolve_content(
+    content: str | None, content_file_path: str | None
+) -> tuple[str | None, dict | None]:
+    """Resolve exactly one of ``content`` (inline) or ``content_file_path`` (read from local disk)
+    into a plain content string, at the adapter boundary -- before any domain-service call, so
+    every existing content-handling path downstream (front-matter detection, redaction, quality
+    gating) is unaffected by which form the caller used. Mirrors this environment's own
+    file_path-vs-inline-data convention for large payloads.
+
+    Returns ``(resolved_content, None)`` on success, or ``(None, <rejected() envelope>)`` when
+    neither or both were supplied, or the file could not be read.
+    """
+    from saltmdb.utils.envelope import error, rejected
+
+    if content is not None and content_file_path is not None:
+        return None, rejected(
+            [
+                error(
+                    "CONTENT_AND_FILE_PATH_BOTH_SET",
+                    "Provide exactly one of content or content_file_path, not both.",
+                    "content",
+                )
+            ]
+        )
+    if content is None and content_file_path is None:
+        return None, rejected(
+            [error("MISSING_CONTENT", "Provide content or content_file_path.", "content")]
+        )
+    if content_file_path is None:
+        return content, None
+    try:
+        with open(content_file_path, encoding="utf-8") as f:
+            return f.read(), None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, rejected(
+            [
+                error(
+                    "CONTENT_FILE_READ_FAILED",
+                    f"Could not read content_file_path '{content_file_path}': {exc}",
+                    "content_file_path",
+                )
+            ]
+        )
 
 
 def _strip_item_owner_id(items: list) -> list:
@@ -350,12 +395,16 @@ def merge_tags(
     A core must stay directly actionable on its own even if a weaker agent never follows a detail
     link; move rationale/chronology/evidence into the linked detail memories instead.
 
+    Exactly one of `content` or `content_file_path` is required: pass `content_file_path` (a
+    local file SALTMDB reads server-side) instead of inlining a large body -- avoids
+    round-tripping a large string through the calling agent's own context just to pass it here.
+
     """
 )
 def store_memory(
     title: str,
-    content: str,
-    tags: list[str],
+    content: str | None = None,
+    tags: list[str] = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
     context_id: str | None = None,
     entity_id: str | None = None,
@@ -367,7 +416,12 @@ def store_memory(
     core_exit_condition: str | None = None,
     core_review_after: str | None = None,
     detail_memory_ids: list | None = None,
+    content_file_path: str | None = None,
 ) -> str | dict:
+    content, _content_error = _resolve_content(content, content_file_path)
+    if _content_error is not None:
+        return _content_error
+    content = cast(str, content)
     submitted = locals().copy()
     owner_id_ = _effective_owner()
     tags_ = _normalize_list_or_str(tags)
@@ -379,7 +433,12 @@ def store_memory(
         corrected_call = build_corrected_call(
             store_memory,
             submitted,
-            {"content": body_without_front_matter},
+            # content_file_path must be cleared here too: `submitted` still carries the caller's
+            # original (non-None) content_file_path alongside the now-resolved `content`, and
+            # build_corrected_call only drops None-valued fields -- without this override the
+            # corrected_call would set both fields and immediately fail
+            # CONTENT_AND_FILE_PATH_BOTH_SET if pasted back verbatim.
+            {"content": body_without_front_matter, "content_file_path": None},
         )
         return rejected(
             [
@@ -793,13 +852,14 @@ def _replacement_payload(
     *,
     entity_id: str,
     title: str,
-    content: str,
-    tags: list[str],
-    reason: str,
+    content: str | None,
+    tags: list[str] | None,
+    reason: str | None,
     owner_id: str | None,
     context_id: str | None,
     scope: Literal["private", "shared"] | None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
+    repoint_relations: bool = False,
 ) -> dict:
     """Build the common replacement request without hidden aliases or front matter parsing."""
     return {
@@ -812,6 +872,7 @@ def _replacement_payload(
         "context_id": context_id,
         "scope": scope,
         "memory_type": memory_type,
+        "repoint_relations": repoint_relations,
     }
 
 
@@ -819,12 +880,14 @@ def _replacement_payload(
 def revise_memory(
     entity_id: str,
     title: str,
-    content: str,
-    tags: list[str],
-    reason: str,
+    content: str | None = None,
+    tags: list[str] = None,
+    reason: str = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+    repoint_relations: bool = False,
+    content_file_path: str | None = None,
 ) -> dict | str:
     """Repairs a deficient memory representation using a new immutable entity ID.
 
@@ -832,7 +895,23 @@ def revise_memory(
     new entity links to it with ``revises``. An inactive target is a hard failure: inspect the
     reported successor before retrying. ``context_id``, ``scope``, and ``memory_type`` are
     inherited when omitted; provenance is assigned to the configured calling agent.
+
+    ``repoint_relations`` (default False) opts in to server-side repointing: every active
+    non-lifecycle edge touching the predecessor is invalidated and recreated onto the new entity,
+    atomically with the revision, instead of being left for the caller to walk
+    ``orphaned_semantic_edges`` and repoint by hand via ``manage_relation``. No predicate or
+    direction filtering -- every edge found is repointed, since setting this flag is itself the
+    caller's judgment call that this replacement is identity-preserving continuity, not a change
+    that should leave any edge stale on purpose. Leave it False (the default) when the revision
+    might invalidate what an existing edge asserted about the old content.
+
+    Exactly one of ``content`` or ``content_file_path`` is required: pass ``content_file_path``
+    (a local file SALTMDB reads server-side) instead of inlining a large revised body -- avoids
+    round-tripping a large string through the calling agent's own context just to pass it here.
     """
+    content, content_error = _resolve_content(content, content_file_path)
+    if content_error is not None:
+        return content_error
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "revise_memory",
@@ -846,6 +925,7 @@ def revise_memory(
             context_id=context_id,
             scope=scope,
             memory_type=memory_type,
+            repoint_relations=repoint_relations,
         ),
     )
 
@@ -854,12 +934,14 @@ def revise_memory(
 def supersede_memory(
     entity_id: str,
     title: str,
-    content: str,
-    tags: list[str],
-    reason: str,
+    content: str | None = None,
+    tags: list[str] = None,
+    reason: str = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+    repoint_relations: bool = False,
+    content_file_path: str | None = None,
 ) -> dict | str:
     """Replaces valid knowledge with newer knowledge using a new immutable entity ID.
 
@@ -867,7 +949,26 @@ def supersede_memory(
     is never silently redirected; the error reports known active successors and lineage. Optional
     administrative fields are inherited unless explicitly supplied.
 
+    ``repoint_relations`` (default False) opts in to server-side repointing: every active
+    non-lifecycle edge touching the predecessor (``manage_relation``'s closed-vocabulary
+    predicates, both directions) is invalidated and an equivalent edge recreated onto the new
+    entity, atomically with the supersession -- no separate ``orphaned_semantic_edges`` walk plus
+    manual ``manage_relation`` calls needed afterward. No predicate or direction filtering: every
+    edge found is repointed unconditionally, since passing this flag is itself the caller's
+    judgment that the supersession is additive/index-like continuity (e.g. a growing tracker
+    document) rather than a correction that might leave some edge intentionally stale against the
+    old content. The response's ``semantic_relations_repointed`` echoes this flag, and
+    ``repointed_relations`` lists each old/new relation id pair actually rewritten.
+
+    Exactly one of ``content`` or ``content_file_path`` is required: pass ``content_file_path``
+    (a local file SALTMDB reads server-side) instead of inlining a large new body -- avoids
+    round-tripping a large string through the calling agent's own context (and the response's own
+    size limit) just to pass it here. Pairs naturally with a large document that was already
+    edited on disk, such as a wayfinder map's growing body.
     """
+    content, content_error = _resolve_content(content, content_file_path)
+    if content_error is not None:
+        return content_error
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "supersede_memory",
@@ -881,6 +982,7 @@ def supersede_memory(
             context_id=context_id,
             scope=scope,
             memory_type=memory_type,
+            repoint_relations=repoint_relations,
         ),
     )
 
