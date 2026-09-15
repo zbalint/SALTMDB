@@ -5,7 +5,9 @@
 **LOCKED**
 
 **Scope**: may edit `pyproject.toml` (add exactly two new runtime dependencies, `leidenalg` and
-`python-igraph`, see §2); may edit `src/saltmdb/config.py` (add exactly one new constant,
+`python-igraph`, see §2); may edit `uv.lock` (the mechanical, tool-regenerated output of running
+`uv sync`/`uv lock` after §2's `pyproject.toml` change — commit whatever `uv` itself produces, no
+hand-editing; see Amendment 2); may edit `src/saltmdb/config.py` (add exactly one new constant,
 `COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S`, see §3); may edit `src/saltmdb/db/schema.py` (add two
 new relational tables, `communities` and `community_membership`, plus one new `_system_locks` seed
 row, see §4); may edit `src/saltmdb/db/vector_schema.py` (add one new function,
@@ -370,7 +372,14 @@ the same transaction, by `recompute_communities` itself).
 A new domain-service module, sibling to `context_expansion_service.py`/`cohesion_service.py`,
 following this codebase's existing conventions: module-level `logger = logging.getLogger(__name__)`,
 the same `db_connection=None, db_path: str | None = None` open-or-reuse-connection pattern used
-throughout the domain-service layer.
+throughout the domain-service layer. Also add, at module level alongside `logger` (not a local
+import inside any function — see Amendment 2, and mirrors `cohesion_service.py:4`'s identical
+module-level placement, required so `tests/test_community_detection_service.py` can
+`patch("saltmdb.domain.services.community_detection_service.try_load_vector_extension", ...)`
+exactly like `test_cohesion_service.py` already does for `cohesion_service`):
+```python
+from saltmdb.db.vector_schema import try_load_vector_extension
+```
 
 ### 6.1 `recompute_communities` — the full Leiden pass
 
@@ -391,7 +400,21 @@ itself could call this directly with no cooldown concern.
 
 1. Open one connection (`db_connection` if given, else `get_connection(db_path or get_db_path())`,
    closing it at the end only if this function opened it) — mirror A1/A2/A3/A4's `should_close`
-   pattern exactly.
+   pattern exactly. Then load the sqlite-vec extension onto **this specific connection** (extension
+   loading is per-connection, not per-process — `init_community_vector_schema` loading it onto the
+   connection `init_db` used tells you nothing about whether *this* connection, opened separately by
+   this function or handed in by a caller, has it loaded too — see Amendment 2):
+   ```python
+   vector_extension_loaded = try_load_vector_extension(conn)
+   if not vector_extension_loaded:
+       logger.warning(
+           "recompute_communities: sqlite-vec extension unavailable on this connection -- "
+           "community structure (communities/community_membership) will still be computed and "
+           "written normally, but community_embeddings is left untouched this cycle (no read, no "
+           "clear, no write against it)."
+       )
+   ```
+   `vector_extension_loaded` is read (never re-computed) by steps 5, 8, and 12 below.
 2. Compute `now = datetime.now(UTC).isoformat()` — the single point-in-time every bitemporal check
    below evaluates against (no caller-supplied `point_in_time`, per §1 upstream-decision
    framing — constraint 21 explicitly rejects point-in-time community history).
@@ -426,13 +449,18 @@ itself could call this directly with no cooldown concern.
    ```
 5. **Empty-edge-set short-circuit** (§1 upstream-decision 4): if `edge_set` is empty, still clear
    any stale prior state (a corpus that previously had communities but has since had every
-   qualifying relation invalidated must not keep serving them), then return early:
+   qualifying relation invalidated must not keep serving them), then return early. The
+   `community_embeddings` clear is itself gated on `vector_extension_loaded` (Amendment 2) — a
+   `DELETE FROM community_embeddings` against a vec0 virtual table requires the module registered
+   on *this* connection the same as any other query against it, so this is not optional even for a
+   bare `DELETE`:
    ```python
    if not edge_set:
        def _clear(c):
            c.execute("DELETE FROM community_membership")
            c.execute("DELETE FROM communities")
-           c.execute("DELETE FROM community_embeddings")
+           if vector_extension_loaded:
+               c.execute("DELETE FROM community_embeddings")
        write_transaction_retrying(conn, _clear)
        return {"status": "no_edges", "communities_created": 0}
    ```
@@ -457,18 +485,25 @@ itself could call this directly with no cooldown concern.
    `partition` is a list-like grouping of vertex indices; each group is one community.
 8. Batch-fetch every node's `entity_embeddings` vector in one query (mirrors A2/A4's own batched
    entity-materialization pattern) — an entity with no embedding row yet (e.g. embedding still
-   `pending`) is simply absent from this dict, handled per step 9's degrade-gracefully rule:
+   `pending`) is simply absent from this dict, handled per step 9's degrade-gracefully rule. The
+   query itself is gated on `vector_extension_loaded` (Amendment 2): `entity_embeddings` is a vec0
+   virtual table exactly like `community_embeddings`, so this SELECT needs the extension loaded on
+   this connection too, not only the later writes — if it's unavailable, `raw_vector` is simply
+   empty, which step 9's existing centroid logic already treats identically to "no member of this
+   community has a usable embedding" (no new branch needed there):
    ```python
    import numpy as np
 
-   placeholders = ",".join("?" for _ in node_ids)
-   embedding_rows = conn.execute(
-       f"SELECT entity_id, embedding FROM entity_embeddings WHERE entity_id IN ({placeholders})",
-       node_ids,
-   ).fetchall()
-   raw_vector = {
-       entity_id: np.frombuffer(blob, dtype=np.float32) for entity_id, blob in embedding_rows
-   }
+   raw_vector: dict[str, np.ndarray] = {}
+   if vector_extension_loaded:
+       placeholders = ",".join("?" for _ in node_ids)
+       embedding_rows = conn.execute(
+           f"SELECT entity_id, embedding FROM entity_embeddings WHERE entity_id IN ({placeholders})",
+           node_ids,
+       ).fetchall()
+       raw_vector = {
+           entity_id: np.frombuffer(blob, dtype=np.float32) for entity_id, blob in embedding_rows
+       }
    ```
 9. For each community (each group of vertex indices from `partition`), compute its representative,
    centroid, and member count. Implement this exactly:
@@ -569,12 +604,18 @@ itself could call this directly with no cooldown concern.
            embeddings_to_insert.append((community_id, sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist())))
     ```
 12. Write everything inside one wrapped transaction (constraint 21's explicit delete-then-reinsert
-    choice, not a shadow-table swap):
+    choice, not a shadow-table swap). The `community_embeddings` delete+insert pair is gated on
+    `vector_extension_loaded` (Amendment 2 — same reasoning as step 5: any statement referencing a
+    vec0 virtual table needs the module registered on this connection, even a `DELETE`). Note this
+    gate is almost always a no-op in practice when the extension IS loaded: if it loaded
+    successfully, `embeddings_to_insert` may still legitimately be empty (e.g. every community
+    happens to have no embedded member yet, step 10's existing per-community case) — that case
+    still runs the `DELETE`/empty-`executemany` normally, exactly as before this amendment; only a
+    **failed extension load** skips touching the table at all:
     ```python
     def _write(c):
         c.execute("DELETE FROM community_membership")
         c.execute("DELETE FROM communities")
-        c.execute("DELETE FROM community_embeddings")
         c.executemany(
             "INSERT INTO communities (id, representative_entity_id, member_count, level, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -584,10 +625,12 @@ itself could call this directly with no cooldown concern.
             "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, ?)",
             membership_to_insert,
         )
-        c.executemany(
-            "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
-            embeddings_to_insert,
-        )
+        if vector_extension_loaded:
+            c.execute("DELETE FROM community_embeddings")
+            c.executemany(
+                "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
+                embeddings_to_insert,
+            )
 
     write_transaction_retrying(conn, _write)
     return {
@@ -597,6 +640,10 @@ itself could call this directly with no cooldown concern.
         "communities_missing_embedding": len(communities_to_insert) - len(embeddings_to_insert),
     }
     ```
+    When `vector_extension_loaded` is `False`, `embeddings_to_insert` is always empty (step 8 left
+    `raw_vector` empty, so step 9's centroid logic gives every community `centroid_vec = None`), so
+    `communities_missing_embedding` correctly equals `communities_created` in this case too — no
+    change needed to this return dict's computation itself.
 
 This function raises nothing itself for a resolvable/valid database state; a genuine `igraph`/
 `leidenalg` failure (malformed graph construction, library-internal error) propagates uncaught,
@@ -899,6 +946,27 @@ itself, not in the new module):
     the connection — assert the patched `trigger_community_detection` is never called, mirroring
     `log_event`'s own existing `_in_transaction` gate precedent.
 
+Required test scenario added by Amendment 2, back in `tests/test_community_detection_service.py`
+(topically belongs with `recompute_communities`'s own scenarios 1-16 above; numbered to continue
+the file's existing sequence rather than renumbering the list):
+
+25. **`sqlite-vec` extension unavailable on this connection**: patch
+    `saltmdb.domain.services.community_detection_service.try_load_vector_extension` to
+    `return_value=False` (mirrors `test_cohesion_service.py`'s own identical pattern for
+    `cohesion_service.try_load_vector_extension`) against a fixture with real qualifying edges and
+    real `entity_embeddings` rows for every member — assert `recompute_communities` still completes
+    without raising; `communities`/`community_membership` are written normally (structural
+    clustering unaffected — same `member_count`/membership as an unpatched run against the same
+    fixture); no row exists in `community_embeddings` for any community afterward; and
+    `communities_missing_embedding` in the return dict equals `communities_created`. Also exercise
+    the step-5 short-circuit under the same patch: a fixture with zero qualifying edges but a
+    **pre-existing** `community_embeddings` row from an earlier unpatched recompute — assert
+    `community_membership`/`communities` are still cleared (`{"status": "no_edges",
+    "communities_created": 0}`), but the pre-existing `community_embeddings` row is left untouched
+    (not deleted) precisely because the extension is unavailable this cycle, proving the gate in
+    step 5 is real and not merely a no-op that happens to look identical when nothing was there to
+    clear.
+
 ## 9. Out of scope
 
 - Milestone C.5's orphan-to-community assignment (the query-time cosine-comparison against
@@ -935,8 +1003,8 @@ itself, not in the new module):
 ```bash
 PYTHONPATH=src uv run pytest tests/test_community_detection_service.py -v
 ```
-must exit 0, and every scenario in §8's first list (1-21) must correspond to at least one passing
-test (a reviewer checks this by name, not just by exit code).
+must exit 0, and every scenario in §8's first list (1-21, plus 25 added by Amendment 2) must
+correspond to at least one passing test (a reviewer checks this by name, not just by exit code).
 
 ```bash
 PYTHONPATH=src uv run pytest tests/test_relation_service.py -v -k "community_detection"
@@ -991,3 +1059,69 @@ about — rejected.
 edit, scoped to exactly the three scenarios §8 already specifies (items 22-24) — no other change
 to that file, no relaxation of any other acceptance criterion. No other section of this spec
 changes. OMP may resume implementation immediately against the amended §0.
+
+## Amendment 2 — `uv.lock` scope gap and a real vec0-extension-loading bug in §6.1
+
+**Reported by OMP** (as forward notes on its second attempt, not a second formal `BLOCKED` report,
+since it correctly took no action while Amendment 1's contradiction was still unresolved): (1)
+`uv.lock` may need its own scope amendment; (2) fresh trigger-worker connections need vec0
+extension handling before vector reads/writes. Two other notes OMP raised — trigger-call
+duplicate/no-op return-placement semantics, and existing-relation-test async/test-mode isolation
+— are **not** amended here: both are already explicitly addressed by existing spec text (§8
+scenario 22's own "whichever the implementation actually does, the test must pin it down
+explicitly" clause, and §8's existing `SALTMDB_TEST_MODE`/no-real-background-pool-submission
+guidance) and require no scope or algorithm change, just implementation-time attention OMP already
+has enough to act on.
+
+**Both remaining items verified independently against the actual current tree before amending**
+(no code written or run beyond reading — a text/precedent check, not a probe):
+
+1. **`uv.lock` gap is real.** §2 adds two new runtime dependencies to `pyproject.toml`; `uv
+   sync`/`uv lock` regenerates `uv.lock` as a direct, unavoidable mechanical consequence, and §0's
+   file list never named it — exactly the `spec-writing` skill's own documented "mechanical
+   step's output file never named in scope" failure shape (a lockfile regenerated by a package
+   manager). This is the same root cause as Amendment 1 (a file genuinely touched by the spec's
+   own instructions, never added to §0's affirmative list) — not a new category of gap.
+
+2. **The vec0-extension-loading gap is real and would have broken the implementation at
+   runtime**, confirmed by reading `src/saltmdb/db/connection.py` (does not load `sqlite_vec` for
+   any connection it opens — extension loading is per-connection, not global) and
+   `src/saltmdb/db/vector_schema.py`'s own `try_load_vector_extension` (built exactly for "a
+   caller that opens their own ad-hoc connection... and needs the extension loaded before
+   querying [a] vec0 virtual table," returning `False` instead of raising so callers degrade
+   gracefully). `cohesion_service.get_fresh_entity_centroids` (`cohesion_service.py:83`) is the
+   established precedent for this exact situation — call `try_load_vector_extension(conn)` once,
+   gate every subsequent vec0-table read/write on its return value — with a matching test-mock
+   precedent already in `tests/test_cohesion_service.py` (`patch(
+   "saltmdb.domain.services.cohesion_service.try_load_vector_extension", return_value=False)`),
+   which requires the import to be module-level, not local to a function, for `patch`'s dotted
+   path to resolve.
+
+   §6.1 as originally drafted opened its own connection (or received one from
+   `_run_community_detection_pass_impl`, itself also freshly opened, per §6.3) and never loaded
+   the extension on it at all, before: reading `entity_embeddings` (step 8, a vec0 table); writing
+   `community_embeddings` (step 12, a vec0 table); and clearing `community_embeddings` in the
+   empty-edge-set short-circuit (step 5, a vec0 table — a bare `DELETE` against a virtual table
+   still requires its module registered on the connection executing it). All three would raise on
+   a real, freshly-opened connection that never had `sqlite_vec.load()` called on it — this is not
+   a hypothetical or an edge case, it is the connection `_run_community_detection_pass_impl`
+   *always* opens for every triggered pass.
+
+**Resolution**: §6's module-level imports gain `try_load_vector_extension` (mirrors
+`cohesion_service.py:4`'s exact placement, for testability). §6.1 step 1 gains a
+`try_load_vector_extension(conn)` call immediately after opening the connection, storing
+`vector_extension_loaded` for steps 5/8/12 to read. Step 5's and step 12's `community_embeddings`
+`DELETE`/`INSERT` statements are now gated on that flag (skipped entirely, not erroring, when
+`False` — structural clustering into `communities`/`community_membership` proceeds unaffected
+either way). Step 8's `entity_embeddings` `SELECT` is now gated the same way, degrading to an
+empty `raw_vector` — which step 9's already-existing centroid logic already treats identically to
+"no member has a usable embedding," requiring no new branch there. A new required test scenario,
+25, is added to §8 (`recompute_communities`'s own scenario list) covering the degrade path
+directly, mirroring `test_cohesion_service.py`'s own mock pattern. §10 Acceptance's scenario-count
+line updated to include it.
+
+No other section of this spec changes. This amendment does not alter §1's locked design decisions,
+§7's `relation_service.py` changes, or Amendment 1's own resolution — it is purely a §6.1
+algorithm-correctness fix plus the two mechanically-necessitated scope additions (`uv.lock`,
+already-permitted `try_load_vector_extension` import) it depends on. OMP may resume implementation
+immediately against the amended §0/§6.
