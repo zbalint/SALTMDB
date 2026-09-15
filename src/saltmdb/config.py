@@ -237,6 +237,18 @@ LIBRARIAN_LOCK_STALE_MINUTES = 10  # promoted from a hardcoded "-10 minutes" lit
 LIBRARIAN_TRIGGER_COOLDOWN_S = (
     300  # promoted from a hardcoded 300 literal in librarian_service.py's trigger_librarian()
 )
+# Milestone C (wayfinder ticket "clustering trigger and freshness/maintenance", standing
+# constraint 18, memory 20b4c507) -- community_detection_service's write-triggered recompute
+# cooldown, same shape as LIBRARIAN_TRIGGER_COOLDOWN_S above (same shared _librarian_trigger_pool,
+# same _system_locks atomic-claim pattern, new task_name='community_detection'). PLACEHOLDER:
+# seeded at LIBRARIAN_TRIGGER_COOLDOWN_S's own order of magnitude per constraint 22's explicit
+# calibration mechanic ("seeded at the existing Librarian task's own cooldown order of magnitude,
+# validated by a named probe for transient mis-assignment during the cooldown window") -- not yet
+# benchmarked against SALTMDB's own corpus. Do not remove the placeholder framing when tuning
+# this; replace this comment with the benchmark citation once a real value is locked from the
+# Milestone C/C.5 benchmark run (wayfinder ticket 787ebf0c), matching the treatment already given
+# to CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS before Milestone B calibrated it.
+COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S = 300
 
 # Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py and
 # relation_service.py:commit_consolidation). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory

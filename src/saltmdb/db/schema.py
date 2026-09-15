@@ -208,9 +208,7 @@ def _ensure_agent_sessions_table(conn) -> None:
     conn.execute(
         "INSERT INTO _agent_sessions "
         "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason) "
-        "SELECT "
-        + ", ".join(select_expr)
-        + " FROM _agent_sessions_legacy"
+        "SELECT " + ", ".join(select_expr) + " FROM _agent_sessions_legacy"
     )
     conn.execute("DROP TABLE _agent_sessions_legacy")
 
@@ -765,6 +763,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             init_vector_schema,
             init_entity_chunk_vector_schema,
             init_retrieval_vector_schema,
+            init_community_vector_schema,
             migrate_entity_chunk_embeddings_schema,
         )
 
@@ -785,6 +784,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             init_vector_schema(conn)
             init_entity_chunk_vector_schema(conn)
             init_retrieval_vector_schema(conn)
+            init_community_vector_schema(conn)
         except Exception as e:
             logger.warning("Vector schema init deferred/failed: %s", e)
 
@@ -830,6 +830,50 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at)
         VALUES ('librarian_consolidation', NULL, NULL, NULL);
         """)
+        conn.execute(
+            "INSERT OR IGNORE INTO _system_locks (task_name, locked_at, locked_by_pid, last_run_at) "
+            "VALUES ('community_detection', NULL, NULL, NULL);"
+        )
+
+        # Milestone C (wayfinder standing constraint 21, memory 4c20b91f) -- Leiden community
+        # detection over the explicit relation graph. Three tables, one of them (community_embeddings,
+        # in vector_schema.py) a vec0 virtual table mirroring the entity_embeddings/
+        # entity_chunk_embeddings/retrieval_embeddings family. `level INTEGER NOT NULL DEFAULT 0` is
+        # reserved on both relational tables now so a future Milestone D hierarchy retrofit is
+        # additive, not a migration -- this milestone (flat communities only, constraint 20) never
+        # writes anything but 0 into it. No bitemporal columns: constraint 18's full-recompute-every-
+        # trigger policy makes row PRESENCE itself mean "member as of last recompute" -- no locked
+        # query path ever needs point-in-time community history. A triggered recompute DELETEs and
+        # re-INSERTs the full contents of all three tables inside one wrapped transaction (see
+        # community_detection_service.recompute_communities) rather than a shadow-table swap --
+        # verified safe under this database's actual PRAGMA journal_mode=WAL (connection.py) for a
+        # concurrent reader mid-recompute. community_id is NOT stable across recomputes -- every
+        # trigger mints fresh UUIDs (mirrors constraint 19's own accepted representative/centroid
+        # identity-churn precedent).
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS communities (
+            id TEXT PRIMARY KEY,
+            representative_entity_id TEXT NOT NULL,
+            member_count INTEGER NOT NULL,
+            level INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY (representative_entity_id) REFERENCES entities(id) ON DELETE CASCADE
+        );
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS community_membership (
+            entity_id TEXT PRIMARY KEY,
+            community_id TEXT NOT NULL,
+            level INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE,
+            FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+        );
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_membership_community_id "
+            "ON community_membership(community_id)"
+        )
 
         # 6b. Viewer Sessions Table for Reference-Counted Lifecycle
         conn.execute("""

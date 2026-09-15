@@ -242,6 +242,7 @@ def _dispatch_manage_relation(**kw):
             target_id=kw.get("target_id"),
             predicate=kw.get("predicate"),
             invalid_at=kw.get("invalid_at"),
+            coordinator=kw.get("coordinator"),
         )
     return relation_service.store_relation(
         source_id=kw.get("source_id"),
@@ -250,6 +251,7 @@ def _dispatch_manage_relation(**kw):
         valid_at=kw.get("valid_at"),
         override_justification=kw.get("override_justification"),
         owner_id=kw.get("owner_id"),
+        coordinator=kw.get("coordinator"),
     )
 
 
@@ -493,7 +495,7 @@ MUTATING_TOOLS = frozenset(
 def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
     fn = DISPATCH_TABLE[tool]
     if tool in MUTATING_TOOLS:
-        if tool in {"store_memory", "log_event"}:
+        if tool in {"store_memory", "log_event", "manage_relation"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
     return fn(**kwargs)
