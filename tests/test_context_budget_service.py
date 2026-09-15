@@ -110,6 +110,7 @@ class TestContextBudgetService(unittest.TestCase):
                     "expansion_truncated": False,
                     "expansion_dropped_count": 0,
                     "conflict_reserve_tokens_used": 0,
+                    "orphan_community_reserve_tokens_used": 0,
                 },
             },
         )

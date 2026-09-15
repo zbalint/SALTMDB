@@ -21,6 +21,7 @@ def pack_context_budget(
     conflict_sets_result: dict[str, Any],
     *,
     budget_tokens: int | None = None,
+    orphan_community_entity_ids: set[str] | None = None,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
@@ -40,8 +41,9 @@ def pack_context_budget(
         for member in conflict_set["members"]
         if member["inclusion"] == "conflict_only"
     }
+    orphan_community_ids: set[str] = orphan_community_entity_ids or set()
 
-    if not primary_ids and not expansion_ids and not conflict_only_ids:
+    if not primary_ids and not expansion_ids and not conflict_only_ids and not orphan_community_ids:
         return {
             "packed_entity_ids": {"primary": [], "expansion": []},
             "dropped_entity_ids": {"primary": [], "expansion": []},
@@ -56,6 +58,7 @@ def pack_context_budget(
                 "expansion_truncated": False,
                 "expansion_dropped_count": 0,
                 "conflict_reserve_tokens_used": 0,
+                "orphan_community_reserve_tokens_used": 0,
             },
         }
 
@@ -66,7 +69,7 @@ def pack_context_budget(
         should_close = True
 
     try:
-        all_ids = set(primary_ids) | set(expansion_ids) | conflict_only_ids
+        all_ids = set(primary_ids) | set(expansion_ids) | conflict_only_ids | orphan_community_ids
         placeholders = ",".join("?" for _ in all_ids)
         rows = conn.execute(
             f"SELECT id, full_content FROM entities WHERE id IN ({placeholders})", tuple(all_ids)
@@ -102,6 +105,9 @@ def pack_context_budget(
         conflict_reserve_tokens_used = sum(
             token_counts[entity_id] for entity_id in conflict_only_ids
         )
+        orphan_community_reserve_tokens_used = sum(
+            token_counts[entity_id] for entity_id in orphan_community_ids
+        )
         return {
             "packed_entity_ids": {"primary": primary_packed, "expansion": expansion_packed},
             "dropped_entity_ids": {"primary": primary_dropped, "expansion": expansion_dropped},
@@ -116,6 +122,7 @@ def pack_context_budget(
                 "expansion_truncated": len(expansion_dropped) > 0,
                 "expansion_dropped_count": len(expansion_dropped),
                 "conflict_reserve_tokens_used": conflict_reserve_tokens_used,
+                "orphan_community_reserve_tokens_used": orphan_community_reserve_tokens_used,
             },
         }
     finally:

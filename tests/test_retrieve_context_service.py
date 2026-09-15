@@ -168,6 +168,12 @@ class TestRetrieveContextService(unittest.TestCase):
                             "truncated": False,
                             "dropped_count": 0,
                         },
+                        "orphan_community_reserve": {
+                            "cap": config.CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP,
+                            "eligible_count": 0,
+                            "truncated": False,
+                            "dropped_count": 0,
+                        },
                     },
                     "budget": {
                         "unit": "tokens",
@@ -178,6 +184,7 @@ class TestRetrieveContextService(unittest.TestCase):
                         "expansion_truncated": False,
                         "expansion_dropped_count": 0,
                         "conflict_reserve_tokens_used": 0,
+                        "orphan_community_reserve_tokens_used": 0,
                     },
                 },
             },

@@ -10,6 +10,7 @@ from saltmdb.db.connection import close_connection, get_connection
 from saltmdb.domain.services import memory_service
 from saltmdb.domain.services.conflict_set_service import assemble_conflict_sets
 from saltmdb.domain.services.context_budget_service import pack_context_budget
+from saltmdb.domain.services.orphan_community_service import find_orphan_community_matches
 from saltmdb.domain.services.context_expansion_service import (
     PrimaryHit,
     expand_context_candidates,
@@ -19,7 +20,7 @@ from saltmdb.domain.services.lineage_assembly_service import assemble_lineage
 logger = logging.getLogger(__name__)
 
 
-def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
+def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     query: str,
     owner_id: str | None,
     *,
@@ -89,6 +90,7 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
             for hit in search_hits
         }
         original_rank = {hit["id"]: index + 1 for index, hit in enumerate(search_hits)}
+        primary_hit_ids_set = {hit["id"] for hit in primary_hits}
 
         expansion_result = expand_context_candidates(
             cast(list[PrimaryHit], primary_hits),
@@ -101,11 +103,32 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
             point_in_time=pit,
             db_connection=conn,
         )
+        expansion_candidate_ids = {
+            candidate["entity_id"] for candidate in expansion_result["expansion_candidates"]
+        }
+        conflict_only_ids = {
+            member["id"]
+            for conflict_set in conflict_sets_result["conflict_sets"]
+            for member in conflict_set["members"]
+            if member["inclusion"] == "conflict_only"
+        }
+        excluded_for_orphan_lookup = (
+            set(primary_hit_ids_set) | expansion_candidate_ids | conflict_only_ids
+        )
+        orphan_result = find_orphan_community_matches(
+            primary_hits,
+            excluded_for_orphan_lookup,
+            db_connection=conn,
+        )
+        orphan_community_entity_ids = {
+            match["entity_id"] for match in orphan_result["orphan_community_matches"]
+        }
         budget_result = pack_context_budget(
             expansion_result,
             primary_hits,
             conflict_sets_result,
             budget_tokens=budget_tokens,
+            orphan_community_entity_ids=orphan_community_entity_ids,
             db_connection=conn,
         )
         lineage_result = assemble_lineage(
@@ -148,8 +171,10 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
             for entity_id in recovered_primary + recovered_expansion
         )
 
-        needs_memory_type = set(final_expansion_ids) | set(
-            budget_result["conflict_only_entity_ids"]
+        needs_memory_type = (
+            set(final_expansion_ids)
+            | set(budget_result["conflict_only_entity_ids"])
+            | orphan_community_entity_ids
         )
         memory_type_by_id: dict[str, str] = {}
         if needs_memory_type:
@@ -217,6 +242,29 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
                     ],
                 }
             )
+        orphan_title_by_id = {
+            match["entity_id"]: match["title"]
+            for match in orphan_result["orphan_community_matches"]
+        }
+        orphan_provenance_by_id = {
+            match["entity_id"]: {
+                "reason": "orphan_community_assignment",
+                "orphan_entity_id": match["orphan_entity_id"],
+                "community_id": match["community_id"],
+                "similarity": match["similarity"],
+            }
+            for match in orphan_result["orphan_community_matches"]
+        }
+        for entity_id in orphan_community_entity_ids:
+            memories.append(
+                {
+                    "entity_id": entity_id,
+                    "title": orphan_title_by_id[entity_id],
+                    "memory_type": memory_type_by_id.get(entity_id, "unknown"),
+                    "inclusion": "orphan_community",
+                    "retrieval_provenance": [orphan_provenance_by_id[entity_id]],
+                }
+            )
         surfaced_ids = {memory["entity_id"] for memory in memories}
         lineage_result = {
             head_id: entry for head_id, entry in lineage_result.items() if head_id in surfaced_ids
@@ -236,6 +284,7 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
             "fan_out": {
                 **expansion_result["fan_out"],
                 "conflict_reserve": conflict_sets_result["contradicts_cap"],
+                "orphan_community_reserve": orphan_result["orphan_community_cap"],
             },
             "budget": {
                 "unit": budget_result["budget"]["unit"],
@@ -248,6 +297,9 @@ def assemble_retrieve_context(  # noqa: PLR0912, PLR0915
                 "conflict_reserve_tokens_used": (
                     budget_result["budget"]["conflict_reserve_tokens_used"] + recovered_tokens_used
                 ),
+                "orphan_community_reserve_tokens_used": budget_result["budget"][
+                    "orphan_community_reserve_tokens_used"
+                ],
             },
         }
 
