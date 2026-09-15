@@ -306,6 +306,35 @@ CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
 # memories) and confirmed the resulting conflict set (2 members) sits comfortably under this cap.
 # Confirmed at its existing value, no longer a placeholder.
 CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
+# Milestone C.5 (wayfinder ticket "orphan-to-community assignment mechanics," standing constraint
+# 16, memory 1c15e9ac) -- retrieve_context's orphan-community reserve: bounds how many net-new
+# (orphan_community) entities a call may pull in across ALL zero-edge orphan primary hits combined,
+# additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's fan-out cap and
+# CONTEXT_EXPANSION_CONTRADICTS_CAP's conflict reserve. A FLAT constant, mirroring
+# CONTEXT_EXPANSION_CONTRADICTS_CAP's own shape exactly (not scaled by orphan-hit or primary-hit
+# count, unlike CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS) -- orphan-community is a sparse
+# force-include mechanism, not G4's always-on default case. Fixed now, NOT a Milestone-C/C.5-
+# benchmark placeholder (unlike COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD below) -- mirrors
+# LINEAGE_HISTORICAL_CAP's own "low-stakes and reversible, do not defer" precedent: getting this
+# number wrong costs at most a few extra/fewer context entries, recoverable by re-tuning without
+# calibration evidence. Seeded at the same value as CONTEXT_EXPANSION_CONTRADICTS_CAP's own current
+# value, since constraint 16 explicitly mirrors that constant's shape.
+CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP = 5
+
+# Milestone C.5 (wayfinder ticket "orphan-to-community assignment mechanics," standing constraint
+# 16, memory 1c15e9ac) -- the minimum cosine similarity between a zero-edge orphan primary hit's
+# own entity_embeddings vector and a community's PageRank-weighted centroid (community_embeddings)
+# required to assign that orphan to that community at all. Below this threshold, the orphan gets no
+# orphan_community assignment for this call, full stop -- never force-assigned to its
+# nearest-however-distant community. PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus
+# -- seeded at the same order of magnitude as this codebase's other cosine-similarity thresholds
+# gating a comparably-scoped "does this specific thing belong with that specific thing" judgment
+# (RELATION_GATE_MIN_SIMILARITY_THRESHOLD=0.6505, COHESION_MIN_PAIRWISE_THRESHOLD=0.6547) -- not
+# derived from any benchmark of its own. Recalibrated by the Milestone C/C.5 benchmark run
+# (wayfinder ticket 787ebf0c) via a sweep maximizing that ticket's own recall-lift metric without
+# false-positive noise. Do not remove the placeholder framing when tuning this; replace this
+# comment with the benchmark citation once a real value is locked.
+COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.65
 
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
