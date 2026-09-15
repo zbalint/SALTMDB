@@ -31,6 +31,17 @@ C.5, like Milestone C, introduces no new tool and no new `retrieve_context` para
 new parameter either — the only observable surface change is a new `inclusion` value and new
 `metadata` sub-fields on the tool's already-existing output).
 
+**Amendment 1** additionally permits editing exactly two existing test files, each limited to one
+named assertion site and nothing else: `tests/test_context_budget_service.py`, only the whole-dict
+`assertEqual` in `test_scenario_1_all_inputs_empty_returns_zero_shape_without_opening_connection`
+(add the one key `"orphan_community_reserve_tokens_used": 0` to the expected `budget` dict); and
+`tests/test_retrieve_context_service.py`, only the whole-dict `assertEqual` inside the shared
+`_assert_empty_envelope` helper (add `"orphan_community_reserve": {"cap": config.
+CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP, "eligible_count": 0, "truncated": False, "dropped_count":
+0}` under `fan_out`, and `"orphan_community_reserve_tokens_used": 0` under `budget`). No other
+line of either file may change under this grant. See Amendment 1 below for why these two sites,
+and only these two, are affected.
+
 **Pre-lock gate completed against the current tree**: `assemble_retrieve_context`,
 `pack_context_budget`, and `assemble_conflict_sets` were re-read in full before drafting §§3-5.
 Grepped `orphan_community`, `find_orphan_community_matches`, `orphan_community_service`,
@@ -687,7 +698,10 @@ PYTHONPATH=src uv run pytest tests/test_context_budget_service.py tests/test_ret
 (or whatever the actual existing Milestone-A integration test file for `assemble_retrieve_context`
 is named in the tree at implementation time — confirm the real filename first) must exit 0, proving
 zero regression to `pack_context_budget`'s existing contract and `assemble_retrieve_context`'s
-existing behavior for calls that predate this spec.
+existing behavior for calls that predate this spec. **Amendment 1**: passing this command requires
+the two narrowly-scoped edits to these files' whole-dict `assertEqual` sites that §0's Scope
+(as amended) permits — those two additions are the only way these two commands can pass alongside
+§4/§5's own new required fields, and this command is not expected to pass unmodified.
 
 ```bash
 PYTHONPATH=src uv run pytest tests/ -q
@@ -714,3 +728,61 @@ spec's acceptance is pure structural/behavioral correctness against
 `COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD`'s *symbol* — no test may hardcode its numeric value
 (`0.65`), and no part of this acceptance bar depends on constraint 22's not-yet-determined
 recall-lift threshold.
+
+## Amendment 1 — §0 Scope omitted two existing tests' whole-dict exact-equality assertions
+
+**Reported by OMP as `BLOCKED — SPEC ADJUDICATION REQUIRED`**: §0 Scope's file list excludes
+`tests/test_context_budget_service.py` and `tests/test_retrieve_context_service.py`, while §4
+requires `pack_context_budget`'s return shape to gain
+`budget["orphan_community_reserve_tokens_used"]` (including in its all-empty-input zero-result
+shape, per §4 change 5) and §5 requires `assemble_retrieve_context`'s `metadata` to gain
+`metadata.fan_out.orphan_community_reserve` and `metadata.budget.orphan_community_reserve_tokens_
+used`. `tests/test_context_budget_service.py:97-113`
+(`test_scenario_1_all_inputs_empty_returns_zero_shape_without_opening_connection`) and
+`tests/test_retrieve_context_service.py:150-184` (the shared `_assert_empty_envelope` helper) each
+compare the entire result dict with `self.assertEqual(result, {...})` against a literal that
+predates this spec — both required additions fail those two exact comparisons unless the literals
+are updated. No implementation can satisfy §4/§5's required output shape and §0's original
+five-path scope list at the same time.
+
+**Verified independently, not trusted from OMP's report alone** — read both test files in full
+before amending:
+
+- `tests/test_context_budget_service.py` has exactly one whole-dict `assertEqual(result, {...})`
+  site in the entire file (scenario 1, line 97); every other assertion in the file (scenarios 2-9,
+  ~20 call sites) reads an individual `result["..."]` sub-field or a scoped sub-dict
+  (`result["packed_entity_ids"]`, `result["dropped_entity_ids"]`, etc.), none of which break when
+  a new key is added elsewhere in the same top-level dict.
+- `tests/test_retrieve_context_service.py` has exactly one whole-result `assertEqual(result, {...})`
+  site, inside the shared `_assert_empty_envelope` helper (used by three tests: the zero-primary-
+  hits case, one other all-empty-envelope case, and one at the file's end); every other
+  `assertEqual` in the file (~20 further call sites) targets a specific sub-field, a specific
+  `memories[]`/`conflict_sets[]` entry, or a set/list comparison scoped well below the top level,
+  none of which the two new additive fields touch.
+- Confirmed via a fresh baseline run (`PYTHONPATH=src uv run pytest
+  tests/test_context_budget_service.py tests/test_retrieve_context_service.py -v`, 28 passed) that
+  both files currently pass unmodified, establishing the "before" state these two edits are scoped
+  against.
+- Confirmed `find_orphan_community_matches`'s own zero-result shape (§3, "the zero-result shape")
+  reports `cap` as the real `CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP` constant, never a bare `0`,
+  even when `primary_hits` is empty — `assemble_retrieve_context` has no early return before the
+  new orphan-lookup call (confirmed by reading the function: it has exactly one `return`, at its
+  end), so the zero-primary-hits envelope test's expected `orphan_community_reserve` sub-dict must
+  use the constant's value for `cap`, not `0`, matching `conflict_reserve`'s own existing identical
+  convention one line above it in the same literal.
+
+**Adjudication: widen §0 by exactly these two assertion sites, not relax §4/§5's required output
+shape.** Dropping the new fields (or making them optional/absent-when-empty) would contradict §1
+upstream-decision 2's explicit mirroring of the conflict-reserve precedent (which already always
+reports its own reserve fields, empty or not) and would leave `metadata.fan_out.orphan_community_
+reserve`/`metadata.budget.orphan_community_reserve_tokens_used` inconsistently shaped depending on
+whether a call happened to have any orphan hits — the same shape-consistency argument §4 change 5
+already makes explicitly for `pack_context_budget`'s own zero-result shape. The gap is narrow and
+mechanical (drafting built §0's file list before confirming these two files' own exact-comparison
+style, the same root cause the `spec-writing` skill's pre-lock gate step 5 exists to catch), not a
+sign either required field is wrong.
+
+**Resolution**: §0 Scope amended above to permit editing exactly these two files, each limited to
+its one named whole-dict assertion site — no other line of either file changes, no relaxation of
+any other acceptance criterion, no change to any §1 locked design decision. OMP may resume
+implementation immediately against the amended §0.
