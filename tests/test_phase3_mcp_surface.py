@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from unittest.mock import patch
 
 from saltmdb.daemon import dispatch, protocol
 from saltmdb.mcp import tools
@@ -88,6 +89,87 @@ class TestPhase3McpSurface(unittest.TestCase):
         self.assertIn("inspect_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("update_memory_metadata", dispatch.MUTATING_TOOLS)
         self.assertNotIn("inspect_memory", dispatch.MUTATING_TOOLS)
+
+    def test_scenario_31_manage_relation_threads_coordinator_except_bulk(self):
+        self.assertIn("manage_relation", dispatch.MUTATING_TOOLS)
+        sentinel = object()
+
+        class _ImmediateCoordinator:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, name, operation, *, priority, wait=True):
+                self.submissions.append((name, priority, wait))
+                return operation(None)
+
+        coordinator = _ImmediateCoordinator()
+        relations = [{"source_id": "source", "target_id": "target", "predicate": "part_of"}]
+
+        with (
+            patch.object(
+                dispatch.relation_service, "store_relation", return_value="stored"
+            ) as store,
+            patch.object(
+                dispatch.relation_service, "invalidate_relation", return_value="invalidated"
+            ) as invalidate,
+            patch.object(
+                dispatch.relation_service, "bulk_store_relations", return_value=["bulk"]
+            ) as bulk,
+        ):
+            self.assertEqual(
+                dispatch._dispatch_tool_inner(
+                    "manage_relation",
+                    {
+                        "source_id": "source",
+                        "target_id": "target",
+                        "predicate": "related_to",
+                        "valid_at": "2026-01-01T00:00:00+00:00",
+                        "override_justification": "justification",
+                        "owner_id": "owner",
+                    },
+                    coordinator,
+                ),
+                "stored",
+            )
+            self.assertEqual(
+                dispatch._dispatch_manage_relation(
+                    source_id="source",
+                    target_id="target",
+                    predicate="related_to",
+                    invalid_at="2026-02-01T00:00:00+00:00",
+                    invalidate=True,
+                    coordinator=sentinel,
+                ),
+                "invalidated",
+            )
+            self.assertEqual(
+                dispatch._dispatch_manage_relation(
+                    relations=relations,
+                    owner_id="owner",
+                    invalidate=False,
+                    coordinator=sentinel,
+                ),
+                ["bulk"],
+            )
+
+        store.assert_called_once_with(
+            source_id="source",
+            target_id="target",
+            predicate="related_to",
+            valid_at="2026-01-01T00:00:00+00:00",
+            override_justification="justification",
+            owner_id="owner",
+            coordinator=coordinator,
+        )
+        invalidate.assert_called_once_with(
+            source_id="source",
+            target_id="target",
+            predicate="related_to",
+            invalid_at="2026-02-01T00:00:00+00:00",
+            coordinator=sentinel,
+        )
+        bulk.assert_called_once_with(relations=relations, owner_id="owner", invalidate=False)
+        self.assertEqual(coordinator.submissions, [("tool:manage_relation", "foreground", True)])
 
 
 if __name__ == "__main__":

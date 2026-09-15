@@ -77,6 +77,33 @@ def init_retrieval_vector_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
+def init_community_vector_schema(conn: sqlite3.Connection) -> None:
+    """Create the community_embeddings vec0 virtual table (Milestone C, wayfinder standing
+    constraint 21). One row per community, keyed by community_id -- mirrors entity_embeddings'
+    exact shape (a single PRIMARY KEY id column plus one FLOAT[384] embedding column, no
+    auxiliary columns), since a community's embedding, like an entity's, is a single deterministic
+    index vector (the PageRank-weighted centroid, see community_detection_service.py), not
+    multiple per-community vectors the way entity_chunk_embeddings holds multiple per-entity rows.
+
+    Loads the sqlite_vec extension onto this connection itself, matching every other vec0 call
+    site in this codebase (init_vector_schema, init_entity_chunk_vector_schema,
+    init_retrieval_vector_schema) that self-loads defensively rather than assume a prior call
+    already attached the extension to this specific connection object. Loading twice on the same
+    connection is a harmless no-op.
+    """
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS community_embeddings USING vec0(
+            community_id TEXT PRIMARY KEY,
+            embedding FLOAT[384]
+        );
+    """)
+
+
 def _entity_chunk_embeddings_ddl(if_not_exists: bool) -> str:
     """Shared DDL for entity_chunk_embeddings, used by both the fresh-install path
     (init_entity_chunk_vector_schema) and the drop+recreate migration path
