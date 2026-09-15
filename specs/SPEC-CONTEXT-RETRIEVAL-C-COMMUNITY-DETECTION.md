@@ -730,6 +730,13 @@ def _run_community_detection_pass_on_connection(conn) -> str:
         (now, now, now, now),
     ).fetchone()[0]
     if edge_count == 0:
+        # Amendment 4: must still clear stale communities/community_membership/
+        # community_embeddings before returning -- see Amendment 4 below for why the original
+        # bare `return` here contradicted this same function's own required invariant
+        # (§6.1 step 5 / §1 upstream-decision 4). `recompute_communities` re-derives the edge set
+        # itself, finds it empty again, and runs its own empty-edge-set short-circuit -- this
+        # never claims the cooldown and never invokes Leiden.
+        recompute_communities(db_connection=conn)
         return "Skipped: no qualifying relation edges to cluster."
     claim_now = datetime.now(UTC).isoformat()
     cur = conn.execute(
@@ -783,6 +790,10 @@ def _run_community_detection_pass_impl(db_path: str) -> str:
             (now, now, now, now),
         ).fetchone()[0]
         if edge_count == 0:
+            # Amendment 4: same fix as §6.2's `_run_community_detection_pass_on_connection` --
+            # clear stale state via `recompute_communities` before returning; never claims the
+            # cooldown or invokes Leiden along this path.
+            recompute_communities(db_connection=conn)
             return "Skipped: no qualifying relation edges to cluster."
 
         def _claim_cooldown(c):
@@ -1205,9 +1216,16 @@ added by Amendment 3) must correspond to at least one passing test (a reviewer c
 name, not just by exit code).
 
 ```bash
-PYTHONPATH=src uv run pytest tests/test_relation_service.py -v -k "community_detection"
+PYTHONPATH=src uv run pytest tests/test_relation_service.py -v -k "community_detection or coordinator"
 ```
-must exit 0, covering §8's scenarios 22-24 and 29-30 (Amendment 3).
+must exit 0, covering §8's scenarios 22-24 and 29-30 (Amendment 3). **Amendment 4**: the filter is
+`"community_detection or coordinator"`, not the original `"community_detection"` alone — scenarios
+29-30's own test names (`test_scenario_29_store_relation_forwards_coordinator_to_trigger`,
+`test_scenario_30_invalidate_relation_forwards_coordinator_to_trigger`) do not contain the literal
+substring `community_detection`, so the original filter silently selected only 3 of the 5 tests
+this line's own prose already claimed it covered (verified directly: `--collect-only` against the
+original filter returns exactly scenarios 22-24, never 29-30, while both run and pass under the
+corrected filter).
 
 ```bash
 PYTHONPATH=src uv run pytest tests/test_phase3_mcp_surface.py -v -k "manage_relation or coordinator"
@@ -1242,10 +1260,38 @@ uv run ruff format --check src/saltmdb/domain/services/community_detection_servi
   src/saltmdb/daemon/dispatch.py \
   tests/test_community_detection_service.py tests/test_relation_service.py tests/test_phase3_mcp_surface.py && \
 uv run mypy src/saltmdb/domain/services/community_detection_service.py src/saltmdb/db/schema.py \
-  src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py src/saltmdb/daemon/dispatch.py
+  src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py
 ```
-must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md`). **Amendment 3
-carve-out**: `ruff format --check` on `src/saltmdb/db/schema.py` and
+must exit 0 (verified clean, zero pre-existing debt in any of these four files). **Amendment 4**:
+`src/saltmdb/daemon/dispatch.py` is dropped from this combined command and gets its own, separate
+mypy invocation instead:
+```bash
+uv run mypy src/saltmdb/daemon/dispatch.py
+```
+which does **not** need to exit 0 — it must instead reproduce exactly these three pre-existing,
+already-known baseline errors, unchanged in content from the pre-Milestone-C baseline (verified via
+`git stash` against this worktree's own base commit), shifted only by the two-line offset §7.1's
+own permitted `_dispatch_manage_relation` additions introduce ahead of them in the file:
+```text
+src/saltmdb/daemon/dispatch.py:358: error: Argument "metadata" to "update_memory_metadata" has incompatible type "Any | None"; expected "dict[Any, Any]"  [arg-type]
+src/saltmdb/daemon/dispatch.py:417: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "str | None"  [arg-type]
+src/saltmdb/daemon/dispatch.py:417: error: Argument 4 to "analyze_dependencies" has incompatible type "**dict[str, object]"; expected "bool"  [arg-type]
+```
+Both broken lines (`_dispatch_update_memory_metadata`, the `analyze_dependencies` dispatch call)
+are pre-existing, unrelated functions squarely outside §7.1's locked edit range for this file (the
+two mechanical `coordinator`-threading additions only). This is the identical baseline debt
+Milestone A slice A5 already hit and resolved the same way (SALTMDB memory `4af83a9a`, itself
+tracing to the deliberate `kw.get()` → `Any | None` deferral recorded in memory `50e45023`) — not a
+new class of problem, and not something this spec's own two-line diff is responsible for fixing.
+Widening `dispatch.py`'s permitted edit range to also fix these two lines was considered and
+rejected: it would expand this spec's scope past its own locked two-addition boundary for debt this
+change did not introduce, mirroring the same "widen scope to match real mechanical necessity, never
+volunteer unrelated fixes" precedent Amendments 1-3 already established for this exact file's own
+history. This split matches this repo's documented lint/type gate (`CONTRIBUTING.md`) for the four
+files that do carry a zero-error bar, while giving `dispatch.py` its own established baseline-diff
+bar instead.
+
+**Amendment 3 carve-out**: `ruff format --check` on `src/saltmdb/db/schema.py` and
 `src/saltmdb/domain/services/relation_service.py` may reformat exactly two pre-existing,
 unrelated blocks that already violate this repo's current `ruff format` output on the clean
 baseline (confirmed independently — see Amendment 3): the string-concatenation lines inside
@@ -1454,3 +1500,100 @@ lint/type/test commands.
 
 No change to any §1 locked design decision or to Amendments 1/2's own resolutions. OMP may resume
 implementation immediately against the amended §0/§6/§7/§7.1/§8/§10.
+
+## Amendment 4 — Pre-existing dispatch.py mypy debt, a real §6.1/§6.3 stale-state contradiction,
+and a `-k` filter gap that silently dropped two required test scenarios
+
+**Reported by OMP** as `BLOCKED — SPEC ADJUDICATION REQUIRED` on its next attempt, with fresh
+acceptance evidence (focused suite 137 passed; full suite 1659 passed / 12 skipped / 18 subtests;
+ruff check/format clean; mypy failing only at `dispatch.py:358` and `:417`), citing two problems:
+(1) §10's combined mypy command collides with pre-existing, unrelated `dispatch.py` debt outside
+§7.1's permitted two-line edit range; (2) a recorded spec tension between §6.3's early no-edge
+`return` and §6.1's own required invariant that a corpus which previously had communities must not
+keep serving them once every qualifying relation is gone — OMP's diff already resolves this in
+favor of the invariant (both worker functions now call `recompute_communities` before returning on
+the empty-edge path, proven by scenario 28) rather than the literal §6.2/§6.3 code blocks as
+originally drafted. OMP again performed no unauthorized edits; the worktree sat exactly as
+described (uncommitted, unmerged, only the eleven §0-permitted paths touched, `git diff --check`
+clean).
+
+**Both items, plus a third found independently during this adjudication, verified directly against
+the actual tree — none trusted from OMP's report alone**:
+
+1. **The `dispatch.py` mypy debt is real, pre-existing, and identical to Milestone A slice A5's own
+   already-resolved instance of this exact problem.** Ran `uv run mypy src/saltmdb/daemon/
+   dispatch.py` against this worktree (three errors, at lines 358/417) and again against the same
+   file with this worktree's own diff stashed out (three errors, identical text, at lines 356/415)
+   — the two-line shift is exactly §7.1's own two permitted `coordinator=kw.get("coordinator"),`
+   additions inside `_dispatch_manage_relation`, landing above the pre-existing broken lines in
+   `_dispatch_update_memory_metadata` and the `analyze_dependencies` dispatch call. This is the
+   identical error text, at the identical two logical call sites, as SALTMDB memory `4af83a9a` (A5
+   Amendment 4) already established and resolved via a per-file mypy split rather than a fix — this
+   spec's own `dispatch.py` scope is even narrower than A5's (two mechanical additions only, vs.
+   A5's "import block and code from `_dispatch_retrieve_context` onward"), so the same reasoning
+   applies with, if anything, less room to argue for widening scope to fix it here.
+2. **The §6.1/§6.3 tension is real, and OMP's already-shipped fix is correct.** §6.1's own step-5
+   prose is explicit and unconditional: "a corpus that had communities before and has since had
+   every relation invalidated must not keep serving stale rows forever." §6.2/§6.3's original code
+   blocks, as literally transcribed into this spec, have `_run_community_detection_pass_on_
+   connection` and `_run_community_detection_pass_impl` both `return` immediately on `edge_count ==
+   0` without ever calling `recompute_communities` — meaning the one call path that actually fires
+   in production the instant the *last* qualifying relation is invalidated (`invalidate_relation` →
+   `trigger_community_detection` → one of these two functions) would leave stale `communities`/
+   `community_membership`/`community_embeddings` rows in place forever, directly contradicting
+   §6.1's own named invariant on this exact scenario. Read the actual implementation and the actual
+   `test_scenario_28_connection_worker_runs_pass_and_honors_preconditions` test directly (not just
+   OMP's summary of it): after invalidating a fixture's only edge, `_run_community_detection_pass_
+   on_connection` is asserted to (a) never call `leidenalg.find_partition` (`find_partition.assert_
+   not_called()` under a patch), (b) leave `_system_locks.last_run_at` for `'community_detection'`
+   unchanged (no cooldown claimed), and (c) leave all three tables — `communities`,
+   `community_membership`, and `community_embeddings` — at zero rows. This is exactly the "clear
+   stale state, never claim the cooldown, never invoke Leiden" behavior §1 upstream-decision 4 and
+   §6.1 step 5 already require, achieved by calling `recompute_communities(db_connection=conn)` (its
+   own already-locked empty-edge-set short-circuit does the actual clearing) instead of a bare
+   `return` — not a new algorithm, not a scope expansion, just correcting the literal code sample to
+   match the invariant the surrounding prose already promised.
+3. **A third issue, not raised in OMP's report, found while independently re-running every §10
+   acceptance command rather than trusting its exit-code summary**: the second pytest command's `-k
+   "community_detection"` filter does not actually select scenarios 29-30. Confirmed via
+   `--collect-only`: the filter matches exactly `test_scenario_22/23/24` (their own function names
+   contain the literal substring `community_detection`) and silently deselects `test_scenario_
+   29_store_relation_forwards_coordinator_to_trigger` / `test_scenario_30_invalidate_relation_
+   forwards_coordinator_to_trigger` (whose names do not contain that substring) — even though this
+   same line's own prose already claimed the command covers "scenarios 22-24 and 29-30." Both
+   scenarios pass when run directly (`-k "coordinator"`, 2 passed) — this is a documentation/tooling
+   gap in the acceptance command's own filter string, not a code defect.
+
+**Adjudication.**
+
+- Item 1: §10's mypy command is split — the four files with a genuine zero-error bar keep an
+  `exit 0` requirement (verified clean); `dispatch.py` gets its own invocation whose bar is
+  "reproduces exactly these three known baseline errors, unchanged from the pre-Milestone-C
+  baseline" — mirrors A5 Amendment 4's own resolution of the identical situation precisely, not a
+  novel exception invented for this spec.
+- Item 2: §6.2 and §6.3's code blocks are corrected in place (both `if edge_count == 0:` branches
+  now call `recompute_communities(db_connection=conn)` before returning the same "Skipped: no
+  qualifying relation edges to cluster." message) — the already-shipped implementation and its
+  scenario-28 coverage are accepted as-is; the spec's own prose is the thing that was wrong, not the
+  code. No new test scenario is required beyond already-passing scenario 28, which already asserts
+  all three of the invariant's own required properties (no cooldown claim, no Leiden call, tables
+  cleared) directly against a real post-invalidation fixture.
+- Item 3: §10's second pytest command's filter is corrected to `"community_detection or
+  coordinator"`, so it actually exercises every scenario its own prose already claimed. No test
+  content changes — scenarios 29-30 were always correctly written and always passed when run; only
+  the acceptance command's own filter string undercounted them.
+
+No change to any §1 locked design decision, to §0's file list, or to Amendments 1-3's own
+resolutions. Full acceptance chain re-verified directly in this adjudication (not merely re-quoted
+from OMP's report): `tests/test_community_detection_service.py` 25/25 named scenarios passed;
+`tests/test_relation_service.py -k "community_detection or coordinator"` 5/5 passed;
+`tests/test_phase3_mcp_surface.py -k "manage_relation or coordinator"` 1/1 passed; full suite 1659
+passed / 12 skipped / 18 subtests, 0 failures (the Amendment-3-carved-out daemon-shutdown flake did
+not reproduce this run either); `ruff check`/`ruff format --check` both clean across the full file
+set; `mypy` clean on all four non-`dispatch.py` files; `dispatch.py` reproduces exactly the three
+documented baseline errors, confirmed identical via `git stash` against this worktree's own base
+commit. `git diff --check` clean; only the eleven §0-permitted paths touched.
+
+This implementation is **accepted**. Claude (not OMP) will perform final review and commit per this
+workspace's standing OMP-handoff protocol — OMP's own diff stays uncommitted and unmerged in the
+worktree per that same protocol, which this amendment does not change.
