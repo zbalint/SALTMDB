@@ -13,7 +13,10 @@ row, see §4); may edit `src/saltmdb/db/vector_schema.py` (add one new function,
 may edit `src/saltmdb/domain/services/relation_service.py` (exactly two small additions — a
 fire-and-forget trigger call near the end of `store_relation` and of `invalidate_relation`, see
 §7); may create `src/saltmdb/domain/services/community_detection_service.py` (new file, see §6)
-and `tests/test_community_detection_service.py` (new file, see §8). Does not touch:
+and `tests/test_community_detection_service.py` (new file, see §8); may edit
+`tests/test_relation_service.py` (add exactly three new test scenarios per §8 items 22-24,
+covering the two trigger-call additions §7 makes to `store_relation`/`invalidate_relation` — no
+other change to this file; see Amendment 1). Does not touch:
 `src/saltmdb/domain/services/context_expansion_service.py`,
 `conflict_set_service.py`, `context_budget_service.py`, `lineage_assembly_service.py`,
 `retrieve_context_service.py` (Milestone C exposes nothing to `retrieve_context` at all — standing
@@ -962,3 +965,29 @@ spec's acceptance is pure structural/behavioral correctness against
 `COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S`'s *symbol* — no test may hardcode its numeric value
 (`300`), and no part of this acceptance bar depends on constraint 22's not-yet-determined
 recall-lift threshold, which gates only the future, separate benchmark ticket run.
+
+## Amendment 1 — §0 Scope omitted `tests/test_relation_service.py`
+
+**Reported by OMP as `BLOCKED — SPEC ADJUDICATION REQUIRED`**: §0 Scope's affirmative file list
+never named `tests/test_relation_service.py`, while §8 (scenarios 22-24) explicitly requires
+adding three new test scenarios to that existing file, and §10 Acceptance's second command
+(`pytest tests/test_relation_service.py -v -k "community_detection"`) already exercised it too.
+OMP correctly declined to guess past the contradiction and performed no tracked-file edits.
+
+**Verified against the actual locked text** (not just OMP's claim): confirmed both the §0 omission
+and the §8/§10 requirement are real, exactly as reported — no code was written or run to check
+this, the contradiction is visible directly in the spec's own prose.
+
+**Adjudication: widen §0, not shrink §8/§10.** §8 itself already frames this addition as
+deliberate and singular ("this is the one small addition to an existing test file this spec
+makes, since the trigger call sites live in `relation_service.py` itself, not in the new module"),
+and §10's acceptance command already assumed it — §0's own file list is the one section that
+never caught up to that intent when the spec was drafted, not a sign the test coverage itself was
+wrong or should be dropped. Removing scenarios 22-24 (option 2) would silently drop all direct
+test coverage for §7's two trigger-call additions, the very code this amendment's own conflict is
+about — rejected.
+
+**Resolution**: §0 Scope amended above to add `tests/test_relation_service.py` as a permitted
+edit, scoped to exactly the three scenarios §8 already specifies (items 22-24) — no other change
+to that file, no relaxation of any other acceptance criterion. No other section of this spec
+changes. OMP may resume implementation immediately against the amended §0.
