@@ -12,19 +12,25 @@ hand-editing; see Amendment 2); may edit `src/saltmdb/config.py` (add exactly on
 new relational tables, `communities` and `community_membership`, plus one new `_system_locks` seed
 row, see §4); may edit `src/saltmdb/db/vector_schema.py` (add one new function,
 `init_community_vector_schema`, creating the `community_embeddings` vec0 virtual table, see §5);
-may edit `src/saltmdb/domain/services/relation_service.py` (exactly two small additions — a
-fire-and-forget trigger call near the end of `store_relation` and of `invalidate_relation`, see
-§7); may create `src/saltmdb/domain/services/community_detection_service.py` (new file, see §6)
+may edit `src/saltmdb/domain/services/relation_service.py` (a `coordinator=None` parameter plus a
+fire-and-forget trigger call near the end of `store_relation` and of `invalidate_relation`, see §7
+and Amendment 3); may edit `src/saltmdb/daemon/dispatch.py` (exactly two small, mechanical
+additions threading `coordinator` through the existing `manage_relation` tool dispatch — no new
+tool, no new surface, see §7.1 and Amendment 3); may create
+`src/saltmdb/domain/services/community_detection_service.py` (new file, see §6)
 and `tests/test_community_detection_service.py` (new file, see §8); may edit
-`tests/test_relation_service.py` (add exactly three new test scenarios per §8 items 22-24,
-covering the two trigger-call additions §7 makes to `store_relation`/`invalidate_relation` — no
-other change to this file; see Amendment 1). Does not touch:
+`tests/test_relation_service.py` (test scenarios per §8 items 22-24 plus Amendment 3's own
+additions, covering the two trigger-call additions §7 makes to `store_relation`/
+`invalidate_relation` — no other change to this file; see Amendment 1); may edit
+`tests/test_phase3_mcp_surface.py` (one new test scenario for §7.1's `dispatch.py` change, see
+Amendment 3 — no other change to this file). Does not touch:
 `src/saltmdb/domain/services/context_expansion_service.py`,
 `conflict_set_service.py`, `context_budget_service.py`, `lineage_assembly_service.py`,
 `retrieve_context_service.py` (Milestone C exposes nothing to `retrieve_context` at all — standing
 constraint 17; Milestone C.5's own separate spec is the one that touches
-`retrieve_context_service.py`), `src/saltmdb/mcp/tools.py` / `src/saltmdb/daemon/dispatch.py` /
-`src/saltmdb/daemon/protocol.py` (no new MCP tool surface — constraint 17), and
+`retrieve_context_service.py`), `src/saltmdb/mcp/tools.py`, `src/saltmdb/daemon/protocol.py` (no
+new MCP tool surface, no wire-protocol change — constraint 17 remains intact; `dispatch.py`'s own
+narrow exception is explained in §7.1/Amendment 3), and
 `src/saltmdb/domain/services/librarian_service.py` itself (its existing `_librarian_trigger_pool`
 is imported and reused as-is — no signature change, no new wrapper — per constraint 18's own named,
 accepted "shared pool" tradeoff).
@@ -656,16 +662,89 @@ A1/A4's own precedent of only catching the specific, named, expected failure mod
 _COMMUNITY_DETECTION_TASK_NAME = "community_detection"
 
 
-def trigger_community_detection(db_path: str | None = None) -> None:
+def trigger_community_detection(db_path: str | None = None, *, coordinator=None) -> None:
     """Fire-and-forget: schedules the cooldown check + recompute on the SAME single-worker
     _librarian_trigger_pool trigger_librarian uses (constraint 18's own named, accepted shared-pool
-    tradeoff) -- never blocks the caller."""
+    tradeoff) -- never blocks the caller. `coordinator` branching mirrors
+    `librarian_service.trigger_librarian` exactly (see Amendment 3) -- required for correctness
+    under the real daemon's single-writer boundary, not optional polish."""
     if os.environ.get("SALTMDB_DISABLE_COMMUNITY_DETECTION") or os.environ.get("SALTMDB_TEST_MODE"):
         return
     db_path = db_path or get_db_path()
     from saltmdb.domain.services.librarian_service import _librarian_trigger_pool
 
-    _librarian_trigger_pool.submit(_run_community_detection_pass_impl, db_path)
+    if coordinator is not None:
+        _librarian_trigger_pool.submit(
+            _run_community_detection_with_coordinator, db_path, coordinator
+        )
+    else:
+        _librarian_trigger_pool.submit(_run_community_detection_pass_impl, db_path)
+
+
+def _run_community_detection_with_coordinator(db_path: str, coordinator) -> str:
+    """Mirrors `librarian_service.run_librarian_now`'s own coordinator branch (Amendment 3):
+    runs on the trigger-pool's worker thread (the same thread `trigger_community_detection`
+    above submitted onto), then hops onto the coordinator's own dedicated writer thread via
+    `coordinator.submit`, where `connection.py`'s `_coordinator_connection` ContextVar is
+    actually set for the duration of the call -- this hop is why a coordinator-aware branch
+    exists at all: ContextVar values set on the coordinator's writer thread never propagate
+    into a *different* ThreadPoolExecutor worker thread (this function's own caller's thread),
+    so this function's job closure must explicitly receive the connection as an argument
+    (`conn`, below) rather than relying on `get_connection()` to find it implicitly. `db_path`
+    is accepted for signature symmetry with the no-coordinator branch but unused here --
+    `coordinator.submit` supplies its own connection, already opened against the coordinator's
+    own `db_path` at daemon startup."""
+    return coordinator.submit(
+        "community_detection_mutations",
+        lambda conn: _run_community_detection_pass_on_connection(conn),
+        priority="background",
+    )
+
+
+def _run_community_detection_pass_on_connection(conn) -> str:
+    """Mirrors `librarian_service._run_maintenance_pass_on_connection`'s exact shape (Amendment
+    3): the coordinator-path pass body, operating directly on the connection the coordinator's
+    own job closure hands it -- never calling `get_connection()` itself, and never opening its
+    own transaction (db_write_coordinator.py's `_execute_job` already wraps every submitted job
+    in `write_transaction_retrying`, with `connection.py`'s `_coordinator_connection` ContextVar
+    set for the whole call -- so `recompute_communities`'s own internal
+    `write_transaction_retrying(conn, ...)` calls correctly detect they're already inside the
+    coordinator's transaction (`connection.py:165-166`) and reuse it rather than opening a
+    nested one). Precondition-check and cooldown-claim logic is intentionally duplicated from
+    `_run_community_detection_pass_impl` below rather than shared/refactored -- mirrors
+    `_run_maintenance_pass_on_connection`/`_run_maintenance_pass_impl`'s own established,
+    already-shipped duplication exactly (see Amendment 3 for why this isn't a Coding-Standards-
+    rule-4 violation: it matches existing precedent rather than inventing a new pattern)."""
+    now = datetime.now(UTC).isoformat()
+    edge_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM relations r
+        JOIN entities e1 ON r.source_id = e1.id
+        JOIN entities e2 ON r.target_id = e2.id
+        WHERE e1.status != 'archived' AND e2.status != 'archived'
+          AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+          AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+          AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+        """,
+        (now, now, now, now),
+    ).fetchone()[0]
+    if edge_count == 0:
+        return "Skipped: no qualifying relation edges to cluster."
+    claim_now = datetime.now(UTC).isoformat()
+    cur = conn.execute(
+        f"""
+        UPDATE _system_locks
+        SET last_run_at = ?
+        WHERE task_name = '{_COMMUNITY_DETECTION_TASK_NAME}'
+          AND (last_run_at IS NULL OR datetime(last_run_at) < datetime('now', '-{COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S} seconds'))
+        """,
+        (claim_now,),
+    )
+    if cur.rowcount != 1:
+        return "Skipped: cooldown not elapsed."
+    result = recompute_communities(db_connection=conn)
+    return f"Community detection pass complete: {result}"
 ```
 
 `SALTMDB_DISABLE_COMMUNITY_DETECTION` is a new, dedicated env var mirroring
@@ -739,13 +818,26 @@ than "raw entity count ≥ 2", since the two subsystems have genuinely different
 
 ## 7. `src/saltmdb/domain/services/relation_service.py`
 
-Two small additions (§1 upstream-decision 1), each mirroring exactly where `store_memory`/
-`log_event` already call `trigger_librarian` — right before the function's own final success
-return, gated the same way `log_event` already gates its own `trigger_librarian` call on
-`_in_transaction`.
+Three additions per function (§1 upstream-decision 1, extended by Amendment 3): a new
+`coordinator=None` parameter, a fire-and-forget trigger call passing it through, and (Amendment 3)
+the `coordinator` value itself — each mirroring exactly where `store_memory`/`log_event` already
+accept `coordinator=None` and forward it into `trigger_librarian` (`memory_service/write.py:592`,
+`event_service.py:21`) — right before the function's own final success return, gated the same way
+`log_event` already gates its own `trigger_librarian` call on `_in_transaction`.
 
-In `store_relation`, immediately before the existing `return result_msg` (current line 442, right
-after `result_msg = write_transaction_retrying(conn, _write)` at line 441):
+Add `coordinator=None` to `store_relation`'s signature, immediately after the existing
+`db_path: str = None` parameter (current line 141) and before `_in_transaction: bool = False`:
+```python
+    db_connection=None,
+    db_path: str = None,
+    coordinator=None,
+    _in_transaction: bool = False,
+    _allow_core_elaborates_on: bool = False,
+) -> str:
+```
+
+Then, in `store_relation`, immediately before the existing `return result_msg` (current line 442,
+right after `result_msg = write_transaction_retrying(conn, _write)` at line 441):
 
 ```python
         if not _in_transaction:
@@ -753,12 +845,22 @@ after `result_msg = write_transaction_retrying(conn, _write)` at line 441):
                 trigger_community_detection,
             )
 
-            trigger_community_detection(db_path=db_path)
+            trigger_community_detection(db_path=db_path, coordinator=coordinator)
         return result_msg
 ```
 
-In `invalidate_relation`, immediately before its existing `return result_msg` (current line 534,
-the exact same shape):
+Add `coordinator=None` to `invalidate_relation`'s signature, immediately after the existing
+`db_path: str = None` parameter (current line 462) and before `_in_transaction: bool = False`:
+```python
+    db_connection=None,
+    db_path: str = None,
+    coordinator=None,
+    _in_transaction: bool = False,
+) -> str:
+```
+
+Then, in `invalidate_relation`, immediately before its existing `return result_msg` (current line
+534, the exact same shape):
 
 ```python
         if not _in_transaction:
@@ -766,7 +868,7 @@ the exact same shape):
                 trigger_community_detection,
             )
 
-            trigger_community_detection(db_path=db_path)
+            trigger_community_detection(db_path=db_path, coordinator=coordinator)
         return result_msg
 ```
 
@@ -779,7 +881,49 @@ consistent regardless).
 
 No other line of `store_relation`/`invalidate_relation` changes. `bulk_store_relations`,
 `commit_consolidation`, `consolidate_memories`, and `bulk_commit_consolidation` are explicitly
-**not** touched (§1 upstream-decision 1's accepted, flagged gap).
+**not** touched (§1 upstream-decision 1's accepted, flagged gap) — none of them gain a
+`coordinator` parameter either; only the two functions the trigger itself is wired into need one.
+
+### 7.1 `src/saltmdb/daemon/dispatch.py` (Amendment 3 — required for the trigger to write
+correctly under the real daemon's single-writer boundary; see Amendment 3 below for why)
+
+Two small, mechanical additions, exactly mirroring how `store_memory`/`log_event` already receive
+their own `coordinator` argument through this exact file:
+
+In `MUTATING_TOOLS`'s coordinator-injection check inside `_dispatch_tool_inner` (current line 496),
+add `"manage_relation"` to the existing two-tool set:
+```python
+        if tool in {"store_memory", "log_event", "manage_relation"}:
+            kwargs = {**kwargs, "coordinator": coordinator}
+```
+
+In `_dispatch_manage_relation` (current lines 232-253), forward the now-available `coordinator`
+kwarg into the two calls this spec's trigger is wired into — `store_relation` and
+`invalidate_relation` only, **not** `bulk_store_relations` (mirrors §1 upstream-decision 1's own
+bulk-path exclusion exactly — `bulk_store_relations` never gains a `coordinator` parameter, so it
+has nothing to receive here regardless):
+```python
+    if kw.get("invalidate"):
+        return relation_service.invalidate_relation(
+            source_id=kw.get("source_id"),
+            target_id=kw.get("target_id"),
+            predicate=kw.get("predicate"),
+            invalid_at=kw.get("invalid_at"),
+            coordinator=kw.get("coordinator"),
+        )
+    return relation_service.store_relation(
+        source_id=kw.get("source_id"),
+        target_id=kw.get("target_id"),
+        predicate=kw.get("predicate"),
+        valid_at=kw.get("valid_at"),
+        override_justification=kw.get("override_justification"),
+        owner_id=kw.get("owner_id"),
+        coordinator=kw.get("coordinator"),
+    )
+```
+No other line of `dispatch.py` changes — no new tool, no new `retrieve_context` parameter, no
+`protocol.py` change (constraint 17 is unaffected: this is purely internal coordinator-threading
+plumbing for an *existing* tool's dispatch, not a new caller-facing surface).
 
 ## 8. `tests/test_community_detection_service.py` (new file)
 
@@ -967,6 +1111,59 @@ the file's existing sequence rather than renumbering the list):
     step 5 is real and not merely a no-op that happens to look identical when nothing was there to
     clear.
 
+Required test scenarios added by Amendment 3, back in `tests/test_community_detection_service.py`
+(continuing the file's existing sequence):
+
+26. **`trigger_community_detection` with `coordinator=None` takes the legacy path**: patch
+    `_librarian_trigger_pool.submit` — assert it is called with `_run_community_detection_pass_impl`
+    (not `_run_community_detection_with_coordinator`) when no `coordinator` is passed, proving the
+    pre-Amendment-3 behavior is unchanged for every caller that omits the new parameter.
+27. **`trigger_community_detection` with a real `coordinator` takes the coordinator path**: pass a
+    minimal fake coordinator object (mirrors `tests/test_daemon_server.py`'s own
+    `_ImmediateCoordinator` — copy the same `submit(self, name, operation, *, priority, wait=True)`
+    shape locally in this test file rather than importing across test files, per this spec's own
+    established fixture convention) — patch `_librarian_trigger_pool.submit` and assert it is
+    called with `_run_community_detection_with_coordinator` and the coordinator object, not
+    `_run_community_detection_pass_impl`.
+28. **`_run_community_detection_pass_on_connection` end-to-end against a real connection**:
+    construct a fixture with real qualifying edges and a real `_system_locks` row, call
+    `_run_community_detection_pass_on_connection(conn)` directly (no coordinator object needed —
+    this function takes a bare connection) — assert it returns "Community detection pass
+    complete: ..." and that `communities`/`community_membership`/`community_embeddings` are
+    populated identically to an equivalent `recompute_communities(db_connection=conn)` call, proving
+    this function is a correct thin wrapper, not a divergent reimplementation. Also exercise its own
+    empty-edge-set and cooldown-not-elapsed returns ("Skipped: no qualifying relation edges to
+    cluster."/"Skipped: cooldown not elapsed."), mirroring scenarios 19/21's own assertions but
+    against this function directly rather than `_run_community_detection_pass_impl`.
+
+Required test scenarios added by Amendment 3, in `tests/test_relation_service.py` (alongside
+scenarios 22-24 from Amendment 1):
+
+29. **`store_relation` forwards its `coordinator` argument to the trigger call**: patch
+    `trigger_community_detection` and call `store_relation` with a sentinel `coordinator` object —
+    assert the patched trigger was called with that exact same sentinel as its own `coordinator`
+    kwarg (not merely called at all, per scenario 22 — this scenario specifically proves the value
+    is threaded through, not dropped or replaced with `None`).
+30. **`invalidate_relation` forwards its `coordinator` argument to the trigger call**: same shape as
+    scenario 29, for `invalidate_relation`'s own success path.
+
+Required test scenario added by Amendment 3, in `tests/test_phase3_mcp_surface.py` (mirrors that
+file's own existing `dispatch.MUTATING_TOOLS` membership-check convention, e.g. its
+`self.assertIn("update_memory_metadata", dispatch.MUTATING_TOOLS)` pattern):
+
+31. **`manage_relation` receives its `coordinator` kwarg through `_dispatch_tool_inner`, and
+    `_dispatch_manage_relation` forwards it to `store_relation`/`invalidate_relation` but never to
+    `bulk_store_relations`**: assert `"manage_relation"` is in the coordinator-injection set
+    alongside `"store_memory"`/`"log_event"` (a direct set-membership or call-through check,
+    whichever is more natural against `_dispatch_tool_inner`'s actual implementation shape); then,
+    with `relation_service.store_relation`/`invalidate_relation` patched, dispatch a `manage_relation`
+    call with a sentinel `coordinator` through `_dispatch_manage_relation` directly (non-bulk, both
+    the create and invalidate branches) and assert the sentinel reaches the patched function's own
+    `coordinator` kwarg; then dispatch a `relations=[...]` (bulk) call and assert
+    `bulk_store_relations` — separately patched — is called with no `coordinator` kwarg at all
+    (proving the bulk-exclusion from §1 upstream-decision 1 is real at the dispatch layer, not just
+    in `relation_service.py`'s own signatures).
+
 ## 9. Out of scope
 
 - Milestone C.5's orphan-to-community assignment (the query-time cosine-comparison against
@@ -1003,30 +1200,61 @@ the file's existing sequence rather than renumbering the list):
 ```bash
 PYTHONPATH=src uv run pytest tests/test_community_detection_service.py -v
 ```
-must exit 0, and every scenario in §8's first list (1-21, plus 25 added by Amendment 2) must
-correspond to at least one passing test (a reviewer checks this by name, not just by exit code).
+must exit 0, and every scenario in §8's first list (1-21, plus 25 added by Amendment 2 and 26-28
+added by Amendment 3) must correspond to at least one passing test (a reviewer checks this by
+name, not just by exit code).
 
 ```bash
 PYTHONPATH=src uv run pytest tests/test_relation_service.py -v -k "community_detection"
 ```
-must exit 0, covering §8's scenarios 22-24.
+must exit 0, covering §8's scenarios 22-24 and 29-30 (Amendment 3).
+
+```bash
+PYTHONPATH=src uv run pytest tests/test_phase3_mcp_surface.py -v -k "manage_relation or coordinator"
+```
+must exit 0, covering §8's scenario 31 (Amendment 3) — adjust the `-k` filter to whatever the
+actual test method name(s) end up being if this exact filter doesn't match; the requirement is
+that scenario 31 runs and passes as part of this command, not the literal filter string.
 
 ```bash
 PYTHONPATH=src uv run pytest tests/ -q
 ```
-must also exit 0 (no regression to the existing suite).
+must also exit 0 (no regression to the existing suite), **with one named, narrow exception added
+by Amendment 3**: `tests/test_daemon_server.py::TestDaemonSignalShutdown::test_sigterm_triggers_clean_shutdown_without_deadlock`
+is a known pre-existing, timing-sensitive/environment-specific flake on this machine, independently
+established on a clean baseline *before this spec's own changes ever existed* (SALTMDB memory
+`6f956bfb`, via `git stash`-and-rerun) and independently re-confirmed during this amendment's own
+adjudication (5 consecutive isolated runs passed on both the clean `context-aware-search` baseline
+and this spec's own worktree; a full `pytest tests/ -q` run on each passed 100% including this
+test — its failure is real but nondeterministic, not reliably reproducible even with zero changes
+from this spec applied). A failure in exactly this one test, and no other, does not block
+acceptance. **Any other failing test anywhere else in the suite still fails this acceptance bar in
+full** — this carve-out names one specific, already-flaky nodeid, not a general tolerance for
+full-suite failures.
 
 ```bash
 uv run ruff check src/saltmdb/domain/services/community_detection_service.py \
   src/saltmdb/db/schema.py src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py \
-  tests/test_community_detection_service.py tests/test_relation_service.py && \
+  src/saltmdb/daemon/dispatch.py \
+  tests/test_community_detection_service.py tests/test_relation_service.py tests/test_phase3_mcp_surface.py && \
 uv run ruff format --check src/saltmdb/domain/services/community_detection_service.py \
   src/saltmdb/db/schema.py src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py \
-  tests/test_community_detection_service.py tests/test_relation_service.py && \
+  src/saltmdb/daemon/dispatch.py \
+  tests/test_community_detection_service.py tests/test_relation_service.py tests/test_phase3_mcp_surface.py && \
 uv run mypy src/saltmdb/domain/services/community_detection_service.py src/saltmdb/db/schema.py \
-  src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py
+  src/saltmdb/db/vector_schema.py src/saltmdb/domain/services/relation_service.py src/saltmdb/daemon/dispatch.py
 ```
-must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md`).
+must exit 0, matching this repo's documented lint/type gate (`CONTRIBUTING.md`). **Amendment 3
+carve-out**: `ruff format --check` on `src/saltmdb/db/schema.py` and
+`src/saltmdb/domain/services/relation_service.py` may reformat exactly two pre-existing,
+unrelated blocks that already violate this repo's current `ruff format` output on the clean
+baseline (confirmed independently — see Amendment 3): the string-concatenation lines inside
+`_ensure_agent_sessions_table` (`schema.py`, currently ~line 210) and the `status = "duplicate"
+if ... else "success"` line inside `bulk_store_relations` (`relation_service.py`, currently
+~line 1883). Reformatting these two specific, already-broken, functionally-unrelated blocks to
+satisfy `ruff format --check` is in scope and expected; no other reformatting of either file is
+permitted, and no other file in this command's list may need reformatting for reasons unrelated
+to this spec's own additions.
 
 **Explicit acceptance carve-out (per §1 upstream-decision 7 / forward-note `e74d4355`)**: this
 spec's acceptance is pure structural/behavioral correctness against
@@ -1125,3 +1353,104 @@ No other section of this spec changes. This amendment does not alter §1's locke
 algorithm-correctness fix plus the two mechanically-necessitated scope additions (`uv.lock`,
 already-permitted `try_load_vector_extension` import) it depends on. OMP may resume implementation
 immediately against the amended §0/§6.
+
+## Amendment 3 — Full-suite flake, a pre-existing ruff-format contradiction, and a real daemon
+write-boundary bug (all three verified independently, none merely trusted from OMP's report)
+
+**Reported by OMP** as `BLOCKED — SPEC ADJUDICATION REQUIRED` on its next attempt, with fresh
+acceptance evidence (focused suite 125 passed; full suite 1652 passed / 1 failed / 12 skipped),
+citing three separate problems: (1) a full-suite test failure
+(`TestDaemonSignalShutdown::test_sigterm_triggers_clean_shutdown_without_deadlock`, exit -15 vs.
+expected 0) which OMP itself flagged against SALTMDB precedent `6f956bfb` as likely pre-existing;
+(2) a "formatter/scope contradiction" — `ruff format --check` on the required file set only passes
+if it reformats two lines OMP read the spec as forbidding it to touch; (3) a "daemon write-boundary
+contradiction" — the mandated background worker opens a connection under the daemon boundary that
+turns out to be query-only, then attempts the required `_system_locks`/community-table writes. OMP
+again performed no unauthorized edits and left the worktree exactly as its own report described:
+uncommitted, unmerged, only the (then-) nine §0-permitted paths touched.
+
+**All three verified independently against the actual tree/history before amending** — none taken
+on OMP's word alone, per this workspace's `spec-writing`/adjudication protocol:
+
+1. **The daemon-shutdown test is genuinely flaky, not a regression this spec introduces.** Ran it
+   5x in isolation on the clean `context-aware-search` baseline (5/5 passed) and 5x in isolation in
+   this spec's own worktree (5/5 passed), then ran the *full* suite once on each: baseline
+   `1655 passed, 0 failed`; worktree `1653 passed, 12 skipped, 0 failed` (the `12 skipped` exactly
+   matches OMP's own report, but the `1 failed` did not reproduce either time). This is consistent
+   with — not merely re-asserting — memory `6f956bfb`'s own independent `git stash`-confirmed
+   finding that this exact test fails intermittently on a clean baseline with zero changes applied,
+   on this machine, for reasons unrelated to any specific feature work. Resolved via a narrow,
+   named §10 carve-out (below) rather than either ignoring the acceptance bar generally or forcing
+   OMP into an unfixable retry loop against a test its own changes don't control.
+
+2. **The ruff-format contradiction is real, and pre-exists this spec entirely.** Ran
+   `uv run ruff format --check` against every file in the acceptance command's list, on the clean
+   baseline, *before any Milestone C change exists*: `src/saltmdb/db/schema.py` and
+   `src/saltmdb/domain/services/relation_service.py` **both already fail** — `schema.py` wants to
+   collapse a 3-line string-concatenation inside `_ensure_agent_sessions_table` (current lines
+   208-211, nowhere near this spec's own `_system_locks`/table-creation additions) to one line;
+   `relation_service.py` wants to reformat a `status = "duplicate" if ... else "success"` ternary
+   inside `bulk_store_relations` (current line ~1883, nowhere near `store_relation`/
+   `invalidate_relation`) the same way. Confirmed OMP's own actual diff already contains this exact
+   `bulk_store_relations` reformat, sitting alongside its two legitimate trigger-call additions —
+   OMP correctly performed the reformat (since leaving it out would fail `ruff format --check`) but
+   correctly flagged it as outside §0's literal "no other change to this file" framing, rather than
+   silently overstepping. This is the same root cause as Amendments 1 and 2 (a real, mechanically-
+   necessary change §0 never named) — not a new failure category.
+
+3. **The daemon write-boundary contradiction is real and would have broken the trigger in every
+   actual production deployment**, confirmed by reading `src/saltmdb/db/connection.py`,
+   `src/saltmdb/daemon/db_write_coordinator.py`, `src/saltmdb/daemon/dispatch.py`, and
+   `src/saltmdb/domain/services/librarian_service.py` directly (no code written or run beyond
+   these reads and the verification runs in items 1-2 above). The mechanism: after daemon
+   bootstrap, `connection.py`'s `enable_daemon_connection_boundary()` makes bare `get_connection()`
+   calls from any thread other than the coordinator's own writer thread return a genuinely
+   **read-only** connection (`open_read_connection`, `PRAGMA query_only=ON`) — `_daemon_boundary_
+   enabled` is checked only after the `_coordinator_connection` ContextVar comes back empty, and
+   that ContextVar is **thread-local**: it is set only for the duration of a closure the coordinator
+   itself invokes on its own dedicated writer thread, and does **not** propagate into a *different*
+   `ThreadPoolExecutor` worker thread (`connection.py:17-22,96-114`). §6.2/§6.3 as originally
+   drafted submit `_run_community_detection_pass_impl` onto `_librarian_trigger_pool` — a separate
+   thread pool from the coordinator's writer thread — where its own `get_connection(db_path)` call
+   would therefore return a read-only connection in a real daemon, and every subsequent write
+   (the `_system_locks` cooldown-claim `UPDATE`, and `recompute_communities`'s own table writes)
+   would raise. Confirmed this is a **known, already-solved problem** in this exact codebase, not a
+   novel design question: `librarian_service.trigger_librarian`/`run_librarian_now` already accept
+   an explicit `coordinator=None` parameter and, when given one, hop from the trigger-pool thread
+   onto the coordinator's own writer thread via `coordinator.submit(...)` (a *second*, explicit
+   submission — the ContextVar's thread-locality is exactly why an implicit hand-off can't work);
+   `store_memory`/`log_event` already accept and forward a `coordinator` parameter for exactly this
+   reason (`memory_service/write.py:592`, `event_service.py:21`); and `dispatch.py`'s
+   `MUTATING_TOOLS`/`_dispatch_tool_inner` (lines 477-499) already inject `coordinator` into
+   `store_memory`/`log_event`'s kwargs specifically so they can forward it — `relation_service.py`'s
+   `store_relation`/`invalidate_relation` never received the same treatment, and neither did
+   `dispatch.py`'s `_dispatch_manage_relation` (confirmed: it forwards a fixed, explicit parameter
+   list with no `coordinator` today, `dispatch.py:232-253`), so even injecting `coordinator` into
+   `manage_relation`'s dispatch kwargs would have been silently dropped without also updating that
+   function.
+
+**Adjudication.** Item 1: narrow, named §10 carve-out (added above) — the acceptance bar's "no
+regression" intent is preserved (any *other* failure still blocks), while a test this spec's own
+changes provably don't control, and which fails nondeterministically even against a change-free
+baseline, no longer wrongly gates this spec's acceptance. Item 2: widen §0 to explicitly permit
+these two specific, pre-existing, functionally-unrelated reformats (added above) — mirrors
+Amendments 1/2's own "widen scope to match a real mechanical necessity, never shrink the acceptance
+bar to route around it" precedent exactly. Item 3: widen §0/§7 to add the `coordinator`-threading
+plumbing (§6.2, §7, §7.1 above) — this is the largest of the three amendments by diff size, but is
+**entirely mechanical and precedented**, mirroring `trigger_librarian`/`run_librarian_now`/
+`store_memory`/`log_event`/`dispatch.py`'s own already-shipped pattern near line-for-line rather
+than inventing a new design; every locked §1 decision (constraint 18's fire-and-forget/shared-pool
+framing included) is preserved unchanged — the coordinator branch is an *additional* path alongside
+the existing no-coordinator one, never a replacement for it, so every direct/test-mode caller that
+never had a coordinator to begin with is unaffected.
+
+New required test scenarios (26-31) added to §8 above, covering: both branches of
+`trigger_community_detection`'s new `coordinator` parameter; `_run_community_detection_pass_on_
+connection`'s own correctness against a real connection; `store_relation`/`invalidate_relation`
+correctly forwarding (not dropping) their own `coordinator` argument; and `dispatch.py`'s own
+injection-and-forwarding, including the explicit proof that `bulk_store_relations` never receives
+one. §10 Acceptance extended with `dispatch.py` and `tests/test_phase3_mcp_surface.py` in the
+lint/type/test commands.
+
+No change to any §1 locked design decision or to Amendments 1/2's own resolutions. OMP may resume
+implementation immediately against the amended §0/§6/§7/§7.1/§8/§10.
