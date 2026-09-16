@@ -1098,3 +1098,163 @@ amendment sites" after this fix: the remaining hits are §9's own historical nar
 *original* lock said (correctly preserved as history, not a live constraint), Amendment 1's own
 narration of the same history, and this amendment's own text above. No other live, currently-binding
 sentence still asserts a three-site cap.
+
+## Amendment 3 — §4's unconditional additive-keys design also breaks two pre-existing `pack_context_budget` assertions in a fourth, previously-unauthorized test file, `tests/test_orphan_community_service.py` (OMP BLOCKED, adjudicated)
+
+### Contradiction (as reported by OMP, mid-implementation, uncommitted)
+
+OMP had implemented §2's constants and §4's `pack_context_budget` change (uncommitted, in this
+worktree), landed the five `test_context_budget_service.py` sites Amendment 1 authorized plus its own
+new scenarios 11-12 in that file, and prepared `tests/test_community_retrieval_service.py`'s new §8
+suite, then ran `uv run pytest -q` per §11 and found two more pre-existing assertions break under §4's
+same unconditional-shape design — this time in `tests/test_orphan_community_service.py`, a file never
+named anywhere in §0's file-edit scope or §9's amendment-site list:
+
+1. `test_scenario_12_pack_budget_is_backward_compatible_without_new_parameter` (lines 331-353) —
+   whole-`result` `assertEqual` against the pre-D2 exact shape (no `community_member` key anywhere,
+   no `community_representative_entity_ids` key, no three new `budget` sub-fields).
+2. `test_scenario_13_pack_budget_reserves_orphan_tokens_outside_ordinary_budget` (line 372) —
+   `result["packed_entity_ids"]` exact-compared to `{"primary": [], "expansion": []}`.
+
+§0 explicitly excludes editing `orphan_community_service.py` (the production module) but never
+authorizes editing `tests/test_orphan_community_service.py` (the test file) at all — it is absent
+from both the "may edit" list and §9's file list — so `uv run pytest -q` cannot pass without an edit
+this spec, as amended twice already, still forbids. OMP correctly stopped rather than editing an
+unauthorized file or reworking §4's already-locked unconditional design to dodge the two breaks.
+
+### Verification (before adjudicating, not trusted from OMP's report)
+
+Read the actual current `tests/test_orphan_community_service.py` lines 331-379 directly: confirmed
+both claimed breaks exactly — scenario 12's whole-dict `assertEqual` (old 6-key shape, no additive
+fields) and scenario 13's `packed_entity_ids` exact 2-key comparison. Read OMP's actual uncommitted
+`git diff` of `src/saltmdb/domain/services/context_budget_service.py`: confirmed both the early-return
+and normal-path return dicts now unconditionally include `community_member` in `packed_entity_ids`/
+`dropped_entity_ids`, the new top-level `community_representative_entity_ids` key, and the three new
+`budget` sub-fields — exactly the §4 design Amendment 1 already ruled must stay unconditional.
+
+Also independently swept for a possible fourth affected file, rather than trusting this is the last
+one: `grep -rn "pack_context_budget(" tests/ src/` lists every call site. Beyond the two orphan-test
+sites above and the five already-amended `test_context_budget_service.py` sites, the only remaining
+caller is `tests/test_retrieve_context_service.py`'s `_real_budget_result` helper (line 140) and its
+three call sites (lines 367, 445, 487) — read each: none does a whole-dict or whole-sub-dict equality
+against `packed`/`dropped_entity_ids`; each uses `assertIn`/`set(...)` against specific pre-existing
+member IDs, which the new additive keys don't disturb. This matches Amendment 1's own independent
+audit conclusion for local-mode's named-sub-key-access pattern in `retrieve_context_service.py` itself
+(production code) and extends the same finding to this file's test helper. No third file is affected.
+
+### Adjudication
+
+Same root cause as Amendment 1, recurring in a file Amendment 1's own audit didn't check: §4's
+unconditional-shape design (deliberate, load-bearing per constraint 26 and §4's own "kept in sync
+field-for-field" commentary) breaks every direct caller of `pack_context_budget` that asserts its
+return shape exactly, regardless of which test file that caller lives in. Amendment 1 swept
+`test_context_budget_service.py` (the function's own dedicated unit-test file) and audited
+`retrieve_context_service.py`'s production consumption pattern, but never swept the *other* test files
+that call `pack_context_budget` directly as a fixture, which is exactly what
+`test_orphan_community_service.py`'s scenarios 12-13 do (they predate this spec, added when
+`orphan_community_entity_ids`/`db_connection` were `pack_context_budget`'s own most recent additive
+parameters, per Milestone C.5). Ruled: authorize exactly these two sites, mirroring Amendment 1's own
+disposition — widen scope by exactly what's needed, do not relax §4's unconditional design to dodge
+the gap (a conditional/legacy shape was already explicitly rejected once in Amendment 1 for the same
+reason and remains rejected here for the same reason).
+
+### Fix
+
+**§0's Scope** gains one authorized file. Insert after the existing "may edit `tests/test_context_
+budget_service.py`, `tests/test_retrieve_context_service.py`, and `tests/test_retrieve_context_
+wiring.py`" sentence:
+
+> may also edit `tests/test_orphan_community_service.py` (exactly the two pre-existing assertion
+> sites named in Amendment 3, each amended to add only the new key(s) §4 mandates — no other line in
+> this file changes). This file's own production module, `orphan_community_service.py`, remains
+> untouched per §0's existing "Does not touch" list; only its test file's two `pack_context_budget`
+> assertions are affected.
+
+**§9** gains two new named amendment sites (9 and 10, continuing Amendment 1's numbering):
+
+**Site 9 (`test_scenario_12_pack_budget_is_backward_compatible_without_new_parameter`, lines
+331-353)** — replace the whole `assertEqual` block with:
+
+```python
+        self.assertEqual(
+            result,
+            {
+                "packed_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "dropped_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "conflict_only_entity_ids": [],
+                "community_representative_entity_ids": [],
+                "token_counts": {},
+                "budget": {
+                    "unit": "tokens",
+                    "limit": config.CONTEXT_BUDGET_DEFAULT_TOKENS,
+                    "used": 0,
+                    "primary_truncated": False,
+                    "primary_dropped_count": 0,
+                    "expansion_truncated": False,
+                    "expansion_dropped_count": 0,
+                    "conflict_reserve_tokens_used": 0,
+                    "orphan_community_reserve_tokens_used": 0,
+                    "community_member_truncated": False,
+                    "community_member_dropped_count": 0,
+                    "community_representative_reserve_tokens_used": 0,
+                },
+            },
+        )
+```
+
+**Site 10 (`test_scenario_13_pack_budget_reserves_orphan_tokens_outside_ordinary_budget`, line
+372)** — replace:
+
+```python
+        self.assertEqual(result["packed_entity_ids"], {"primary": [], "expansion": []})
+```
+
+with:
+
+```python
+        self.assertEqual(
+            result["packed_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
+```
+
+No other line in either scenario changes. `tests/test_orphan_community_service.py`'s scenario
+numbering is unaffected — both sites are pre-existing scenarios amended in place, no renumbering, no
+new scenario added to this file by this spec.
+
+**§10**'s bullet (as amended by Amendment 2) is superseded again to read:
+
+> Renumbering or otherwise touching any existing test scenario in any of the five edited test files
+> beyond the ten named amendment sites in §9 as amended (the three `test_retrieve_context_wiring.py`
+> sites originally named, Amendment 1's five `test_context_budget_service.py` sites, and Amendment 3's
+> two `test_orphan_community_service.py` sites) — every other line in every edited test file is
+> append-only under this spec's scope (§0/§9, as amended).
+
+**§11**'s acceptance text ("the three `test_retrieve_context_wiring.py` sites originally named, plus
+this amendment's five `test_context_budget_service.py` sites — eight sites total across both files",
+per Amendment 1's own §11 correction) is superseded to read: ten sites across three files — the three
+`test_retrieve_context_wiring.py` sites, Amendment 1's five `test_context_budget_service.py` sites, and
+Amendment 3's two `test_orphan_community_service.py` sites — updated exactly as specified, no other
+line touched in any of the three files. §11's targeted pytest invocation is additionally amended to
+include the newly-authorized file:
+
+```bash
+uv run pytest tests/test_community_retrieval_service.py tests/test_context_budget_service.py tests/test_orphan_community_service.py tests/test_retrieve_context_service.py tests/test_retrieve_context_wiring.py -v
+uv run pytest -q
+```
+
+### Scope
+
+§0's file-edit scope widens by exactly one file, `tests/test_orphan_community_service.py`, for exactly
+the two named sites above — no other line in that file, and no production module, is authorized for
+edit. `orphan_community_service.py` itself stays on §0's "Does not touch" list, unchanged.
+
+### Independent audit for a further residual file (none found)
+
+Beyond the `grep -rn "pack_context_budget("` sweep above (which is exhaustive over both `tests/` and
+`src/`), also checked whether any other pre-existing test asserts on `pack_context_budget`'s return
+shape indirectly — e.g. by calling `assemble_retrieve_context` and inspecting its `metadata["budget"]`
+sub-object, which is local mode's own named-sub-key passthrough already audited clean in Amendment 1.
+No test does a whole-`metadata["budget"]` or whole-envelope equality that would also break under the
+three new `budget` sub-fields; every such assertion in `test_retrieve_context_service.py` and
+`test_retrieve_context_wiring.py` accesses specific named sub-keys only (already confirmed in
+Amendment 1's own audit and re-confirmed here). No fourth affected file exists.
