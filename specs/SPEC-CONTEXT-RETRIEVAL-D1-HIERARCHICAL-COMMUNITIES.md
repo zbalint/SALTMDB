@@ -561,3 +561,141 @@ rg -n "parent_community_id" src/saltmdb/db/schema.py src/saltmdb/domain/services
 must show the column defined once (schema.py), threaded through the INSERT in
 `community_detection_service.py`, and referenced only inside `fetch_leaf_community_centroids`'s own
 query — never re-implemented as a second, divergent leaf-filter query anywhere else in the tree.
+
+## Amendment 1 — §4.2 `_process_partition_group` needs its own local `numpy` import (OMP BLOCKED, adjudicated)
+
+### Contradiction (as reported by OMP, SALTMDB event `dacac008-a29e-4525-a4c3-a4af774c7436`)
+
+§4.2 prescribes a new module-level function `_process_partition_group` whose body calls
+`centroid_vec.astype(np.float32)` at runtime, inside its `if centroid_vec is not None:` block. §4.2's
+own explanatory paragraph immediately following that code block claimed this was already covered by
+`recompute_communities`'s existing `import numpy as np` (current line 159). **That claim is false**: a
+Python `import` statement executed inside one function body only binds the imported name in *that
+function's own local scope* — it never creates a module-global binding. `_process_partition_group` is
+a sibling top-level function, not a nested closure of `recompute_communities`, so it has no access to
+`recompute_communities`'s local `np` binding at all. Re-reading the actual current file
+(`community_detection_service.py`, all 353 lines, re-verified against the tree as part of this
+amendment, not merely re-read from the earlier pre-lock pass) confirms every *other* numpy use in this
+file already follows the opposite, correct pattern: `_compute_community_group` (line 24),
+`_normalize_community_vector` (line 87), and `recompute_communities` itself (line 159) each do their
+own **local, per-function** `import numpy as np` as the first statement that needs it. §4.2 was the
+only place in this spec that used `np` without following that same established convention. This is not
+an edge case: it is a guaranteed `NameError` the first time `_process_partition_group` processes any
+partition group whose centroid is not `None` — i.e. on every non-trivial `recompute_communities` call
+once implemented. OMP correctly stopped rather than guessing past it.
+
+### Fix
+
+This amendment supersedes §4.2's original code block and the paragraph immediately following it (the
+one that began "`import numpy as np` already happens earlier in `recompute_communities`..."). Both are
+replaced, in place, by the following:
+
+1. **`_process_partition_group`'s body** gets its own local `import numpy as np` as its first
+   statement, immediately after the docstring — mirroring the exact convention this file's three
+   existing numpy-using functions already established, not a new pattern:
+
+```python
+def _process_partition_group(  # noqa: PLR0913
+    group_indices: list[int],
+    graph,
+    node_ids: list[str],
+    raw_vector: dict[str, "np.ndarray"],
+    level: int,
+    parent_community_id: str | None,
+    now: str,
+    communities_to_insert: list[tuple],
+    membership_to_insert: list[tuple],
+    embeddings_to_insert: list[tuple],
+) -> None:
+    """Insert one community row for this partition group at `level`, then either recurse into a
+    fresh Leiden pass over its own induced subgraph (if oversized and under the depth cap) or emit
+    leaf-level community_membership rows for its members. Every community row this function ever
+    creates -- leaf or not -- gets its own representative/centroid via the existing,
+    completely-unmodified _compute_community_group (constraint 25's own "independently at every
+    level" requirement)."""
+    import numpy as np
+
+    sorted_group = sorted(group_indices)
+    member_ids, representative_id, centroid_vec = _compute_community_group(
+        sorted_group, graph, node_ids, raw_vector
+    )
+    member_count = len(member_ids)
+    community_id = str(uuid.uuid4())
+    communities_to_insert.append(
+        (community_id, representative_id, member_count, level, now, parent_community_id)
+    )
+    if centroid_vec is not None:
+        import sqlite_vec
+
+        embeddings_to_insert.append(
+            (
+                community_id,
+                sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist()),
+            )
+        )
+
+    if member_count > COMMUNITY_HIERARCHY_SIZE_THRESHOLD and level < COMMUNITY_HIERARCHY_MAX_DEPTH:
+        import leidenalg
+
+        child_graph = graph.subgraph(sorted_group)
+        child_node_ids = [node_ids[i] for i in sorted_group]
+        child_partition = leidenalg.find_partition(child_graph, leidenalg.ModularityVertexPartition)
+        for child_group in child_partition:
+            _process_partition_group(
+                list(child_group),
+                child_graph,
+                child_node_ids,
+                raw_vector,
+                level + 1,
+                community_id,
+                now,
+                communities_to_insert,
+                membership_to_insert,
+                embeddings_to_insert,
+            )
+    else:
+        for entity_id in member_ids:
+            membership_to_insert.append((entity_id, community_id, level))
+```
+
+   (Identical to the original §4.2 code block except for the added `import numpy as np` line and the
+   blank line after it, immediately following the docstring.)
+
+2. **The explanatory paragraph immediately after the code block is replaced** with:
+
+   `_process_partition_group` imports `numpy` locally, as its own first statement, exactly like this
+   file's other three numpy-using functions (`_compute_community_group`, `_normalize_community_vector`,
+   `recompute_communities` itself) — never at module scope. A local import inside `recompute_communities`
+   does not bind `np` for a separate top-level function; `_process_partition_group` needs, and now has,
+   its own. `_process_partition_group`'s type hint on `raw_vector` still uses a string-quoted
+   `"np.ndarray"` annotation, for the same reason every other `np`-typed signature in this file does:
+   the annotation is evaluated only if something calls `typing.get_type_hints()` on it (nothing in this
+   codebase does), so the string form never actually requires `np` to be bound at *def* time — only the
+   function *body*'s runtime `np.float32` use requires the local import above.
+
+No other section of this spec is affected: `fetch_leaf_community_centroids` (§4.3) and
+`recompute_communities`'s own edits (§4.4) never reference `np` directly and are unchanged by this
+amendment.
+
+### Scope
+
+No change to §0's file-edit scope. This amendment stays entirely inside the same file
+(`community_detection_service.py`) and the same function §4.2 already named in scope.
+
+### Independent audit of the rest of the spec (no other contradictions found)
+
+While adjudicating this block, the rest of the spec was re-verified against the current tree — not
+just re-read from the original drafting pass:
+
+- Every cited line number was checked against the actual current file: §2 (`config.py:249/251`), §3
+  (`schema.py:854/865`), §4.1 (`community_detection_service.py:9`), §5
+  (`orphan_community_service.py:70-72`), and §7 (`test_orphan_community_service.py`, whose scenarios
+  end at 14, so a new scenario 15 is correctly the next number) — all match exactly.
+- §4.2's worked example (an 82-member level-0 community → `[30, 25, 15, 12]` at level 1 → `[22, 8]`
+  from the 30-member child at level 2) was walked through the corrected code above and remains
+  internally consistent with §1's locked design decisions 2-5 and with the corrected function's own
+  `member_count > threshold and level < max_depth` recursion condition.
+- Parameter order was checked positionally, not just by name, between every call site and the
+  corrected function's own signature: the top-level call in §4.4 and the recursive self-call inside
+  §4.2 both match `_process_partition_group`'s ten-parameter order exactly.
+- No other bug, missing import, or internal contradiction was found anywhere else in the spec.
