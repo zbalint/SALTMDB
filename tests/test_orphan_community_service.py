@@ -334,9 +334,10 @@ class TestOrphanCommunityService(unittest.TestCase):
         self.assertEqual(
             result,
             {
-                "packed_entity_ids": {"primary": [], "expansion": []},
-                "dropped_entity_ids": {"primary": [], "expansion": []},
+                "packed_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "dropped_entity_ids": {"primary": [], "expansion": [], "community_member": []},
                 "conflict_only_entity_ids": [],
+                "community_representative_entity_ids": [],
                 "token_counts": {},
                 "budget": {
                     "unit": "tokens",
@@ -348,6 +349,9 @@ class TestOrphanCommunityService(unittest.TestCase):
                     "expansion_dropped_count": 0,
                     "conflict_reserve_tokens_used": 0,
                     "orphan_community_reserve_tokens_used": 0,
+                    "community_member_truncated": False,
+                    "community_member_dropped_count": 0,
+                    "community_representative_reserve_tokens_used": 0,
                 },
             },
         )
@@ -369,7 +373,9 @@ class TestOrphanCommunityService(unittest.TestCase):
             db_connection=self.conn,
         )
 
-        self.assertEqual(result["packed_entity_ids"], {"primary": [], "expansion": []})
+        self.assertEqual(
+            result["packed_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
         self.assertEqual(result["dropped_entity_ids"]["primary"], [primary])
         self.assertGreater(result["token_counts"][orphan_member], 0)
         self.assertEqual(

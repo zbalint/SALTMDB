@@ -365,6 +365,59 @@ CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP = 5
 # for no corresponding safety benefit). No longer a placeholder.
 COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.60
 
+# Milestone D (wayfinder ticket "Milestone D primary-search seeding," standing constraint 27,
+# memory 6ca4317c) -- strategy:"global" retrieve_context's seed selection: the number of nearest
+# (by cosine similarity of the query embedding to each leaf community's own centroid) leaf
+# communities taken as seeds for a global-mode call. Unconditional best-effort top-K -- no minimum-
+# similarity abstention floor in v1 (a deliberate choice, not an oversight: constraint 27 exists
+# specifically because retrieve_context's existing strict abstention gate already broke this exact
+# query shape once, see b9b75764/e957aa78; adding a second uncalibrated threshold in the same
+# subsystem for the same reason would repeat that mistake). A FLAT constant, not scaled by anything
+# -- unlike CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's per-primary-hit-count scaling, there is no
+# analogous per-call quantity to scale a community seed count against in this design. PLACEHOLDER:
+# not yet benchmarked against SALTMDB's own corpus -- seeded at the same order of magnitude as
+# CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's own current value, not derived from any benchmark of
+# its own. Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing
+# constraint 28) via its own concrete quantitative sweep against the live corpus. Do not remove the
+# placeholder framing when tuning this; replace this comment with the benchmark citation once a
+# real value is locked.
+CONTEXT_GLOBAL_TOP_K_COMMUNITIES = 10
+
+# Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
+# memory 51127287) -- strategy:"global" retrieve_context's representative-slot reserve: how many of
+# the CONTEXT_GLOBAL_TOP_K_COMMUNITIES seeded leaf communities actually get their own constraint-19
+# representative force-included as a guaranteed, budget-accounted (but never budget-gated) slot.
+# Ranked by each seeded community's own seed similarity -- the lowest-similarity seeded communities'
+# representatives are dropped first if the seed count exceeds this cap. Independently capped from
+# CONTEXT_GLOBAL_MEMBER_POOL_CAP below -- a community whose representative was dropped here still
+# contributes its own members to the member pool on equal footing (see this spec's own §1 design
+# decision 1). PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- seeded at the same
+# order of magnitude as CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP's own current value, mirroring that
+# constant's own "sparse force-include mechanism" shape, not derived from any benchmark of its own.
+# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
+# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
+# framing when tuning this; replace this comment with the benchmark citation once a real value is
+# locked.
+CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP = 5
+
+# Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
+# memory 51127287) -- strategy:"global" retrieve_context's member-pool node-eligibility cap: the
+# maximum combined candidate-member count, across every seeded leaf community, that is even offered
+# to context_budget_service.pack_context_budget's own separate real-token packing pass. A node-
+# eligibility cap, not a token-count cap -- mirrors CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/G4's own
+# "independent from the token-budget axis" precedent (constraint 25's own explicit framing), applied
+# here at the community-member level. Ranked by each member's own query-embedding similarity across
+# the whole combined pool (never per-community sub-pools) before this cap truncates it, matching
+# constraint 26's own "one shared, continuously relevance-ranked pool" requirement. PLACEHOLDER: not
+# yet benchmarked against SALTMDB's own corpus -- seeded at CONTEXT_GLOBAL_TOP_K_COMMUNITIES times a
+# small constant, giving each seeded community a comparable member-slot budget on average to what a
+# single Milestone-A expansion pass typically admits, not derived from any benchmark of its own.
+# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
+# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
+# framing when tuning this; replace this comment with the benchmark citation once a real value is
+# locked.
+CONTEXT_GLOBAL_MEMBER_POOL_CAP = 30
+
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
 # Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching

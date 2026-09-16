@@ -86,6 +86,15 @@ def _optional_mode(kw: dict[str, Any]) -> Literal["strict", "broad", "history"]:
     return value
 
 
+def _optional_strategy(kw: dict[str, Any]) -> Literal["local", "global"]:
+    value = kw.get("strategy")
+    if value is None:
+        return "local"
+    if value not in {"local", "global"}:
+        raise ValueError("strategy must be 'local' or 'global'")
+    return value
+
+
 def _optional_direction(kw: dict[str, Any]) -> Literal["outbound", "inbound", "both"]:
     value = kw.get("direction")
     if value is None:
@@ -444,6 +453,7 @@ def _dispatch_retrieve_context(**kw):
         owner_id=kw.get("owner_id"),
         limit=_optional_int_or_none(kw, "limit"),
         budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
+        strategy=_optional_strategy(kw),
     )
 
 
