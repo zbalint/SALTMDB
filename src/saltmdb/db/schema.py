@@ -861,6 +861,23 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         );
         """)
 
+        # Milestone D (wayfinder standing constraint 25, memory 94579e0f) -- self-referencing FK
+        # supporting hierarchical sub-clustering: NULL for a level-0 (root full-graph pass)
+        # community, or the id of the community this row was produced by recursively re-running
+        # Leiden on. A row with no other row naming it here is a LEAF community -- the correct,
+        # construction-guaranteed definition project-wide (see community_detection_service.py's
+        # fetch_leaf_community_centroids and open gap 14c261d9's own resolution); never derive
+        # "leaf" from a level-number comparison instead. Additive migration via the existing
+        # _add_column_if_missing helper (mirrors how `level` itself was reserved ahead of need by
+        # constraint 21) -- nullable, so every already-populated pre-hierarchy communities row
+        # (parent_community_id implicitly NULL) already means exactly what a leaf-with-no-parent
+        # community should mean, no backfill required.
+        _add_column_if_missing(
+            conn,
+            "communities",
+            "parent_community_id TEXT REFERENCES communities(id) ON DELETE CASCADE",
+        )
+
         conn.execute("""
         CREATE TABLE IF NOT EXISTS community_membership (
             entity_id TEXT PRIMARY KEY,

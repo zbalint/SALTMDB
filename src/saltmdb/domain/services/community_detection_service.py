@@ -6,7 +6,12 @@ import uuid
 from datetime import datetime, UTC
 from typing import Any
 
-from saltmdb.config import COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S, get_db_path
+from saltmdb.config import (
+    COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S,
+    COMMUNITY_HIERARCHY_MAX_DEPTH,
+    COMMUNITY_HIERARCHY_SIZE_THRESHOLD,
+    get_db_path,
+)
 from saltmdb.db.connection import close_connection, get_connection, write_transaction_retrying
 from saltmdb.db.vector_schema import try_load_vector_extension
 
@@ -90,6 +95,69 @@ def _normalize_community_vector(vec):
     return vec / norm if norm > 0 else vec
 
 
+def _process_partition_group(  # noqa: PLR0913
+    group_indices: list[int],
+    graph,
+    node_ids: list[str],
+    raw_vector: dict[str, "np.ndarray"],  # type: ignore[name-defined]  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+    level: int,
+    parent_community_id: str | None,
+    now: str,
+    communities_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
+    membership_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
+    embeddings_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
+) -> None:
+    """Insert one community row for this partition group at `level`, then either recurse into a
+    fresh Leiden pass over its own induced subgraph (if oversized and under the depth cap) or emit
+    leaf-level community_membership rows for its members. Every community row this function ever
+    creates -- leaf or not -- gets its own representative/centroid via the existing,
+    completely-unmodified _compute_community_group (constraint 25's own "independently at every
+    level" requirement)."""
+    import numpy as np
+
+    sorted_group = sorted(group_indices)
+    member_ids, representative_id, centroid_vec = _compute_community_group(
+        sorted_group, graph, node_ids, raw_vector
+    )
+    member_count = len(member_ids)
+    community_id = str(uuid.uuid4())
+    communities_to_insert.append(
+        (community_id, representative_id, member_count, level, now, parent_community_id)
+    )
+    if centroid_vec is not None:
+        import sqlite_vec
+
+        embeddings_to_insert.append(
+            (
+                community_id,
+                sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist()),
+            )
+        )
+
+    if member_count > COMMUNITY_HIERARCHY_SIZE_THRESHOLD and level < COMMUNITY_HIERARCHY_MAX_DEPTH:
+        import leidenalg
+
+        child_graph = graph.subgraph(sorted_group)
+        child_node_ids = [node_ids[i] for i in sorted_group]
+        child_partition = leidenalg.find_partition(child_graph, leidenalg.ModularityVertexPartition)
+        for child_group in child_partition:
+            _process_partition_group(
+                list(child_group),
+                child_graph,
+                child_node_ids,
+                raw_vector,
+                level + 1,
+                community_id,
+                now,
+                communities_to_insert,
+                membership_to_insert,
+                embeddings_to_insert,
+            )
+    else:
+        for entity_id in member_ids:
+            membership_to_insert.append((entity_id, community_id, level))
+
+
 def recompute_communities(  # noqa: C901, PLR0912, PLR0915
     *,
     db_connection: sqlite3.Connection | None = None,
@@ -170,35 +238,31 @@ def recompute_communities(  # noqa: C901, PLR0912, PLR0915
                 for entity_id, blob in embedding_rows
             }
 
-        communities_to_insert = []
-        membership_to_insert = []
-        embeddings_to_insert = []
+        communities_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
+        membership_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
+        embeddings_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
 
         for group in partition:
-            member_ids, representative_id, centroid_vec = _compute_community_group(
-                group, graph, node_ids, raw_vector
+            _process_partition_group(
+                list(group),
+                graph,
+                node_ids,
+                raw_vector,
+                0,
+                None,
+                now,
+                communities_to_insert,
+                membership_to_insert,
+                embeddings_to_insert,
             )
-            member_count = len(member_ids)
-            community_id = str(uuid.uuid4())
-            communities_to_insert.append((community_id, representative_id, member_count, 0, now))
-            for entity_id in member_ids:
-                membership_to_insert.append((entity_id, community_id, 0))
-            if centroid_vec is not None:
-                import sqlite_vec
-
-                embeddings_to_insert.append(
-                    (
-                        community_id,
-                        sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist()),
-                    )
-                )
 
         def _write(c):
             c.execute("DELETE FROM community_membership")
             c.execute("DELETE FROM communities")
             c.executemany(
-                "INSERT INTO communities (id, representative_entity_id, member_count, level, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO communities "
+                "(id, representative_entity_id, member_count, level, created_at, parent_community_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 communities_to_insert,
             )
             c.executemany(
@@ -222,6 +286,33 @@ def recompute_communities(  # noqa: C901, PLR0912, PLR0915
     finally:
         if should_close:
             close_connection(conn)
+
+
+def fetch_leaf_community_centroids(conn: sqlite3.Connection) -> list[tuple[str, bytes]]:
+    """Community centroids for LEAF communities only -- a community row with no other row naming
+    it via parent_community_id (never a `level = MAX(level)` comparison, which per-branch recursion
+    (this file's own _process_partition_group) makes unsafe: different branches of the hierarchy
+    tree can bottom out at different depths, so there is no single "finest level" number that is
+    finest everywhere in the tree at once).
+
+    Returns the exact same (community_id, embedding_blob) row shape a raw
+    `SELECT community_id, embedding FROM community_embeddings` already returns, so an existing call
+    site can replace its own raw query with a call to this function with no further change to how it
+    consumes the result. Before hierarchy has ever produced a single non-leaf row (a fresh install,
+    or a corpus whose communities have never exceeded COMMUNITY_HIERARCHY_SIZE_THRESHOLD), every
+    community is trivially a leaf and this returns the same rows the old unfiltered query would
+    have.
+    """
+    return conn.execute(
+        """
+        SELECT ce.community_id, ce.embedding
+        FROM community_embeddings ce
+        JOIN communities c ON c.id = ce.community_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM communities child WHERE child.parent_community_id = c.id
+        )
+        """
+    ).fetchall()
 
 
 def trigger_community_detection(db_path: str | None = None, *, coordinator=None) -> None:

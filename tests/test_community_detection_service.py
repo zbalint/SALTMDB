@@ -738,6 +738,237 @@ class TestCommunityDetectionService(unittest.TestCase):
         for table in ("communities", "community_membership", "community_embeddings"):
             self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
+    def test_scenario_29_oversized_community_recurses_into_real_children(self):
+        nodes = sorted(self._new_entity(f"hierarchy-29-{index}") for index in range(6))
+        for left, right in (
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 4),
+            (2, 5),
+            (4, 5),
+        ):
+            self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3):
+            result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(result["status"], "recomputed")
+        roots = self.conn.execute(
+            "SELECT id, member_count FROM communities "
+            "WHERE level = 0 AND parent_community_id IS NULL AND member_count > 3"
+        ).fetchall()
+        self.assertEqual(len(roots), 1)
+        root_id, root_count = roots[0]
+        self.assertEqual(root_count, 4)
+        children = self.conn.execute(
+            "SELECT id FROM communities WHERE parent_community_id = ? AND level = 1",
+            (root_id,),
+        ).fetchall()
+        self.assertGreaterEqual(len(children), 2)
+        child_ids = [row[0] for row in children]
+        child_members = self.conn.execute(
+            f"SELECT entity_id, level FROM community_membership "
+            f"WHERE community_id IN ({','.join('?' for _ in child_ids)})",
+            child_ids,
+        ).fetchall()
+        self.assertEqual(len(child_members), root_count)
+        self.assertTrue(all(level == 1 for _, level in child_members))
+        member_ids = [entity_id for entity_id, _ in child_members]
+        self.assertEqual(
+            self.conn.execute(
+                f"SELECT COUNT(*) FROM community_membership "
+                f"WHERE entity_id IN ({','.join('?' for _ in member_ids)}) AND level = 0",
+                member_ids,
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_scenario_30_child_below_threshold_does_not_recurse_further(self):
+        nodes = sorted(self._new_entity(f"hierarchy-30-{index}") for index in range(6))
+        for left, right in (
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 4),
+            (2, 5),
+            (4, 5),
+        ):
+            self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3):
+            recompute_communities(db_connection=self.conn)
+
+        root_id = self.conn.execute(
+            "SELECT id FROM communities "
+            "WHERE level = 0 AND parent_community_id IS NULL AND member_count > 3"
+        ).fetchone()[0]
+        children = self.conn.execute(
+            "SELECT id, member_count FROM communities WHERE parent_community_id = ? AND level = 1",
+            (root_id,),
+        ).fetchall()
+        self.assertGreaterEqual(len(children), 2)
+        self.assertTrue(all(member_count <= 3 for _, member_count in children))
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM communities WHERE level = 2").fetchone()[0],
+            0,
+        )
+        for child_id, _ in children:
+            self.assertEqual(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM communities WHERE parent_community_id = ?",
+                    (child_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_scenario_31_recursion_is_capped_at_max_depth_while_still_oversized(self):
+        nodes = sorted(self._new_entity(f"hierarchy-31-{index}") for index in range(4))
+        for left, right in (
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+        ):
+            self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with (
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+        ):
+            recompute_communities(db_connection=self.conn)
+
+        root_id, root_count = self.conn.execute(
+            "SELECT id, member_count FROM communities "
+            "WHERE level = 0 AND parent_community_id IS NULL"
+        ).fetchone()
+        self.assertEqual(root_count, 4)
+        deepest = self.conn.execute(
+            "SELECT id, member_count FROM communities WHERE level = 1 AND parent_community_id = ?",
+            (root_id,),
+        ).fetchall()
+        self.assertEqual(len(deepest), 1)
+        deepest_id, deepest_count = deepest[0]
+        self.assertGreater(deepest_count, 3)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM communities WHERE parent_community_id = ?",
+                (deepest_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_scenario_32_representative_and_centroid_are_computed_at_every_level(self):
+        nodes = sorted(self._new_entity(f"hierarchy-32-{index}") for index in range(4))
+        for left, right in (
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+        ):
+            self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with (
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+        ):
+            recompute_communities(db_connection=self.conn)
+
+        rows = self.conn.execute(
+            "SELECT id, representative_entity_id, level FROM communities ORDER BY level"
+        ).fetchall()
+        self.assertEqual([row[2] for row in rows], [0, 1])
+        for community_id, representative_id, _ in rows:
+            self.assertIsNotNone(representative_id)
+            self.assertIsNotNone(
+                self.conn.execute(
+                    "SELECT embedding FROM community_embeddings WHERE community_id = ?",
+                    (community_id,),
+                ).fetchone()
+            )
+
+    def test_scenario_33_flat_behavior_is_unchanged_at_or_below_threshold(self):
+        first, second = (
+            self._new_entity("hierarchy-flat-first"),
+            self._new_entity("hierarchy-flat-second"),
+        )
+        self._store_edge(first, second, "related_to")
+        self._insert_vector(first, _axis_vector(0))
+        self._insert_vector(second, _axis_vector(1))
+
+        result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(result["status"], "recomputed")
+        self.assertEqual(result["communities_created"], 1)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM communities WHERE parent_community_id IS NULL AND level = 0"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM communities WHERE level > 0").fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM community_membership WHERE level = 0"
+            ).fetchone()[0],
+            2,
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM community_embeddings").fetchone()[0],
+            1,
+        )
+
+    def test_scenario_34_full_recompute_clears_every_hierarchy_level(self):
+        nodes = sorted(self._new_entity(f"hierarchy-clear-{index}") for index in range(4))
+        for left, right in (
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+        ):
+            self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3):
+            first = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(first["communities_created"], 3)
+        self.assertEqual(
+            [
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT level, COUNT(*) FROM communities GROUP BY level ORDER BY level"
+                ).fetchall()
+            ],
+            [0, 1, 2],
+        )
+        self.conn.execute("DELETE FROM relations")
+        self.conn.commit()
+
+        second = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(second, {"status": "no_edges", "communities_created": 0})
+        for table in ("communities", "community_membership", "community_embeddings"):
+            self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

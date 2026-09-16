@@ -67,9 +67,11 @@ def find_orphan_community_matches(  # noqa: C901, PLR0912, PLR0915
             )
             return _zero_result()
 
-        centroid_rows = conn.execute(
-            "SELECT community_id, embedding FROM community_embeddings"
-        ).fetchall()
+        from saltmdb.domain.services.community_detection_service import (
+            fetch_leaf_community_centroids,
+        )
+
+        centroid_rows = fetch_leaf_community_centroids(conn)
         if not centroid_rows:
             return _zero_result()
         centroids = {
