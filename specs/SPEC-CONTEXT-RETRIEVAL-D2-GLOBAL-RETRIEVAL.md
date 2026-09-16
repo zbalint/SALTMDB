@@ -858,3 +858,194 @@ every test referencing one of these three constants must reference it by symbol 
 CONTEXT_GLOBAL_TOP_K_COMMUNITIES` etc.), never a bare numeric literal standing in for its current
 seeded value — mirroring `SPEC-CONTEXT-RETRIEVAL-C5-ORPHAN-ASSIGNMENT.md`'s own identical
 PLACEHOLDER-acceptance-bar convention (§1 design decision, "Out of scope" above).
+
+## Amendment 1 — §9's amendment-site list was incomplete: `test_context_budget_service.py`'s own existing whole/sub-dict shape assertions also break under §4's unconditional additive keys (OMP BLOCKED, adjudicated)
+
+### Contradiction (as reported by OMP, before any tracked-file edit, worker dispatch, or commit)
+
+§4 mandates that `pack_context_budget`'s return dict — **both** the all-empty early-return shape and
+the normal-path return shape — unconditionally includes the three new additive surfaces
+(`packed_entity_ids["community_member"]`, `dropped_entity_ids["community_member"]`, the new
+top-level `community_representative_entity_ids` key, and three new `budget` sub-fields
+(`community_member_truncated`, `community_member_dropped_count`,
+`community_representative_reserve_tokens_used`)) on **every call**, regardless of whether a caller
+passes the two new optional parameters. This is a deliberate design choice (§4's own commentary:
+"Both this early-return shape and the normal-path return shape below must be kept in sync
+field-for-field"), not an oversight — it mirrors how `orphan_community_reserve_tokens_used` is
+already unconditionally present in today's shipped shape regardless of whether any orphan was
+found, and it is what makes constraint 26's "one shared, continuously relevance-ranked pool" and
+this spec's own uniform-envelope design (§1 design decision 5) hold without a caller-visible
+local/global shape fork.
+
+§9, as originally locked, named only three pre-existing test-assertion amendment sites — all three
+in `tests/test_retrieve_context_wiring.py` — and said explicitly: "No other line in
+`test_retrieve_context_wiring.py` changes," with the overall list framed as "the only three
+pre-existing assertions in scope for editing." It never traced `pack_context_budget`'s own direct
+unit tests in `tests/test_context_budget_service.py`, which exact-compare its return shape and
+therefore break under §4's own locked, unconditional additive-keys design. Independently verified
+against the actual current file (not merely re-read from the original pre-lock pass) — five
+existing assertions break, exactly as OMP reported:
+
+1. `test_scenario_1_all_inputs_empty_returns_zero_shape_without_opening_connection` (current lines
+   97-116) — whole-`result` `assertEqual` against the old exact all-empty shape.
+2. `test_scenario_2_everything_fits_under_budget` (current line 128) —
+   `result["packed_entity_ids"]` exact-compared to `{"primary": primary, "expansion": expansion}`.
+3. `test_scenario_2_everything_fits_under_budget` (current line 129) —
+   `result["dropped_entity_ids"]` exact-compared to `{"primary": [], "expansion": []}`.
+4. `test_scenario_5_conflict_only_members_are_always_included_outside_budget` (current line 211) —
+   `result["packed_entity_ids"]` exact-compared to `{"primary": [], "expansion": []}`.
+5. `test_scenario_10_actual_a1_and_a2_outputs_pack_distinct_pools_end_to_end` (current line 312) —
+   `result["dropped_entity_ids"]` exact-compared to `{"primary": [], "expansion": []}`.
+
+OMP correctly stopped rather than either silently widening its own edit scope past §9's literal
+"only three" framing or inventing a conditional/legacy return shape to dodge the contradiction —
+the latter is explicitly rejected below.
+
+### Fix
+
+This amendment supersedes §9's "Named amendment sites" framing: it is no longer "the only three
+pre-existing assertions in scope for editing" — it is the three `test_retrieve_context_wiring.py`
+sites already named, **plus** the following five `tests/test_context_budget_service.py` sites,
+each amended to add exactly the new key(s) §4 mandates and no other change to the line:
+
+**Site 4 (scenario 1, current lines 97-116)** — replace the whole `assertEqual` block with:
+
+```python
+        self.assertEqual(
+            result,
+            {
+                "packed_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "dropped_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "conflict_only_entity_ids": [],
+                "community_representative_entity_ids": [],
+                "token_counts": {},
+                "budget": {
+                    "unit": "tokens",
+                    "limit": config.CONTEXT_BUDGET_DEFAULT_TOKENS,
+                    "used": 0,
+                    "primary_truncated": False,
+                    "primary_dropped_count": 0,
+                    "expansion_truncated": False,
+                    "expansion_dropped_count": 0,
+                    "conflict_reserve_tokens_used": 0,
+                    "orphan_community_reserve_tokens_used": 0,
+                    "community_member_truncated": False,
+                    "community_member_dropped_count": 0,
+                    "community_representative_reserve_tokens_used": 0,
+                },
+            },
+        )
+```
+
+**Site 5 (scenario 2, current line 128)** — replace:
+
+```python
+        self.assertEqual(result["packed_entity_ids"], {"primary": primary, "expansion": expansion})
+```
+
+with:
+
+```python
+        self.assertEqual(
+            result["packed_entity_ids"],
+            {"primary": primary, "expansion": expansion, "community_member": []},
+        )
+```
+
+**Site 6 (scenario 2, current line 129)** — replace:
+
+```python
+        self.assertEqual(result["dropped_entity_ids"], {"primary": [], "expansion": []})
+```
+
+with:
+
+```python
+        self.assertEqual(
+            result["dropped_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
+```
+
+**Site 7 (scenario 5, current line 211)** — replace:
+
+```python
+        self.assertEqual(result["packed_entity_ids"], {"primary": [], "expansion": []})
+```
+
+with:
+
+```python
+        self.assertEqual(
+            result["packed_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
+```
+
+**Site 8 (scenario 10, current line 312)** — replace:
+
+```python
+        self.assertEqual(result["dropped_entity_ids"], {"primary": [], "expansion": []})
+```
+
+with:
+
+```python
+        self.assertEqual(
+            result["dropped_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
+```
+
+No other line at any of these five sites changes — same assertion, same test logic, only the new
+key(s) §4 already mandates added to each literal. A conditional/legacy return shape (making the new
+keys present only when the two new parameters are actually passed) is explicitly rejected as a fix:
+it would fork `pack_context_budget`'s return contract by caller intent, contradicting §4's own
+explicit "kept in sync field-for-field" unconditional-shape design and breaking constraint 26's
+uniform-envelope precedent for no reason other than avoiding five test-line edits already inside
+this spec's own authorized file scope (§0 already permits editing `test_context_budget_service.py`
+for "new scenarios" — these five lines are pre-existing scenarios whose shape this spec's own §4
+change unavoidably touches, the same class of edit §9's original three sites already were).
+
+### Also corrects: §9's scenario-numbering claim for `test_context_budget_service.py`
+
+Independently found while adjudicating the above (re-verified against the actual current file, not
+assumed): §9's original text said new scenarios continue "at 15" because the file "currently ends
+at 14." This is incorrect. The file's actual current last scenario is
+`test_scenario_10_actual_a1_and_a2_outputs_pack_distinct_pools_end_to_end` (there are two
+same-numbered `test_scenario_9_*` methods immediately before it —
+`test_scenario_9_missing_entity_row_falls_back_to_empty_content_and_zero_tokens` and
+`test_scenario_9_real_empty_entity_row_normalizes_to_zero_tokens` — but no scenario past 10 exists).
+New scenarios in this file must continue from **11**, not 15 — using 15 would leave a fabricated
+gap (11-14 never existed). The scenario this section's new-scenario prose says to mirror,
+`test_scenario_13_pack_budget_reserves_orphan_tokens_outside_ordinary_budget`, is real and exists
+exactly as described, but lives in `tests/test_orphan_community_service.py`, not this file — the
+original text never claimed otherwise, but is clarified here to prevent a worker searching the
+wrong file for it.
+
+### §11 Acceptance correction
+
+§11's sentence "the three named amendment sites in §9 updated exactly as specified and no other
+line touched" is superseded to read: the three `test_retrieve_context_wiring.py` sites originally
+named in §9, plus this amendment's five `test_context_budget_service.py` sites — eight sites total
+across both files — updated exactly as specified, no other line touched in either file.
+
+### Scope
+
+No change to §0's file-edit scope. `test_context_budget_service.py` was already an authorized file
+under §0 ("may edit ... `tests/test_context_budget_service.py` ... new scenarios only") — this
+amendment clarifies that five of its *pre-existing* scenario assertions are unavoidably touched by
+§4's own already-locked design, the same category of necessary edit §9's original three sites
+already were, just discovered one file later.
+
+### Independent audit of the rest of the spec (no other contradictions found)
+
+While adjudicating this block, traced `pack_context_budget`'s new unconditional keys through
+`retrieve_context_service.py`'s actual current source (not the spec's own prose) to check whether
+§5.2's "local-mode body is byte-for-byte unchanged" claim also silently breaks under §4's change,
+since local mode's existing code also calls `pack_context_budget`. It does not: local mode's
+existing `metadata["budget"]` construction (current lines 289-303) and its `packed_entity_ids`/
+`dropped_entity_ids` consumption (current lines 149-168) both access named sub-keys explicitly
+(`budget_result["budget"]["unit"]`, `budget_result["packed_entity_ids"]["primary"]`, etc.) — never
+a whole-dict passthrough or spread — so the three new `budget` sub-fields and the new
+`community_member`/`community_representative_entity_ids` keys are never read or forwarded by
+local mode's unchanged pipeline. §5.2's claim holds; no test in `test_retrieve_context_service.py`
+or `test_retrieve_context_wiring.py` needs amendment beyond §9's already-named three sites. No other
+bug, missing import, or internal contradiction was found elsewhere in the spec.
