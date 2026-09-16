@@ -1049,3 +1049,52 @@ a whole-dict passthrough or spread — so the three new `budget` sub-fields and 
 local mode's unchanged pipeline. §5.2's claim holds; no test in `test_retrieve_context_service.py`
 or `test_retrieve_context_wiring.py` needs amendment beyond §9's already-named three sites. No other
 bug, missing import, or internal contradiction was found elsewhere in the spec.
+
+## Amendment 2 — §10's "Out of scope" bullet still forbade the five sites Amendment 1 just authorized (OMP BLOCKED, adjudicated)
+
+### Contradiction (as reported by OMP, before any tracked-file edit, worker dispatch, or commit)
+
+Amendment 1 resolved §9 and §11 by widening the authorized amendment-site list from three sites (all
+in `test_retrieve_context_wiring.py`) to eight (those three, plus five newly-authorized sites in
+`test_context_budget_service.py`). It did not touch §10. §10's final bullet, unchanged since the
+original lock, still reads:
+
+> Renumbering or otherwise touching any existing test scenario in any of the four edited test files
+> beyond the three named amendment sites in §9 — every other line in every edited test file is
+> append-only under this spec's scope (§0/§9).
+
+This is the same "only three" framing Amendment 1 explicitly superseded in §9 and §11, restated a
+third time in a section Amendment 1 never visited. Read literally, §10 still prohibits the exact five
+`test_context_budget_service.py` edits Amendment 1's "Fix" section (sites 4-8 above) requires — the
+same five edits are therefore simultaneously mandatory (§4, as amended) and forbidden (§10) at once.
+Verified directly against the current file (not merely re-read from the original pre-lock pass): §9
+and §11 both already read the amended eight-site framing (§11 via this document's own "§11 Acceptance
+correction" note above); §10 alone still carries the stale three-site text, confirming this is a
+leftover gap in Amendment 1's own sweep rather than a new defect.
+
+### Fix
+
+§10's final bullet is superseded to read:
+
+> Renumbering or otherwise touching any existing test scenario in any of the four edited test files
+> beyond the eight named amendment sites in §9 as amended (the three `test_retrieve_context_wiring.py`
+> sites originally named, plus Amendment 1's five `test_context_budget_service.py` sites) — every
+> other line in every edited test file is append-only under this spec's scope (§0/§9, as amended).
+
+No other bullet in §10 changes. This is a wording-only correction to match the site count §9 and §11
+already carry post-Amendment-1 — it authorizes no edit beyond the eight sites Amendment 1 already
+specified verbatim, and forbids everything §10 already forbade apart from that count.
+
+### Scope
+
+No change to §0's file-edit scope. §0's own scope text (line 27-29) never states a specific site
+count — it defers to "enumerated exactly in §9" — so §0 required no corresponding edit; only §10's own
+inline "three" needed correcting to match.
+
+### Independent check for further residual "three"/"only three" text (none found beyond what Amendment 1 already corrected)
+
+Grepped the full spec text for every other occurrence of "three named", "only three", and "named
+amendment sites" after this fix: the remaining hits are §9's own historical narration of what the
+*original* lock said (correctly preserved as history, not a live constraint), Amendment 1's own
+narration of the same history, and this amendment's own text above. No other live, currently-binding
+sentence still asserts a three-site cap.
