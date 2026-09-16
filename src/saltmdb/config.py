@@ -240,14 +240,12 @@ LIBRARIAN_TRIGGER_COOLDOWN_S = (
 # Milestone C (wayfinder ticket "clustering trigger and freshness/maintenance", standing
 # constraint 18, memory 20b4c507) -- community_detection_service's write-triggered recompute
 # cooldown, same shape as LIBRARIAN_TRIGGER_COOLDOWN_S above (same shared _librarian_trigger_pool,
-# same _system_locks atomic-claim pattern, new task_name='community_detection'). PLACEHOLDER:
-# seeded at LIBRARIAN_TRIGGER_COOLDOWN_S's own order of magnitude per constraint 22's explicit
-# calibration mechanic ("seeded at the existing Librarian task's own cooldown order of magnitude,
-# validated by a named probe for transient mis-assignment during the cooldown window") -- not yet
-# benchmarked against SALTMDB's own corpus. Do not remove the placeholder framing when tuning
-# this; replace this comment with the benchmark citation once a real value is locked from the
-# Milestone C/C.5 benchmark run (wayfinder ticket 787ebf0c), matching the treatment already given
-# to CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS before Milestone B calibrated it.
+# same _system_locks atomic-claim pattern, new task_name='community_detection'). Confirmed at its
+# seeded value (LIBRARIAN_TRIGGER_COOLDOWN_S's own order of magnitude) by the Milestone C/C.5
+# benchmark run (wayfinder ticket 787ebf0c, memory 463753f9): the required cooldown-degrade probe
+# -- a same-topic zero-edge memory queried mid-cooldown, before a fresh recompute_communities()
+# call -- got a normal, correct, non-crashing match against the still-valid prior-cycle centroid,
+# with no sign of harmful staleness. No longer a placeholder.
 COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S = 300
 
 # Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py and
@@ -326,15 +324,15 @@ CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP = 5
 # own entity_embeddings vector and a community's PageRank-weighted centroid (community_embeddings)
 # required to assign that orphan to that community at all. Below this threshold, the orphan gets no
 # orphan_community assignment for this call, full stop -- never force-assigned to its
-# nearest-however-distant community. PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus
-# -- seeded at the same order of magnitude as this codebase's other cosine-similarity thresholds
-# gating a comparably-scoped "does this specific thing belong with that specific thing" judgment
-# (RELATION_GATE_MIN_SIMILARITY_THRESHOLD=0.6505, COHESION_MIN_PAIRWISE_THRESHOLD=0.6547) -- not
-# derived from any benchmark of its own. Recalibrated by the Milestone C/C.5 benchmark run
-# (wayfinder ticket 787ebf0c) via a sweep maximizing that ticket's own recall-lift metric without
-# false-positive noise. Do not remove the placeholder framing when tuning this; replace this
-# comment with the benchmark citation once a real value is locked.
-COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.65
+# nearest-however-distant community. Locked from the Milestone C/C.5 benchmark run (wayfinder
+# ticket 787ebf0c, memories 463753f9/c030edc4): a direct find_orphan_community_matches threshold
+# sweep against real bge-small-en-v1.5 embeddings found 11/11 true same-cluster admissions with
+# ZERO false-positive cross-topic admissions at every threshold from 0.50 up to 0.80 -- the
+# similarity gap between real same-topic and cross-topic pairs is wide enough that false-positive
+# risk was never the binding constraint anywhere in the tested range. 0.60 is the highest threshold
+# in that zero-false-positive range that still admits all 11/11 true positives (0.65 dropped 2/11
+# for no corresponding safety benefit). No longer a placeholder.
+COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.60
 
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
