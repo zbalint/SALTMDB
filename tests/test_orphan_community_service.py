@@ -433,6 +433,56 @@ class TestOrphanCommunityService(unittest.TestCase):
             expected_reserve_tokens,
         )
 
+    def test_scenario_15_orphan_assignment_matches_leaf_centroid_only(self):
+        orphan = self._memory("Hierarchy orphan")
+        parent_member = self._memory("Hierarchy parent member")
+        leaf_member = self._memory("Hierarchy leaf member")
+        parent_id = "hierarchy-parent"
+        child_id = "hierarchy-child"
+        now = datetime.now(UTC).isoformat()
+        child_centroid = _cosine_vector(0.8)
+        self.conn.execute(
+            "INSERT INTO communities "
+            "(id, representative_entity_id, member_count, level, created_at, parent_community_id) "
+            "VALUES (?, ?, ?, 0, ?, NULL)",
+            (parent_id, parent_member, 1, now),
+        )
+        self.conn.execute(
+            "INSERT INTO communities "
+            "(id, representative_entity_id, member_count, level, created_at, parent_community_id) "
+            "VALUES (?, ?, ?, 1, ?, ?)",
+            (child_id, leaf_member, 1, now, parent_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 0)",
+            (parent_member, parent_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 1)",
+            (leaf_member, child_id),
+        )
+        self.conn.executemany(
+            "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
+            [
+                (parent_id, sqlite_vec.serialize_float32(_axis_vector(0))),
+                (child_id, sqlite_vec.serialize_float32(child_centroid)),
+            ],
+        )
+        self._insert_vector(orphan, _axis_vector(0))
+        self._insert_vector(parent_member, _axis_vector(0))
+        self._insert_vector(leaf_member, child_centroid)
+        self.conn.commit()
+
+        result = find_orphan_community_matches(
+            self._primary(orphan), set(), db_connection=self.conn
+        )
+
+        matches = result["orphan_community_matches"]
+        self.assertEqual([match["entity_id"] for match in matches], [leaf_member])
+        self.assertEqual(matches[0]["community_id"], child_id)
+        self.assertNotEqual(matches[0]["community_id"], parent_id)
+        self.assertGreater(matches[0]["similarity"], COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD)
+
 
 if __name__ == "__main__":
     unittest.main()

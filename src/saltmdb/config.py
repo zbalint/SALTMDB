@@ -248,6 +248,37 @@ LIBRARIAN_TRIGGER_COOLDOWN_S = (
 # with no sign of harmful staleness. No longer a placeholder.
 COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S = 300
 
+# Milestone D (wayfinder ticket "Milestone D hierarchy mechanics," standing constraint 25, memory
+# 94579e0f) -- community_detection_service's hierarchical sub-clustering trigger: a community whose
+# member_count exceeds this value is a candidate for recursive re-run of Leiden on its own induced
+# subgraph (see recompute_communities/_process_partition_group). A community at or below this value
+# never recurses, regardless of internal heterogeneity -- a pure size trigger, not a compound
+# size+heterogeneity signal, per constraint 25's own explicit locked choice. PLACEHOLDER: not yet
+# benchmarked against SALTMDB's own corpus -- seeded above the live-corpus median (~10, per probe
+# 13549b72) and comfortably below the live-corpus's own confirmed "definitely too large, definitely
+# heterogeneous" tier (41+ members, same probe), so a community this size or smaller is expected to
+# already be plausibly topic-coherent without recursion, not derived from any benchmark of its own.
+# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
+# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
+# framing when tuning this; replace this comment with the benchmark citation once a real value is
+# locked.
+COMMUNITY_HIERARCHY_SIZE_THRESHOLD = 20
+
+# Milestone D (wayfinder ticket "Milestone D hierarchy mechanics," standing constraint 25, memory
+# 94579e0f) -- the maximum `communities.level` a recursive sub-clustering pass may ever produce. A
+# still-oversized community at this level never recurses further, regardless of its own
+# member_count -- capped iterative recursion, not unbounded, per constraint 25's own explicit locked
+# choice. Level 0 (the original whole-graph pass) always counts against this cap: a value of 2 means
+# levels 0, 1, and 2 may exist, and a level-2 community never produces a level-3 child. PLACEHOLDER:
+# not yet benchmarked against SALTMDB's own corpus -- seeded at a small value since the live-corpus
+# cost probe (memory acd52d4a) measured only one recursion level's worth of overhead (~3.3% on top
+# of the full-graph pass); a deeper cap multiplies that cost per additional level and has not itself
+# been measured. Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing
+# constraint 28) via its own concrete quantitative sweep against the live corpus. Do not remove the
+# placeholder framing when tuning this; replace this comment with the benchmark citation once a real
+# value is locked.
+COMMUNITY_HIERARCHY_MAX_DEPTH = 2
+
 # Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py and
 # relation_service.py:commit_consolidation). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory
 # `5c09effa`. Locked from scripts/benchmarking/benchmark_cohesion_threshold.py's real
