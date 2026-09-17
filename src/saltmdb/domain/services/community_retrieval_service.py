@@ -47,9 +47,13 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
 ) -> dict[str, Any]:
     """Seed and rank leaf communities and their members for global retrieval.
 
-    The query is embedded once and compared with every leaf community centroid.  The selected
-    communities provide two independently capped, already-ranked candidate lists: one guaranteed
-    representative reserve and one shared member pool ranked by member-to-query similarity.
+    The query is embedded once and compared with every leaf community centroid to pick which
+    communities to enter. Within each entered community, every member (including its fixed,
+    clustering-time representative_entity_id) is then scored against the same query; the single
+    best per-query match becomes that community's representative for this response, and the rest
+    fall through to one shared member pool ranked by member-to-query similarity. The fixed
+    representative_entity_id is never surfaced as-is -- it is only one candidate among its
+    community's members for this per-query selection.
     """
     should_close = db_connection is None
     conn = db_connection if db_connection is not None else get_connection(db_path or get_db_path())
@@ -96,18 +100,6 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
 
         seeded_ids = [community_id for community_id, _ in seeded]
         placeholders = ",".join("?" for _ in seeded_ids)
-        community_rows = cast(
-            list[tuple[str, str, int]],
-            conn.execute(
-                f"SELECT id, representative_entity_id, member_count FROM communities WHERE id IN ({placeholders})",
-                seeded_ids,
-            ).fetchall(),
-        )
-        community_by_id: dict[str, tuple[str, int]] = {
-            community_id: (representative_entity_id, member_count)
-            for community_id, representative_entity_id, member_count in community_rows
-        }
-
         membership_rows = cast(
             list[tuple[str, str]],
             conn.execute(
@@ -119,19 +111,56 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
             community_id: [] for community_id in seeded_ids
         }
         for entity_id, community_id in membership_rows:
-            community = community_by_id.get(community_id)
-            if community is not None and entity_id != community[0]:
+            if community_id in members_by_community:
                 members_by_community[community_id].append(entity_id)
 
-        representative_candidates: list[tuple[str, str, float]] = [
-            (
-                community_by_id[community_id][0],
-                community_id,
-                float(seed_similarity),
-            )
-            for community_id, seed_similarity in seeded
-            if community_id in community_by_id
+        # Every community member -- including the fixed, clustering-time representative_entity_id
+        # -- is scored against this query: the representative slot below is picked per query, not
+        # read off the fixed id, so it must compete on equal footing with the rest of the community.
+        all_member_ids = [
+            entity_id
+            for community_id in seeded_ids
+            for entity_id in members_by_community[community_id]
         ]
+        scored_by_community: dict[str, list[tuple[str, float]]] = {
+            community_id: [] for community_id in seeded_ids
+        }
+        if all_member_ids:
+            member_placeholders = ",".join("?" for _ in all_member_ids)
+            embedding_rows = cast(
+                list[tuple[str, bytes]],
+                conn.execute(
+                    f"SELECT entity_id, embedding FROM entity_embeddings WHERE entity_id IN ({member_placeholders})",
+                    all_member_ids,
+                ).fetchall(),
+            )
+            community_by_member = {
+                entity_id: community_id
+                for community_id in seeded_ids
+                for entity_id in members_by_community[community_id]
+            }
+            for entity_id, blob in embedding_rows:
+                member_vector = _normalize(np.frombuffer(blob, dtype=np.float32).astype(np.float64))
+                similarity = float(np.dot(query_vector, member_vector))
+                scored_by_community[community_by_member[entity_id]].append((entity_id, similarity))
+
+        # For each seeded community (in centroid-seed rank order), the single best per-query match
+        # becomes that community's representative for this response; every other scored member of
+        # that community falls through to the shared member pool below. A community contributes
+        # nothing to either list if none of its members have an embedding row.
+        representative_candidates: list[tuple[str, str, float]] = []
+        member_candidates: list[tuple[str, str, float]] = []
+        for community_id, _centroid_similarity in seeded:
+            scored = scored_by_community.get(community_id, [])
+            if not scored:
+                continue
+            scored.sort(key=lambda item: (-item[1], item[0]))
+            top_entity_id, top_similarity = scored[0]
+            representative_candidates.append((top_entity_id, community_id, top_similarity))
+            member_candidates.extend(
+                (entity_id, community_id, similarity) for entity_id, similarity in scored[1:]
+            )
+
         representative_eligible_count = len(representative_candidates)
         representative_admitted = representative_candidates[
             :CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP
@@ -144,36 +173,6 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
                 0, representative_eligible_count - CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP
             ),
         }
-
-        member_ids = [
-            entity_id
-            for community_id in seeded_ids
-            for entity_id in members_by_community[community_id]
-        ]
-        member_candidates: list[tuple[str, str, float]] = []
-        if member_ids:
-            member_placeholders = ",".join("?" for _ in member_ids)
-            embedding_rows = cast(
-                list[tuple[str, bytes]],
-                conn.execute(
-                    f"SELECT entity_id, embedding FROM entity_embeddings WHERE entity_id IN ({member_placeholders})",
-                    member_ids,
-                ).fetchall(),
-            )
-            community_by_member = {
-                entity_id: community_id
-                for community_id in seeded_ids
-                for entity_id in members_by_community[community_id]
-            }
-            for entity_id, blob in embedding_rows:
-                member_vector = _normalize(np.frombuffer(blob, dtype=np.float32).astype(np.float64))
-                member_candidates.append(
-                    (
-                        entity_id,
-                        community_by_member[entity_id],
-                        float(np.dot(query_vector, member_vector)),
-                    )
-                )
 
         member_candidates.sort(key=lambda item: (-item[2], item[0]))
         member_eligible_count = len(member_candidates)

@@ -220,20 +220,27 @@ class TestCommunityRetrievalService(unittest.TestCase):
             representatives[:2],
         )
 
-    def test_scenario_05_representative_is_excluded_from_own_member_candidates(self):
-        representative, _ = self._insert_community(
+    def test_scenario_05_best_per_query_match_becomes_representative_even_if_not_the_fixed_one(
+        self,
+    ):
+        representative, member_ids = self._insert_community(
             "community-a",
-            [("Representative", _axis_vector(0)), ("Member", _axis_vector(0))],
+            [("Representative", _axis_vector(2)), ("Member", _axis_vector(0))],
             _axis_vector(0),
         )
 
         with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
             result = seed_and_rank_communities("community query", db_connection=self.conn)
 
+        # "Member" exactly matches the query (similarity 1.0); the fixed "Representative" is
+        # orthogonal (similarity 0) and loses -- it falls through to the member pool instead of
+        # being force-shown regardless of relevance.
         self.assertEqual(
-            [match["entity_id"] for match in result["representative_matches"]], [representative]
+            [match["entity_id"] for match in result["representative_matches"]], [member_ids[1]]
         )
-        self.assertNotIn(representative, [match["entity_id"] for match in result["member_matches"]])
+        self.assertEqual(
+            [match["entity_id"] for match in result["member_matches"]], [representative]
+        )
 
     def test_scenario_06_representative_and_member_caps_are_independent(self):
         representatives = []
@@ -247,7 +254,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
                 community_id,
                 [
                     (f"{community_id} representative", _axis_vector(0)),
-                    (f"{community_id} member", _axis_vector(0)),
+                    (f"{community_id} member", _cosine_vector(0.3)),
                 ],
                 _cosine_vector(similarity),
             )
@@ -283,7 +290,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
         first_rep, first_ids = self._insert_community(
             "community-a",
             [
-                ("A representative", _axis_vector(2)),
+                ("A representative", _axis_vector(0)),
                 ("A high member", _cosine_vector(0.9)),
                 ("A low member", _cosine_vector(0.4)),
             ],
@@ -292,7 +299,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
         second_rep, second_ids = self._insert_community(
             "community-b",
             [
-                ("B representative", _axis_vector(2)),
+                ("B representative", _axis_vector(0)),
                 ("B high member", _cosine_vector(0.8)),
                 ("B low member", _cosine_vector(0.7)),
             ],
@@ -336,10 +343,22 @@ class TestCommunityRetrievalService(unittest.TestCase):
         with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
             result = seed_and_rank_communities("community query", db_connection=self.conn)
 
+        # "Present member" has the best query similarity among entities with an embedding row, so
+        # it wins the representative slot; "Missing embedding" never competes (no embedding row)
+        # and never appears in either list; "Representative" (the fixed medoid, orthogonal to the
+        # query) loses the per-query contest and falls through to the member pool.
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]], [member_ids[2]]
+        )
         self.assertEqual(result["member_pool"]["eligible_count"], 1)
         self.assertEqual(
-            [match["entity_id"] for match in result["member_matches"]], [member_ids[2]]
+            [match["entity_id"] for match in result["member_matches"]], [member_ids[0]]
         )
+        surfaced_ids = {
+            match["entity_id"]
+            for match in result["representative_matches"] + result["member_matches"]
+        }
+        self.assertNotIn(member_ids[1], surfaced_ids)
 
     def test_scenario_09_ties_break_by_community_and_entity_id(self):
         _, first_ids = self._insert_community(
@@ -359,19 +378,29 @@ class TestCommunityRetrievalService(unittest.TestCase):
             ):
                 result = seed_and_rank_communities("community query", db_connection=self.conn)
 
+        # "A member"/"B member" exactly match the query and win each community's representative
+        # slot; the two fixed representatives (both orthogonal to the query, tied at similarity 0)
+        # fall through to the shared member pool, where the tie is broken by entity_id.
         self.assertEqual(
             [match["community_id"] for match in result["representative_matches"]],
             ["community-a", "community-b"],
         )
         self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [first_ids[1], second_ids[1]],
+        )
+        self.assertEqual(
             [match["entity_id"] for match in result["member_matches"]],
-            sorted([first_ids[1], second_ids[1]]),
+            sorted([first_ids[0], second_ids[0]]),
         )
 
     def test_scenario_10_null_title_is_reported_as_unknown(self):
         representative, _ = self._insert_community(
             "community-a",
-            [("Nullable title representative", _axis_vector(0)), ("Member", _axis_vector(0))],
+            [
+                ("Nullable title representative", _axis_vector(0)),
+                ("Member", _cosine_vector(0.3)),
+            ],
             _axis_vector(0),
         )
         connection = _NullTitleConnection(self.conn, {representative})

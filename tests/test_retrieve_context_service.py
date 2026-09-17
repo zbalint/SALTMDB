@@ -676,10 +676,21 @@ class TestRetrieveContextService(unittest.TestCase):
             "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
             (community_id, sqlite_vec.serialize_float32(query_vector)),
         )
-        self.conn.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (member,))
+        # Pin both entities' own embeddings explicitly (store_memory's real embedding pipeline
+        # would otherwise give "representative" an arbitrary real-content vector) so the per-query
+        # winner is deterministic: representative matches the query exactly, member is a
+        # deliberately lower (but nonzero) similarity.
+        member_vector = [0.6, 0.8] + [0.0] * 382
+        self.conn.execute(
+            "DELETE FROM entity_embeddings WHERE entity_id IN (?, ?)", (representative, member)
+        )
         self.conn.execute(
             "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
-            (member, sqlite_vec.serialize_float32(query_vector)),
+            (representative, sqlite_vec.serialize_float32(query_vector)),
+        )
+        self.conn.execute(
+            "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+            (member, sqlite_vec.serialize_float32(member_vector)),
         )
         self.conn.commit()
 
@@ -718,8 +729,23 @@ class TestRetrieveContextService(unittest.TestCase):
         assemble_conflict_sets.assert_not_called()
         find_orphan_community_matches.assert_not_called()
         assemble_lineage.assert_not_called()
+        # Round similarity floats before comparing -- they round-trip through a float32 sqlite-vec
+        # column, so the raw float64 result carries float32 rounding noise past the 6th decimal.
+        rounded_memories = [
+            {
+                **memory,
+                "retrieval_provenance": [
+                    {
+                        key: (round(value, 6) if isinstance(value, float) else value)
+                        for key, value in provenance.items()
+                    }
+                    for provenance in memory["retrieval_provenance"]
+                ],
+            }
+            for memory in result["memories"]
+        ]
         self.assertEqual(
-            result["memories"],
+            rounded_memories,
             [
                 {
                     "entity_id": representative,
@@ -743,7 +769,7 @@ class TestRetrieveContextService(unittest.TestCase):
                         {
                             "reason": "community_member",
                             "community_id": community_id,
-                            "similarity": 1.0,
+                            "similarity": 0.6,
                         }
                     ],
                 },
