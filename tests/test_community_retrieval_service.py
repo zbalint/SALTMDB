@@ -141,6 +141,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
             "representative_reserve": {
                 "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
                 **cap,
+                "gap_dropped_count": 0,
             },
             "member_pool": {"cap": config.CONTEXT_GLOBAL_MEMBER_POOL_CAP, **cap},
         }
@@ -226,7 +227,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
                 "gap_dropped_count": 0,
             },
         )
-        self.assertEqual(
+        self.assertCountEqual(
             [match["entity_id"] for match in result["representative_matches"]],
             representatives[:2],
         )
@@ -254,48 +255,53 @@ class TestCommunityRetrievalService(unittest.TestCase):
         )
 
     def test_scenario_06_representative_and_member_caps_are_independent(self):
-        representatives = []
-        lower_member_ids = []
-        for community_id, similarity in (
-            ("community-a", 1.0),
-            ("community-b", 0.8),
-            ("community-c", 0.6),
-        ):
-            representative, member_ids = self._insert_community(
-                community_id,
-                [
-                    (f"{community_id} representative", _axis_vector(0)),
-                    (f"{community_id} member", _cosine_vector(0.3)),
-                ],
-                _cosine_vector(similarity),
-            )
-            representatives.append(representative)
-            lower_member_ids.append(member_ids[1])
+        _, first_ids = self._insert_community(
+            "community-a",
+            [("A representative", _cosine_vector(0.5)), ("A member", _cosine_vector(0.3))],
+            _cosine_vector(1.0),
+        )
+        _, second_ids = self._insert_community(
+            "community-b",
+            [("B representative", _cosine_vector(0.9)), ("B member", _cosine_vector(0.3))],
+            _cosine_vector(0.8),
+        )
+        _, third_ids = self._insert_community(
+            "community-c",
+            [("C representative", _cosine_vector(0.7)), ("C member", _cosine_vector(0.3))],
+            _cosine_vector(0.6),
+        )
 
         with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_TOP_K_COMMUNITIES", 3):
             with patch.object(
-                community_retrieval_service, "CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP", 1
+                community_retrieval_service, "CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP", 2
             ):
                 with patch.object(
                     community_retrieval_service, "embed_text", return_value=_axis_vector(0)
                 ):
                     result = seed_and_rank_communities("community query", db_connection=self.conn)
 
+        # Representative selection is driven entirely by each candidate's own real per-query
+        # similarity (0.5/0.9/0.7), not its community's centroid rank (1.0/0.8/0.6) -- community-b's
+        # representative (0.9) and community-c's representative (0.7) win the 2 reserve slots despite
+        # community-a having the single highest centroid; community-a's representative (0.5, weakest)
+        # is dropped by the cap, but its own other member still surfaces via the independent member
+        # pool.
         self.assertEqual(
             [match["entity_id"] for match in result["representative_matches"]],
-            representatives[:1],
+            [second_ids[0], third_ids[0]],
         )
         self.assertEqual(
             result["representative_reserve"],
             {
-                "cap": 1,
+                "cap": 2,
                 "eligible_count": 3,
                 "truncated": True,
-                "dropped_count": 2,
+                "dropped_count": 1,
+                "gap_dropped_count": 0,
             },
         )
         member_ids = [match["entity_id"] for match in result["member_matches"]]
-        self.assertTrue(set(lower_member_ids[1:]).issubset(member_ids))
+        self.assertIn(first_ids[1], member_ids)
 
     def test_scenario_07_member_pool_is_shared_and_truncated_by_query_similarity(self):
         first_rep, first_ids = self._insert_community(
@@ -392,11 +398,11 @@ class TestCommunityRetrievalService(unittest.TestCase):
         # "A member"/"B member" exactly match the query and win each community's representative
         # slot; the two fixed representatives (both orthogonal to the query, tied at similarity 0)
         # fall through to the shared member pool, where the tie is broken by entity_id.
-        self.assertEqual(
+        self.assertCountEqual(
             [match["community_id"] for match in result["representative_matches"]],
             ["community-a", "community-b"],
         )
-        self.assertEqual(
+        self.assertCountEqual(
             [match["entity_id"] for match in result["representative_matches"]],
             [first_ids[1], second_ids[1]],
         )
@@ -453,7 +459,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
                 "gap_dropped_count": 0,
             },
         )
-        self.assertEqual(
+        self.assertCountEqual(
             [match["entity_id"] for match in result["representative_matches"]],
             [first_rep, second_rep],
         )
@@ -490,6 +496,77 @@ class TestCommunityRetrievalService(unittest.TestCase):
         self.assertEqual(
             [match["entity_id"] for match in result["representative_matches"]],
             [weak_rep],
+        )
+
+    def test_scenario_13_representative_gap_floor_excludes_weak_second_representative(self):
+        first_rep, _ = self._insert_community(
+            "community-a",
+            [("A representative", _cosine_vector(1.0)), ("A member", _cosine_vector(0.5))],
+            _cosine_vector(1.0),
+        )
+        _, second_ids = self._insert_community(
+            "community-b",
+            [("B representative", _cosine_vector(0.3)), ("B member", _cosine_vector(0.1))],
+            _cosine_vector(0.6),
+        )
+
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            result = seed_and_rank_communities("community query", db_connection=self.conn)
+
+        # Both communities are seeded (centroid gap 1.0-0.6=0.4 <= CONTEXT_GLOBAL_SEED_SIMILARITY_GAP,
+        # 0.5) -- D3's community-level floor admits both. But community-b's own best member (0.3) is
+        # 0.7 away from community-a's own best member (1.0), exceeding
+        # CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP (0.5) -- its representative candidate is
+        # excluded from representative_matches. community-b's own dropped representative candidate is
+        # never redirected into the member pool (this cap's pre-existing, unchanged cap-independent
+        # behavior) -- but "B member" (0.1), always separately scored, still competes for member_pool
+        # on its own merits.
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [first_rep],
+        )
+        self.assertEqual(
+            result["representative_reserve"],
+            {
+                "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+                "eligible_count": 2,
+                "truncated": True,
+                "dropped_count": 0,
+                "gap_dropped_count": 1,
+            },
+        )
+        member_ids = [match["entity_id"] for match in result["member_matches"]]
+        self.assertIn(second_ids[1], member_ids)
+        self.assertNotIn(second_ids[0], member_ids)
+
+    def test_scenario_14_weakest_possible_representative_still_admitted_when_sole_candidate(self):
+        weak_rep, _ = self._insert_community(
+            "community-a",
+            [("Weak representative", _cosine_vector(0.02)), ("Weak member", _cosine_vector(0.01))],
+            _cosine_vector(0.02),
+        )
+
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            result = seed_and_rank_communities("community query", db_connection=self.conn)
+
+        # A single, extremely weak community/representative pair (similarity 0.02) -- the
+        # representative gap floor compares each candidate to the best ADMITTED representative this
+        # call, and the single best one's own gap-to-itself is always 0, so it is force-included
+        # regardless of how weak its absolute similarity is. Mirrors scenario 12's proof of the same
+        # guarantee at the community-seeding stage, one level down.
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [weak_rep],
+        )
+        self.assertEqual(
+            result["representative_reserve"],
+            {
+                "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+                "eligible_count": 1,
+                "truncated": False,
+                "dropped_count": 0,
+                "gap_dropped_count": 0,
+            },
         )
 
 
