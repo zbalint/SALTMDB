@@ -60,6 +60,7 @@ class TestRetrieveContextWiring(unittest.TestCase):
             owner_id="owner",
             limit=None,
             budget_tokens=None,
+            strategy="local",
         )
 
     def test_dispatch_requires_string_query_but_allows_empty_string(self):
@@ -80,12 +81,13 @@ class TestRetrieveContextWiring(unittest.TestCase):
             owner_id="owner",
             limit=None,
             budget_tokens=None,
+            strategy="local",
         )
 
     def test_public_schema_exposes_query_controls_without_owner_id(self):
         self.assertEqual(
             list(inspect.signature(tools.retrieve_context).parameters),
-            ["query", "limit", "budget_tokens"],
+            ["query", "limit", "budget_tokens", "strategy"],
         )
         self.assertNotIn("owner_id", inspect.signature(tools.retrieve_context).parameters)
         registered = tools.mcp._tool_manager._tools["retrieve_context"]

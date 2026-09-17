@@ -11,6 +11,7 @@ from saltmdb.domain.services import memory_service
 from saltmdb.domain.services.conflict_set_service import assemble_conflict_sets
 from saltmdb.domain.services.context_budget_service import pack_context_budget
 from saltmdb.domain.services.orphan_community_service import find_orphan_community_matches
+from saltmdb.domain.services.community_retrieval_service import seed_and_rank_communities
 from saltmdb.domain.services.context_expansion_service import (
     PrimaryHit,
     expand_context_candidates,
@@ -26,6 +27,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     *,
     limit: int | None = None,
     budget_tokens: int | None = None,
+    strategy: str = "local",
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
@@ -45,6 +47,8 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
         effective_db_path = db_path or get_db_path()
 
     try:
+        if strategy == "global":
+            return _assemble_global_context(query, budget_tokens, conn)
         pit = datetime.now(UTC).isoformat()
         search_fn = cast(
             Callable[..., list[dict[str, Any]] | dict[str, Any]],
@@ -314,3 +318,99 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     finally:
         if should_close:
             close_connection(conn)
+
+
+def _assemble_global_context(
+    query: str, budget_tokens: int | None, conn: sqlite3.Connection
+) -> dict[str, Any]:
+    seed_result = seed_and_rank_communities(query, db_connection=conn)
+    representative_entity_ids = {
+        match["entity_id"] for match in seed_result["representative_matches"]
+    }
+    member_entity_ids = [match["entity_id"] for match in seed_result["member_matches"]]
+
+    budget_result = pack_context_budget(
+        {"expansion_candidates": []},
+        [],
+        {"conflict_sets": []},
+        budget_tokens=budget_tokens,
+        community_member_ids=member_entity_ids,
+        community_representative_ids=representative_entity_ids,
+        db_connection=conn,
+    )
+
+    title_by_id = {
+        match["entity_id"]: match["title"]
+        for match in seed_result["representative_matches"] + seed_result["member_matches"]
+    }
+    community_id_by_id = {
+        match["entity_id"]: match["community_id"]
+        for match in seed_result["representative_matches"] + seed_result["member_matches"]
+    }
+    similarity_by_id = {
+        match["entity_id"]: match["seed_similarity"]
+        for match in seed_result["representative_matches"]
+    } | {match["entity_id"]: match["similarity"] for match in seed_result["member_matches"]}
+
+    surfaced_ids = set(budget_result["community_representative_entity_ids"]) | set(
+        budget_result["packed_entity_ids"]["community_member"]
+    )
+    memory_type_by_id: dict[str, str] = {}
+    if surfaced_ids:
+        placeholders = ",".join("?" for _ in surfaced_ids)
+        rows = conn.execute(
+            f"SELECT id, memory_type FROM entities WHERE id IN ({placeholders})",
+            tuple(surfaced_ids),
+        ).fetchall()
+        memory_type_by_id = {row[0]: row[1] for row in rows}
+
+    memories: list[dict[str, Any]] = []
+    for entity_id in budget_result["community_representative_entity_ids"]:
+        memories.append(
+            {
+                "entity_id": entity_id,
+                "title": title_by_id[entity_id],
+                "memory_type": memory_type_by_id.get(entity_id, "unknown"),
+                "inclusion": "community_representative",
+                "retrieval_provenance": [
+                    {
+                        "reason": "community_representative",
+                        "community_id": community_id_by_id[entity_id],
+                        "seed_similarity": similarity_by_id[entity_id],
+                    }
+                ],
+            }
+        )
+    for entity_id in budget_result["packed_entity_ids"]["community_member"]:
+        memories.append(
+            {
+                "entity_id": entity_id,
+                "title": title_by_id[entity_id],
+                "memory_type": memory_type_by_id.get(entity_id, "unknown"),
+                "inclusion": "community_member",
+                "retrieval_provenance": [
+                    {
+                        "reason": "community_member",
+                        "community_id": community_id_by_id[entity_id],
+                        "similarity": similarity_by_id[entity_id],
+                    }
+                ],
+            }
+        )
+
+    return {
+        "query": query,
+        "memories": memories,
+        "edges": [],
+        "lineage": {},
+        "conflict_sets": [],
+        "metadata": {
+            "strategy": "global",
+            "community": {
+                "seed_top_k": seed_result["seed_cap"],
+                "representative_reserve": seed_result["representative_reserve"],
+                "member_pool": seed_result["member_pool"],
+            },
+            "budget": budget_result["budget"],
+        },
+    }

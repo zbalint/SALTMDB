@@ -15,12 +15,14 @@ from saltmdb.domain.services.embedding_service import get_model
 logger = logging.getLogger(__name__)
 
 
-def pack_context_budget(
+def pack_context_budget(  # noqa: PLR0912, PLR0915
     expansion_result: dict[str, Any],
     primary_hits: list[dict[str, Any]],
     conflict_sets_result: dict[str, Any],
     *,
     budget_tokens: int | None = None,
+    community_member_ids: list[str] | None = None,
+    community_representative_ids: set[str] | None = None,
     orphan_community_entity_ids: set[str] | None = None,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
@@ -42,12 +44,22 @@ def pack_context_budget(
         if member["inclusion"] == "conflict_only"
     }
     orphan_community_ids: set[str] = orphan_community_entity_ids or set()
+    community_member_ids = community_member_ids or []
+    community_representative_ids = community_representative_ids or set()
 
-    if not primary_ids and not expansion_ids and not conflict_only_ids and not orphan_community_ids:
+    if (
+        not primary_ids
+        and not expansion_ids
+        and not conflict_only_ids
+        and not orphan_community_ids
+        and not community_member_ids
+        and not community_representative_ids
+    ):
         return {
-            "packed_entity_ids": {"primary": [], "expansion": []},
-            "dropped_entity_ids": {"primary": [], "expansion": []},
+            "packed_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+            "dropped_entity_ids": {"primary": [], "expansion": [], "community_member": []},
             "conflict_only_entity_ids": [],
+            "community_representative_entity_ids": [],
             "token_counts": {},
             "budget": {
                 "unit": "tokens",
@@ -59,6 +71,9 @@ def pack_context_budget(
                 "expansion_dropped_count": 0,
                 "conflict_reserve_tokens_used": 0,
                 "orphan_community_reserve_tokens_used": 0,
+                "community_member_truncated": False,
+                "community_member_dropped_count": 0,
+                "community_representative_reserve_tokens_used": 0,
             },
         }
 
@@ -69,7 +84,14 @@ def pack_context_budget(
         should_close = True
 
     try:
-        all_ids = set(primary_ids) | set(expansion_ids) | conflict_only_ids | orphan_community_ids
+        all_ids = (
+            set(primary_ids)
+            | set(expansion_ids)
+            | conflict_only_ids
+            | orphan_community_ids
+            | set(community_member_ids)
+            | community_representative_ids
+        )
         placeholders = ",".join("?" for _ in all_ids)
         rows = conn.execute(
             f"SELECT id, full_content FROM entities WHERE id IN ({placeholders})", tuple(all_ids)
@@ -101,6 +123,15 @@ def pack_context_budget(
                 used += cost
             else:
                 expansion_dropped.append(entity_id)
+        community_member_packed: list[str] = []
+        community_member_dropped: list[str] = []
+        for entity_id in community_member_ids:
+            cost = token_counts[entity_id]
+            if used + cost <= effective_budget:
+                community_member_packed.append(entity_id)
+                used += cost
+            else:
+                community_member_dropped.append(entity_id)
 
         conflict_reserve_tokens_used = sum(
             token_counts[entity_id] for entity_id in conflict_only_ids
@@ -108,10 +139,22 @@ def pack_context_budget(
         orphan_community_reserve_tokens_used = sum(
             token_counts[entity_id] for entity_id in orphan_community_ids
         )
+        community_representative_reserve_tokens_used = sum(
+            token_counts[entity_id] for entity_id in community_representative_ids
+        )
         return {
-            "packed_entity_ids": {"primary": primary_packed, "expansion": expansion_packed},
-            "dropped_entity_ids": {"primary": primary_dropped, "expansion": expansion_dropped},
+            "packed_entity_ids": {
+                "primary": primary_packed,
+                "expansion": expansion_packed,
+                "community_member": community_member_packed,
+            },
+            "dropped_entity_ids": {
+                "primary": primary_dropped,
+                "expansion": expansion_dropped,
+                "community_member": community_member_dropped,
+            },
             "conflict_only_entity_ids": sorted(conflict_only_ids),
+            "community_representative_entity_ids": sorted(community_representative_ids),
             "token_counts": token_counts,
             "budget": {
                 "unit": "tokens",
@@ -123,6 +166,9 @@ def pack_context_budget(
                 "expansion_dropped_count": len(expansion_dropped),
                 "conflict_reserve_tokens_used": conflict_reserve_tokens_used,
                 "orphan_community_reserve_tokens_used": orphan_community_reserve_tokens_used,
+                "community_member_truncated": len(community_member_dropped) > 0,
+                "community_member_dropped_count": len(community_member_dropped),
+                "community_representative_reserve_tokens_used": community_representative_reserve_tokens_used,
             },
         }
     finally:

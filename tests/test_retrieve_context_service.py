@@ -652,6 +652,220 @@ class TestRetrieveContextService(unittest.TestCase):
         self._assert_empty_envelope(result, query)
         self.assertEqual(search_memory.call_args.kwargs["db_path"], self.db_path)
 
+    def test_global_populated_leaf_community_uses_community_pipeline_only(self):
+        query = "global-community-query"
+        representative = self._memory("Global representative", f"{query} representative content")
+        member = self._memory("Global member", f"{query} member content")
+        query_vector = [1.0] + [0.0] * 383
+        community_id = "global-community"
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO communities "
+            "(id, representative_entity_id, member_count, level, created_at) VALUES (?, ?, ?, 0, ?)",
+            (community_id, representative, 2, now),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 0)",
+            (representative, community_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 0)",
+            (member, community_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
+            (community_id, sqlite_vec.serialize_float32(query_vector)),
+        )
+        self.conn.execute("DELETE FROM entity_embeddings WHERE entity_id = ?", (member,))
+        self.conn.execute(
+            "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+            (member, sqlite_vec.serialize_float32(query_vector)),
+        )
+        self.conn.commit()
+
+        with (
+            patch(
+                "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory"
+            ) as search_memory,
+            patch(
+                "saltmdb.domain.services.retrieve_context_service.expand_context_candidates"
+            ) as expand_context_candidates,
+            patch(
+                "saltmdb.domain.services.retrieve_context_service.assemble_conflict_sets"
+            ) as assemble_conflict_sets,
+            patch(
+                "saltmdb.domain.services.retrieve_context_service.find_orphan_community_matches"
+            ) as find_orphan_community_matches,
+            patch(
+                "saltmdb.domain.services.retrieve_context_service.assemble_lineage"
+            ) as assemble_lineage,
+            patch(
+                "saltmdb.domain.services.community_retrieval_service.embed_text",
+                return_value=query_vector,
+            ) as embed_text,
+        ):
+            result = assemble_retrieve_context(
+                query,
+                "retrieve-context-test",
+                strategy="global",
+                budget_tokens=1000,
+                db_path=self.db_path,
+            )
+
+        embed_text.assert_called_once_with(query)
+        search_memory.assert_not_called()
+        expand_context_candidates.assert_not_called()
+        assemble_conflict_sets.assert_not_called()
+        find_orphan_community_matches.assert_not_called()
+        assemble_lineage.assert_not_called()
+        self.assertEqual(
+            result["memories"],
+            [
+                {
+                    "entity_id": representative,
+                    "title": "Global representative",
+                    "memory_type": "fact",
+                    "inclusion": "community_representative",
+                    "retrieval_provenance": [
+                        {
+                            "reason": "community_representative",
+                            "community_id": community_id,
+                            "seed_similarity": 1.0,
+                        }
+                    ],
+                },
+                {
+                    "entity_id": member,
+                    "title": "Global member",
+                    "memory_type": "fact",
+                    "inclusion": "community_member",
+                    "retrieval_provenance": [
+                        {
+                            "reason": "community_member",
+                            "community_id": community_id,
+                            "similarity": 1.0,
+                        }
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(result["edges"], [])
+        self.assertEqual(result["lineage"], {})
+        self.assertEqual(result["conflict_sets"], [])
+        self.assertNotIn("fan_out", result["metadata"])
+        self.assertEqual(
+            result["metadata"]["community"],
+            {
+                "seed_top_k": {
+                    "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+                    "eligible_count": 1,
+                    "truncated": False,
+                    "dropped_count": 0,
+                },
+                "representative_reserve": {
+                    "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+                    "eligible_count": 1,
+                    "truncated": False,
+                    "dropped_count": 0,
+                },
+                "member_pool": {
+                    "cap": config.CONTEXT_GLOBAL_MEMBER_POOL_CAP,
+                    "eligible_count": 1,
+                    "truncated": False,
+                    "dropped_count": 0,
+                },
+            },
+        )
+        budget = result["metadata"]["budget"]
+        self.assertEqual(budget["limit"], 1000)
+        self.assertEqual(budget["used"], self._content_tokens(member))
+        self.assertEqual(
+            budget["community_representative_reserve_tokens_used"],
+            self._content_tokens(representative),
+        )
+        self.assertFalse(budget["community_member_truncated"])
+        self.assertEqual(budget["community_member_dropped_count"], 0)
+
+    def test_global_without_communities_returns_empty_hierarchy_envelope(self):
+        query = "global-empty-query"
+        query_vector = [1.0] + [0.0] * 383
+        with patch(
+            "saltmdb.domain.services.community_retrieval_service.embed_text",
+            return_value=query_vector,
+        ):
+            result = assemble_retrieve_context(
+                query,
+                "retrieve-context-test",
+                strategy="global",
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(
+            result,
+            {
+                "query": query,
+                "memories": [],
+                "edges": [],
+                "lineage": {},
+                "conflict_sets": [],
+                "metadata": {
+                    "strategy": "global",
+                    "community": {
+                        "seed_top_k": {
+                            "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+                            "eligible_count": 0,
+                            "truncated": False,
+                            "dropped_count": 0,
+                        },
+                        "representative_reserve": {
+                            "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+                            "eligible_count": 0,
+                            "truncated": False,
+                            "dropped_count": 0,
+                        },
+                        "member_pool": {
+                            "cap": config.CONTEXT_GLOBAL_MEMBER_POOL_CAP,
+                            "eligible_count": 0,
+                            "truncated": False,
+                            "dropped_count": 0,
+                        },
+                    },
+                    "budget": {
+                        "unit": "tokens",
+                        "limit": config.CONTEXT_BUDGET_DEFAULT_TOKENS,
+                        "used": 0,
+                        "primary_truncated": False,
+                        "primary_dropped_count": 0,
+                        "expansion_truncated": False,
+                        "expansion_dropped_count": 0,
+                        "conflict_reserve_tokens_used": 0,
+                        "orphan_community_reserve_tokens_used": 0,
+                        "community_member_truncated": False,
+                        "community_member_dropped_count": 0,
+                        "community_representative_reserve_tokens_used": 0,
+                    },
+                },
+            },
+        )
+        self.assertNotIn("fan_out", result["metadata"])
+
+    def test_explicit_local_strategy_matches_omitted_strategy(self):
+        query = "local-strategy-regression"
+        with patch(
+            "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
+            return_value=[],
+        ):
+            omitted = self._assemble(query)
+            explicit = assemble_retrieve_context(
+                query,
+                "retrieve-context-test",
+                strategy="local",
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(omitted, explicit)
+        self._assert_empty_envelope(omitted, query)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1080,6 +1080,7 @@ def retrieve_context(
     query: str,
     limit: int | None = None,
     budget_tokens: int | None = None,
+    strategy: Literal["local", "global"] | None = None,
 ) -> dict:
     """Assembles graph-aware, budget-bounded local context for a query in one call: primary search
     hits, one-hop predicate-allowlisted graph expansion, contradiction/conflict-set surfacing,
@@ -1101,6 +1102,16 @@ def retrieve_context(
     own default). budget_tokens caps the total token payload of memories[] (server default and hard
     ceiling apply if omitted). All other traversal behavior -- which relation predicates expand
     context, how far, and in which direction -- is fixed for this tool and not caller-configurable.
+    strategy selects the retrieval mode: "local" (the default) is the existing bounded one-hop-plus
+    expansion described above. "global" instead seeds from whichever leaf community-detection
+    clusters (see Milestone C) are nearest the query by embedding similarity, synthesizing a
+    representative-plus-ranked-members result per seeded community for whole-topic breadth rather
+    than one-hop-local depth -- it never runs the primary-search/expansion/conflict/lineage pipeline
+    above at all, so edges/lineage/conflict_sets are always empty and memories[] items instead carry
+    inclusion "community_representative"|"community_member" with a different retrieval_provenance
+    shape (community_id plus a similarity score) and metadata carries a new metadata.community
+    namespace in place of metadata.fan_out.
+
     """
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
@@ -1109,6 +1120,7 @@ def retrieve_context(
             "query": query,
             "limit": limit,
             "budget_tokens": budget_tokens,
+            "strategy": strategy if strategy is not None else "local",
             "owner_id": owner_id_,
         },
     )

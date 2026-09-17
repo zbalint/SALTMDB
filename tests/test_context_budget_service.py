@@ -97,9 +97,10 @@ class TestContextBudgetService(unittest.TestCase):
         self.assertEqual(
             result,
             {
-                "packed_entity_ids": {"primary": [], "expansion": []},
-                "dropped_entity_ids": {"primary": [], "expansion": []},
+                "packed_entity_ids": {"primary": [], "expansion": [], "community_member": []},
+                "dropped_entity_ids": {"primary": [], "expansion": [], "community_member": []},
                 "conflict_only_entity_ids": [],
+                "community_representative_entity_ids": [],
                 "token_counts": {},
                 "budget": {
                     "unit": "tokens",
@@ -111,6 +112,9 @@ class TestContextBudgetService(unittest.TestCase):
                     "expansion_dropped_count": 0,
                     "conflict_reserve_tokens_used": 0,
                     "orphan_community_reserve_tokens_used": 0,
+                    "community_member_truncated": False,
+                    "community_member_dropped_count": 0,
+                    "community_representative_reserve_tokens_used": 0,
                 },
             },
         )
@@ -125,8 +129,13 @@ class TestContextBudgetService(unittest.TestCase):
             db_connection=self.conn,
         )
 
-        self.assertEqual(result["packed_entity_ids"], {"primary": primary, "expansion": expansion})
-        self.assertEqual(result["dropped_entity_ids"], {"primary": [], "expansion": []})
+        self.assertEqual(
+            result["packed_entity_ids"],
+            {"primary": primary, "expansion": expansion, "community_member": []},
+        )
+        self.assertEqual(
+            result["dropped_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
         self.assertFalse(result["budget"]["primary_truncated"])
         self.assertFalse(result["budget"]["expansion_truncated"])
         expected_counts = {
@@ -208,7 +217,9 @@ class TestContextBudgetService(unittest.TestCase):
             db_connection=self.conn,
         )
 
-        self.assertEqual(result["packed_entity_ids"], {"primary": [], "expansion": []})
+        self.assertEqual(
+            result["packed_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
         self.assertEqual(result["dropped_entity_ids"]["primary"], [primary])
         self.assertEqual(result["conflict_only_entity_ids"], [conflict_only])
         self.assertGreater(result["token_counts"][conflict_only], 0)
@@ -309,10 +320,63 @@ class TestContextBudgetService(unittest.TestCase):
 
         self.assertEqual(result["packed_entity_ids"]["primary"], [primary])
         self.assertEqual(result["packed_entity_ids"]["expansion"], [expansion])
-        self.assertEqual(result["dropped_entity_ids"], {"primary": [], "expansion": []})
+        self.assertEqual(
+            result["dropped_entity_ids"], {"primary": [], "expansion": [], "community_member": []}
+        )
         self.assertEqual(result["conflict_only_entity_ids"], [conflict_only])
         self.assertEqual(set(result["token_counts"]), {primary, expansion, conflict_only})
         self.assertGreater(result["budget"]["conflict_reserve_tokens_used"], 0)
+
+    def test_scenario_11_community_members_pack_in_order_and_truncate_with_first_fit(self):
+        members = [
+            self._memory("Community member one", "first community member content."),
+            self._memory("Community member two", "second community member content."),
+            self._memory("Community member three", "third community member content."),
+        ]
+        first_two_cost = sum(
+            get_model().token_count(self._content(entity_id)) for entity_id in members[:2]
+        )
+
+        result = pack_context_budget(
+            {"expansion_candidates": []},
+            [],
+            {"conflict_sets": []},
+            budget_tokens=first_two_cost,
+            community_member_ids=members,
+            db_connection=self.conn,
+        )
+
+        self.assertEqual(result["packed_entity_ids"]["community_member"], members[:2])
+        self.assertEqual(result["dropped_entity_ids"]["community_member"], [members[2]])
+        self.assertTrue(result["budget"]["community_member_truncated"])
+        self.assertEqual(result["budget"]["community_member_dropped_count"], 1)
+        self.assertEqual(result["budget"]["used"], first_two_cost)
+
+    def test_scenario_12_community_representatives_reserve_tokens_outside_ordinary_budget(self):
+        primary = self._memory("Community representative primary", "ordinary primary content.")
+        representative = self._memory(
+            "Community representative reserve",
+            "A representative must remain available outside the ordinary token budget.",
+        )
+
+        result = pack_context_budget(
+            {"expansion_candidates": []},
+            [{"id": primary, "score": 1.0}],
+            {"conflict_sets": []},
+            budget_tokens=0,
+            community_representative_ids={representative},
+            db_connection=self.conn,
+        )
+
+        self.assertEqual(result["packed_entity_ids"]["primary"], [])
+        self.assertEqual(result["dropped_entity_ids"]["primary"], [primary])
+        self.assertEqual(result["community_representative_entity_ids"], [representative])
+        self.assertGreater(result["token_counts"][representative], 0)
+        self.assertEqual(
+            result["budget"]["community_representative_reserve_tokens_used"],
+            result["token_counts"][representative],
+        )
+        self.assertEqual(result["budget"]["used"], 0)
 
 
 if __name__ == "__main__":
