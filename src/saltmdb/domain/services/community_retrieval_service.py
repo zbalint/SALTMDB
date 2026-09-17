@@ -9,6 +9,7 @@ import numpy as np
 from saltmdb.config import (
     CONTEXT_GLOBAL_MEMBER_POOL_CAP,
     CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+    CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP,
     CONTEXT_GLOBAL_SEED_SIMILARITY_GAP,
     CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
     get_db_path,
@@ -35,6 +36,7 @@ def _empty_result() -> dict[str, Any]:
         "representative_reserve": {
             "cap": CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
             **zero_cap,
+            "gap_dropped_count": 0,
         },
         "member_pool": {"cap": CONTEXT_GLOBAL_MEMBER_POOL_CAP, **zero_cap},
     }
@@ -62,6 +64,16 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
     stays within CONTEXT_GLOBAL_SEED_SIMILARITY_GAP of rank-1's own similarity. This floor can only
     shrink the top-K window, never grow it, and can never produce zero seeded communities when at
     least one eligible community exists.
+    Representative selection itself is then gated by a second relative similarity floor: after
+    ranking every seeded community's own best-matching member by that member's real per-query
+    similarity and capping at CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP, the single best-ranked
+    representative candidate is always admitted regardless of its own absolute similarity, and
+    every subsequent representative candidate is admitted only while its own similarity stays
+    within CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP of the best one's own similarity. This
+    floor can only shrink the representative-reserve window, never grow it, and can never produce
+    zero admitted representatives when at least one eligible representative candidate exists. A
+    community whose representative candidate is excluded by either the cap or this gap still
+    contributes its own other members to the shared member pool, unaffected.
     """
     should_close = db_connection is None
     conn = db_connection if db_connection is not None else get_connection(db_path or get_db_path())
@@ -167,9 +179,10 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
                 scored_by_community[community_by_member[entity_id]].append((entity_id, similarity))
 
         # For each seeded community (in centroid-seed rank order), the single best per-query match
-        # becomes that community's representative for this response; every other scored member of
-        # that community falls through to the shared member pool below. A community contributes
-        # nothing to either list if none of its members have an embedding row.
+        # becomes that community's representative candidate for this response; every other scored
+        # member of that community falls through to the shared member pool below, unconditionally --
+        # independent of whatever happens to its own community's representative candidate afterward.
+        # A community contributes nothing to either list if none of its members have an embedding row.
         representative_candidates: list[tuple[str, str, float]] = []
         member_candidates: list[tuple[str, str, float]] = []
         for community_id, _centroid_similarity in seeded:
@@ -183,17 +196,37 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
                 (entity_id, community_id, similarity) for entity_id, similarity in scored[1:]
             )
 
+        # Relative admission gap (D4 fix, SALTMDB memory 6dc8924d): representative_candidates is
+        # ranked by each candidate's own real per-query similarity -- not by its community's
+        # centroid/seed rank -- mirroring member_candidates' own sort exactly. The best-ranked
+        # candidate (representative_capped[0]) is always admitted regardless of its own absolute
+        # similarity -- this floor can only shrink the reserve-cap window, never produce an empty
+        # representative_reserve. Every subsequent capped candidate, in similarity-descending order,
+        # is admitted only while it stays within CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP of the
+        # best one's own similarity; the first candidate that violates the gap ends the admitted
+        # prefix (every later entry has equal or lower similarity, so it would violate the gap too).
+        representative_candidates.sort(key=lambda item: (-item[2], item[0]))
         representative_eligible_count = len(representative_candidates)
-        representative_admitted = representative_candidates[
+        representative_capped = representative_candidates[
             :CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP
         ]
+        representative_admitted: list[tuple[str, str, float]] = []
+        for entity_id, community_id, similarity in representative_capped:
+            if representative_admitted and (
+                representative_capped[0][2] - similarity
+                > CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP
+            ):
+                break
+            representative_admitted.append((entity_id, community_id, similarity))
         representative_reserve = {
             "cap": CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
             "eligible_count": representative_eligible_count,
-            "truncated": representative_eligible_count > CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+            "truncated": representative_eligible_count > CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP
+            or len(representative_admitted) < len(representative_capped),
             "dropped_count": max(
                 0, representative_eligible_count - CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP
             ),
+            "gap_dropped_count": len(representative_capped) - len(representative_admitted),
         }
 
         member_candidates.sort(key=lambda item: (-item[2], item[0]))

@@ -794,6 +794,7 @@ class TestRetrieveContextService(unittest.TestCase):
                     "eligible_count": 1,
                     "truncated": False,
                     "dropped_count": 0,
+                    "gap_dropped_count": 0,
                 },
                 "member_pool": {
                     "cap": config.CONTEXT_GLOBAL_MEMBER_POOL_CAP,
@@ -850,6 +851,7 @@ class TestRetrieveContextService(unittest.TestCase):
                             "eligible_count": 0,
                             "truncated": False,
                             "dropped_count": 0,
+                            "gap_dropped_count": 0,
                         },
                         "member_pool": {
                             "cap": config.CONTEXT_GLOBAL_MEMBER_POOL_CAP,

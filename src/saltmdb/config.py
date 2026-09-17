@@ -409,18 +409,43 @@ CONTEXT_GLOBAL_SEED_SIMILARITY_GAP = 0.5
 # memory 51127287) -- strategy:"global" retrieve_context's representative-slot reserve: how many of
 # the CONTEXT_GLOBAL_TOP_K_COMMUNITIES seeded leaf communities actually get their own constraint-19
 # representative force-included as a guaranteed, budget-accounted (but never budget-gated) slot.
-# Ranked by each seeded community's own seed similarity -- the lowest-similarity seeded communities'
-# representatives are dropped first if the seed count exceeds this cap. Independently capped from
-# CONTEXT_GLOBAL_MEMBER_POOL_CAP below -- a community whose representative was dropped here still
-# contributes its own members to the member pool on equal footing (see this spec's own §1 design
-# decision 1). PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- seeded at the same
-# order of magnitude as CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP's own current value, mirroring that
-# constant's own "sparse force-include mechanism" shape, not derived from any benchmark of its own.
-# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
-# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
-# framing when tuning this; replace this comment with the benchmark citation once a real value is
-# locked.
+# Milestone D4 fix (SALTMDB memory 6dc8924d, live DNS repro this same session) -- ranked by each
+# admitted representative's own real per-query similarity (post Bug A fix, memory 3c40dd0e), NOT by
+# its community's centroid/seed-rank similarity -- the weakest-matching representatives are dropped
+# first if the eligible count exceeds this cap, and CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP
+# below can additionally shrink this window before the cap is even reached. Independently capped
+# from CONTEXT_GLOBAL_MEMBER_POOL_CAP below -- a community whose representative candidate is dropped
+# here (by either the cap or the gap) still contributes its own other members to the member pool on
+# equal footing; the dropped representative candidate itself is never redirected into the member
+# pool (this constant's own pre-existing cap-independent behavior, unchanged by the D4 fix).
+# PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- seeded at the same order of
+# magnitude as CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP's own current value, mirroring that constant's
+# own "sparse force-include mechanism" shape, not derived from any benchmark of its own. Recalibrated
+# by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28) via its own
+# concrete quantitative sweep against the live corpus. Do not remove the placeholder framing when
+# tuning this; replace this comment with the benchmark citation once a real value is locked.
 CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP = 5
+# Milestone D4 fix (SALTMDB memory 6dc8924d, live DNS repro this same session) -- strategy:"global"
+# retrieve_context's representative-slot relative admission gate: an admitted representative
+# candidate is kept only if its own real per-query similarity is within this absolute gap of the
+# single best-matching representative's own similarity in the same call. The best representative
+# itself is always force-included regardless of its own absolute similarity (its own gap-to-itself
+# is always 0, so it is never subject to this gap), so this floor can only ever shrink the existing
+# CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP window, never produce an empty representative_reserve on
+# its own when at least one eligible representative candidate exists. This mirrors
+# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP above exactly -- same ABSOLUTE GAP (not FIXED absolute floor)
+# shape and the same generalization reasoning (see that constant's own comment and the
+# RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE removal NOTE below RERANK_GAP_SKIP_RATIO) -- just applied one
+# stage later, to each representative's own real per-query similarity instead of its community's
+# centroid similarity. Closes the gap D3 (memory 9c4d6277's decision 6) left open: a community
+# relevant enough to be seeded does not guarantee its own single best member is itself a strong
+# match, and representative_reserve previously had no floor of its own at all. PLACEHOLDER: not yet
+# benchmarked against SALTMDB's own live corpus -- seeded at the same value as
+# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP for consistency, validated by hand against every existing
+# test_community_retrieval_service.py scenario before locking (see this spec's own pre-lock gate).
+# Recalibrate via a real benchmark sweep before treating this as final; do not remove the placeholder
+# framing when tuning it.
+CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP = 0.5
 
 # Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
 # memory 51127287) -- strategy:"global" retrieve_context's member-pool node-eligibility cap: the
