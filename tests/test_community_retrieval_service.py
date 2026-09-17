@@ -133,7 +133,11 @@ class TestCommunityRetrievalService(unittest.TestCase):
         return {
             "representative_matches": [],
             "member_matches": [],
-            "seed_cap": {"cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES, **cap},
+            "seed_cap": {
+                "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+                **cap,
+                "gap_dropped_count": 0,
+            },
             "representative_reserve": {
                 "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
                 **cap,
@@ -154,13 +158,13 @@ class TestCommunityRetrievalService(unittest.TestCase):
         embed.assert_not_called()
         self.assertEqual(result, self._zero_shape())
 
-    def test_scenario_03_fewer_leaf_communities_all_seeded(self):
+    def test_scenario_03_gap_floor_excludes_orthogonal_second_community(self):
         first_rep, _ = self._insert_community(
             "community-a",
             [("A representative", _axis_vector(0)), ("A member", _axis_vector(1))],
             _axis_vector(0),
         )
-        second_rep, _ = self._insert_community(
+        self._insert_community(
             "community-b",
             [("B representative", _axis_vector(0)), ("B member", _axis_vector(1))],
             _axis_vector(1),
@@ -169,18 +173,24 @@ class TestCommunityRetrievalService(unittest.TestCase):
         with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
             result = seed_and_rank_communities("community query", db_connection=self.conn)
 
+        # community-b's centroid is orthogonal to the query (similarity 0.0) while community-a's is
+        # an exact match (1.0) -- a gap of 1.0, exceeding CONTEXT_GLOBAL_SEED_SIMILARITY_GAP (0.5).
+        # This reproduces probe 3's confirmed Bug B defect shape in miniature: before this fix,
+        # community-b was still seeded purely because fewer leaf communities existed than
+        # CONTEXT_GLOBAL_TOP_K_COMMUNITIES, regardless of its zero relevance to the query.
         self.assertEqual(
             result["seed_cap"],
             {
                 "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
                 "eligible_count": 2,
-                "truncated": False,
+                "truncated": True,
                 "dropped_count": 0,
+                "gap_dropped_count": 1,
             },
         )
         self.assertEqual(
             [match["entity_id"] for match in result["representative_matches"]],
-            [first_rep, second_rep],
+            [first_rep],
         )
 
     def test_scenario_04_top_k_seeding_truncates_by_centroid_similarity(self):
@@ -213,6 +223,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
                 "eligible_count": 3,
                 "truncated": True,
                 "dropped_count": 1,
+                "gap_dropped_count": 0,
             },
         )
         self.assertEqual(
@@ -413,6 +424,73 @@ class TestCommunityRetrievalService(unittest.TestCase):
 
         self.assertEqual(result["representative_matches"][0]["entity_id"], representative)
         self.assertEqual(result["representative_matches"][0]["title"], "Unknown")
+
+    def test_scenario_11_communities_within_gap_all_seeded(self):
+        first_rep, _ = self._insert_community(
+            "community-a",
+            [("A representative", _axis_vector(0)), ("A member", _axis_vector(1))],
+            _cosine_vector(1.0),
+        )
+        second_rep, _ = self._insert_community(
+            "community-b",
+            [("B representative", _axis_vector(0)), ("B member", _axis_vector(1))],
+            _cosine_vector(0.7),
+        )
+
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            result = seed_and_rank_communities("community query", db_connection=self.conn)
+
+        # Both centroids are within CONTEXT_GLOBAL_SEED_SIMILARITY_GAP (0.5) of the top match's own
+        # similarity (gap 0.3) -- the floor admits both, confirming the fix trims genuine outliers
+        # only, not every community below rank 1.
+        self.assertEqual(
+            result["seed_cap"],
+            {
+                "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+                "eligible_count": 2,
+                "truncated": False,
+                "dropped_count": 0,
+                "gap_dropped_count": 0,
+            },
+        )
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [first_rep, second_rep],
+        )
+
+    def test_scenario_12_top_ranked_community_seeded_despite_weak_absolute_similarity(self):
+        weak_rep, _ = self._insert_community(
+            "community-a",
+            [("Weak representative", _axis_vector(0)), ("Weak member", _axis_vector(1))],
+            _cosine_vector(0.05),
+        )
+        self._insert_community(
+            "community-b",
+            [("Excluded representative", _axis_vector(0)), ("Excluded member", _axis_vector(1))],
+            _cosine_vector(-0.5),
+        )
+
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            result = seed_and_rank_communities("community query", db_connection=self.conn)
+
+        # community-a is rank 1 (similarity 0.05) and is force-included despite being a weak
+        # absolute match -- the gap floor can never produce an empty seed set. community-b
+        # (similarity -0.5, gap 0.55 from rank 1) exceeds CONTEXT_GLOBAL_SEED_SIMILARITY_GAP (0.5)
+        # and is correctly excluded.
+        self.assertEqual(
+            result["seed_cap"],
+            {
+                "cap": config.CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+                "eligible_count": 2,
+                "truncated": True,
+                "dropped_count": 0,
+                "gap_dropped_count": 1,
+            },
+        )
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [weak_rep],
+        )
 
 
 if __name__ == "__main__":

@@ -787,6 +787,7 @@ class TestRetrieveContextService(unittest.TestCase):
                     "eligible_count": 1,
                     "truncated": False,
                     "dropped_count": 0,
+                    "gap_dropped_count": 0,
                 },
                 "representative_reserve": {
                     "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
@@ -842,6 +843,7 @@ class TestRetrieveContextService(unittest.TestCase):
                             "eligible_count": 0,
                             "truncated": False,
                             "dropped_count": 0,
+                            "gap_dropped_count": 0,
                         },
                         "representative_reserve": {
                             "cap": config.CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,

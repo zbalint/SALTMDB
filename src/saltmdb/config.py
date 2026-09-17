@@ -382,6 +382,28 @@ COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.60
 # placeholder framing when tuning this; replace this comment with the benchmark citation once a
 # real value is locked.
 CONTEXT_GLOBAL_TOP_K_COMMUNITIES = 10
+# Milestone D2 Bug B fix (SALTMDB memory 510c19ff, live DNS repro bb609f00) -- strategy:"global"
+# retrieve_context's community-seeding relative admission gate: a candidate leaf community is
+# admitted only if its centroid-to-query cosine similarity is within this absolute gap of the
+# single best-matching (rank-1) community's own similarity in the same call. Rank-1 itself is
+# always force-included regardless of its own absolute similarity (never subject to this gap), so
+# this floor can only ever shrink the existing CONTEXT_GLOBAL_TOP_K_COMMUNITIES window, never
+# produce an empty seed set on its own -- structurally avoiding the exact false-negative failure
+# mode (local strategy's strict abstention gate, memory b9b75764, original incident
+# e957aa78/33cb492f) that constraint 27's original "no floor in v1" choice was written to avoid
+# repeating. This is an ABSOLUTE GAP anchored to this call's own top match, not a FIXED absolute
+# similarity floor on raw centroid similarity -- the fixed-absolute-floor shape was already tried
+# and abandoned once for the entity-level relevance gate elsewhere in this file (see the
+# RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE removal NOTE below RERANK_GAP_SKIP_RATIO: an absolute
+# cosine-distance/-similarity cutoff does not generalize as candidate-pool size grows). PLACEHOLDER:
+# not yet benchmarked against SALTMDB's own live corpus -- seeded by direct verification against
+# every existing test_community_retrieval_service.py scenario at this value: it changes only the
+# one scenario Bug B's fix is meant to change (two orthogonal leaf communities, gap 1.0), and
+# every other scenario's real cross-community gap (<=0.4) stays admitted, unaffected. Recalibrate
+# via a real benchmark sweep (mirroring COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD's positive/negative-
+# pair methodology) before treating this as final; do not remove the placeholder framing when
+# tuning it.
+CONTEXT_GLOBAL_SEED_SIMILARITY_GAP = 0.5
 
 # Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
 # memory 51127287) -- strategy:"global" retrieve_context's representative-slot reserve: how many of

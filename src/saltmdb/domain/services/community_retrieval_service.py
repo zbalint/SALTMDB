@@ -9,6 +9,7 @@ import numpy as np
 from saltmdb.config import (
     CONTEXT_GLOBAL_MEMBER_POOL_CAP,
     CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
+    CONTEXT_GLOBAL_SEED_SIMILARITY_GAP,
     CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
     get_db_path,
 )
@@ -30,7 +31,7 @@ def _empty_result() -> dict[str, Any]:
     return {
         "representative_matches": [],
         "member_matches": [],
-        "seed_cap": {"cap": CONTEXT_GLOBAL_TOP_K_COMMUNITIES, **zero_cap},
+        "seed_cap": {"cap": CONTEXT_GLOBAL_TOP_K_COMMUNITIES, **zero_cap, "gap_dropped_count": 0},
         "representative_reserve": {
             "cap": CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP,
             **zero_cap,
@@ -54,6 +55,13 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
     fall through to one shared member pool ranked by member-to-query similarity. The fixed
     representative_entity_id is never surfaced as-is -- it is only one candidate among its
     community's members for this per-query selection.
+    Community seeding itself is gated by a relative similarity floor: after ranking every leaf
+    community by centroid-to-query similarity and capping at CONTEXT_GLOBAL_TOP_K_COMMUNITIES, the
+    single best-ranked (rank-1) community is always admitted regardless of its own absolute
+    similarity, and every subsequent community is admitted only while its centroid similarity
+    stays within CONTEXT_GLOBAL_SEED_SIMILARITY_GAP of rank-1's own similarity. This floor can only
+    shrink the top-K window, never grow it, and can never produce zero seeded communities when at
+    least one eligible community exists.
     """
     should_close = db_connection is None
     conn = db_connection if db_connection is not None else get_connection(db_path or get_db_path())
@@ -88,12 +96,26 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
             key=lambda item: (-item[1], item[0]),
         )
         eligible_count = len(ranked_communities)
-        seeded = ranked_communities[:CONTEXT_GLOBAL_TOP_K_COMMUNITIES]
+        capped = ranked_communities[:CONTEXT_GLOBAL_TOP_K_COMMUNITIES]
+        # Relative admission gap (Bug B fix, SALTMDB memory 510c19ff): rank-1 (capped[0]) is always
+        # admitted regardless of its own absolute similarity -- this floor can only shrink the
+        # top-K window, never produce an empty seed set. Every subsequent community, in
+        # similarity-descending order, is admitted only while it stays within
+        # CONTEXT_GLOBAL_SEED_SIMILARITY_GAP of rank-1's own similarity; the first community that
+        # violates the gap ends the admitted prefix (every later entry has equal or lower
+        # similarity, so it would violate the gap too).
+        seeded: list[tuple[str, float]] = []
+        for community_id, similarity in capped:
+            if seeded and capped[0][1] - similarity > CONTEXT_GLOBAL_SEED_SIMILARITY_GAP:
+                break
+            seeded.append((community_id, similarity))
         seed_cap = {
             "cap": CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
             "eligible_count": eligible_count,
-            "truncated": eligible_count > CONTEXT_GLOBAL_TOP_K_COMMUNITIES,
+            "truncated": eligible_count > CONTEXT_GLOBAL_TOP_K_COMMUNITIES
+            or len(seeded) < len(capped),
             "dropped_count": max(0, eligible_count - CONTEXT_GLOBAL_TOP_K_COMMUNITIES),
+            "gap_dropped_count": len(capped) - len(seeded),
         }
         if not seeded:
             return _empty_result()
