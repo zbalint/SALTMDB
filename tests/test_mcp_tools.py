@@ -1105,9 +1105,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            18,
-            f"MCP server tool count must be exactly 18 after the metadata update and "
-            f"inspect_memory tools were added "
+            19,
+            f"MCP server tool count must be exactly 19 after retrieve_context was added "
+            f"(Milestone A slice A5) on top of the metadata update and inspect_memory tools "
             f"(ephemeral_memory and "
             f"export_corpus_snapshot removed, following Phase 6's dismiss_event removal), "
             f"got {registered_count}",

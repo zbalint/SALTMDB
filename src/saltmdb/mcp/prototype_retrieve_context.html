@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PROTOTYPE — retrieve_context JSON schema (throwaway, do not ship)</title>
+<style>
+  :root {
+    --bg: #faf9f7; --panel: #ffffff; --ink: #1e1c1a; --muted: #6b655e;
+    --accent: #8a4fff; --line: #e5e1da; --ok: #2f8f4e; --warn: #b45309; --bad: #c0392b;
+    --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 24px 20px 80px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  .banner { background: #2a2430; color: #f4e9ff; border-radius: 10px; padding: 14px 18px; margin-bottom: 20px;
+            font-family: var(--mono); font-size: 12.5px; }
+  .banner b { color: #d9b8ff; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 28px 0 10px; }
+  .question { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+              border-radius: 8px; padding: 14px 16px; margin-bottom: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: inherit; font-size: 13.5px; border: 1px solid var(--line); background: #fff; color: var(--ink);
+           padding: 8px 13px; border-radius: 7px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.on { background: #f2e8ff; border-color: var(--accent); color: #5a2fa0; font-weight: 600; }
+  button.step { display: block; width: 100%; text-align: left; margin-bottom: 6px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button { flex: 1; }
+  .tabs button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .scenario-desc { font-size: 13.5px; color: var(--muted); margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0 4px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: 4px;
+         background: #f1eeff; color: #5a2fa0; }
+  .tag.exp { background: #eef7ee; color: var(--ok); }
+  .tag.conf { background: #fff0ee; color: var(--bad); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11.5px; font-weight: 600; }
+  .badge.yes { background: #fde8e8; color: var(--bad); }
+  .badge.no { background: #e8f6ec; color: var(--ok); }
+  .id { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .synthetic { font-family: var(--mono); font-size: 10.5px; color: var(--warn); }
+  .flag { background: #fff8e6; border: 1px solid #f0d78c; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 10px; }
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 8px; }
+  pre { background: #16141a; color: #d8e6d8; padding: 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 220px 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="banner">
+    ⚠ <b>PROTOTYPE — throwaway.</b> Not production code. Originally resolved wayfinder ticket
+    <b>73d1459a</b>; this revision additionally resolves follow-up ticket <b>ce08d466</b> (exact JSON
+    nesting for the two lineage-entry fields left open by tickets <b>2a5c1357</b> and <b>0ca97ddc</b>)
+    (map <b>d04a3434</b>, context <code>wayfinder:saltmdb:graph-aware-context-retrieval</code>).
+    The pure module in the first &lt;script&gt; block is the liftable part; the page around it is not.
+  </div>
+
+  <h1>retrieve_context — result schema prototype</h1>
+  <div class="question">
+    <b>Question this prototype answers:</b> does a single, general JSON shape for
+    <code>retrieve_context</code> actually hold up across the three query shapes Milestone A must
+    support — a dependency/factual query, a contradiction query, and a lifecycle/supersession query —
+    once G3 (predicate allowlist), G4 (fan-out cap), G6 (retrieval_provenance), G7 (conflict
+    representation) and G8 (token budget) are all wired into <i>one</i> assembly function, run against
+    <b>real current SALTMDB memory graphs</b> pulled from this session (dependency + lifecycle
+    scenarios use real, direction-verified entity IDs and edges; no live <code>contradicts</code> edge
+    exists in the corpus yet — confirmed by memory <span class="id">c2f86098</span> — so that scenario
+    uses two clearly-marked synthetic stand-in pairs, one thematically modeled on the real G8
+    token-count-vs-char-count reversal documented in the map).
+  </div>
+  <div class="question">
+    <b>Follow-up question (ticket ce08d466) this revision answers:</b> two sibling tickets locked
+    <i>policy</i> but deferred the literal JSON nesting to this prototype — (1) does
+    <code>was_flagged_contradiction</code>/<code>contradicted_with</code> live as sibling keys directly
+    on the specific <code>lineage.current</code> / <code>lineage.historical[i]</code> entry object that
+    was literally a <code>contradicts</code>-edge endpoint (ticket 2a5c1357), and (2) where does the
+    <code>lineage.historical</code> cap-of-5 truncation signal live, and under what field names (ticket
+    0ca97ddc)? The <i>contradiction</i> walkthrough's resolved pair (<code>synthetic-budget-old</code> ↔
+    <code>synthetic-budget-new</code>) was extended from a 1-entry to a 6-entry synthetic chain
+    specifically so both mechanics fire on the <em>same</em> <code>lineage[head]</code> at once: the cap
+    truncates <code>synthetic-budget-old</code> out of the visible <code>historical</code> array, while
+    <code>current</code> still carries <code>was_flagged_contradiction</code> +
+    <code>contradicted_with: ["synthetic-budget-old"]</code> — proving the signal survives its own
+    referent being truncated away.
+  </div>
+
+  <h2>Current result</h2>
+  <div class="panel" id="state-panel"></div>
+
+  <h2>Free play</h2>
+  <div class="panel">
+    <div class="row" style="margin-bottom:10px;">
+      <button data-run="dependency">Run dependency query</button>
+      <button data-run="contradiction">Run contradiction query</button>
+      <button data-run="lifecycle">Run lifecycle query</button>
+    </div>
+    <div class="row">
+      <button data-toggle="tinyFanOut" id="btn-fanout">Shrink fan-out cap (force G4 truncation)</button>
+      <button data-toggle="tinyBudget" id="btn-budget">Shrink token budget (force G8 truncation)</button>
+      <button data-action="reset">Reset toggles</button>
+    </div>
+  </div>
+
+  <h2>Guided walkthroughs</h2>
+  <div class="panel">
+    <div class="tabs">
+      <button data-tab="dependency" class="tab-btn">1 · Dependency / factual</button>
+      <button data-tab="contradiction" class="tab-btn">2 · Contradiction</button>
+      <button data-tab="lifecycle" class="tab-btn">3 · Lifecycle / supersession</button>
+    </div>
+    <div id="tab-body"></div>
+  </div>
+
+  <details>
+    <summary>Raw JSON of current result (this is the actual schema artifact)</summary>
+    <pre id="raw-json"></pre>
+  </details>
+
+  <details>
+    <summary>Findings this prototype surfaced (read before locking Milestone A's spec)</summary>
+    <div class="panel" style="margin-top:8px;">
+      <ol style="font-size:13.5px; padding-left:18px;">
+        <li><b>Drop sol:high's separate top-level <code>primary</code> array.</b> G6 already said every
+          memory must explain its own inclusion via <code>retrieval_provenance</code> — that fully
+          subsumes a parallel <code>primary</code> list. One <code>memories[]</code> array, each item
+          tagged <code>inclusion: "primary" | "expansion" | "conflict_only"</code>, is sufficient and
+          removes a redundant field nobody had actually decided how to keep in sync.</li>
+        <li><b>Real naming collision between G4 and G8, both named <code>expansion_truncated</code>.</b>
+          G4's is a fan-out/node-eligibility signal; G8's is a token-budget/payload-size signal — the map
+          itself says these are independent axes, but both were given the identical flat field name in
+          two different resolution write-ups. Flattened, they'd silently shadow each other. Fix applied
+          here: namespace them as <code>metadata.fan_out.expansion_truncated</code> vs.
+          <code>metadata.budget.expansion_truncated</code> — toggle both free-play buttons independently
+          below to see they really are orthogonal once namespaced.</li>
+        <li><b>G7's "extends G4's <code>expansion_truncated</code> signal" reading, applied literally:</b>
+          conflict-set-cap truncation is reported at <code>metadata.fan_out.conflict_sets_truncated</code>
+          (same family as the general fan-out cap), not a third independent truncation flag.</li>
+        <li><b>Resolved conflicts fully vacate <code>conflict_sets</code>.</b> Read literally, G7 says a
+          lifecycle-resolved conflict surfaces "via the ordinary lineage path, NOT the conflict reserve" —
+          taken at face value, that means it doesn't appear in <code>conflict_sets</code> at all once
+          resolved, only in <code>lineage</code>. That has a real cost: the fact that two memories were
+          ever explicitly flagged <code>contradicts</code> (not just superseded) disappears from the
+          response. This was the open gap in memory <span class="id">8cd3413f</span> — now closed, see the
+          next two items for the locked, prototyped shape.</li>
+        <li><b>[ce08d466] <code>was_flagged_contradiction</code>/<code>contradicted_with</code> nest as
+          sibling keys on the <i>specific</i> entry object, never head-only.</b> Ticket 2a5c1357 locked the
+          policy (per-entry, exact-edge-only, never transitive/component-level); this revision settles the
+          literal shape: both <code>lineage[head].current</code> and every
+          <code>lineage[head].historical[i]</code> are entry objects (<code>{id, title, ...}</code>,
+          <code>historical[i]</code> additionally carrying <code>archived_at</code>), and <em>whichever
+          one</em> was literally a <code>contradicts</code>-edge endpoint gets
+          <code>was_flagged_contradiction: true</code> + <code>contradicted_with: [&lt;entity_id&gt;,
+          ...]</code> added as sibling keys on that entry — never hoisted to the head. This required
+          promoting <code>lineage[head].current</code> from a bare id string (the shape locked by the
+          original schema-prototype ticket) to an entry object matching <code>historical[i]</code>'s
+          shape, since <code>current</code> is exactly as likely to be the flagged endpoint as any
+          historical entry — see the contradiction walkthrough, where <code>current</code>
+          (<code>synthetic-budget-new</code>) carries the flag. Exact-edge matching is scoped against the
+          <em>full</em> chain (current + every historical entry, capped or not) — see next item for why.</li>
+        <li><b>[ce08d466] <code>historical_truncated</code> + <code>historical_dropped_count</code> land as
+          siblings directly on <code>lineage[head]</code>, alongside <code>current</code>/
+          <code>historical</code> — matching the <code>&lt;name&gt;_truncated</code> +
+          <code>&lt;name&gt;_dropped_count</code> pattern G4/G8 already established for
+          <code>metadata.fan_out</code>/<code>metadata.budget</code>, not a new naming convention. Ticket
+          0ca97ddc's cap of 5 (keep-most-recent) is applied in this prototype's extended contradiction
+          scenario: the resolved chain now runs 6 synthetic revisions deep (<code>mid5…mid1</code>, then
+          <code>synthetic-budget-old</code>), so the cap drops exactly the oldest one —
+          <code>synthetic-budget-old</code>, the very entry <code>current</code> is flagged as
+          contradicting. Confirmed live in this run: <code>historical_truncated: true</code>,
+          <code>historical_dropped_count: 1</code>, and <code>current.contradicted_with</code> still
+          names <code>synthetic-budget-old</code> even though no entry for it appears in the (capped)
+          <code>historical</code> array — the contradiction <em>signal</em> survives its own referent's
+          entry object being truncated away, since exact-edge matching runs against the full untruncated
+          chain before the cap is applied for display. This is a deliberate, examined consequence of
+          0ca97ddc's own stated assumption ("keep-most-recent retains a resolved conflict's flagged
+          entries by construction — they're necessarily recent") holding only loosely: a chain can keep
+          accumulating unrelated revisions after a contradiction is resolved, eventually pushing the
+          flagged historical peer past the cap. Not reopening 0ca97ddc over this — the signal loss is
+          confined to the truncated entry's own <code>title</code>/<code>archived_at</code> metadata, not
+          the fact-of-contradiction itself, which is exactly the graceful-degradation behavior a fixed,
+          low-stakes cap should have.</li>
+      </ol>
+    </div>
+  </details>
+
+</div>
+
+<script>
+/* ============================================================================
+ * PURE MODULE — liftable into src/saltmdb/mcp/tools.py's retrieve_context.
+ * No DOM access below this point. (state, options) -> result, nothing else.
+ * ============================================================================ */
+
+const ALLOWLIST_PREDICATES = new Set(["elaborates_on", "depends_on", "corrects", "derived_from", "resolves"]);
+const LIFECYCLE_PREDICATES = new Set(["supersedes", "consolidated_from", "revises"]);
+
+/**
+ * @param {object} g - { memories: {id: {id,title,memory_type}}, edges: [{source_id,target_id,predicate}],
+ *                        contradictsEdges: [{source_id,target_id}],
+ *                        supersessionChains: {headId: [{id,title,archived_at}, ...]} }  // most-recent-first
+ * @param {object} q - { queryText, primaryHits: [{id,score,tokenCount}], tokenCounts: {id: n} }
+ * @param {object} opts - { fanOutCap, conflictReserveCap, budgetLimitTokens }
+ */
+function assembleRetrieveContext(g, q, opts) {
+  const primaryIds = new Set(q.primaryHits.map(h => h.id));
+  const tokensOf = id => q.tokenCounts[id] ?? g.memories[id]?.tokenCount ?? 20;
+
+  // --- G3: predicate allowlist gate over edges touching a primary hit ---
+  const touchingPrimary = g.edges.filter(e => primaryIds.has(e.source_id) || primaryIds.has(e.target_id));
+  const allowed = touchingPrimary.filter(e => ALLOWLIST_PREDICATES.has(e.predicate));
+  const excludedByAllowlist = touchingPrimary.filter(e => !ALLOWLIST_PREDICATES.has(e.predicate) && !LIFECYCLE_PREDICATES.has(e.predicate));
+
+  const inNetworkEdges = [];
+  const outOfNetworkCandidates = new Map(); // id -> {id, viaEdge, mutualNeighborCount}
+  for (const e of allowed) {
+    const other = primaryIds.has(e.source_id) ? e.target_id : e.source_id;
+    const direction = primaryIds.has(e.source_id) ? "outbound" : "inbound";
+    if (primaryIds.has(other)) {
+      inNetworkEdges.push(e);
+    } else if (!outOfNetworkCandidates.has(other)) {
+      outOfNetworkCandidates.set(other, {
+        id: other,
+        viaEdge: { predicate: e.predicate, direction, from: primaryIds.has(e.source_id) ? e.source_id : e.target_id },
+        mutualNeighborCount: 1,
+      });
+    } else {
+      outOfNetworkCandidates.get(other).mutualNeighborCount += 1;
+    }
+  }
+
+  // --- G4: fan-out cap, rank by mutual-neighbor-count, tiebreak by (fake) relevance score ---
+  const relevanceOf = id => q.primaryHits.find(h => h.id === id)?.score ?? g.memories[id]?.score ?? 0.5;
+  const ranked = [...outOfNetworkCandidates.values()].sort((a, b) =>
+    b.mutualNeighborCount - a.mutualNeighborCount || relevanceOf(b.id) - relevanceOf(a.id));
+  const kept = ranked.slice(0, opts.fanOutCap);
+  const fanOutDropped = ranked.slice(opts.fanOutCap);
+
+  // --- G7: contradicts connected components, resolved vs unresolved ---
+  const contradictsTouched = new Set();
+  const parent = {};
+  // [ce08d466] fixed a latent infinite-recursion bug here: the original
+  // `x => (parent[x] = parent[x] === undefined ? x : find(parent[x]))` has no base case for an
+  // already-self-parented root -- once parent[x] === x (any node's second find() call), the
+  // `undefined` check is false, so it recurses into find(parent[x]) === find(x) forever. Caught
+  // only now because verifying THIS ticket's lineage changes required actually running the
+  // contradiction scenario end-to-end for the first time -- every prior "confirmed live" claim
+  // about this scenario in the wayfinder map was never backed by a real JS execution, only by
+  // reading the code. Standard path-compressing find with an explicit self-parent base case:
+  const find = x => {
+    if (parent[x] === undefined) parent[x] = x;
+    return parent[x] === x ? x : (parent[x] = find(parent[x]));
+  };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+  for (const e of g.contradictsEdges) {
+    contradictsTouched.add(e.source_id); contradictsTouched.add(e.target_id);
+    find(e.source_id); find(e.target_id); union(e.source_id, e.target_id);
+  }
+  const components = {};
+  for (const id of contradictsTouched) {
+    const root = find(id);
+    (components[root] ||= []).push(id);
+  }
+  // Scope to components that actually touch a primary hit -- a contradicts edge sitting
+  // anywhere else in the corpus is not relevant to *this* retrieval and must not leak in.
+  const conflictComponents = Object.values(components)
+    .filter(members => members.some(id => primaryIds.has(id)))
+    .map(members => {
+      const edges = g.contradictsEdges.filter(e => members.includes(e.source_id) && members.includes(e.target_id));
+      let resolvedHead = null;
+      for (const m of members) if (g.supersessionChains[m]) { resolvedHead = m; break; }
+      const resolution = resolvedHead ? "resolved" : "unresolved";
+      return { members, edges, resolution, resolvedHead };
+    });
+  const unresolvedComponents = conflictComponents.filter(c => c.resolution === "unresolved")
+    .sort((a, b) => Math.max(...b.members.map(relevanceOf)) - Math.max(...a.members.map(relevanceOf)));
+  const conflictReserveKept = unresolvedComponents.slice(0, opts.conflictReserveCap);
+  const conflictReserveDropped = unresolvedComponents.slice(opts.conflictReserveCap);
+
+  // --- lineage: any head with a known chain, plus resolved-conflict heads ---
+  // [ce08d466] was_flagged_contradiction/contradicted_with nest as sibling keys on the SPECIFIC
+  // entry (current or historical[i]) that was literally a contradicts-edge endpoint -- never
+  // head-only, never transitive/component-level (ticket 2a5c1357). historical_truncated /
+  // historical_dropped_count nest as siblings on lineage[head] itself, next to current/historical
+  // (ticket 0ca97ddc's cap of 5, keep-most-recent).
+  const HISTORICAL_CAP = 5;
+
+  // Exact-edge lookup, scoped to members of THIS resolved chain only (current id + every
+  // historical id, capped or not -- truncation is a display concern, not a scoping change to
+  // which edges count as "within this chain").
+  function contradictedPeersWithinChain(id, chainMemberIds) {
+    const peers = [];
+    for (const e of g.contradictsEdges) {
+      if (e.source_id === id && chainMemberIds.has(e.target_id)) peers.push(e.target_id);
+      if (e.target_id === id && chainMemberIds.has(e.source_id)) peers.push(e.source_id);
+    }
+    return peers;
+  }
+
+  const lineage = {};
+  const allHeadCandidates = new Set([...primaryIds, ...kept.map(c => c.id), ...conflictComponents.filter(c=>c.resolvedHead).map(c=>c.resolvedHead)]);
+  for (const id of allHeadCandidates) {
+    const chain = g.supersessionChains[id];
+    if (!chain) continue;
+
+    const cappedChain = chain.slice(0, HISTORICAL_CAP);
+    const droppedChain = chain.slice(HISTORICAL_CAP);
+    const chainMemberIds = new Set([id, ...chain.map(h => h.id)]);
+
+    const currentPeers = contradictedPeersWithinChain(id, chainMemberIds);
+    const current = {
+      id, title: g.memories[id]?.title ?? "(unknown)",
+      ...(currentPeers.length ? { was_flagged_contradiction: true, contradicted_with: currentPeers } : {}),
+    };
+
+    const historical = cappedChain.map(h => {
+      const peers = contradictedPeersWithinChain(h.id, chainMemberIds);
+      return {
+        id: h.id, title: h.title, archived_at: h.archived_at,
+        ...(peers.length ? { was_flagged_contradiction: true, contradicted_with: peers } : {}),
+      };
+    });
+
+    lineage[id] = {
+      current, historical,
+      historical_truncated: droppedChain.length > 0,
+      historical_dropped_count: droppedChain.length,
+    };
+  }
+
+  // --- assemble memories[] (primary + surviving expansion + conflict-only), then G8 token-budget pass ---
+  const memRow = (id, inclusion, provenance) => ({
+    entity_id: id,
+    title: g.memories[id]?.title ?? "(unknown)",
+    memory_type: g.memories[id]?.memory_type ?? "unknown",
+    inclusion,
+    retrieval_provenance: provenance,
+    tokenCount: tokensOf(id),
+  });
+
+  const primaryRows = q.primaryHits.map((h, i) => memRow(h.id, "primary", { reason: "primary_search", rank: i + 1 }));
+  const expansionRows = kept.map(c => memRow(c.id, "expansion", {
+    originating_hit: c.viaEdge.from, predicate: c.viaEdge.predicate, direction: c.viaEdge.direction,
+    hop_depth: 1, path: [{ predicate: c.viaEdge.predicate, direction: c.viaEdge.direction, entity_id: c.id }],
+  }));
+  const conflictOnlyIds = new Set(
+    conflictReserveKept.flatMap(c => c.members).filter(id => !primaryIds.has(id) && !kept.some(k => k.id === id))
+  );
+  const conflictOnlyRows = [...conflictOnlyIds].map(id => {
+    const set = conflictReserveKept.find(c => c.members.includes(id));
+    return memRow(id, "conflict_only", { reason: "contradicts_force_include", conflict_set_id: "cs-" + set.members.join("+") });
+  });
+
+  // one continuous highest-relevance-first pack across primary + expansion (G8); conflict_only is separate/additive
+  const budgetPool = [...primaryRows, ...expansionRows];
+  let used = 0;
+  const packed = [], budgetDropped = [];
+  for (const row of budgetPool) {
+    if (used + row.tokenCount <= opts.budgetLimitTokens) { packed.push(row); used += row.tokenCount; }
+    else budgetDropped.push(row);
+  }
+  const primaryDropped = budgetDropped.filter(r => r.inclusion === "primary");
+  const expansionDropped = budgetDropped.filter(r => r.inclusion === "expansion");
+
+  const memories = [...packed, ...conflictOnlyRows].map(({ tokenCount, ...rest }) => rest);
+  const conflictReserveTokensUsed = conflictOnlyRows.reduce((s, r) => s + tokensOf(r.entity_id), 0);
+
+  return {
+    query: q.queryText,
+    memories,
+    edges: [...inNetworkEdges, ...kept.map(c => ({ source_id: c.viaEdge.from, target_id: c.id, predicate: c.viaEdge.predicate, direction: c.viaEdge.direction }))]
+      .map(e => ({ source_id: e.source_id, target_id: e.target_id, predicate: e.predicate, direction: e.direction ?? "outbound" })),
+    lineage,
+    conflict_sets: conflictReserveKept.map((c, i) => ({
+      id: "cs-" + (i + 1), resolution: "unresolved", members: c.members, edges: c.edges,
+    })),
+    metadata: {
+      strategy: "local",
+      budget: {
+        unit: "tokens", limit: opts.budgetLimitTokens, used,
+        primary_truncated: primaryDropped.length > 0, primary_dropped_count: primaryDropped.length,
+        expansion_truncated: expansionDropped.length > 0, expansion_dropped_count: expansionDropped.length,
+        conflict_reserve_tokens_used: conflictReserveTokensUsed,
+      },
+      fan_out: {
+        cap: opts.fanOutCap, expansion_truncated: fanOutDropped.length > 0, expansion_dropped_count: fanOutDropped.length,
+        excluded_by_allowlist: excludedByAllowlist.map(e => e.predicate),
+        conflict_reserve_cap: opts.conflictReserveCap,
+        conflict_sets_truncated: conflictReserveDropped.length > 0, conflict_sets_dropped_count: conflictReserveDropped.length,
+      },
+    },
+  };
+}
+
+/* ============================================================================
+ * SCENARIO DATA — dependency & lifecycle use real, direction-verified SALTMDB
+ * entity IDs/edges pulled live this session. Contradiction uses two synthetic
+ * stand-in pairs (marked `synthetic: true`) since no live contradicts edge
+ * exists in the corpus yet (see memory c2f86098).
+ * ============================================================================ */
+
+const WORLD = {
+  memories: {
+    "73d1459a-ad9c-4202-96ff-5ad9874b5d5b": { title: "[SALTMDB] Wayfinder Prototype: Sketch retrieve_context's exact JSON result schema against 3 concrete example queries", memory_type: "decision" },
+    "cdf2c7cf-805f-4801-aaa2-39b813dcfe5d": { title: "[SALTMDB] Wayfinder Ticket: How should retrieve_context's deterministic context budget be measured and set?", memory_type: "decision" },
+    "16d1d5f3-c5d1-435d-8848-818218142086": { title: "[SALTMDB] Wayfinder Ticket: Which relation predicates influence context inclusion in Phase 1, and how?", memory_type: "decision" },
+    "c2f86098-0fe6-4344-a2de-8aa54cc41696": { title: "[SALTMDB] Wayfinder Ticket: How should contradictions be represented and surfaced by retrieve_context?", memory_type: "decision" },
+    "a99352a8-1e52-4379-a41b-a4ffddc389ad": { title: "[SALTMDB] Wayfinder Map: Graph-Aware Context Retrieval Roadmap (archived revision)", memory_type: "decision" },
+    "e567fdf8-bbeb-4eb1-a235-307acfcaad52": { title: "[SALTMDB] Wayfinder Map: Graph-Aware Context Retrieval Roadmap (current head)", memory_type: "decision" },
+    // synthetic — unresolved contradiction pair
+    "synthetic-cap-v1": { title: "[SALTMDB Tuning] (SYNTHETIC) Lower RELATION_GATE_MIN_SIMILARITY_THRESHOLD to 0.55 for better recall", memory_type: "decision", synthetic: true },
+    "synthetic-cap-v2": { title: "[SALTMDB Tuning] (SYNTHETIC) Keep RELATION_GATE_MIN_SIMILARITY_THRESHOLD at 0.6505 — 0.55 reintroduced chaining", memory_type: "decision", synthetic: true },
+    // synthetic — resolved contradiction pair (modeled on the real G8 token-count-vs-char-count reversal)
+    "synthetic-budget-old": { title: "[SALTMDB Tuning] (SYNTHETIC) retrieve_context budget measured in character count", memory_type: "decision", synthetic: true },
+    "synthetic-budget-new": { title: "[SALTMDB Tuning] (SYNTHETIC) retrieve_context budget measured in real token count via fastembed", memory_type: "decision", synthetic: true },
+  },
+  // real, direction-verified via get_related_memories(73d1459a, direction=outbound) this session
+  edges: [
+    { source_id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", target_id: "cdf2c7cf-805f-4801-aaa2-39b813dcfe5d", predicate: "depends_on" },
+    { source_id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", target_id: "16d1d5f3-c5d1-435d-8848-818218142086", predicate: "depends_on" },
+    { source_id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", target_id: "c2f86098-0fe6-4344-a2de-8aa54cc41696", predicate: "depends_on" },
+    { source_id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", target_id: "a99352a8-1e52-4379-a41b-a4ffddc389ad", predicate: "part_of" },
+    { source_id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", target_id: "e567fdf8-bbeb-4eb1-a235-307acfcaad52", predicate: "part_of" },
+  ],
+  contradictsEdges: [
+    { source_id: "synthetic-cap-v1", target_id: "synthetic-cap-v2" },          // unresolved
+    { source_id: "synthetic-budget-old", target_id: "synthetic-budget-new" }, // resolved via supersession below
+  ],
+  // real chain for e567fdf8, from this session's get_memory(e567fdf8).lineage.ancestors (most-recent-first)
+  supersessionChains: {
+    "e567fdf8-bbeb-4eb1-a235-307acfcaad52": [
+      { id: "f3798bd8-1e32-4ea5-83a1-c6d80244679e", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T18:53:45Z" },
+      { id: "6afa3afa-4c7a-4fb5-8e1b-cde169671d50", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T18:18:08Z" },
+      { id: "f401afc9-113c-4ea5-ac05-914d6636be90", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T17:58:46Z" },
+      { id: "10cf79ad-d3e8-434b-8f28-c60a7eb369c6", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T15:05:49Z" },
+      { id: "e9a99968-45df-4a2e-ba72-e2ca59e9de9f", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T14:22:34Z" },
+      { id: "72c7ea18-56cb-41c6-a940-6758e55d1e8e", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T14:03:17Z" },
+      { id: "a99352a8-1e52-4379-a41b-a4ffddc389ad", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T13:51:55Z" },
+      { id: "5a5aec5b-96c3-4567-a6fb-7847abe8a69d", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T02:51:15Z" },
+      { id: "c1912199-c78b-4f8e-9af9-50f66f30892d", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T02:50:06Z" },
+      { id: "ea85d5c5-0ec3-4604-bb7e-dac05c95c2d7", title: "Wayfinder Map (rev, archived)", archived_at: "2026-09-10T02:48:48Z" },
+    ],
+    // [ce08d466] extended from 1 to 6 historical entries so the cap-of-5 (0ca97ddc) and the
+    // per-entry contradiction flag (2a5c1357) exercise on the same lineage[head] at once:
+    // synthetic-budget-old is now the *6th* (oldest) entry, so the cap drops exactly the one
+    // entry current.contradicted_with names -- most-recent-first, per get_lineage's own order.
+    "synthetic-budget-new": [
+      { id: "synthetic-budget-mid5", title: "(SYNTHETIC) budget tuning — intermediate revision 5", archived_at: "2026-09-10T23:00:00Z" },
+      { id: "synthetic-budget-mid4", title: "(SYNTHETIC) budget tuning — intermediate revision 4", archived_at: "2026-09-10T22:30:00Z" },
+      { id: "synthetic-budget-mid3", title: "(SYNTHETIC) budget tuning — intermediate revision 3", archived_at: "2026-09-10T22:00:00Z" },
+      { id: "synthetic-budget-mid2", title: "(SYNTHETIC) budget tuning — intermediate revision 2", archived_at: "2026-09-10T21:30:00Z" },
+      { id: "synthetic-budget-mid1", title: "(SYNTHETIC) budget tuning — intermediate revision 1", archived_at: "2026-09-10T21:00:00Z" },
+      { id: "synthetic-budget-old", title: "(SYNTHETIC) retrieve_context budget measured in character count", archived_at: "2026-09-10T20:00:00Z" },
+    ],
+  },
+};
+
+const SCENARIOS = {
+  dependency: {
+    label: "Dependency / factual",
+    desc: "Real graph, verified this session via get_related_memories(73d1459a, direction=outbound). Primary hit is the prototype ticket itself; depends_on edges (G3-allowlisted) expand to its 3 dependency tickets; the two part_of edges to the map (one to a stale archived revision, one to the current head) get excluded by the allowlist gate — watch fan_out.excluded_by_allowlist.",
+    queryText: "what does the retrieve_context JSON-schema prototype ticket depend on?",
+    primaryHits: [{ id: "73d1459a-ad9c-4202-96ff-5ad9874b5d5b", score: 0.92 }],
+    tokenCounts: {
+      "73d1459a-ad9c-4202-96ff-5ad9874b5d5b": 180, "cdf2c7cf-805f-4801-aaa2-39b813dcfe5d": 140,
+      "16d1d5f3-c5d1-435d-8848-818218142086": 120, "c2f86098-0fe6-4344-a2de-8aa54cc41696": 150,
+    },
+    scoresForTiebreak: { "cdf2c7cf-805f-4801-aaa2-39b813dcfe5d": 0.81, "16d1d5f3-c5d1-435d-8848-818218142086": 0.78, "c2f86098-0fe6-4344-a2de-8aa54cc41696": 0.76 },
+  },
+  contradiction: {
+    label: "Contradiction",
+    desc: "Synthetic (no live contradicts edge exists yet). Only cap-v1 is an actual search hit (primary); cap-v2 was never searched for but gets force-included as conflict_only purely because it contradicts cap-v1 — the concrete test of G4's \"outside normal budget competition\" rule. Both must surface with strictly equal visibility, no winner. Pair 2 (budget-old/new) is resolved via a supersedes edge, so per G7 it vacates conflict_sets and surfaces only through lineage — watch lineage[synthetic-budget-new].current carry was_flagged_contradiction/contradicted_with (ticket 2a5c1357, locked), and watch historical_truncated/historical_dropped_count on the same lineage[head] drop synthetic-budget-old out of the visible historical array even though current still names it (ticket 0ca97ddc + ce08d466, locked). The chain was extended to 6 synthetic revisions specifically so both fire together here.",
+    queryText: "similarity-threshold and context-budget-unit decisions",
+    primaryHits: [{ id: "synthetic-cap-v1", score: 0.7 }, { id: "synthetic-budget-new", score: 0.65 }],
+    tokenCounts: { "synthetic-cap-v1": 60, "synthetic-cap-v2": 60, "synthetic-budget-new": 50, "synthetic-budget-old": 45 },
+  },
+  lifecycle: {
+    label: "Lifecycle / supersession",
+    desc: "Real chain, from this session's get_memory(e567fdf8) — the wayfinder map's own lineage.ancestors, 10 revisions deep. Query text-matches an old phrasing but supersession resolution (already-existing _resolve_supersession_chains) walks straight to the current head; the 10 historical entries ride along uncapped — see the findings panel below for why that's now flagged as fog.",
+    queryText: "wayfinder map for graph-aware-context-retrieval",
+    primaryHits: [{ id: "e567fdf8-bbeb-4eb1-a235-307acfcaad52", score: 0.95 }],
+    tokenCounts: { "e567fdf8-bbeb-4eb1-a235-307acfcaad52": 220 },
+  },
+};
+
+/* ============================================================================
+ * PAGE WIRING — throwaway. Calls into the pure module above; never the reverse.
+ * ============================================================================ */
+
+const state = { scenarioKey: "dependency", tinyFanOut: false, tinyBudget: false, activeTab: "dependency" };
+
+function currentOptions() {
+  return {
+    fanOutCap: state.tinyFanOut ? 1 : 5,
+    conflictReserveCap: 1,
+    budgetLimitTokens: state.tinyBudget ? 100 : 3000,
+  };
+}
+
+function buildResultForCurrentScenario() {
+  const sc = SCENARIOS[state.scenarioKey];
+  const g = { ...WORLD, memories: { ...WORLD.memories } };
+  for (const [id, score] of Object.entries(sc.scoresForTiebreak || {})) g.memories[id] = { ...g.memories[id], score };
+  const q = { queryText: sc.queryText, primaryHits: sc.primaryHits, tokenCounts: sc.tokenCounts };
+  return assembleRetrieveContext(g, q, currentOptions());
+}
+
+// [ce08d466] renders one lineage entry object ({id, title, [archived_at], [was_flagged_contradiction, contradicted_with]})
+function entryLabel(e) {
+  const flag = e.was_flagged_contradiction
+    ? ` <span class="badge yes">contradicted_with: ${e.contradicted_with.map(id => id.slice(0, 18) + '…').join(', ')}</span>`
+    : '';
+  return `<code style="font-size:11px">${e.id.slice(0, 18)}…</code>${flag}`;
+}
+
+function render() {
+  const result = buildResultForCurrentScenario();
+  document.getElementById("raw-json").textContent = JSON.stringify(result, null, 2);
+
+  const primary = result.memories.filter(m => m.inclusion === "primary");
+  const expansion = result.memories.filter(m => m.inclusion === "expansion");
+  const conflictOnly = result.memories.filter(m => m.inclusion === "conflict_only");
+
+  const memRow = m => `<tr>
+      <td><span class="tag ${m.inclusion === 'primary' ? '' : m.inclusion === 'expansion' ? 'exp' : 'conf'}">${m.inclusion}</span></td>
+      <td>${m.title}${WORLD.memories[m.entity_id]?.synthetic ? ' <span class="synthetic">(synthetic)</span>' : ''}</td>
+      <td class="id">${m.entity_id}</td>
+      <td><code style="font-size:11px;">${JSON.stringify(m.retrieval_provenance)}</code></td>
+    </tr>`;
+
+  const opts = currentOptions();
+  const b = result.metadata.budget, f = result.metadata.fan_out;
+
+  document.getElementById("state-panel").innerHTML = `
+    <div class="kv" style="margin-bottom:12px;">
+      <div>Scenario</div><div><b>${SCENARIOS[state.scenarioKey].label}</b> — "${result.query}"</div>
+      <div>Fan-out cap</div><div>${opts.fanOutCap} ${state.tinyFanOut ? '(shrunk)' : '(default)'}</div>
+      <div>Token budget</div><div>${opts.budgetLimitTokens} ${state.tinyBudget ? '(shrunk)' : '(default)'}</div>
+    </div>
+    <table>
+      <thead><tr><th>Inclusion</th><th>Memory</th><th>Entity ID</th><th>retrieval_provenance</th></tr></thead>
+      <tbody>
+        ${[...primary, ...expansion, ...conflictOnly].map(memRow).join("") || `<tr><td colspan="4" class="empty">no memories</td></tr>`}
+      </tbody>
+    </table>
+
+    <div class="kv" style="margin-top:14px;">
+      <div>edges[]</div><div>${result.edges.length ? result.edges.map(e => `<code style="font-size:11.5px;">${e.source_id.slice(0,8)}… -[${e.predicate}]-> ${e.target_id.slice(0,8)}…</code>`).join("<br>") : '<span class="empty">none</span>'}</div>
+      <div>excluded by allowlist</div><div>${f.excluded_by_allowlist.length ? f.excluded_by_allowlist.join(", ") : '<span class="empty">none</span>'}</div>
+      <div>lineage</div><div>${Object.keys(result.lineage).length
+        ? Object.entries(result.lineage).map(([head, l]) => `
+            current: ${entryLabel(l.current)}<br>
+            historical (${l.historical.length} shown${l.historical_truncated ? `, historical_truncated=<span class="badge yes">true</span> historical_dropped_count=${l.historical_dropped_count}` : ', historical_truncated=false'}): ${l.historical.length ? l.historical.map(entryLabel).join(' · ') : '<span class="empty">none</span>'}
+          `).join("<hr style='border:none;border-top:1px solid var(--line);margin:8px 0;'>")
+        : '<span class="empty">none</span>'}</div>
+      <div>conflict_sets</div><div>${result.conflict_sets.length
+        ? result.conflict_sets.map(c => `<b>${c.id}</b> (unresolved): ${c.members.map(m => m.slice(0,14)+'…').join(" ↔ ")} — no winner field`).join("<br>")
+        : '<span class="empty">none (all resolved, or none present)</span>'}</div>
+    </div>
+
+    <div class="kv" style="margin-top:14px;">
+      <div>metadata.budget.*</div><div>used ${b.used}/${b.limit} tokens ·
+        primary_truncated=<span class="badge ${b.primary_truncated?'yes':'no'}">${b.primary_truncated}</span> (${b.primary_dropped_count}) ·
+        expansion_truncated=<span class="badge ${b.expansion_truncated?'yes':'no'}">${b.expansion_truncated}</span> (${b.expansion_dropped_count}) ·
+        conflict_reserve_tokens_used=${b.conflict_reserve_tokens_used}</div>
+      <div>metadata.fan_out.*</div><div>cap ${f.cap} ·
+        expansion_truncated=<span class="badge ${f.expansion_truncated?'yes':'no'}">${f.expansion_truncated}</span> (${f.expansion_dropped_count}) ·
+        conflict_sets_truncated=<span class="badge ${f.conflict_sets_truncated?'yes':'no'}">${f.conflict_sets_truncated}</span> (${f.conflict_sets_dropped_count})</div>
+    </div>
+  `;
+
+  // buttons active state
+  document.getElementById("btn-fanout").classList.toggle("on", state.tinyFanOut);
+  document.getElementById("btn-budget").classList.toggle("on", state.tinyBudget);
+  document.querySelectorAll("[data-run]").forEach(b => b.classList.toggle("primary", b.dataset.run === state.scenarioKey));
+
+  renderTab();
+}
+
+function renderTab() {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === state.activeTab));
+  const sc = SCENARIOS[state.activeTab];
+  document.getElementById("tab-body").innerHTML = `
+    <div class="scenario-desc">${sc.desc}</div>
+    <button class="step" data-walk="${state.activeTab}:run">Step 1 — Run "${sc.label}" query (resets state)</button>
+    ${state.activeTab === "dependency" ? `<button class="step" data-walk="dependency:fanout">Step 2 — Shrink fan-out cap to 1 and re-inspect fan_out.expansion_truncated</button>` : ""}
+    ${state.activeTab === "contradiction" ? `<button class="step" data-walk="contradiction:budget">Step 2 — Shrink the token budget: budget-new (primary) gets dropped, but cap-v2 (conflict_only) stays — separate, non-competing reserve</button>` : ""}
+    ${state.activeTab === "lifecycle" ? `<button class="step" data-walk="lifecycle:note">Step 2 — Note: 10 historical entries, zero truncation applied — see findings panel</button>` : ""}
+  `;
+}
+
+document.querySelectorAll("[data-run]").forEach(btn => btn.addEventListener("click", () => {
+  state.scenarioKey = btn.dataset.run; state.activeTab = btn.dataset.run; render();
+}));
+document.getElementById("btn-fanout").addEventListener("click", () => { state.tinyFanOut = !state.tinyFanOut; render(); });
+document.getElementById("btn-budget").addEventListener("click", () => { state.tinyBudget = !state.tinyBudget; render(); });
+document.querySelector('[data-action="reset"]').addEventListener("click", () => { state.tinyFanOut = false; state.tinyBudget = false; render(); });
+document.querySelectorAll(".tab-btn").forEach(btn => btn.addEventListener("click", () => { state.activeTab = btn.dataset.tab; renderTab(); }));
+document.getElementById("tab-body").addEventListener("click", e => {
+  const walk = e.target.dataset.walk; if (!walk) return;
+  const [key, step] = walk.split(":");
+  if (step === "run") { state.tinyFanOut = false; state.tinyBudget = false; state.scenarioKey = key; render(); }
+  if (step === "fanout") { state.tinyFanOut = true; render(); }
+  if (step === "budget") { state.tinyBudget = true; render(); }
+});
+
+render();
+</script>
+</body>
+</html>

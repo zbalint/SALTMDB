@@ -24,6 +24,7 @@ from saltmdb.domain.services import (
     librarian_service,
     memory_service,
     relation_service,
+    retrieve_context_service,
     telemetry_service,
 )
 from typing import Any, Literal
@@ -82,6 +83,15 @@ def _optional_mode(kw: dict[str, Any]) -> Literal["strict", "broad", "history"]:
         return "broad"
     if value not in {"strict", "broad", "history"}:
         raise ValueError("mode must be 'strict', 'broad', or 'history'")
+    return value
+
+
+def _optional_strategy(kw: dict[str, Any]) -> Literal["local", "global"]:
+    value = kw.get("strategy")
+    if value is None:
+        return "local"
+    if value not in {"local", "global"}:
+        raise ValueError("strategy must be 'local' or 'global'")
     return value
 
 
@@ -241,6 +251,7 @@ def _dispatch_manage_relation(**kw):
             target_id=kw.get("target_id"),
             predicate=kw.get("predicate"),
             invalid_at=kw.get("invalid_at"),
+            coordinator=kw.get("coordinator"),
         )
     return relation_service.store_relation(
         source_id=kw.get("source_id"),
@@ -249,6 +260,7 @@ def _dispatch_manage_relation(**kw):
         valid_at=kw.get("valid_at"),
         override_justification=kw.get("override_justification"),
         owner_id=kw.get("owner_id"),
+        coordinator=kw.get("coordinator"),
     )
 
 
@@ -432,6 +444,19 @@ def _dispatch_get_events(**kw):
     )
 
 
+def _dispatch_retrieve_context(**kw):
+    query = kw.get("query")
+    if not isinstance(query, str):
+        raise ValueError("query is required")
+    return retrieve_context_service.assemble_retrieve_context(
+        query=query,
+        owner_id=kw.get("owner_id"),
+        limit=_optional_int_or_none(kw, "limit"),
+        budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
+        strategy=_optional_strategy(kw),
+    )
+
+
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
@@ -451,6 +476,7 @@ DISPATCH_TABLE = {
     "get_lineage": _dispatch_get_lineage,
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
+    "retrieve_context": _dispatch_retrieve_context,
     "review_core_memory": _dispatch_review_core_memory,
     "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
@@ -479,7 +505,7 @@ MUTATING_TOOLS = frozenset(
 def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
     fn = DISPATCH_TABLE[tool]
     if tool in MUTATING_TOOLS:
-        if tool in {"store_memory", "log_event"}:
+        if tool in {"store_memory", "log_event", "manage_relation"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
     return fn(**kwargs)

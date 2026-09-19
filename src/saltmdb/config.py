@@ -1,7 +1,7 @@
 import os
 import re
 
-__version__ = "0.1.0-alpha.103"
+__version__ = "0.1.0-alpha.104"
 
 _OWNER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
@@ -237,6 +237,47 @@ LIBRARIAN_LOCK_STALE_MINUTES = 10  # promoted from a hardcoded "-10 minutes" lit
 LIBRARIAN_TRIGGER_COOLDOWN_S = (
     300  # promoted from a hardcoded 300 literal in librarian_service.py's trigger_librarian()
 )
+# Milestone C (wayfinder ticket "clustering trigger and freshness/maintenance", standing
+# constraint 18, memory 20b4c507) -- community_detection_service's write-triggered recompute
+# cooldown, same shape as LIBRARIAN_TRIGGER_COOLDOWN_S above (same shared _librarian_trigger_pool,
+# same _system_locks atomic-claim pattern, new task_name='community_detection'). Confirmed at its
+# seeded value (LIBRARIAN_TRIGGER_COOLDOWN_S's own order of magnitude) by the Milestone C/C.5
+# benchmark run (wayfinder ticket 787ebf0c, memory 463753f9): the required cooldown-degrade probe
+# -- a same-topic zero-edge memory queried mid-cooldown, before a fresh recompute_communities()
+# call -- got a normal, correct, non-crashing match against the still-valid prior-cycle centroid,
+# with no sign of harmful staleness. No longer a placeholder.
+COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S = 300
+
+# Milestone D (wayfinder ticket "Milestone D hierarchy mechanics," standing constraint 25, memory
+# 94579e0f) -- community_detection_service's hierarchical sub-clustering trigger: a community whose
+# member_count exceeds this value is a candidate for recursive re-run of Leiden on its own induced
+# subgraph (see recompute_communities/_process_partition_group). A community at or below this value
+# never recurses, regardless of internal heterogeneity -- a pure size trigger, not a compound
+# size+heterogeneity signal, per constraint 25's own explicit locked choice. PLACEHOLDER: not yet
+# benchmarked against SALTMDB's own corpus -- seeded above the live-corpus median (~10, per probe
+# 13549b72) and comfortably below the live-corpus's own confirmed "definitely too large, definitely
+# heterogeneous" tier (41+ members, same probe), so a community this size or smaller is expected to
+# already be plausibly topic-coherent without recursion, not derived from any benchmark of its own.
+# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
+# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
+# framing when tuning this; replace this comment with the benchmark citation once a real value is
+# locked.
+COMMUNITY_HIERARCHY_SIZE_THRESHOLD = 20
+
+# Milestone D (wayfinder ticket "Milestone D hierarchy mechanics," standing constraint 25, memory
+# 94579e0f) -- the maximum `communities.level` a recursive sub-clustering pass may ever produce. A
+# still-oversized community at this level never recurses further, regardless of its own
+# member_count -- capped iterative recursion, not unbounded, per constraint 25's own explicit locked
+# choice. Level 0 (the original whole-graph pass) always counts against this cap: a value of 2 means
+# levels 0, 1, and 2 may exist, and a level-2 community never produces a level-3 child. PLACEHOLDER:
+# not yet benchmarked against SALTMDB's own corpus -- seeded at a small value since the live-corpus
+# cost probe (memory acd52d4a) measured only one recursion level's worth of overhead (~3.3% on top
+# of the full-graph pass); a deeper cap multiplies that cost per additional level and has not itself
+# been measured. Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing
+# constraint 28) via its own concrete quantitative sweep against the live corpus. Do not remove the
+# placeholder framing when tuning this; replace this comment with the benchmark citation once a real
+# value is locked.
+COMMUNITY_HIERARCHY_MAX_DEPTH = 2
 
 # Pairwise cohesion gate (src/saltmdb/domain/services/cohesion_service.py and
 # relation_service.py:commit_consolidation). Memory-core rework Phase 3 -- see plans/ and SALTMDB memory
@@ -274,6 +315,158 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
     {frozenset({"supersedes", "elaborates_on"})}
 )
 
+# Milestone A slice A1 (wayfinder ticket G4, memory 5d578d13) -- retrieve_context's graph-expansion
+# fan-out bound: max_out_of_network_neighbors = CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS *
+# num_primary_hits, adopting GraphRAG local-search's own formula/default as-is (verified against
+# GraphRAG source during wayfinder research ticket 5a3694d1). Milestone B calibration (memory
+# 4c0c77bd) benchmarked this against 14 real retrieve_context probes on the live corpus: fan_out
+# truncation (dropped_count) was 0 in every probe, including the densest (14 eligible expansion
+# candidates) -- the cap was never once the binding constraint, so no live evidence supports
+# changing it. Confirmed at its existing value, no longer a placeholder.
+CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS = 10
+
+# Milestone A slice A2 (wayfinder ticket G7, memory 0cb1d191) -- retrieve_context's contradicts-
+# conflict-set reserve: bounds how many net-new (conflict_only) entities an unresolved contradicts
+# conflict set may pull in, additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's
+# general fan-out cap above. Deliberately a FLAT constant, not scaled by num_primary_hits like the
+# fan-out cap -- G3's "small-but-nonzero" framing is an absolute visibility floor for conflicts,
+# not a proportional budget. Milestone B calibration (memory 4c0c77bd) seeded the corpus's first
+# real contradicts edge (a genuine, source-verified conflict between two embedding-model-accuracy
+# memories) and confirmed the resulting conflict set (2 members) sits comfortably under this cap.
+# Confirmed at its existing value, no longer a placeholder.
+CONTEXT_EXPANSION_CONTRADICTS_CAP = 5
+# Milestone C.5 (wayfinder ticket "orphan-to-community assignment mechanics," standing constraint
+# 16, memory 1c15e9ac) -- retrieve_context's orphan-community reserve: bounds how many net-new
+# (orphan_community) entities a call may pull in across ALL zero-edge orphan primary hits combined,
+# additive to (never drawn from) CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's fan-out cap and
+# CONTEXT_EXPANSION_CONTRADICTS_CAP's conflict reserve. A FLAT constant, mirroring
+# CONTEXT_EXPANSION_CONTRADICTS_CAP's own shape exactly (not scaled by orphan-hit or primary-hit
+# count, unlike CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS) -- orphan-community is a sparse
+# force-include mechanism, not G4's always-on default case. Fixed now, NOT a Milestone-C/C.5-
+# benchmark placeholder (unlike COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD below) -- mirrors
+# LINEAGE_HISTORICAL_CAP's own "low-stakes and reversible, do not defer" precedent: getting this
+# number wrong costs at most a few extra/fewer context entries, recoverable by re-tuning without
+# calibration evidence. Seeded at the same value as CONTEXT_EXPANSION_CONTRADICTS_CAP's own current
+# value, since constraint 16 explicitly mirrors that constant's shape.
+CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP = 5
+
+# Milestone C.5 (wayfinder ticket "orphan-to-community assignment mechanics," standing constraint
+# 16, memory 1c15e9ac) -- the minimum cosine similarity between a zero-edge orphan primary hit's
+# own entity_embeddings vector and a community's PageRank-weighted centroid (community_embeddings)
+# required to assign that orphan to that community at all. Below this threshold, the orphan gets no
+# orphan_community assignment for this call, full stop -- never force-assigned to its
+# nearest-however-distant community. Locked from the Milestone C/C.5 benchmark run (wayfinder
+# ticket 787ebf0c, memories 463753f9/c030edc4): a direct find_orphan_community_matches threshold
+# sweep against real bge-small-en-v1.5 embeddings found 11/11 true same-cluster admissions with
+# ZERO false-positive cross-topic admissions at every threshold from 0.50 up to 0.80 -- the
+# similarity gap between real same-topic and cross-topic pairs is wide enough that false-positive
+# risk was never the binding constraint anywhere in the tested range. 0.60 is the highest threshold
+# in that zero-false-positive range that still admits all 11/11 true positives (0.65 dropped 2/11
+# for no corresponding safety benefit). No longer a placeholder.
+COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD = 0.60
+
+# Milestone D (wayfinder ticket "Milestone D primary-search seeding," standing constraint 27,
+# memory 6ca4317c) -- strategy:"global" retrieve_context's seed selection: the number of nearest
+# (by cosine similarity of the query embedding to each leaf community's own centroid) leaf
+# communities taken as seeds for a global-mode call. Unconditional best-effort top-K -- no minimum-
+# similarity abstention floor in v1 (a deliberate choice, not an oversight: constraint 27 exists
+# specifically because retrieve_context's existing strict abstention gate already broke this exact
+# query shape once, see b9b75764/e957aa78; adding a second uncalibrated threshold in the same
+# subsystem for the same reason would repeat that mistake). A FLAT constant, not scaled by anything
+# -- unlike CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's per-primary-hit-count scaling, there is no
+# analogous per-call quantity to scale a community seed count against in this design. PLACEHOLDER:
+# not yet benchmarked against SALTMDB's own corpus -- seeded at the same order of magnitude as
+# CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS's own current value, not derived from any benchmark of
+# its own. Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing
+# constraint 28) via its own concrete quantitative sweep against the live corpus. Do not remove the
+# placeholder framing when tuning this; replace this comment with the benchmark citation once a
+# real value is locked.
+CONTEXT_GLOBAL_TOP_K_COMMUNITIES = 10
+# Milestone D2 Bug B fix (SALTMDB memory 510c19ff, live DNS repro bb609f00) -- strategy:"global"
+# retrieve_context's community-seeding relative admission gate: a candidate leaf community is
+# admitted only if its centroid-to-query cosine similarity is within this absolute gap of the
+# single best-matching (rank-1) community's own similarity in the same call. Rank-1 itself is
+# always force-included regardless of its own absolute similarity (never subject to this gap), so
+# this floor can only ever shrink the existing CONTEXT_GLOBAL_TOP_K_COMMUNITIES window, never
+# produce an empty seed set on its own -- structurally avoiding the exact false-negative failure
+# mode (local strategy's strict abstention gate, memory b9b75764, original incident
+# e957aa78/33cb492f) that constraint 27's original "no floor in v1" choice was written to avoid
+# repeating. This is an ABSOLUTE GAP anchored to this call's own top match, not a FIXED absolute
+# similarity floor on raw centroid similarity -- the fixed-absolute-floor shape was already tried
+# and abandoned once for the entity-level relevance gate elsewhere in this file (see the
+# RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE removal NOTE below RERANK_GAP_SKIP_RATIO: an absolute
+# cosine-distance/-similarity cutoff does not generalize as candidate-pool size grows).
+# CALIBRATED (wayfinder ticket f3f03936, SALTMDB memory f138c6d0, 2026-09-19): a live-corpus sweep
+# across five fresh, previously-unbenchmarked topics (Vonini, Incus/firewall, CADET quota bugs,
+# ACIE dogfooding, homelab WalnutPi) at gap in/{0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50} found 0.10
+# to be the largest value that stays clean (zero off-topic seeded representatives) across every
+# topic while still capturing every additional genuinely-relevant community available -- 0.05
+# under-recalls a second real community on some topics, 0.15+ starts admitting off-topic
+# representatives on at least one topic. The prior 0.5 placeholder was confirmed too loose,
+# corroborating the live DNS-query finding in memory b87b9d46.
+CONTEXT_GLOBAL_SEED_SIMILARITY_GAP = 0.10
+
+# Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
+# memory 51127287) -- strategy:"global" retrieve_context's representative-slot reserve: how many of
+# the CONTEXT_GLOBAL_TOP_K_COMMUNITIES seeded leaf communities actually get their own constraint-19
+# representative force-included as a guaranteed, budget-accounted (but never budget-gated) slot.
+# Milestone D4 fix (SALTMDB memory 6dc8924d, live DNS repro this same session) -- ranked by each
+# admitted representative's own real per-query similarity (post Bug A fix, memory 3c40dd0e), NOT by
+# its community's centroid/seed-rank similarity -- the weakest-matching representatives are dropped
+# first if the eligible count exceeds this cap, and CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP
+# below can additionally shrink this window before the cap is even reached. Independently capped
+# from CONTEXT_GLOBAL_MEMBER_POOL_CAP below -- a community whose representative candidate is dropped
+# here (by either the cap or the gap) still contributes its own other members to the member pool on
+# equal footing; the dropped representative candidate itself is never redirected into the member
+# pool (this constant's own pre-existing cap-independent behavior, unchanged by the D4 fix).
+# PLACEHOLDER: not yet benchmarked against SALTMDB's own corpus -- seeded at the same order of
+# magnitude as CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP's own current value, mirroring that constant's
+# own "sparse force-include mechanism" shape, not derived from any benchmark of its own. Recalibrated
+# by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28) via its own
+# concrete quantitative sweep against the live corpus. Do not remove the placeholder framing when
+# tuning this; replace this comment with the benchmark citation once a real value is locked.
+CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP = 5
+# Milestone D4 fix (SALTMDB memory 6dc8924d, live DNS repro this same session) -- strategy:"global"
+# retrieve_context's representative-slot relative admission gate: an admitted representative
+# candidate is kept only if its own real per-query similarity is within this absolute gap of the
+# single best-matching representative's own similarity in the same call. The best representative
+# itself is always force-included regardless of its own absolute similarity (its own gap-to-itself
+# is always 0, so it is never subject to this gap), so this floor can only ever shrink the existing
+# CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP window, never produce an empty representative_reserve on
+# its own when at least one eligible representative candidate exists. This mirrors
+# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP above exactly -- same ABSOLUTE GAP (not FIXED absolute floor)
+# shape and the same generalization reasoning (see that constant's own comment and the
+# RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE removal NOTE below RERANK_GAP_SKIP_RATIO) -- just applied one
+# stage later, to each representative's own real per-query similarity instead of its community's
+# centroid similarity. Closes the gap D3 (memory 9c4d6277's decision 6) left open: a community
+# relevant enough to be seeded does not guarantee its own single best member is itself a strong
+# match, and representative_reserve previously had no floor of its own at all.
+# CALIBRATED (wayfinder ticket f3f03936, SALTMDB memory f138c6d0, 2026-09-19): kept equal to
+# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP per D3/D4's own original design intent -- the same live-corpus
+# sweep (five fresh topics plus a dedicated small/organically-weak-community probe, comparing
+# retrieve_context(global) against search_memory(broad)) found no evidence requiring the two
+# constants to diverge; 0.10 kept representative selection sane on a real 2-member community
+# (298d2f7a) with zero degradation.
+CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP = 0.10
+
+# Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
+# memory 51127287) -- strategy:"global" retrieve_context's member-pool node-eligibility cap: the
+# maximum combined candidate-member count, across every seeded leaf community, that is even offered
+# to context_budget_service.pack_context_budget's own separate real-token packing pass. A node-
+# eligibility cap, not a token-count cap -- mirrors CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/G4's own
+# "independent from the token-budget axis" precedent (constraint 25's own explicit framing), applied
+# here at the community-member level. Ranked by each member's own query-embedding similarity across
+# the whole combined pool (never per-community sub-pools) before this cap truncates it, matching
+# constraint 26's own "one shared, continuously relevance-ranked pool" requirement. PLACEHOLDER: not
+# yet benchmarked against SALTMDB's own corpus -- seeded at CONTEXT_GLOBAL_TOP_K_COMMUNITIES times a
+# small constant, giving each seeded community a comparable member-slot budget on average to what a
+# single Milestone-A expansion pass typically admits, not derived from any benchmark of its own.
+# Recalibrated by the Milestone D benchmark run (wayfinder ticket f3f03936, standing constraint 28)
+# via its own concrete quantitative sweep against the live corpus. Do not remove the placeholder
+# framing when tuning this; replace this comment with the benchmark citation once a real value is
+# locked.
+CONTEXT_GLOBAL_MEMBER_POOL_CAP = 30
+
 # Rework Phase 6 -- supersession-chain resolution + relevance-abstention gate for search_memory's
 # new mode="strict" (see plans/scalable-strolling-stallman.md and SALTMDB memory `9c199005`).
 # Structural cap on _resolve_supersession_chains' recursive-CTE walk, matching
@@ -281,6 +474,38 @@ RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS = frozenset(
 # Policy choice, not benchmarked -- a `supersedes` chain longer than 10 hops abstains (leaves the
 # candidate unsubstituted) rather than being treated as trustworthy.
 SUPERSESSION_CHAIN_MAX_DEPTH = 10
+
+# Milestone A slice A3 (wayfinder standing constraint 15, memory 0ca97ddc) -- retrieve_context's
+# lineage.historical display cap: the number of most-recent supersession-chain entries shown by
+# default per lineage[head]. Deliberately decoupled from get_lineage's own general-purpose
+# max_depth=10 traversal bound above (a different, downstream concern -- display size, not
+# traversal depth). UNLIKE CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS/CONTEXT_EXPANSION_CONTRADICTS_CAP,
+# this is NOT a Milestone-B placeholder -- constraint 15 already fixed this number now (getting it
+# wrong is low-stakes and reversible, one extra get_lineage call recovers the full chain), so do
+# not add placeholder framing here or flag it for recalibration. An ancestor beyond this cap can
+# still appear in lineage[head].historical when it is force-included as a resolved contradicts-edge
+# endpoint (Milestone A slice A3, wayfinder gap 4cbf26ac) -- this constant bounds only the normal,
+# non-force-included window.
+LINEAGE_HISTORICAL_CAP = 5
+# Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
+# packing: the default real-token-count ceiling (via fastembed's TextEmbedding.token_count(), see
+# context_budget_service.py) applied when a caller does not supply their own budget_tokens value.
+# Milestone B calibration (memory 4c0c77bd) benchmarked the old 4000 default against 11 ordinary
+# probes on the live corpus: usage ranged 1948-3952 tokens (several pinned at 97-99% of the
+# ceiling), with 7/11 probes hitting non-trivial expansion truncation (worst: 11/14 and 9/11
+# eligible candidates dropped) -- 4000 was simply too tight for this corpus's real memory sizes, not
+# evidence expansion itself needed bounding differently. Raised to 8000; re-verified this
+# eliminates truncation for ordinary queries and cuts it sharply (e.g. 11/14 dropped -> 3/14) even
+# on the densest probe in the sample. No longer a placeholder.
+CONTEXT_BUDGET_DEFAULT_TOKENS = 8000
+
+# Milestone A slice A4 (wayfinder ticket G8, memory cdf2c7cf) -- retrieve_context's context-budget
+# packing: the hard ceiling a caller-supplied budget_tokens is clamped DOWN to if it exceeds this
+# value (never clamped up -- a caller requesting less than this gets exactly what they asked for).
+# Milestone B calibration (memory 4c0c77bd) raised this alongside CONTEXT_BUDGET_DEFAULT_TOKENS,
+# keeping the same 4x default:ceiling ratio the original 4000/16000 pair had. No longer a
+# placeholder.
+CONTEXT_BUDGET_MAX_TOKENS = 32000
 
 # NOTE: accept_or_abstain's (memory_service/ranking.py) DIRECT semantic-only acceptance rule
 # (search_memory mode="strict") deliberately does NOT use a standalone

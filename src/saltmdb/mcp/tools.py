@@ -157,6 +157,7 @@ _OWNER_INJECTED_TOOLS = frozenset(
         "get_lineage",
         "get_related_memories",
         "review_core_memory",
+        "retrieve_context",
     }
 )
 
@@ -1069,6 +1070,57 @@ def get_related_memories(
             "max_depth": max_depth,
             "direction": direction,
             "include_inspect": include_inspect,
+            "owner_id": owner_id_,
+        },
+    )
+
+
+@mcp.tool()
+def retrieve_context(
+    query: str,
+    limit: int | None = None,
+    budget_tokens: int | None = None,
+    strategy: Literal["local", "global"] | None = None,
+) -> dict:
+    """Assembles graph-aware, budget-bounded local context for a query in one call: primary search
+    hits, one-hop predicate-allowlisted graph expansion, contradiction/conflict-set surfacing,
+    lifecycle/supersession history, and deterministic token-budget packing -- everything
+    search_memory + get_related_memories + get_lineage would otherwise require composing by hand.
+
+    Returns one memories[] array (each item tagged inclusion: "primary"|"expansion"|
+    "conflict_only", plus a retrieval_provenance explaining how it entered the result), the
+    in-network edges directly connecting primary hits, a lineage map for every surfaced head with a
+    known supersession chain (contradiction-flagged where relevant), conflict_sets for any
+    unresolved contradiction touching this result (a lifecycle-resolved one surfaces via lineage,
+    never here), and metadata.fan_out/metadata.budget truncation accounting. A primary-hit item may
+    also include relevance_preview/relevance_preview_meta -- the same query-focused extractive
+    preview search_memory returns, carried through unchanged (see search_memory's own description
+    for the field's exact semantics and budget-degradation contract); expansion/conflict_only items
+    never carry it, since they were never matched against the query directly.
+
+    limit controls how many primary search hits seed expansion (default 5, matching search_memory's
+    own default). budget_tokens caps the total token payload of memories[] (server default and hard
+    ceiling apply if omitted). All other traversal behavior -- which relation predicates expand
+    context, how far, and in which direction -- is fixed for this tool and not caller-configurable.
+    strategy selects the retrieval mode: "local" (the default) is the existing bounded one-hop-plus
+    expansion described above. "global" instead seeds from whichever leaf community-detection
+    clusters (see Milestone C) are nearest the query by embedding similarity, synthesizing a
+    representative-plus-ranked-members result per seeded community for whole-topic breadth rather
+    than one-hop-local depth -- it never runs the primary-search/expansion/conflict/lineage pipeline
+    above at all, so edges/lineage/conflict_sets are always empty and memories[] items instead carry
+    inclusion "community_representative"|"community_member" with a different retrieval_provenance
+    shape (community_id plus a similarity score) and metadata carries a new metadata.community
+    namespace in place of metadata.fan_out.
+
+    """
+    owner_id_ = _effective_owner()
+    return _backend_or_raise().call(
+        "retrieve_context",
+        {
+            "query": query,
+            "limit": limit,
+            "budget_tokens": budget_tokens,
+            "strategy": strategy if strategy is not None else "local",
             "owner_id": owner_id_,
         },
     )

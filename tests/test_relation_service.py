@@ -8,6 +8,7 @@ import uuid
 import json
 import re
 from datetime import datetime, UTC
+from typing import Any
 from unittest.mock import patch
 
 import sqlite_vec
@@ -2865,6 +2866,193 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         self.assertEqual(results[0]["status"], "duplicate", results)
         self.assertEqual(results[1]["status"], "success", results)
         self.assertEqual(self._override_events(), [])
+
+
+class TestCommunityDetectionRelationHooks(unittest.TestCase):
+    _test_mode: Any = None
+    _embedding_jobs: Any = None
+    temp_dir: str = ""
+    db_path: str = ""
+    conn: sqlite3.Connection = None  # pyright: ignore[reportAssignmentType]
+
+    def setUp(self):
+        self._test_mode = patch.dict(os.environ, {"SALTMDB_TEST_MODE": "1"}, clear=False)
+        self._test_mode.start()
+        self._embedding_jobs = patch.multiple(
+            "saltmdb.domain.services.embedding_service",
+            enqueue_embedding_jobs_for_entity=lambda *args, **kwargs: None,
+            enqueue_retrieval_embedding_job_for_entity=lambda *args, **kwargs: None,
+        )
+        self._embedding_jobs.start()
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        self._embedding_jobs.stop()
+        self._test_mode.stop()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _new_entity(self, label):
+        result = store_memory(
+            content=(
+                f"Community detection relation-hook fixture for {label}. This sentence provides "
+                "durable content for a real relation write."
+            ),
+            title=f"Community hook fixture {label}",
+            owner_id="community-hook-test",
+            db_connection=self.conn,
+        )
+        return _memory_id(result)
+
+    def test_scenario_22_store_relation_triggers_community_detection_on_new_edge(self):
+        source, target = self._new_entity("store-source"), self._new_entity("store-target")
+
+        with patch(
+            "saltmdb.domain.services.community_detection_service.trigger_community_detection"
+        ) as trigger:
+            result = store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+            duplicate = store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+
+        self.assertTrue(result.startswith("Relation successfully stored"), result)
+        self.assertTrue(duplicate.startswith("Relation already exists"), duplicate)
+        self.assertEqual(trigger.call_count, 2)
+        self.assertEqual(
+            [call.kwargs for call in trigger.call_args_list],
+            [
+                {"db_path": self.db_path, "coordinator": None},
+                {"db_path": self.db_path, "coordinator": None},
+            ],
+        )
+
+    def test_scenario_23_invalidate_relation_triggers_community_detection_on_success(self):
+        source, target = (
+            self._new_entity("invalidate-source"),
+            self._new_entity("invalidate-target"),
+        )
+        with patch(
+            "saltmdb.domain.services.community_detection_service.trigger_community_detection"
+        ) as trigger:
+            stored = store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+            trigger.reset_mock()
+            result = invalidate_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+
+        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
+        self.assertTrue(result.startswith("Relation invalidated"), result)
+        trigger.assert_called_once_with(db_path=self.db_path, coordinator=None)
+
+    def test_scenario_29_store_relation_forwards_coordinator_to_trigger(self):
+        source, target = (
+            self._new_entity("forward-store-source"),
+            self._new_entity("forward-store-target"),
+        )
+        coordinator = object()
+
+        with patch(
+            "saltmdb.domain.services.community_detection_service.trigger_community_detection"
+        ) as trigger:
+            result = store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+                coordinator=coordinator,
+            )
+
+        self.assertTrue(result.startswith("Relation successfully stored"), result)
+        trigger.assert_called_once_with(db_path=self.db_path, coordinator=coordinator)
+
+    def test_scenario_30_invalidate_relation_forwards_coordinator_to_trigger(self):
+        source, target = (
+            self._new_entity("forward-invalidate-source"),
+            self._new_entity("forward-invalidate-target"),
+        )
+        stored = store_relation(
+            source_id=source,
+            target_id=target,
+            predicate="depends_on",
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
+        coordinator = object()
+
+        with patch(
+            "saltmdb.domain.services.community_detection_service.trigger_community_detection"
+        ) as trigger:
+            result = invalidate_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+                db_path=self.db_path,
+                coordinator=coordinator,
+            )
+
+        self.assertTrue(result.startswith("Relation invalidated"), result)
+        trigger.assert_called_once_with(db_path=self.db_path, coordinator=coordinator)
+
+    def test_scenario_24_in_transaction_relation_writes_suppress_community_detection(self):
+        source, target = (
+            self._new_entity("transaction-source"),
+            self._new_entity("transaction-target"),
+        )
+
+        with patch(
+            "saltmdb.domain.services.community_detection_service.trigger_community_detection"
+        ) as trigger:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                stored = store_relation(
+                    source_id=source,
+                    target_id=target,
+                    predicate="depends_on",
+                    db_connection=self.conn,
+                    db_path=self.db_path,
+                    _in_transaction=True,
+                )
+                invalidated = invalidate_relation(
+                    source_id=source,
+                    target_id=target,
+                    predicate="depends_on",
+                    db_connection=self.conn,
+                    db_path=self.db_path,
+                    _in_transaction=True,
+                )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
+        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
+        self.assertTrue(invalidated.startswith("Relation invalidated"), invalidated)
+        trigger.assert_not_called()
 
 
 if __name__ == "__main__":

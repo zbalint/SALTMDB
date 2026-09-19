@@ -140,6 +140,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     owner_id: str = None,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
     _in_transaction: bool = False,
     _allow_core_elaborates_on: bool = False,
 ) -> str:
@@ -445,6 +446,12 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                 return _do_store()
 
             result_msg = write_transaction_retrying(conn, _write)
+        if not _in_transaction:
+            from saltmdb.domain.services.community_detection_service import (
+                trigger_community_detection,
+            )
+
+            trigger_community_detection(db_path=db_path, coordinator=coordinator)
         return result_msg
     except Exception as e:
         logger.error("Error storing relation: %s", e)
@@ -461,6 +468,7 @@ def invalidate_relation(  # noqa: C901
     invalid_at: str | None = None,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
     _in_transaction: bool = False,
 ) -> str:
     """Invalidates an active relationship edge on the event/world-time axis (invalid_at).
@@ -531,6 +539,12 @@ def invalidate_relation(  # noqa: C901
                 return _do_invalidate()
 
             result_msg = write_transaction_retrying(conn, _write)
+        if not _in_transaction:
+            from saltmdb.domain.services.community_detection_service import (
+                trigger_community_detection,
+            )
+
+            trigger_community_detection(db_path=db_path, coordinator=coordinator)
         return result_msg
     except Exception as e:
         logger.error("Error invalidating relation: %s", e)
@@ -1881,7 +1895,9 @@ def bulk_store_relations(
                     )
                     if res.startswith("Error"):
                         raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
-                    status = "duplicate" if res.startswith("Relation already invalidated") else "success"
+                    status = (
+                        "duplicate" if res.startswith("Relation already invalidated") else "success"
+                    )
                     results.append(
                         {
                             "status": status,
