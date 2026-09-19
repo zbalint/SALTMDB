@@ -66,8 +66,11 @@ around calling it changes), `src/saltmdb/domain/services/relation_service.py`'s
 `entity_detail.py`'s `get_lineage` method (Amendment 3, licensed above -- every other viewer file
 and every other method in this one remain untouched), and
 `scratch/plans/agent_api_redesign_implementation_plan_20260818.md` (referenced as prior art,
-never edited). No new runtime dependency is introduced (`TypedDict` in §13 is Python's own
-`typing.TypedDict`, already stdlib).
+never edited). No new runtime dependency is introduced (`TypedDict` in §13 is
+`typing_extensions.TypedDict` [Amendment 4] -- `typing_extensions` is not a new dependency this
+spec adds; it is already an unconditional, no-version-marker dependency of `pydantic` itself,
+see `uv.lock`'s `pydantic` package entry -- anything in this codebase that already depends on
+`pydantic`, which every `@mcp.tool()`-decorated function already does, already has it installed).
 
 ## 1. Why
 
@@ -2004,7 +2007,7 @@ per-item reads inside `_dispatch_consolidate_memories`'s `consolidations` branch
 Add, near the top of `mcp/tools.py` (after its existing imports, before the first `@mcp.tool()`):
 
 ```python
-from typing import TypedDict
+from typing_extensions import TypedDict
 
 
 class RelationBatchItem(TypedDict, total=False):
@@ -2026,6 +2029,26 @@ class ConsolidationBatchItem(TypedDict, total=False):
     scope: Literal["private", "shared"] | None
     override_justification: str | None
 ```
+
+**`typing_extensions.TypedDict`, not `typing.TypedDict` (Amendment 4)**: the project's
+supported floor is Python 3.10 (`pyproject.toml`'s `requires-python = ">=3.10"`), and the
+worktree's own venv runs 3.11. Pydantic 2.13 (the version this project pins) requires
+`typing_extensions.TypedDict` specifically on any Python below 3.12, and raises
+`PydanticUserError: Please use typing_extensions.TypedDict instead of typing.TypedDict on
+Python < 3.12` at `@mcp.tool()` registration time otherwise -- confirmed by direct reproduction
+(a throwaway script registering this exact `RelationBatchItem` shape via `mcp.server.fastmcp`'s
+real `FastMCP`, against this worktree's real installed pydantic 2.13.4, hit the identical error
+verbatim; switching only the import line to `from typing_extensions import TypedDict`, zero other
+change, registered cleanly). This is not a new dependency: `typing_extensions` carries no
+Python-version marker on its dependency edge from `pydantic` in `uv.lock` (unlike most of its
+other dependencies, which are conditioned on `python_full_version < '3.13'` etc.) -- it is
+unconditionally installed by pydantic itself on every supported Python version, so anything that
+already imports `pydantic` (every `@mcp.tool()`-decorated function in this file already does,
+transitively via `mcp.server.fastmcp`) already has it available. Raising the project's Python
+floor to 3.12 instead (this adjudication's alternative option) was rejected: it is a disruptive,
+project-wide compatibility decision affecting every user still on 3.10/3.11, entirely unrelated
+to this spec's actual purpose, where a one-line import swap using an already-guaranteed-present
+dependency fully resolves the contradiction with no such cost.
 
 Then change `manage_relation`'s `relations: list | None = None` (line 650) to
 `relations: list[RelationBatchItem] | None = None`, and `consolidate_memories`'s
@@ -2131,6 +2154,20 @@ require and should not attempt (Coding Standards rule 6).
   auth, or RPC method classification (`READ_TOOLS`/`WRITE_TOOLS`/`MUTATING_TOOLS` all unchanged).
 
 ## 17. Acceptance
+
+```bash
+PYTHONPATH=src uv run python -c 'import saltmdb.mcp.tools'
+```
+Must exit 0 with no `PydanticUserError` (Amendment 4) -- this is the exact reproduction command
+that found the `typing.TypedDict`/pydantic-2.13/Python-<3.12 contradiction; run it before the
+full suite, since a collection-time `ImportError` here would otherwise surface as a confusing
+mass of unrelated pytest collection failures rather than this one specific root cause.
+
+```bash
+rg -n '^from typing import TypedDict$|^from typing import.*TypedDict' src/saltmdb/mcp/tools.py
+```
+Must show **zero** matches; `rg -n '^from typing_extensions import TypedDict$'
+src/saltmdb/mcp/tools.py` must show exactly one match.
 
 ```bash
 PYTHONPATH=src uv run pytest tests/ -q
@@ -2421,3 +2458,59 @@ greps, and a fresh `mcp__acie__find_references` on `relation_service.py:get_line
 against the current (still pre-implementation, confirmed via `git status`) tree, and manually
 read every file this amendment names end to end rather than trusting the earlier session's
 partial reads. Status remains **LOCKED**.
+
+## Amendment 4
+
+OMP's third BLOCKED report was a different kind of finding than Amendments 2/3 (an internal
+fanout gap): §13's `from typing import TypedDict` genuinely cannot be registered as an
+`@mcp.tool()` parameter annotation on this project's real, pinned runtime. This was verified
+directly, not accepted from the report text alone: a throwaway script (deleted after use, no
+project file touched) registered the exact `RelationBatchItem` shape from §13 via
+`mcp.server.fastmcp`'s real `FastMCP` against this worktree's actual installed `pydantic`
+(2.13.4, per `uv run python -c 'import pydantic; print(pydantic.VERSION)'`) on this worktree's
+actual Python (3.11.15, per `uv run python --version` -- distinct from the `python3` on `PATH`,
+which resolves to 3.14.4 and is not what `uv run` uses). It reproduced
+`pydantic.errors.PydanticUserError: Please use typing_extensions.TypedDict instead of
+typing.TypedDict on Python < 3.12` verbatim, matching OMP's report exactly.
+
+**Adjudication**: option 1 (switch to `typing_extensions.TypedDict`), not option 2 (raise the
+supported Python floor to 3.12). Checked whether option 1 actually violates §0's "no new runtime
+dependency" constraint, since that constraint is exactly why §13 used stdlib `typing.TypedDict`
+in the first place: it does not. `uv.lock`'s `pydantic` package entry lists `typing-extensions`
+as a dependency with **no** Python-version marker (every one of pydantic's *other* listed
+dependencies that carries a marker is conditioned on `python_full_version < '3.11'` or `< '3.13'`
+-- `typing-extensions` has none), meaning pydantic requires it unconditionally on every supported
+Python version, not just below some cutoff. Concretely: this project already depends on
+`pydantic` (every `@mcp.tool()`-decorated function does, transitively through
+`mcp.server.fastmcp`), so `typing_extensions` is already installed in every environment that can
+run this codebase at all -- switching the one import line adds nothing to the dependency graph.
+Re-ran the same throwaway probe with only `from typing_extensions import TypedDict` swapped in
+(zero other change) and it registered cleanly. Option 2 was rejected because it is a real,
+disruptive, project-wide decision (breaking every user still on Python 3.10/3.11, per
+`pyproject.toml`'s actual `requires-python = ">=3.10"` floor) entirely orthogonal to this spec's
+actual purpose, when a same-cost, zero-new-dependency, zero-collateral-impact fix already exists.
+
+**Fix**: §13's code block now imports `from typing_extensions import TypedDict`, with an inline
+note explaining why and citing the exact verified error/version/dependency facts above so a
+future reader (or a fifth OMP round, if one ever happens) doesn't have to re-derive this. §0's
+"no new runtime dependency" sentence now names the actual import and the unconditional-dependency
+fact backing it, rather than asserting stdlib-only status that turned out to be wrong for this
+runtime. §17 gained a dedicated `import saltmdb.mcp.tools` acceptance command placed *before* the
+full suite (a collection-time failure here would otherwise present as a confusing wall of
+unrelated pytest errors rather than this one specific, already-diagnosed cause) plus a grep
+confirming the import line itself.
+
+**Verification stayed within the adjudication-verification boundary**: the only things executed
+were `python --version`/`pydantic.VERSION` checks, a `uv.lock` grep, and one throwaway,
+deleted-after-use script that registered a single isolated `FastMCP` tool with the exact
+`RelationBatchItem` shape from §13 -- no project source file was edited, no service/wiring code
+was built, and the full project test suite was not run as part of this verification (OMP's own
+fresh `1699 passed, 12 skipped, 18 subtests passed` run, cited in its BLOCKED report, was already
+sufficient evidence the rest of the tree is unaffected). Worktree confirmed spec-only (`git
+status --short` empty of anything but the spec-file edit) before committing.
+
+**Amendment 4 pre-lock re-check**: re-ran `uv run python --version`, `uv run python -c "import
+pydantic; print(pydantic.VERSION)"`, and the `uv.lock` `pydantic` dependency-block grep fresh
+against the current tree to confirm the cited versions and the no-marker `typing-extensions` fact
+are still accurate, and re-read §0's and §13's amended text end to end for internal consistency
+with §17's new commands. Status remains **LOCKED**.
