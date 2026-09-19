@@ -213,9 +213,12 @@ class TestCommunityRetrievalService(unittest.TestCase):
 
         with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_TOP_K_COMMUNITIES", 2):
             with patch.object(
-                community_retrieval_service, "embed_text", return_value=_axis_vector(0)
+                community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
             ):
-                result = seed_and_rank_communities("community query", db_connection=self.conn)
+                with patch.object(
+                    community_retrieval_service, "embed_text", return_value=_axis_vector(0)
+                ):
+                    result = seed_and_rank_communities("community query", db_connection=self.conn)
 
         self.assertEqual(
             result["seed_cap"],
@@ -276,9 +279,21 @@ class TestCommunityRetrievalService(unittest.TestCase):
                 community_retrieval_service, "CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP", 2
             ):
                 with patch.object(
-                    community_retrieval_service, "embed_text", return_value=_axis_vector(0)
+                    community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
                 ):
-                    result = seed_and_rank_communities("community query", db_connection=self.conn)
+                    with patch.object(
+                        community_retrieval_service,
+                        "CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP",
+                        0.5,
+                    ):
+                        with patch.object(
+                            community_retrieval_service,
+                            "embed_text",
+                            return_value=_axis_vector(0),
+                        ):
+                            result = seed_and_rank_communities(
+                                "community query", db_connection=self.conn
+                            )
 
         # Representative selection is driven entirely by each candidate's own real per-query
         # similarity (0.5/0.9/0.7), not its community's centroid rank (1.0/0.8/0.6) -- community-b's
@@ -443,8 +458,13 @@ class TestCommunityRetrievalService(unittest.TestCase):
             _cosine_vector(0.7),
         )
 
-        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
-            result = seed_and_rank_communities("community query", db_connection=self.conn)
+        with patch.object(
+            community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
+        ):
+            with patch.object(
+                community_retrieval_service, "embed_text", return_value=_axis_vector(0)
+            ):
+                result = seed_and_rank_communities("community query", db_connection=self.conn)
 
         # Both centroids are within CONTEXT_GLOBAL_SEED_SIMILARITY_GAP (0.5) of the top match's own
         # similarity (gap 0.3) -- the floor admits both, confirming the fix trims genuine outliers
@@ -510,8 +530,16 @@ class TestCommunityRetrievalService(unittest.TestCase):
             _cosine_vector(0.6),
         )
 
-        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
-            result = seed_and_rank_communities("community query", db_connection=self.conn)
+        with patch.object(
+            community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
+        ):
+            with patch.object(
+                community_retrieval_service, "CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP", 0.5
+            ):
+                with patch.object(
+                    community_retrieval_service, "embed_text", return_value=_axis_vector(0)
+                ):
+                    result = seed_and_rank_communities("community query", db_connection=self.conn)
 
         # Both communities are seeded (centroid gap 1.0-0.6=0.4 <= CONTEXT_GLOBAL_SEED_SIMILARITY_GAP,
         # 0.5) -- D3's community-level floor admits both. But community-b's own best member (0.3) is

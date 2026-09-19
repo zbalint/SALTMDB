@@ -395,15 +395,16 @@ CONTEXT_GLOBAL_TOP_K_COMMUNITIES = 10
 # similarity floor on raw centroid similarity -- the fixed-absolute-floor shape was already tried
 # and abandoned once for the entity-level relevance gate elsewhere in this file (see the
 # RELEVANCE_GATE_MAX_SEMANTIC_DISTANCE removal NOTE below RERANK_GAP_SKIP_RATIO: an absolute
-# cosine-distance/-similarity cutoff does not generalize as candidate-pool size grows). PLACEHOLDER:
-# not yet benchmarked against SALTMDB's own live corpus -- seeded by direct verification against
-# every existing test_community_retrieval_service.py scenario at this value: it changes only the
-# one scenario Bug B's fix is meant to change (two orthogonal leaf communities, gap 1.0), and
-# every other scenario's real cross-community gap (<=0.4) stays admitted, unaffected. Recalibrate
-# via a real benchmark sweep (mirroring COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD's positive/negative-
-# pair methodology) before treating this as final; do not remove the placeholder framing when
-# tuning it.
-CONTEXT_GLOBAL_SEED_SIMILARITY_GAP = 0.5
+# cosine-distance/-similarity cutoff does not generalize as candidate-pool size grows).
+# CALIBRATED (wayfinder ticket f3f03936, SALTMDB memory f138c6d0, 2026-09-19): a live-corpus sweep
+# across five fresh, previously-unbenchmarked topics (Vonini, Incus/firewall, CADET quota bugs,
+# ACIE dogfooding, homelab WalnutPi) at gap in/{0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50} found 0.10
+# to be the largest value that stays clean (zero off-topic seeded representatives) across every
+# topic while still capturing every additional genuinely-relevant community available -- 0.05
+# under-recalls a second real community on some topics, 0.15+ starts admitting off-topic
+# representatives on at least one topic. The prior 0.5 placeholder was confirmed too loose,
+# corroborating the live DNS-query finding in memory b87b9d46.
+CONTEXT_GLOBAL_SEED_SIMILARITY_GAP = 0.10
 
 # Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
 # memory 51127287) -- strategy:"global" retrieve_context's representative-slot reserve: how many of
@@ -439,13 +440,14 @@ CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP = 5
 # stage later, to each representative's own real per-query similarity instead of its community's
 # centroid similarity. Closes the gap D3 (memory 9c4d6277's decision 6) left open: a community
 # relevant enough to be seeded does not guarantee its own single best member is itself a strong
-# match, and representative_reserve previously had no floor of its own at all. PLACEHOLDER: not yet
-# benchmarked against SALTMDB's own live corpus -- seeded at the same value as
-# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP for consistency, validated by hand against every existing
-# test_community_retrieval_service.py scenario before locking (see this spec's own pre-lock gate).
-# Recalibrate via a real benchmark sweep before treating this as final; do not remove the placeholder
-# framing when tuning it.
-CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP = 0.5
+# match, and representative_reserve previously had no floor of its own at all.
+# CALIBRATED (wayfinder ticket f3f03936, SALTMDB memory f138c6d0, 2026-09-19): kept equal to
+# CONTEXT_GLOBAL_SEED_SIMILARITY_GAP per D3/D4's own original design intent -- the same live-corpus
+# sweep (five fresh topics plus a dedicated small/organically-weak-community probe, comparing
+# retrieve_context(global) against search_memory(broad)) found no evidence requiring the two
+# constants to diverge; 0.10 kept representative selection sane on a real 2-member community
+# (298d2f7a) with zero degradation.
+CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP = 0.10
 
 # Milestone D (wayfinder ticket "Milestone D retrieval/synthesis mechanics," standing constraint 26,
 # memory 51127287) -- strategy:"global" retrieve_context's member-pool node-eligibility cap: the
