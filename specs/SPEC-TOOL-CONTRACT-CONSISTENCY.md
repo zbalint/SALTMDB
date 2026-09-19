@@ -19,10 +19,18 @@
   that's Spec 2's job)
 - `AGENT_GUIDE.md` (Amendment 1 -- the one capacity-gate shape reference at line 225 only, same
   update as `README.md` above; no other change to `AGENT_GUIDE.md`)
-- `src/saltmdb/domain/services/relation_service.py` (§7 -- `list_predicates`, `get_lineage`,
-  `get_related_memories`, `consolidate_memories`/`_consolidation_rejected`, `store_relation`,
-  `invalidate_relation`, `bulk_store_relations` only; `analyze_dependencies` itself, and every
-  other function in this 1943-line file not named above, are untouched)
+- `src/saltmdb/domain/services/relation_service.py` (§7 -- `list_predicates`, `get_lineage`
+  [Amendment 2: split into `_get_lineage_raw` + a thin enveloped `get_lineage`, and `analyze_lineage`'s
+  own call site updated to call `_get_lineage_raw`], `get_related_memories`,
+  `consolidate_memories`/`_consolidation_rejected`, `store_relation`, `invalidate_relation`,
+  `bulk_store_relations` only; `analyze_dependencies` itself, and every other function in this
+  1943-line file not named above, are untouched)
+- `src/saltmdb/domain/services/conflict_set_service.py` (Amendment 2 -- `_component_lifecycle_resolved`'s
+  two `get_lineage(` call sites only, renamed to `_get_lineage_raw(` with no other change; every
+  other function in this file is untouched)
+- `src/saltmdb/domain/services/lineage_assembly_service.py` (Amendment 2 -- `assemble_lineage`'s
+  one `get_lineage(` call site only, renamed to `_get_lineage_raw(` with no other change; every
+  other function in this file is untouched)
 - `src/saltmdb/domain/services/memory_service/tags.py` (`search_tags` only, §9)
 - `src/saltmdb/domain/services/librarian_service.py` (`merge_tags` only, §10 -- `run_librarian_now`,
   `trigger_librarian`, `merge_tags_heuristics`, `_run_maintenance_pass_impl`,
@@ -1081,33 +1089,42 @@ and `.swap` are not surfaced here: this query only ever returns rows already in 
 NULL` excludes it structurally) -- `canonical`/`swap` only carry information for the `"alias"`
 case, so omitting them here loses nothing this query's own result set could ever populate.
 
-### 7.2 `get_lineage` -- envelope conversion
+### 7.2 `get_lineage` -- split into a raw core plus a thin enveloped wrapper (Amendment 2)
 
-Before (lines 797-820 shown; full function continues further but this is the validation-and-error
-portion this spec touches):
+**This section supersedes its own original text** (see Amendment 2 for what that original text
+missed and why). `get_lineage` (lines 797-947 in full, not just the validation prefix) is
+consumed two ways: (a) as the public, dispatch-facing entry point (`daemon/dispatch.py`'s
+`_dispatch_get_lineage`, `memory_service/lifecycle.py`'s `_lineage_nodes`), which wants the new
+envelope shape, and (b) as an internal traversal primitive reused by three other services
+(`relation_service.py`'s own `analyze_lineage`, `conflict_set_service.py`'s
+`_component_lifecycle_resolved`, `lineage_assembly_service.py`'s `assemble_lineage`), which
+consume its *current* bare-dict shape (`"error" in result`, `result["nodes"]`, etc.) directly
+and would break -- silently, via `KeyError`, not gracefully -- if that shape changed under them.
+This is exactly the split the codebase already uses for `get_related_memories`/
+`analyze_dependencies` (§7.3): a raw internal function untouched, a thin enveloped wrapper around
+it. Apply the same pattern here instead of editing `get_lineage`'s body in place.
+
+Step 1 -- rename the existing function, zero other change:
+
+Before (line 797, the `def` line only -- everything from here through line 947, the entire
+current body including its three `{"error": ...}` returns and its final success-dict return, is
+byte-for-byte unchanged):
 
 ```python
 def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
-    entity_id: str = None,
-    direction: Literal["ancestors", "descendants"] = "ancestors",
-    max_depth: int = 10,
-    point_in_time: str = None,
-    db_connection=None,
-    db_path: str = None,
-) -> dict:
-    """..."""
-    if not entity_id:
-        return {"error": "entity_id is mandatory"}
-    if direction not in ("ancestors", "descendants"):
-        return {"error": "direction must be 'ancestors' or 'descendants'"}
-    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
-        return {"error": "max_depth must be a non-negative integer"}
 ```
 
 After:
 
 ```python
-def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
+```
+
+Step 2 -- add a new thin `get_lineage` wrapper directly after `_get_lineage_raw` ends (i.e. where
+the old function used to end, line 947), matching §7.3's `get_related_memories` shape exactly:
+
+```python
+def get_lineage(
     entity_id: str = None,
     direction: Literal["ancestors", "descendants"] = "ancestors",
     max_depth: int = 10,
@@ -1115,42 +1132,81 @@ def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
     db_connection=None,
     db_path: str = None,
 ) -> dict:
-    """..."""
+    """Envelope-shaped wrapper around :func:`_get_lineage_raw`.
+
+    Kept as a separate thin function, not an in-place rewrite of the raw traversal, because
+    three other services (`analyze_lineage` in this same module, `conflict_set_service`,
+    `lineage_assembly_service`) reuse the raw bare-dict shape directly and must not be forced
+    through envelope unwrapping on every internal call.
+    """
     from saltmdb.utils import error_codes
     from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
 
-    if not entity_id:
-        return rejected([envelope_error(error_codes.VALIDATION_ERROR, "entity_id is mandatory", "entity_id")])
-    if direction not in ("ancestors", "descendants"):
-        return rejected(
-            [envelope_error(error_codes.VALIDATION_ERROR, "direction must be 'ancestors' or 'descendants'", "direction")]
-        )
-    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
-        return rejected(
-            [envelope_error(error_codes.VALIDATION_ERROR, "max_depth must be a non-negative integer", "max_depth")]
-        )
+    result = _get_lineage_raw(
+        entity_id=entity_id,
+        direction=direction,
+        max_depth=max_depth,
+        point_in_time=point_in_time,
+        db_connection=db_connection,
+        db_path=db_path,
+    )
+    if "error" in result:
+        return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])
+    return envelope_ok(result)
 ```
 
-The rest of this function (its real traversal logic, further down past line 820) returns its
-successful result as a dict already shaped like `{"root": ..., direction: [...], ...}` per its
-own docstring's contract -- wrap that final successful return in `envelope_ok(...)` at its own
-return statement(s) (there are multiple `return` points further into this `noqa: PLR0911`
-function; wrap each one that currently returns the successful traversal dict, not the
-error-shaped ones already covered above -- read the function's remaining body during
-implementation to enumerate them exactly, since this spec's audit did not read past line 820).
+This mirrors §7.3's own `get_related_memories` error-forwarding exactly (`if "error" in result:
+return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])` -- same
+precedent, same error code, no new pattern introduced) rather than trying to preserve
+per-validation-check `field` granularity: `_get_lineage_raw`'s three distinct validation
+messages, plus its "Could not resolve entity" and exception-catch messages, all collapse to the
+same `VALIDATION_ERROR` code with the original message text preserved, exactly as
+`get_related_memories` already does for `analyze_dependencies`'s own error messages.
 
-**No cascading call site found** for this function's *error* dict shape specifically: `grep -rn
-"get_lineage(" src/` shows callers (`daemon/dispatch.py`'s `_dispatch_get_lineage`,
-`memory_service/lifecycle.py`'s `_memory_lineage` via `_lineage_nodes`) already treat the return
-as an opaque dict and probe for a `"nodes"`/direction-named key or an `"error"` key
-defensively (`_lineage_nodes`, lifecycle.py:49 `if not isinstance(result, dict) or
-result.get("error"): return []`) -- this check must be updated too, since a `rejected()` envelope
-has no top-level `"error"` key (it has `"status": "rejected"` and an `"errors"` list). Update
-`_lineage_nodes` (lifecycle.py:42-58) to check `result.get("status") == "rejected"` in addition
-to (not instead of) `result.get("error")`, since `get_lineage`'s own *successful* return shape is
-now wrapped by `envelope_ok(...)` too, changing where the real node list lives (`result["data"]`,
-not top-level) -- adjust `_lineage_nodes`'s own field lookups (`result.get("nodes")` etc.,
-currently lines 51-55) to read from `result.get("data", {})` first.
+Step 3 -- update the three internal call sites to call `_get_lineage_raw` instead of
+`get_lineage`. Each is a pure rename of the call target; nothing else about the call or its
+surrounding shape-handling logic changes, because `_get_lineage_raw`'s return shape is identical
+to `get_lineage`'s pre-this-spec shape:
+
+- `relation_service.py:959` (`analyze_lineage`'s own call, in this same file) --
+  `result = get_lineage(` becomes `result = _get_lineage_raw(`.
+- `conflict_set_service.py:118` and `:125` (`_component_lifecycle_resolved`'s
+  `ancestors_result =`/`descendants_result =` calls) -- both `get_lineage(` become
+  `_get_lineage_raw(`.
+- `lineage_assembly_service.py:82` (`assemble_lineage`'s `ancestors_result =` call) --
+  `get_lineage(` becomes `_get_lineage_raw(`.
+
+Step 4 -- `daemon/dispatch.py`'s `_dispatch_get_lineage` and `memory_service/lifecycle.py`'s
+`_lineage_nodes` keep calling `get_lineage` unchanged (it is still named `get_lineage`, just now
+the enveloped wrapper) and still need the fix Amendment 1 already specified for
+`_lineage_nodes`: update it (lifecycle.py:42-58) to check `result.get("status") == "rejected"` in
+addition to (not instead of) `result.get("error")`, and to read the node list from
+`result.get("data", {})` first (currently lines 51-55 read top-level keys directly) -- unchanged
+from the original text, restated here because it now applies to the new wrapper rather than the
+old single function.
+
+Step 5 -- tests. `tests/test_relation_service.py::TestPhase3LineageGraph`'s four existing tests
+(currently calling `get_lineage(...)` directly and asserting the raw bare-dict shape -- cycle
+bounding, bitemporal `valid_at` filtering, `max_depth` honoring, archived-parent absorption) are
+testing `_get_lineage_raw`'s traversal algorithm, not `get_lineage`'s envelope shape -- redirect
+these four call sites to `_get_lineage_raw` (pure rename, their existing assertions need no other
+change, consistent with Step 3's rationale for the production call sites). Add coverage for the
+new `get_lineage` wrapper itself (one success case asserting `envelope_ok` shape, one error case
+asserting `rejected` shape) if no such coverage already exists after this rename -- confirm via
+the §17 acceptance run rather than assuming either way.
+
+**No cascading call site outside these five** (three internal-service readers, `dispatch.py`,
+`lifecycle.py`): `viewer/routes/entity_detail.py` also calls `get_lineage` directly (via
+`getattr(relation_service, "get_lineage", None)`) and reads `.get("error")`/`.get("nodes", [])`
+on its result -- this is a sixth, real call site, but `src/saltmdb/viewer/**` is explicitly out
+of scope per §0 ("Does not touch"). Left as-is per that existing boundary, this is a **known,
+accepted regression**: after this change, `entity_detail.py`'s ancestor-lineage panel will
+silently render empty (its defensive checks find neither `"error"` nor `"nodes"` at the top level
+of the now-enveloped result, and it treats that as "no data" rather than raising) rather than
+crashing or showing an error. This is not fixed by this spec -- viewer fixes are out of scope by
+design -- but is recorded here rather than left as an undocumented side effect of the fix; a
+follow-up spec should update `entity_detail.py` to read `result.get("data", {})` the same way
+`_lineage_nodes` now does.
 
 ### 7.3 `get_related_memories` -- drop the duplicate key (Q9)
 
@@ -1985,6 +2041,22 @@ output before considering this spec's implementation complete (pre-lock gate ste
 discipline, applied here as OMP's own final self-check, not just this spec-writing pass's).
 
 ```bash
+rg -n '\bget_lineage\(' src/saltmdb/domain/services/relation_service.py src/saltmdb/domain/services/conflict_set_service.py src/saltmdb/domain/services/lineage_assembly_service.py
+```
+Must show **zero** matches (Amendment 2) except the two lines that legitimately still name
+`get_lineage` -- its own `def get_lineage(` (the new thin wrapper) and `_get_lineage_raw`'s
+internal call from inside that wrapper. Every other call site named in §7.2 Step 3 (`analyze_lineage`'s
+call, `conflict_set_service.py`'s two calls, `lineage_assembly_service.py`'s one call) must read
+`_get_lineage_raw(` instead. `daemon/dispatch.py` and `memory_service/lifecycle.py` are
+deliberately excluded from this grep -- they correctly keep calling `get_lineage` (the wrapper).
+
+```bash
+rg -n 'get_lineage\(' tests/test_relation_service.py
+```
+Must show the four `TestPhase3LineageGraph` call sites (§7.2 Step 5) now reading
+`_get_lineage_raw(`, not `get_lineage(`.
+
+```bash
 rg -n '\.startswith\("Error"\)|\.startswith\("Relation |res\.startswith' src/saltmdb/ --glob '!telemetry_service.py'
 ```
 Must show **zero** remaining matches anywhere in `src/saltmdb/` outside `telemetry_service.py` --
@@ -2084,3 +2156,61 @@ excluding this spec file's own discussion of the same strings), and a full manua
 against every section it now cross-references (§2 through §17, in order) to confirm every
 section named in a Scope bullet actually exists and every file this document's mechanical
 sections touch is licensed somewhere in §0 -- no further gap found. Status remains **LOCKED**.
+
+## Amendment 2
+
+OMP raised a genuine pre-implementation blocker (no implementation work was in flight -- adjudicated
+before any file was touched, confirmed via `git status` in the implementation worktree showing a
+clean tree) requiring a choice between (1) authorizing reader migrations in
+`relation_service.py` (`analyze_lineage`), `lineage_assembly_service.py`, and
+`conflict_set_service.py` plus their shape-dependent tests, or (2) amending §7.2 so `get_lineage`
+keeps its raw internal shape and envelope-wraps only at a dispatch/tool boundary.
+
+**Root cause**: §7.2's original "no cascading call site found" claim was based on `grep -rn
+"get_lineage(" src/`, but that audit only reconciled the two callers it went on to discuss
+(`daemon/dispatch.py`, `memory_service/lifecycle.py`) and never re-ran the grep against its own
+full output. Re-running it during this amendment (`grep -rn 'get_lineage(' src/ | grep -v 'def
+get_lineage'`) surfaced four more call sites the original text never accounted for:
+`relation_service.py:959` (`analyze_lineage`'s own call, inside the *same file* this spec was
+already editing), `conflict_set_service.py:118`/`:125`, `lineage_assembly_service.py:82`, and
+`viewer/routes/entity_detail.py:48`. Cross-checked independently via `mcp__acie__find_references`
+on `relation_service.py:get_lineage#function`, which returned the identical three in-repo service
+call sites (plus four `tests/test_relation_service.py` call sites not caught by the plain grep,
+since ACIE's reference graph includes test files by default) -- ACIE and grep agree on the
+production call sites, giving two independent confirmations of the gap. Direct source read of
+all three service call sites confirmed each does `"error" in result` / `result["nodes"]` against
+`get_lineage`'s current bare-dict shape, which a `rejected()`/`envelope_ok()` conversion in place
+would silently break (the `"error" in result` check would always be `False` against an envelope,
+and `result["nodes"]` would `KeyError` since nodes move under `result["data"]`).
+
+**Fix**: neither of OMP's two proposed options as originally framed -- both would either force
+unnecessary test-shape migrations (option 1, if done as a naive in-place conversion) or push
+envelope construction out of the domain-service layer against this spec's own architecture
+(option 2, which would contradict decision 4's "validation lives in services, not dispatch"
+principle already locked for every other function in this spec). Instead, §7.2 is rewritten to
+apply the *existing* raw-core/enveloped-wrapper split this same file already uses for
+`get_related_memories`/`analyze_dependencies` (§7.3): the current `get_lineage` body is renamed
+verbatim to `_get_lineage_raw` (zero logic change), a new thin `get_lineage` wrapper is added
+that calls it and converts the result via the same `if "error" in result: return
+rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])` /
+`return envelope_ok(result)` pattern §7.3 already established, and the three internal readers
+plus four existing `tests/test_relation_service.py` call sites are redirected to call
+`_get_lineage_raw` -- a pure rename at each call site, no shape-handling logic anywhere needs to
+change, because the raw function's return shape is byte-identical to `get_lineage`'s
+pre-this-spec shape. `dispatch.py` and `lifecycle.py` keep calling `get_lineage` (now the
+wrapper) exactly as already locked. §0's Scope list gained two new file bullets
+(`conflict_set_service.py`, `lineage_assembly_service.py`), both narrowly scoped to the one-line
+rename only.
+
+`viewer/routes/entity_detail.py`'s call site is the one call site this fix deliberately does
+**not** touch, since `src/saltmdb/viewer/**` is already out of scope per §0's "Does not touch"
+list -- documented as a known, accepted regression (silent empty ancestor panel, not a crash) in
+§7.2's own text rather than left as an undiscovered side effect, with a note that a follow-up
+spec should fix it the same way `_lineage_nodes` was fixed here.
+
+**Amendment 2 pre-lock re-check**: re-ran `rg -n '\bget_lineage\(' src/saltmdb/domain/services/relation_service.py
+src/saltmdb/domain/services/conflict_set_service.py src/saltmdb/domain/services/lineage_assembly_service.py`
+against the current (pre-implementation) tree to confirm the call sites and line numbers cited
+above are real and unchanged, and re-ran `mcp__acie__find_references` on
+`relation_service.py:get_lineage#function` a second time after drafting this amendment's text to
+confirm no fifth production call site was missed. Status remains **LOCKED**.
