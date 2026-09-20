@@ -55,8 +55,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Relation successfully stored"))
-        rel_id = res.split("ID: ")[1].rstrip(")")
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("successfully stored", res["data"]["message"])
+        rel_id = res["data"]["relation_id"]
 
         row = self.conn.execute(
             "SELECT created_at, valid_from, valid_at FROM relations WHERE id = ?", (rel_id,)
@@ -75,8 +76,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             valid_at=custom_time,
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Relation successfully stored"))
-        rel_id = res.split("ID: ")[1].rstrip(")")
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("successfully stored", res["data"]["message"])
+        rel_id = res["data"]["relation_id"]
 
         row = self.conn.execute("SELECT valid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
         self.assertEqual(row[0], custom_time)
@@ -98,7 +100,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             valid_at="2026-12-31T23:59:59+00:00",
             db_connection=self.conn,
         )
-        self.assertTrue(res_dup.startswith("Relation already exists (no-op)"))
+        self.assertEqual(res_dup["status"], "ok")
+        self.assertIn("already exists (no-op)", res_dup["data"]["message"])
 
         row = self.conn.execute(
             "SELECT valid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
@@ -113,7 +116,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        rel_id = res_store.split("ID: ")[1].rstrip(")")
+        rel_id = res_store["data"]["relation_id"]
 
         res_inv = invalidate_relation(
             source_id=self.id_alpha,
@@ -121,8 +124,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res_inv.startswith("Relation invalidated"))
-        self.assertIn(rel_id, res_inv)
+        self.assertEqual(res_inv["status"], "ok")
+        self.assertIn("Relation invalidated", res_inv["data"]["message"])
+        self.assertIn(rel_id, res_inv["data"]["message"])
 
         row = self.conn.execute(
             "SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)
@@ -146,8 +150,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             invalid_at=custom_inv_time,
             db_connection=self.conn,
         )
-        self.assertTrue(res_inv.startswith("Relation invalidated"))
-        self.assertIn(custom_inv_time, res_inv)
+        self.assertEqual(res_inv["status"], "ok")
+        self.assertIn("Relation invalidated", res_inv["data"]["message"])
+        self.assertIn(custom_inv_time, res_inv["data"]["message"])
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
@@ -168,7 +173,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res_inv.startswith("Relation invalidated"))
+        self.assertEqual(res_inv["status"], "ok")
+        self.assertIn("Relation invalidated", res_inv["data"]["message"])
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
             (self.id_alpha, self.id_beta),
@@ -190,7 +196,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             invalid_at=custom_time,
             db_connection=self.conn,
         )
-        self.assertTrue(res1.startswith("Relation invalidated"))
+        self.assertEqual(res1["status"], "ok")
+        self.assertIn("Relation invalidated", res1["data"]["message"])
 
         res2 = invalidate_relation(
             source_id=self.id_alpha,
@@ -199,8 +206,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             invalid_at="2026-01-01T00:00:00+00:00",
             db_connection=self.conn,
         )
-        self.assertTrue(res2.startswith("Relation already invalidated (no-op)"))
-        self.assertIn(custom_time, res2)
+        self.assertEqual(res2["status"], "ok")
+        self.assertIn("already invalidated (no-op)", res2["data"]["message"])
+        self.assertIn(custom_time, res2["data"]["message"])
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ?",
@@ -216,7 +224,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="nonexistent_predicate",
             db_connection=self.conn,
         )
-        self.assertEqual(res1, "Error: relation not found")
+        self.assertEqual(res1["status"], "rejected")
+        self.assertEqual(res1["errors"][0]["code"], "NOT_FOUND")
+        self.assertEqual(res1["errors"][0]["message"], "Error: relation not found")
 
         # (b) Tuple whose edge has valid_to set (system expired / consolidated)
         res_store = store_relation(
@@ -225,7 +235,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="resolves",
             db_connection=self.conn,
         )
-        rel_id = res_store.split("ID: ")[1].rstrip(")")
+        rel_id = res_store["data"]["relation_id"]
         self.conn.execute(
             "UPDATE relations SET valid_to = '2025-01-01T00:00:00' WHERE id = ?", (rel_id,)
         )
@@ -236,7 +246,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="resolves",
             db_connection=self.conn,
         )
-        self.assertEqual(res2, "Error: relation not found")
+        self.assertEqual(res2["status"], "rejected")
+        self.assertEqual(res2["errors"][0]["code"], "NOT_FOUND")
+        self.assertEqual(res2["errors"][0]["message"], "Error: relation not found")
 
     def test_invalidate_relation_canonical_alias_matching(self):
         # Phase 6 reversed-behavior regression (plan §3.17/§5.8): references is now an alias
@@ -254,8 +266,9 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="references",
             db_connection=self.conn,
         )
-        self.assertTrue(res_inv.startswith("Relation invalidated"))
-        self.assertIn("related_to", res_inv)
+        self.assertEqual(res_inv["status"], "ok")
+        self.assertIn("Relation invalidated", res_inv["data"]["message"])
+        self.assertIn("related_to", res_inv["data"]["message"])
 
         row = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",
@@ -380,7 +393,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res1.startswith("Relation successfully stored"))
+        self.assertEqual(res1["status"], "ok")
+        self.assertIn("successfully stored", res1["data"]["message"])
 
         res_inv = invalidate_relation(
             source_id=self.id_alpha,
@@ -388,7 +402,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res_inv.startswith("Relation invalidated"))
+        self.assertEqual(res_inv["status"], "ok")
+        self.assertIn("Relation invalidated", res_inv["data"]["message"])
 
         res2 = store_relation(
             source_id=self.id_alpha,
@@ -396,7 +411,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res2.startswith("Relation successfully stored"))
+        self.assertEqual(res2["status"], "ok")
+        self.assertIn("successfully stored", res2["data"]["message"])
 
         rows = self.conn.execute(
             "SELECT id, valid_to, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ?",

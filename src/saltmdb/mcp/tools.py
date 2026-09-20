@@ -1,4 +1,6 @@
 from typing import Any, Literal, cast
+from typing_extensions import TypedDict
+
 import json
 import logging
 import re
@@ -11,6 +13,26 @@ from saltmdb.daemon import protocol
 from saltmdb.domain.services import core_governance_service
 
 logger = logging.getLogger(__name__)
+
+
+class RelationBatchItem(TypedDict, total=False):
+    source_id: str
+    target_id: str
+    predicate: str
+    valid_at: str | None
+    invalidate: bool
+    invalid_at: str | None
+    override_justification: str | None
+
+
+class ConsolidationBatchItem(TypedDict, total=False):
+    parent_ids: list[str]
+    title: str
+    content: str
+    is_core: bool | None
+    tags: list[str] | None
+    scope: Literal["private", "shared"] | None
+    override_justification: str | None
 
 
 class _UnsetRetrievalText(str):
@@ -380,8 +402,8 @@ def merge_tags(
     retrieval), `core_exit_condition` (20-500 chars: the observable condition that ends the
     urgency), and admits three independent hard caps: at most 5 active cores globally, at most
     2,500 Unicode characters of `content` per core, and a 15,000-character exact rendered
-    bootstrap digest. A capacity failure returns `status: "REJECTED"` with `error_code:
-    "CORE_CAPACITY_EXCEEDED"`, a balanced inventory of every active core (no full content), and
+    bootstrap digest. A capacity failure returns `status: "rejected"` with an `errors[0].code ==
+    "CORE_CAPACITY_EXCEEDED"` entry, a balanced inventory of every active core (no full content),
     zero side effects -- rebalance (demote/archive/shorten/consolidate existing cores) and retry;
     this never requires a human decision. `core_review_after` defaults to 14 days out and may
     never exceed 30 days; while ANY core is overdue for review, creating/promoting a new core,
@@ -451,6 +473,9 @@ def store_memory(
             ],
             corrected_call=corrected_call,
         )
+    from saltmdb.utils import error_codes
+    from saltmdb.utils.envelope import error, rejected
+
     try:
         # Strict tri-state parse (core-memory governance resolved gap #6): an unrecognized value
         # like "yes" or an integer is rejected outright here, at the adapter boundary, rather
@@ -458,7 +483,7 @@ def store_memory(
         # membership check did.
         is_core_ = core_governance_service.parse_is_core(is_core)
     except ValueError as e:
-        return f"Error: {e}"
+        return rejected([error(error_codes.VALIDATION_ERROR, str(e), "is_core")])
 
     memory_type_ = memory_type
     retrieval_text_provided = retrieval_text is not _RETRIEVAL_TEXT_UNSET
@@ -647,7 +672,7 @@ def _predicate_disposition_error(
 
 @mcp.tool()
 def manage_relation(
-    relations: list | None = None,
+    relations: list[RelationBatchItem] | None = None,
     source_id: str | None = None,
     target_id: str | None = None,
     predicate: str | None = None,
@@ -776,7 +801,7 @@ def manage_relation(
 
 @mcp.tool()
 def consolidate_memories(
-    consolidations: list | None = None,
+    consolidations: list[ConsolidationBatchItem] | None = None,
     parent_ids: list | None = None,
     title: str | None = None,
     content: str | None = None,
@@ -874,7 +899,7 @@ def _replacement_payload(
         "entity_id": entity_id,
         "title": title,
         "content": content,
-        "tags": _normalize_list_or_str(tags),
+        "tags": None if tags is None else _normalize_list_or_str(tags),
         "reason": reason,
         "owner_id": owner_id,
         "context_id": context_id,

@@ -326,7 +326,9 @@ class RetrievalTextTests(unittest.TestCase):
 
             self.assertIn(
                 "successfully archived",
-                archive_memory(entity_id, owner_id="sqlite-owner", db_connection=conn),
+                archive_memory(entity_id, owner_id="sqlite-owner", db_connection=conn)["data"][
+                    "message"
+                ],
             )
             conn.execute("DELETE FROM entities WHERE id=?", (entity_id,))
             conn.commit()

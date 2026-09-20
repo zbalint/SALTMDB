@@ -28,8 +28,23 @@ from saltmdb.domain.services import (
     telemetry_service,
 )
 from typing import Any, Literal
+from saltmdb.utils import error_codes
+from saltmdb.utils.envelope import error, rejected
+
 
 logger = logging.getLogger(__name__)
+
+
+class _DispatchValidationError(Exception):
+    """Carry a rejected envelope for caller-input validation failures.
+
+    Dispatch helpers raise this local exception so each dispatcher can convert validation
+    failures into a normal tool result. Unexpected service faults keep propagating.
+    """
+
+    def __init__(self, payload: dict[str, Any]):
+        super().__init__(payload)
+        self.payload: dict[str, Any] = payload
 
 
 def _optional_bool(kw: dict[str, Any], key: str, default: bool) -> bool:
@@ -37,7 +52,9 @@ def _optional_bool(kw: dict[str, Any], key: str, default: bool) -> bool:
     if value is None:
         return default
     if not isinstance(value, bool):
-        raise ValueError(f"{key} must be a boolean")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be a boolean", key)])
+        )
     return value
 
 
@@ -46,7 +63,9 @@ def _optional_int(kw: dict[str, Any], key: str, default: int) -> int:
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{key} must be an integer")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be an integer", key)])
+        )
     return value
 
 
@@ -55,7 +74,9 @@ def _optional_int_or_none(kw: dict[str, Any], key: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{key} must be an integer")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be an integer", key)])
+        )
     return value
 
 
@@ -64,7 +85,9 @@ def _optional_float_or_none(kw: dict[str, Any], key: str) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{key} must be numeric")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be numeric", key)])
+        )
     return float(value)
 
 
@@ -73,7 +96,17 @@ def _optional_scope(kw: dict[str, Any], key: str = "scope") -> Literal["private"
     if value is None:
         return "shared"
     if value not in {"private", "shared"}:
-        raise ValueError(f"{key} must be 'private' or 'shared'")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        f"{key} must be 'private' or 'shared'",
+                        key,
+                    )
+                ]
+            )
+        )
     return value
 
 
@@ -82,7 +115,17 @@ def _optional_mode(kw: dict[str, Any]) -> Literal["strict", "broad", "history"]:
     if value is None:
         return "broad"
     if value not in {"strict", "broad", "history"}:
-        raise ValueError("mode must be 'strict', 'broad', or 'history'")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "mode must be 'strict', 'broad', or 'history'",
+                        "mode",
+                    )
+                ]
+            )
+        )
     return value
 
 
@@ -91,7 +134,17 @@ def _optional_strategy(kw: dict[str, Any]) -> Literal["local", "global"]:
     if value is None:
         return "local"
     if value not in {"local", "global"}:
-        raise ValueError("strategy must be 'local' or 'global'")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "strategy must be 'local' or 'global'",
+                        "strategy",
+                    )
+                ]
+            )
+        )
     return value
 
 
@@ -100,21 +153,43 @@ def _optional_direction(kw: dict[str, Any]) -> Literal["outbound", "inbound", "b
     if value is None:
         return "both"
     if value not in {"outbound", "inbound", "both"}:
-        raise ValueError("direction must be 'outbound', 'inbound', or 'both'")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "direction must be 'outbound', 'inbound', or 'both'",
+                        "direction",
+                    )
+                ]
+            )
+        )
     return value
 
 
 def _required_str(kw: dict[str, Any], key: str) -> str:
     value = kw.get(key)
     if not isinstance(value, str) or not value:
-        raise ValueError(f"{key} is required")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} is required", key)])
+        )
     return value
 
 
 def _required_str_list(kw: dict[str, Any], key: str) -> list[str]:
     value = kw.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{key} must be a list of strings")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        f"{key} must be a list of strings",
+                        key,
+                    )
+                ]
+            )
+        )
     return value
 
 
@@ -123,25 +198,42 @@ def _optional_tag_operator(kw: dict[str, Any]) -> Literal["AND", "OR"]:
     if value is None:
         return "AND"
     if value not in {"AND", "OR"}:
-        raise ValueError("tag_operator must be 'AND' or 'OR'")
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "tag_operator must be 'AND' or 'OR'",
+                        "tag_operator",
+                    )
+                ]
+            )
+        )
     return value
 
 
 def _required_list(kw: dict[str, Any], key: str) -> list[Any]:
     value = kw.get(key)
     if not isinstance(value, list):
-        raise ValueError(f"{key} must be a list")
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be a list", key)])
+        )
     return value
 
 
 def _dispatch_store_memory(**kw):
     retrieval_text_provided = kw.get("retrieval_text_provided", "retrieval_text" in kw)
+    try:
+        scope = _optional_scope(kw)
+        weight = _optional_int(kw, "weight", 1)
+    except _DispatchValidationError as exc:
+        return exc.payload
     return memory_service.store_memory(
         content=kw.get("content"),
         tags=kw.get("tags"),
         owner_id=kw.get("owner_id"),
-        scope=_optional_scope(kw),
-        weight=_optional_int(kw, "weight", 1),
+        scope=scope,
+        weight=weight,
         is_core=kw.get("is_core"),
         memory_type=kw.get("memory_type"),
         title=kw.get("title"),
@@ -167,35 +259,56 @@ def _dispatch_store_memory(**kw):
 
 
 def _dispatch_search_memory(**kw):
+    try:
+        explain_mode = _optional_bool(kw, "explain_mode", False)
+        limit = _optional_int(kw, "limit", 5)
+        tag_operator = _optional_tag_operator(kw)
+        mode = _optional_mode(kw)
+        include_related = _optional_bool(kw, "include_related", True)
+        prefer_durable_types = _optional_bool(kw, "prefer_durable_types", False)
+        demote_superseded = _optional_bool(kw, "demote_superseded", False)
+        cross_encoder_candidate_cap = _optional_int_or_none(kw, "cross_encoder_candidate_cap")
+        cross_encoder_text_cap_chars = _optional_int_or_none(kw, "cross_encoder_text_cap_chars")
+        use_chunk_candidates = _optional_bool(kw, "use_chunk_candidates", False)
+        oversampling_multiplier = _optional_int_or_none(kw, "oversampling_multiplier")
+        candidate_window = _optional_int_or_none(kw, "candidate_window")
+        chunk_weight = _optional_float_or_none(kw, "chunk_weight")
+        collapse_supersedes_families = _optional_bool(kw, "collapse_supersedes_families", False)
+        return_diagnostics = _optional_bool(kw, "return_diagnostics", False)
+        use_retrieval_text_candidates = _optional_bool(kw, "use_retrieval_text_candidates", False)
+        retrieval_fts_weight = _optional_float_or_none(kw, "retrieval_fts_weight")
+        retrieval_vector_weight = _optional_float_or_none(kw, "retrieval_vector_weight")
+    except _DispatchValidationError as exc:
+        return exc.payload
     return memory_service.search_memory(
         owner_id=kw.get("owner_id"),
         query_keywords=kw.get("query_keywords"),
         tags_filter=kw.get("tags_filter"),
         metadata_filter=kw.get("metadata_filter"),
-        explain_mode=_optional_bool(kw, "explain_mode", False),
-        limit=_optional_int(kw, "limit", 5),
+        explain_mode=explain_mode,
+        limit=limit,
         context_id=kw.get("context_id"),
         agent_session_id=kw.get("agent_session_id"),
         is_core=kw.get("is_core"),
         memory_type_filter=kw.get("memory_type_filter"),
-        tag_operator=_optional_tag_operator(kw),
+        tag_operator=tag_operator,
         cursor=kw.get("cursor"),
-        mode=_optional_mode(kw),
-        include_related=_optional_bool(kw, "include_related", True),
-        prefer_durable_types=_optional_bool(kw, "prefer_durable_types", False),
-        demote_superseded=_optional_bool(kw, "demote_superseded", False),
-        cross_encoder_candidate_cap=_optional_int_or_none(kw, "cross_encoder_candidate_cap"),
-        cross_encoder_text_cap_chars=_optional_int_or_none(kw, "cross_encoder_text_cap_chars"),
-        use_chunk_candidates=_optional_bool(kw, "use_chunk_candidates", False),
-        oversampling_multiplier=_optional_int_or_none(kw, "oversampling_multiplier"),
-        candidate_window=_optional_int_or_none(kw, "candidate_window"),
-        chunk_weight=_optional_float_or_none(kw, "chunk_weight"),
-        collapse_supersedes_families=_optional_bool(kw, "collapse_supersedes_families", False),
-        return_diagnostics=_optional_bool(kw, "return_diagnostics", False),
+        mode=mode,
+        include_related=include_related,
+        prefer_durable_types=prefer_durable_types,
+        demote_superseded=demote_superseded,
+        cross_encoder_candidate_cap=cross_encoder_candidate_cap,
+        cross_encoder_text_cap_chars=cross_encoder_text_cap_chars,
+        use_chunk_candidates=use_chunk_candidates,
+        oversampling_multiplier=oversampling_multiplier,
+        candidate_window=candidate_window,
+        chunk_weight=chunk_weight,
+        collapse_supersedes_families=collapse_supersedes_families,
+        return_diagnostics=return_diagnostics,
         disable_semantic=kw.get("disable_semantic", False),
-        use_retrieval_text_candidates=_optional_bool(kw, "use_retrieval_text_candidates", False),
-        retrieval_fts_weight=_optional_float_or_none(kw, "retrieval_fts_weight"),
-        retrieval_vector_weight=_optional_float_or_none(kw, "retrieval_vector_weight"),
+        use_retrieval_text_candidates=use_retrieval_text_candidates,
+        retrieval_fts_weight=retrieval_fts_weight,
+        retrieval_vector_weight=retrieval_vector_weight,
     )
 
 
@@ -207,7 +320,10 @@ def _dispatch_get_memory(**kw):
     independently of the service implementation.  The fallback is deliberately not a redirect:
     ``fetch_memory_chunk`` addresses exactly the supplied entity and includes archived rows.
     """
-    entity_id = _required_str(kw, "entity_id")
+    try:
+        entity_id = _required_str(kw, "entity_id")
+    except _DispatchValidationError as exc:
+        return exc.payload
     fetch = getattr(memory_service, "get_memory", None)
     if fetch is not None:
         return fetch(entity_id=entity_id)
@@ -215,7 +331,10 @@ def _dispatch_get_memory(**kw):
 
 
 def _dispatch_inspect_memory(**kw):
-    entity_id = _required_str(kw, "entity_id")
+    try:
+        entity_id = _required_str(kw, "entity_id")
+    except _DispatchValidationError as exc:
+        return exc.payload
     return memory_service.inspect_memory(entity_id=entity_id)
 
 
@@ -228,9 +347,12 @@ def _dispatch_archive_memory(**kw):
     # addendum per standing practice).
     mode = kw.get("mode")
     if mode == "bulk":
-        return memory_service.bulk_archive_memory(
-            archive_requests=_required_list(kw, "archive_requests")
-        )
+        try:
+            archive_requests = _required_list(kw, "archive_requests")
+        except _DispatchValidationError as exc:
+            return exc.payload
+        return memory_service.bulk_archive_memory(archive_requests=archive_requests)
+
     elif mode == "single":
         return memory_service.archive_memory(
             entity_id=kw.get("entity_id"), owner_id=kw.get("owner_id")
@@ -240,8 +362,12 @@ def _dispatch_archive_memory(**kw):
 
 def _dispatch_manage_relation(**kw):
     if kw.get("relations"):
+        try:
+            relations = _required_list(kw, "relations")
+        except _DispatchValidationError as exc:
+            return exc.payload
         return relation_service.bulk_store_relations(
-            relations=_required_list(kw, "relations"),
+            relations=relations,
             owner_id=kw.get("owner_id"),
             invalidate=bool(kw.get("invalidate")),
         )
@@ -270,12 +396,15 @@ def _dispatch_replacement(**kw):
     The lifecycle services own validation, successor lookup, archival, and edge creation.  The
     daemon only enforces the typed adapter contract before entering the coordinator transaction.
     """
-    required = ("entity_id", "title", "content", "reason")
-    for key in required:
-        _required_str(kw, key)
-    tags = _required_str_list(kw, "tags")
-    if not tags:
-        raise ValueError("tags is required")
+    try:
+        required = ("entity_id", "title", "content", "reason")
+        for key in required:
+            _required_str(kw, key)
+        tags = kw.get("tags")
+        if tags is not None:
+            tags = _required_str_list(kw, "tags")
+    except _DispatchValidationError as exc:
+        return exc.payload
     service_name = kw.pop("_service_name")
     service = getattr(memory_service, service_name)
     return service(
@@ -311,21 +440,33 @@ def _dispatch_consolidate_memories(**kw):
             "bulk_consolidate_memories",
             relation_service.bulk_commit_consolidation,
         )
+        try:
+            consolidations = _required_list(kw, "consolidations")
+        except _DispatchValidationError as exc:
+            return exc.payload
         return bulk(
-            consolidations=_required_list(kw, "consolidations"),
+            consolidations=consolidations,
             owner_id=kw.get("owner_id"),
             context_id=kw.get("context_id"),
             agent_session_id=kw.get("agent_session_id"),
         )
+    try:
+        parent_ids = _required_str_list(kw, "parent_ids")
+        title = _required_str(kw, "title")
+        content = _required_str(kw, "content")
+        scope = _optional_scope(kw)
+        weight = _optional_int(kw, "weight", 1)
+    except _DispatchValidationError as exc:
+        return exc.payload
     consolidate = getattr(relation_service, "consolidate_memories")
     return consolidate(
-        parent_ids=_required_str_list(kw, "parent_ids"),
-        title=_required_str(kw, "title"),
-        content=_required_str(kw, "content"),
+        parent_ids=parent_ids,
+        title=title,
+        content=content,
         is_core=kw.get("is_core"),
         tags=kw.get("tags"),
-        scope=_optional_scope(kw),
-        weight=_optional_int(kw, "weight", 1),
+        scope=scope,
+        weight=weight,
         owner_id=kw.get("owner_id"),
         context_id=kw.get("context_id"),
         agent_session_id=kw.get("agent_session_id"),
@@ -347,23 +488,34 @@ def _dispatch_review_core_memory(**kw):
     # through kwargs -- the domain call's own get_connection() resolves to the ambient
     # coordinator-owned connection via connection.py's contextvar when running inside
     # coordinator.submit (see dispatch_tool's MUTATING_TOOLS branch below).
+    try:
+        entity_id = _required_str(kw, "entity_id")
+        outcome = _required_str(kw, "outcome")
+        review_rationale = _required_str(kw, "review_rationale")
+        owner_id = _required_str(kw, "owner_id")
+    except _DispatchValidationError as exc:
+        return exc.payload
     from saltmdb.config import get_db_path
     from saltmdb.db.connection import get_connection
 
     conn = get_connection(get_db_path())
     return core_governance_service.review_core_memory(
         conn,
-        entity_id=_required_str(kw, "entity_id"),
-        outcome=_required_str(kw, "outcome"),
-        review_rationale=_required_str(kw, "review_rationale"),
-        owner_id=_required_str(kw, "owner_id"),
+        entity_id=entity_id,
+        outcome=outcome,
+        review_rationale=review_rationale,
+        owner_id=owner_id,
         core_review_after=kw.get("core_review_after"),
     )
 
 
 def _dispatch_update_memory_metadata(**kw):
+    try:
+        entity_id = _required_str(kw, "entity_id")
+    except _DispatchValidationError as exc:
+        return exc.payload
     return memory_service.update_memory_metadata(
-        entity_id=_required_str(kw, "entity_id"),
+        entity_id=entity_id,
         metadata=kw.get("metadata"),
         agent_session_id=kw.get("agent_session_id"),
     )
@@ -387,11 +539,22 @@ def _dispatch_get_last_session_digest(**kw):
 
 
 def _dispatch_get_lineage(**kw):
-    entity_id = _required_str(kw, "entity_id")
-    direction = kw.get("direction") or "ancestors"
-    if direction not in {"ancestors", "descendants"}:
-        raise ValueError("direction must be 'ancestors' or 'descendants'")
-    max_depth = _optional_int(kw, "max_depth", 5)
+    try:
+        entity_id = _required_str(kw, "entity_id")
+        direction = kw.get("direction") or "ancestors"
+        if direction not in {"ancestors", "descendants"}:
+            return rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "direction must be 'ancestors' or 'descendants'",
+                        "direction",
+                    )
+                ]
+            )
+        max_depth = _optional_int(kw, "max_depth", 5)
+    except _DispatchValidationError as exc:
+        return exc.payload
 
     # The Phase-3 service entry point supports both directions and all lifecycle predicates.  The
     # fallback preserves ancestor behaviour against the pre-Phase-3 service while development is
@@ -405,16 +568,19 @@ def _dispatch_get_lineage(**kw):
 
 
 def _dispatch_get_related_memories(**kw):
-    entity_id = _required_str(kw, "entity_id")
-    max_depth = _optional_int(kw, "max_depth", 5)
-    direction = _optional_direction(kw)
-    related_kwargs = {
-        "entity_id": entity_id,
-        "max_depth": max_depth,
-        "direction": direction,
-    }
-    if "include_inspect" in kw:
-        related_kwargs["include_inspect"] = _optional_bool(kw, "include_inspect", False)
+    try:
+        entity_id = _required_str(kw, "entity_id")
+        max_depth = _optional_int(kw, "max_depth", 5)
+        direction = _optional_direction(kw)
+        related_kwargs = {
+            "entity_id": entity_id,
+            "max_depth": max_depth,
+            "direction": direction,
+        }
+        if "include_inspect" in kw:
+            related_kwargs["include_inspect"] = _optional_bool(kw, "include_inspect", False)
+    except _DispatchValidationError as exc:
+        return exc.payload
     get_related = getattr(relation_service, "get_related_memories", None)
     if get_related is not None:
         return get_related(**related_kwargs)
@@ -447,13 +613,19 @@ def _dispatch_get_events(**kw):
 def _dispatch_retrieve_context(**kw):
     query = kw.get("query")
     if not isinstance(query, str):
-        raise ValueError("query is required")
+        return rejected([error(error_codes.VALIDATION_ERROR, "query is required", "query")])
+    try:
+        limit = _optional_int_or_none(kw, "limit")
+        budget_tokens = _optional_int_or_none(kw, "budget_tokens")
+        strategy = _optional_strategy(kw)
+    except _DispatchValidationError as exc:
+        return exc.payload
     return retrieve_context_service.assemble_retrieve_context(
         query=query,
         owner_id=kw.get("owner_id"),
-        limit=_optional_int_or_none(kw, "limit"),
-        budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
-        strategy=_optional_strategy(kw),
+        limit=limit,
+        budget_tokens=budget_tokens,
+        strategy=strategy,
     )
 
 

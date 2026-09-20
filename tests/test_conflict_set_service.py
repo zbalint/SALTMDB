@@ -451,7 +451,7 @@ class TestConflictSetService(unittest.TestCase):
         edge = self._edge(primary, neighbor)
 
         with patch(
-            "saltmdb.domain.services.conflict_set_service.get_lineage",
+            "saltmdb.domain.services.conflict_set_service._get_lineage_raw",
             return_value={"error": "anchor unavailable"},
         ):
             result = assemble_conflict_sets(

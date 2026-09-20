@@ -11,7 +11,7 @@ from saltmdb.config import (
     get_db_path,
 )
 from saltmdb.db.connection import close_connection, get_connection
-from saltmdb.domain.services.relation_service import get_lineage
+from saltmdb.domain.services.relation_service import _get_lineage_raw
 
 logger = logging.getLogger(__name__)
 
@@ -115,14 +115,14 @@ def _component_lifecycle_resolved(
             break
         newly_discovered: set[str] = set()
         for entity_id in frontier:
-            ancestors_result = get_lineage(
+            ancestors_result = _get_lineage_raw(
                 entity_id,
                 direction="ancestors",
                 max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
                 point_in_time=point_in_time,
                 db_connection=conn,
             )
-            descendants_result = get_lineage(
+            descendants_result = _get_lineage_raw(
                 entity_id,
                 direction="descendants",
                 max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,

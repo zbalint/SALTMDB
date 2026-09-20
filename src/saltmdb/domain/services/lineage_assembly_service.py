@@ -12,7 +12,7 @@ from saltmdb.config import (
 )
 from saltmdb.db.connection import close_connection, get_connection
 from saltmdb.domain.services.conflict_set_service import classify_contradicts_components
-from saltmdb.domain.services.relation_service import get_lineage
+from saltmdb.domain.services.relation_service import _get_lineage_raw
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def assemble_lineage(
 
         output: dict[str, dict[str, Any]] = {}
         for head_id in sorted(head_candidate_ids):
-            ancestors_result = get_lineage(
+            ancestors_result = _get_lineage_raw(
                 head_id,
                 direction="ancestors",
                 max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,

@@ -130,15 +130,36 @@ class TestPhase4McpSurface(unittest.TestCase):
         supersede.assert_called_once()
         self.assertEqual(supersede.call_args.kwargs["reason"], "newer knowledge")
 
-    def test_replacement_requires_nonempty_tags(self):
-        with self.assertRaisesRegex(ValueError, "tags is required"):
-            dispatch._dispatch_revise_memory(
-                entity_id="old",
-                title="Revised",
-                content="content",
-                tags=[],
-                reason="representation repair",
-            )
+    @patch(
+        "saltmdb.daemon.dispatch.memory_service.revise_memory",
+        return_value={
+            "status": "rejected",
+            "errors": [
+                {
+                    "code": "INVALID_TAGS",
+                    "message": "tags must be a non-empty list of non-empty strings.",
+                    "field": "tags",
+                }
+            ],
+            "warnings": [],
+        },
+    )
+    def test_replacement_requires_nonempty_tags(self, revise):
+        # An explicitly empty tags list is structurally valid at the dispatch layer (a list of
+        # strings, vacuously) -- non-emptiness is now a domain-layer business rule (§6.1), not a
+        # dispatch-layer shape check, so dispatch passes it straight through and returns whatever
+        # the service layer decides.
+        result = dispatch._dispatch_revise_memory(
+            entity_id="old",
+            title="Revised",
+            content="content",
+            tags=[],
+            reason="representation repair",
+        )
+        revise.assert_called_once()
+        self.assertEqual(revise.call_args.kwargs["tags"], [])
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "INVALID_TAGS")
 
     @patch(
         "saltmdb.daemon.dispatch.relation_service.consolidate_memories",

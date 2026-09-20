@@ -193,9 +193,12 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
 # NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
 def search_tags(
     domain: str = None, limit: int = 50, db_connection=None, db_path: str = None
-) -> list:
+) -> dict:
     """Queries canonical tags (agent API redesign plan §5.12, Phase 6 item 27: renamed from
     get_canonical_tags -- advisory discovery, not a prerequisite)."""
+    from saltmdb.utils import error_codes
+    from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
+
     should_close = False
     conn = db_connection
     if not conn:
@@ -223,10 +226,10 @@ def search_tags(
                 (limit,),
             )
         rows = cursor.fetchall()
-        return [{"id": r[0], "name": r[1]} for r in rows]
+        return envelope_ok([{"id": r[0], "name": r[1]} for r in rows])
     except Exception as e:
         logger.error("Error fetching canonical tags: %s", e)
-        return [{"error": str(e)}]
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)

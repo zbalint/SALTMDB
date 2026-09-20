@@ -25,7 +25,8 @@ from saltmdb.domain.services.retrieve_context_service import assemble_retrieve_c
 
 def _memory_id(result: str | dict[str, Any]) -> str:
     if isinstance(result, dict):
-        return cast(dict[str, str], result["data"])["id"]
+        data = cast(dict[str, str], result["data"])
+        return data.get("id") or data["relation_id"]
     match = re.search(r"ID:\s*([a-f0-9-]+)", result)
     assert match, f"Could not parse entity ID from result: {result!r}"
     return match.group(1)
@@ -70,7 +71,8 @@ class TestRetrieveContextService(unittest.TestCase):
             predicate=predicate,
             db_connection=self.conn,
         )
-        self.assertIn("successfully stored", result, result)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("successfully stored", result["data"]["message"])
         return _memory_id(result)
 
     def _raw_relation(self, source_id: str, target_id: str, predicate: str) -> str:

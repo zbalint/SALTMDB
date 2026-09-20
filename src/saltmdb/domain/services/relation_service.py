@@ -14,6 +14,14 @@ from saltmdb.config import (
     RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+from saltmdb.utils import error_codes
+from saltmdb.utils.envelope import (
+    error as envelope_error,
+    ok as envelope_ok,
+    rejected,
+    warning as envelope_warning,
+)
+from saltmdb.utils import envelope
 from saltmdb.utils.text import resolve_entity_id, resolve_entity_ref, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
@@ -84,7 +92,7 @@ def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None)
 
 def list_predicates(
     query: str = None, limit: int = 50, db_connection=None, db_path: str = None
-) -> list:
+) -> dict:
     """Lists the closed relation-predicate vocabulary (agent API redesign plan §5.12, Phase 6
     item 27: renamed from get_canonical_predicates). Mirrors memory_service.search_tags for the
     predicates table."""
@@ -104,10 +112,21 @@ def list_predicates(
             cursor = conn.execute(
                 "SELECT id, name FROM predicates WHERE canonical_id IS NULL LIMIT ?", (limit,)
             )
-        return [{"id": r[0], "name": r[1]} for r in cursor.fetchall()]
+        rows = []
+        for row in cursor.fetchall():
+            disposition = classify_predicate(row[1])
+            rows.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "disposition": disposition.status,
+                    "lifecycle_tool": disposition.lifecycle_tool,
+                }
+            )
+        return envelope_ok(rows)
     except Exception as e:
         logger.error("Error fetching canonical predicates: %s", e)
-        return [{"error": str(e)}]
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)
@@ -143,7 +162,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     coordinator=None,
     _in_transaction: bool = False,
     _allow_core_elaborates_on: bool = False,
-) -> str:
+) -> dict:
     """Stores a directional relationship edge between two knowledge entities.
 
     Core-memory governance (see core_governance_service.py, resolved gap #1): an `elaborates_on`
@@ -170,7 +189,14 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     always a no-op, checked BEFORE the gate -- re-submitting it never requires an override.
     """
     if not source_id or not target_id or not predicate:
-        return "Error: source_id, target_id, and predicate are mandatory parameters."
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "Error: source_id, target_id, and predicate are mandatory parameters.",
+                )
+            ]
+        )
 
     should_close = False
     conn = db_connection
@@ -185,12 +211,29 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     if not resolved_source or not resolved_target:
         if should_close:
             close_connection(conn)
-        return source_error or target_error or "Error: Could not resolve target entity IDs."
+        error_message = (
+            source_error or target_error or "Error: Could not resolve target entity IDs."
+        )
+        error_code = (
+            "AMBIGUOUS_ID_PREFIX"
+            if "AMBIGUOUS_ID_PREFIX" in error_message
+            else "UNKNOWN_ENTITY_ID"
+            if "UNKNOWN_ENTITY_ID" in error_message
+            else error_codes.VALIDATION_ERROR
+        )
+        return rejected([envelope_error(error_code, error_message)])
 
     if resolved_source == resolved_target:
         if should_close:
             close_connection(conn)
-        return "Error: Self-referential relations (source_id == target_id) are forbidden."
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "Error: Self-referential relations (source_id == target_id) are forbidden.",
+                )
+            ]
+        )
 
     # Closed predicate vocabulary write-time gate (plan §5.8, Phase 6 item 25). This is the
     # domain-layer backstop -- mcp/tools.py's manage_relation runs the same classification
@@ -202,16 +245,32 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     if disposition.status == "reserved":
         if should_close:
             close_connection(conn)
-        return (
-            f"Error: RESERVED_PREDICATE - '{predicate}' is reserved; it is created only by "
-            f"{disposition.lifecycle_tool}, never directly via manage_relation."
+        return rejected(
+            [
+                envelope_error(
+                    "RESERVED_PREDICATE",
+                    (
+                        f"Error: RESERVED_PREDICATE - '{predicate}' is reserved; it is created only by "
+                        f"{disposition.lifecycle_tool}, never directly via manage_relation."
+                    ),
+                    "predicate",
+                )
+            ]
         )
     if disposition.status == "legacy_readonly":
         if should_close:
             close_connection(conn)
-        return (
-            f"Error: LEGACY_READONLY_PREDICATE - '{predicate}' edges are legacy; existing ones "
-            "remain readable but no new ones may be created."
+        return rejected(
+            [
+                envelope_error(
+                    "LEGACY_READONLY_PREDICATE",
+                    (
+                        f"Error: LEGACY_READONLY_PREDICATE - '{predicate}' edges are legacy; existing ones "
+                        "remain readable but no new ones may be created."
+                    ),
+                    "predicate",
+                )
+            ]
         )
     if disposition.status == "alias":
         if should_close:
@@ -222,24 +281,40 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
             if disposition.swap
             else ""
         )
-        return (
-            f"Error: NONCANONICAL_PREDICATE - '{predicate}' is not canonical; the canonical "
-            f"form is '{disposition.canonical}'{swap_note}. Retry with predicate="
-            f"'{disposition.canonical}'."
+        return rejected(
+            [
+                envelope_error(
+                    "NONCANONICAL_PREDICATE",
+                    (
+                        f"Error: NONCANONICAL_PREDICATE - '{predicate}' is not canonical; the canonical "
+                        f"form is '{disposition.canonical}'{swap_note}. Retry with predicate="
+                        f"'{disposition.canonical}'."
+                    ),
+                    "predicate",
+                )
+            ]
         )
     if disposition.status == "unknown":
         if should_close:
             close_connection(conn)
-        return (
-            f"Error: UNKNOWN_PREDICATE - '{predicate}' is not part of the closed predicate "
-            f"vocabulary. Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
+        return rejected(
+            [
+                envelope_error(
+                    "UNKNOWN_PREDICATE",
+                    (
+                        f"Error: UNKNOWN_PREDICATE - '{predicate}' is not part of the closed predicate "
+                        f"vocabulary. Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
+                    ),
+                    "predicate",
+                )
+            ]
         )
 
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     try:
 
-        def _do_store():  # noqa: C901, PLR0912
+        def _do_store():  # noqa: C901, PLR0912, PLR0915
             normalized_requested = _normalize_predicate_name(predicate)
             canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
             note = (
@@ -261,7 +336,14 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                 (resolved_source, resolved_target, canonical_predicate),
             ).fetchone()
             if existing_edge:
-                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+                message = (
+                    f"Relation already exists (no-op): '{canonical_predicate}' between "
+                    f"{resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+                )
+                return envelope_ok(
+                    {"relation_id": existing_edge[0], "message": message},
+                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
+                )
 
             # C-fix (cold-start agent-experience review, Issue C): detect whether this call is a
             # manual repoint -- same source + a single-active-target-invariant predicate, but a
@@ -294,11 +376,19 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                     "SELECT is_core, status FROM entities WHERE id = ?", (resolved_target,)
                 ).fetchone()
                 if target_row and bool(target_row[0]) and target_row[1] != "archived":
-                    return (
-                        "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
-                        "core memory are governed exclusively by that core's own "
-                        "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
-                        "-- manage_relation cannot create them directly."
+                    return rejected(
+                        [
+                            envelope_error(
+                                "REJECT_CORE_ELABORATES_ON",
+                                (
+                                    "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                                    "core memory are governed exclusively by that core's own "
+                                    "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                                    "-- manage_relation cannot create them directly."
+                                ),
+                                "predicate",
+                            )
+                        ]
                     )
 
             # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
@@ -365,12 +455,18 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                             f"REJECT_CONTRADICTORY_PREDICATE (predicate='{canonical_predicate}' "
                             f"conflicts with existing {contradictions} on this edge)"
                         )
-                    return (
+                    message = (
                         "Error: "
                         + " ".join(reasons)
                         + f" Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} "
                         "chars) to force this relation."
                     )
+                    code = (
+                        "REJECT_LOW_RELATION_SIMILARITY"
+                        if "low_similarity" in violations
+                        else "REJECT_CONTRADICTORY_PREDICATE"
+                    )
+                    return rejected([envelope_error(code, message)])
 
                 # Atomic audit trail -- written as the first write for this call, before the
                 # relation itself, so any log_event failure rolls back the whole transaction
@@ -394,9 +490,10 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                     db_connection=conn,
                     _in_transaction=True,
                 )
-                if audit_result.startswith("Error"):
+                if envelope.is_rejected(audit_result):
                     raise RuntimeError(
-                        f"Failed to record relation gate override audit event: {audit_result}"
+                        "Failed to record relation gate override audit event: "
+                        f"{audit_result['errors'][0]['message']}"
                     )
 
             # C-fix (continued): every gate above has now passed without an early return, so the
@@ -435,8 +532,23 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                     (resolved_source, resolved_target, canonical_predicate),
                 ).fetchone()
                 existing_id = existing[0] if existing else relation_id
-                return f"Relation already exists (no-op): '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {existing_id}){note}"
-            return f"Relation successfully stored: '{canonical_predicate}' between {resolved_source} and {resolved_target} (ID: {relation_id}){note}"
+                message = (
+                    f"Relation already exists (no-op): '{canonical_predicate}' between "
+                    f"{resolved_source} and {resolved_target} (ID: {existing_id}){note}"
+                )
+                return envelope_ok(
+                    {"relation_id": existing_id, "message": message},
+                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
+                )
+            return envelope_ok(
+                {
+                    "relation_id": relation_id,
+                    "message": (
+                        f"Relation successfully stored: '{canonical_predicate}' between "
+                        f"{resolved_source} and {resolved_target} (ID: {relation_id}){note}"
+                    ),
+                }
+            )
 
         if _in_transaction:
             result_msg = _do_store()
@@ -455,7 +567,9 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
         return result_msg
     except Exception as e:
         logger.error("Error storing relation: %s", e)
-        return f"Error storing relation: {e}"
+        return rejected(
+            [envelope_error(error_codes.INTERNAL_ERROR, f"Error storing relation: {e}")]
+        )
     finally:
         if should_close:
             close_connection(conn)
@@ -470,13 +584,20 @@ def invalidate_relation(  # noqa: C901
     db_path: str = None,
     coordinator=None,
     _in_transaction: bool = False,
-) -> str:
+) -> dict:
     """Invalidates an active relationship edge on the event/world-time axis (invalid_at).
 
     Does NOT touch valid_to (system/transaction time, driven by commit_consolidation).
     """
     if not source_id or not target_id or not predicate:
-        return "Error: source_id, target_id, and predicate are mandatory parameters."
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "Error: source_id, target_id, and predicate are mandatory parameters.",
+                )
+            ]
+        )
 
     should_close = False
     conn = db_connection
@@ -491,7 +612,17 @@ def invalidate_relation(  # noqa: C901
     if not resolved_source or not resolved_target:
         if should_close:
             close_connection(conn)
-        return source_error or target_error or "Error: Could not resolve target entity IDs."
+        error_message = (
+            source_error or target_error or "Error: Could not resolve target entity IDs."
+        )
+        error_code = (
+            "AMBIGUOUS_ID_PREFIX"
+            if "AMBIGUOUS_ID_PREFIX" in error_message
+            else "UNKNOWN_ENTITY_ID"
+            if "UNKNOWN_ENTITY_ID" in error_message
+            else error_codes.VALIDATION_ERROR
+        )
+        return rejected([envelope_error(error_code, error_message)])
 
     now = datetime.now(UTC).isoformat()
     try:
@@ -516,12 +647,18 @@ def invalidate_relation(  # noqa: C901
                     (resolved_source, resolved_target, canonical_predicate),
                 ).fetchone()
             if not existing:
-                return "Error: relation not found"
+                return rejected(
+                    [envelope_error(error_codes.NOT_FOUND, "Error: relation not found")]
+                )
 
             rel_id, existing_invalid_at = existing
             if existing_invalid_at is not None:
-                return (
+                message = (
                     f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
+                )
+                return envelope_ok(
+                    {"relation_id": rel_id, "message": message},
+                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
                 )
 
             effective_invalid_at = invalid_at or now
@@ -529,7 +666,11 @@ def invalidate_relation(  # noqa: C901
                 "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
                 (effective_invalid_at, effective_invalid_at, rel_id),
             )
-            return f"Relation invalidated: '{canonical_predicate}' between {resolved_source} and {resolved_target} at {effective_invalid_at} (ID: {rel_id}){note}"
+            message = (
+                f"Relation invalidated: '{canonical_predicate}' between {resolved_source} "
+                f"and {resolved_target} at {effective_invalid_at} (ID: {rel_id}){note}"
+            )
+            return envelope_ok({"relation_id": rel_id, "message": message})
 
         if _in_transaction:
             result_msg = _do_invalidate()
@@ -548,7 +689,9 @@ def invalidate_relation(  # noqa: C901
         return result_msg
     except Exception as e:
         logger.error("Error invalidating relation: %s", e)
-        return f"Error invalidating relation: {e}"
+        return rejected(
+            [envelope_error(error_codes.INTERNAL_ERROR, f"Error invalidating relation: {e}")]
+        )
     finally:
         if should_close:
             close_connection(conn)
@@ -794,7 +937,7 @@ def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
     }
 
 
-def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     entity_id: str = None,
     direction: Literal["ancestors", "descendants"] = "ancestors",
     max_depth: int = 10,
@@ -947,6 +1090,34 @@ def get_lineage(  # noqa: C901, PLR0911, PLR0912, PLR0915
             close_connection(conn)
 
 
+def get_lineage(
+    entity_id: str = None,
+    direction: Literal["ancestors", "descendants"] = "ancestors",
+    max_depth: int = 10,
+    point_in_time: str = None,
+    db_connection=None,
+    db_path: str = None,
+) -> dict:
+    """Envelope-shaped wrapper around :func:`_get_lineage_raw`.
+
+    Kept as a separate thin function, not an in-place rewrite of the raw traversal, because
+    three other services (`analyze_lineage` in this same module, `conflict_set_service`,
+    `lineage_assembly_service`) reuse the raw bare-dict shape directly and must not be forced
+    through envelope unwrapping on every internal call.
+    """
+    result = _get_lineage_raw(
+        entity_id=entity_id,
+        direction=direction,
+        max_depth=max_depth,
+        point_in_time=point_in_time,
+        db_connection=db_connection,
+        db_path=db_path,
+    )
+    if "error" in result:
+        return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])
+    return envelope_ok(result)
+
+
 def analyze_lineage(
     entity_id: str = None, point_in_time: str = None, db_connection=None, db_path: str = None
 ) -> dict:
@@ -956,7 +1127,7 @@ def analyze_lineage(
     ``generation_depth``.  Keeping this thin projection lets the new graph contract land
     independently while those callers migrate to ``get_lineage``.
     """
-    result = get_lineage(
+    result = _get_lineage_raw(
         entity_id=entity_id,
         direction="ancestors",
         max_depth=10,
@@ -1014,16 +1185,13 @@ def get_related_memories(
         db_path=db_path,
     )
     if "error" in result:
-        return result
-    # Keep the historical keys while exposing the terminology of the new tool. This is
-    # useful to in-process callers during the MCP/daemon registration migration.
-    return {
-        **result,
-        "entity_id": result["root"]["id"],
-        "related_memories": result["dependencies"],
-        "total_related_found": result["total_dependencies_found"],
-        "max_depth": max_depth,
-    }
+        return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])
+    payload = {key: value for key, value in result.items() if key != "dependencies"}
+    payload["entity_id"] = result["root"]["id"]
+    payload["related_memories"] = result["dependencies"]
+    payload["total_related_found"] = result["total_dependencies_found"]
+    payload["max_depth"] = max_depth
+    return envelope_ok(payload)
 
 
 def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
@@ -1136,11 +1304,7 @@ def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, s
 
 def _consolidation_rejected(code: str, message: str) -> dict:
     """Build the Phase 4 mutation envelope for a validation rejection."""
-    return {
-        "status": "rejected",
-        "errors": [{"code": code, "message": message}],
-        "warnings": [],
-    }
+    return rejected([envelope_error(code, message)])
 
 
 def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -1491,9 +1655,10 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     db_connection=conn,
                     _in_transaction=True,
                 )
-                if audit_result.startswith("Error"):
+                if envelope.is_rejected(audit_result):
                     raise RuntimeError(
-                        f"Failed to record consolidation override audit event: {audit_result}"
+                        "Failed to record consolidation override audit event: "
+                        f"{audit_result['errors'][0]['message']}"
                     )
 
             is_core_val = 1 if core_state["is_core"] else 0
@@ -1639,9 +1804,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             write_transaction_retrying(conn, _write)
 
-        return {
-            "status": "ok",
-            "data": {
+        return envelope_ok(
+            {
                 "entity_id": consolidated_id,
                 "message": f"Successfully committed consolidated memory with ID: {consolidated_id}",
                 "orphaned_relations": orphaned_edges,
@@ -1651,9 +1815,8 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     "Re-declaring these relations through manage_relation is optional; "
                     "skipping them leaves a correct historical graph."
                 ),
-            },
-            "warnings": [],
-        }
+            }
+        )
     except Exception as e:
         logger.error("Error committing consolidation: %s", e)
         return _consolidation_rejected("CONSOLIDATION_FAILED", str(e))
@@ -1838,7 +2001,7 @@ def bulk_store_relations(
     db_path: str = None,
     owner_id: str | None = None,
     invalidate: bool = False,
-) -> list:
+) -> list | dict:
     """Executes multiple relation insertions or invalidations atomically -- all-or-nothing.
 
     ``owner_id`` is the default attribution for the batch.  Trusted in-process callers may
@@ -1859,7 +2022,15 @@ def bulk_store_relations(
     error result instead of claiming any individual items succeeded.
     """
     if not relations or not isinstance(relations, list):
-        return [{"status": "error", "error": "relations must be a non-empty array of objects"}]
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "relations must be a non-empty array of objects",
+                    "relations",
+                )
+            ]
+        )
     should_close = False
     conn = db_connection
     if not conn:
@@ -1893,19 +2064,22 @@ def bulk_store_relations(
                         db_connection=conn,
                         _in_transaction=True,
                     )
-                    if res.startswith("Error"):
-                        raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
-                    status = (
-                        "duplicate" if res.startswith("Relation already invalidated") else "success"
+                    if envelope.is_rejected(res):
+                        raise RuntimeError(
+                            "Bulk relation store aborted (all-or-nothing): "
+                            f"{res['errors'][0]['message']}"
+                        )
+                    is_dup = any(
+                        w.get("code") == error_codes.ALREADY_DONE for w in res.get("warnings", [])
                     )
                     results.append(
                         {
-                            "status": status,
+                            "status": "duplicate" if is_dup else "success",
                             "source": src,
                             "target": tgt,
                             "predicate": pred,
                             "action": "invalidate",
-                            "result": res,
+                            "result": res["data"],
                         }
                     )
                     continue
@@ -1919,17 +2093,22 @@ def bulk_store_relations(
                     db_connection=conn,
                     _in_transaction=True,
                 )
-                if res.startswith("Error"):
-                    raise RuntimeError(f"Bulk relation store aborted (all-or-nothing): {res}")
-                status = "duplicate" if res.startswith("Relation already exists") else "success"
+                if envelope.is_rejected(res):
+                    raise RuntimeError(
+                        "Bulk relation store aborted (all-or-nothing): "
+                        f"{res['errors'][0]['message']}"
+                    )
+                is_dup = any(
+                    w.get("code") == error_codes.ALREADY_DONE for w in res.get("warnings", [])
+                )
                 results.append(
                     {
-                        "status": status,
+                        "status": "duplicate" if is_dup else "success",
                         "source": src,
                         "target": tgt,
                         "predicate": pred,
                         "action": "store",
-                        "result": res,
+                        "result": res["data"],
                     }
                 )
 
@@ -1937,7 +2116,7 @@ def bulk_store_relations(
         return results
     except Exception as e:
         logger.error("Bulk store relations error (batch rolled back, no items stored): %s", e)
-        return [{"status": "error", "error": str(e)}]
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)

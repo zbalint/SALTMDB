@@ -23,7 +23,7 @@ from saltmdb.domain.services.relation_service import (
     bulk_store_relations,
     analyze_dependencies,
     analyze_lineage,
-    get_lineage,
+    _get_lineage_raw,
     get_related_memories,
     commit_consolidation,
     consolidate_memories,
@@ -63,7 +63,8 @@ def _cons_content(marker: str) -> str:
 
 def _memory_id(result) -> str:
     if isinstance(result, dict):
-        return result["data"]["id"]
+        data = result["data"]
+        return data.get("id") or data["relation_id"]
     match = re.search(r"ID:\s*([a-f0-9-]+)", result)
     assert match, f"Could not parse entity ID from result: {result!r}"
     return match.group(1)
@@ -408,8 +409,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("successfully stored", res1)
-        self.assertFalse(res1.startswith("Error"))
+        self.assertEqual(res1["status"], "ok")
+        self.assertIn("successfully stored", res1["data"]["message"])
         id_in_res1 = _memory_id(res1)
 
         res2 = store_relation(
@@ -418,8 +419,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("already exists", res2)
-        self.assertFalse(res2.startswith("Error"))
+        self.assertEqual(res2["status"], "ok")
+        self.assertIn("already exists", res2["data"]["message"])
         id_in_res2 = _memory_id(res2)
 
         self.assertEqual(
@@ -531,9 +532,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             ],
             db_connection=self.conn,
         )
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["status"], "error")
-        self.assertIn("relation not found", results[0]["error"])
+        self.assertEqual(results["status"], "rejected")
+        self.assertIn("relation not found", results["errors"][0]["message"])
         self.assertIsNone(
             self._relation_row(self.id1, self.id2, "related_to"),
             "a failing invalidate must roll back the earlier create",
@@ -547,9 +547,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             relations=[{"source_id": self.id1, "target_id": self.id2, "predicate": "references"}],
             db_connection=self.conn,
         )
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["status"], "error")
-        self.assertIn("NONCANONICAL_PREDICATE", results[0]["error"])
+        self.assertEqual(results["status"], "rejected")
+        self.assertIn("NONCANONICAL_PREDICATE", results["errors"][0]["message"])
         self.assertEqual(
             self._relation_count(self.id1, self.id2),
             0,
@@ -572,7 +571,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertIn("successfully stored", active_res)
+        self.assertEqual(active_res["status"], "ok")
+        self.assertIn("successfully stored", active_res["data"]["message"])
         active_id = _memory_id(active_res)
         self.assertNotEqual(active_id, expired_id)
 
@@ -582,7 +582,7 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertIn("already exists", dup_res)
+        self.assertIn("already exists", dup_res["data"]["message"])
         reported_id = _memory_id(dup_res)
         self.assertEqual(
             reported_id,
@@ -602,7 +602,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             override_justification="unresolved-centroid test fixtures, deliberate override for coverage",
             db_connection=self.conn,
         )
-        self.assertTrue(first.startswith("Relation successfully stored"), first)
+        self.assertEqual(first["status"], "ok", first)
+        self.assertIn("Relation successfully stored", first["data"]["message"])
 
         repoint = store_relation(
             source_id=self.id1,
@@ -611,7 +612,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             override_justification="unresolved-centroid test fixtures, deliberate override for coverage",
             db_connection=self.conn,
         )
-        self.assertTrue(repoint.startswith("Relation successfully stored"), repoint)
+        self.assertEqual(repoint["status"], "ok", repoint)
+        self.assertIn("Relation successfully stored", repoint["data"]["message"])
 
         old_row = self._relation_row(self.id1, self.id2, "elaborates_on")
         new_row = self._relation_row(self.id1, self.id3, "elaborates_on")
@@ -632,7 +634,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertTrue(first.startswith("Relation successfully stored"), first)
+        self.assertEqual(first["status"], "ok", first)
+        self.assertIn("Relation successfully stored", first["data"]["message"])
 
         second = store_relation(
             source_id=self.id1,
@@ -640,7 +643,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertTrue(second.startswith("Relation successfully stored"), second)
+        self.assertEqual(second["status"], "ok", second)
+        self.assertIn("Relation successfully stored", second["data"]["message"])
 
         row1 = self._relation_row(self.id1, self.id2, "related_to")
         row2 = self._relation_row(self.id1, self.id3, "related_to")
@@ -666,7 +670,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="elaborates_on",
             db_connection=self.conn,
         )
-        self.assertTrue(first.startswith("Relation successfully stored"), first)
+        self.assertEqual(first["status"], "ok", first)
+        self.assertIn("Relation successfully stored", first["data"]["message"])
 
         rejected = store_relation(
             source_id=source,
@@ -674,7 +679,8 @@ class TestStoreRelationDedup(unittest.TestCase):
             predicate="elaborates_on",
             db_connection=self.conn,  # no override_justification -> gate must reject
         )
-        self.assertTrue(rejected.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), rejected)
+        self.assertEqual(rejected["status"], "rejected", rejected)
+        self.assertIn("REJECT_LOW_RELATION_SIMILARITY", rejected["errors"][0]["message"])
 
         old_row = self._relation_row(source, old_target, "elaborates_on")
         new_row = self._relation_row(source, new_target, "elaborates_on")
@@ -817,7 +823,8 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         result = store_relation(
             source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
         )
-        self.assertTrue(result.startswith("Error: UNKNOWN_PREDICATE"))
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertIn("UNKNOWN_PREDICATE", result["errors"][0]["message"])
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
@@ -848,13 +855,14 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         result = store_relation(
             source_id=id1, target_id=id2, predicate="relates_to", db_connection=self.conn
         )
-        self.assertTrue(result.startswith("Error: NONCANONICAL_PREDICATE"))
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertIn("NONCANONICAL_PREDICATE", result["errors"][0]["message"])
         self.assertIn(
             "related_to",
-            result,
+            result["errors"][0]["message"],
             "the canonical replacement name must still be surfaced so the caller knows how to retry",
         )
-        self.assertIn("relates_to", result)
+        self.assertIn("relates_to", result["errors"][0]["message"])
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
@@ -917,10 +925,11 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         result = invalidate_relation(
             source_id=id1, target_id=id2, predicate="!!!", db_connection=self.conn
         )
-        self.assertIn("Relation invalidated", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Relation invalidated", result["data"]["message"])
         self.assertNotIn(
             "canonicalized",
-            result,
+            result["data"]["message"],
             "a degenerate predicate that falls back to the raw input on both sides must NOT be "
             "reported as canonicalized",
         )
@@ -937,7 +946,7 @@ class TestListPredicates(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_fresh_db_excludes_aliased_predicates(self):
-        results = list_predicates(db_connection=self.conn)
+        results = list_predicates(db_connection=self.conn)["data"]
         names = {r["name"] for r in results}
         self.assertEqual(
             names,
@@ -964,7 +973,7 @@ class TestListPredicates(unittest.TestCase):
         )
 
     def test_query_filters_to_matching_predicate(self):
-        results = list_predicates(query="depend", db_connection=self.conn)
+        results = list_predicates(query="depend", db_connection=self.conn)["data"]
         names = {r["name"] for r in results}
         self.assertEqual(names, {"depends_on"})
 
@@ -978,7 +987,7 @@ class TestListPredicates(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = list_predicates(db_connection=self.conn)
+        results = list_predicates(db_connection=self.conn)["data"]
         self.assertEqual(
             len(results), 50, "default limit must cap unfiltered results at 50, not return all rows"
         )
@@ -997,7 +1006,7 @@ class TestListPredicates(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = list_predicates(limit=5, db_connection=self.conn)
+        results = list_predicates(limit=5, db_connection=self.conn)["data"]
         self.assertEqual(len(results), 5)
 
 
@@ -1021,7 +1030,7 @@ class TestSearchTags(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = search_tags(db_connection=self.conn)
+        results = search_tags(db_connection=self.conn)["data"]
         self.assertEqual(
             len(results),
             50,
@@ -1038,7 +1047,7 @@ class TestSearchTags(unittest.TestCase):
 
         write_transaction_retrying(self.conn, _write)
 
-        results = search_tags(limit=5, db_connection=self.conn)
+        results = search_tags(limit=5, db_connection=self.conn)["data"]
         self.assertEqual(len(results), 5)
 
 
@@ -1467,7 +1476,7 @@ class TestPhase3LineageGraph(unittest.TestCase):
             (datetime.now(UTC).isoformat(), archived_parent),
         )
 
-        result = get_lineage(
+        result = _get_lineage_raw(
             entity_id=archived_parent,
             direction="descendants",
             db_connection=self.conn,
@@ -1493,7 +1502,7 @@ class TestPhase3LineageGraph(unittest.TestCase):
             (revised, superseded, consolidated),
         )
 
-        result = get_lineage(entity_id=newest, direction="ancestors", db_connection=self.conn)
+        result = _get_lineage_raw(entity_id=newest, direction="ancestors", db_connection=self.conn)
 
         self.assertEqual(
             [edge["predicate"] for edge in result["edges"]],
@@ -1511,7 +1520,7 @@ class TestPhase3LineageGraph(unittest.TestCase):
         self._edge(hidden, root, "revises", valid_at=future)
         self._edge(old, root, "supersedes", valid_from="2019-01-01T00:00:00+00:00")
 
-        result = get_lineage(
+        result = _get_lineage_raw(
             entity_id=root,
             direction="descendants",
             max_depth=1,
@@ -1530,13 +1539,14 @@ class TestPhase3LineageGraph(unittest.TestCase):
         self._edge(b, a, "revises")
         self._edge(a, b, "supersedes")
 
-        result = get_lineage(
+        result = _get_lineage_raw(
             entity_id=a, direction="descendants", max_depth=20, db_connection=self.conn
         )
         self.assertLessEqual(len(result["edges"]), 2)
         related = get_related_memories(entity_id=a, db_connection=self.conn)
-        self.assertIn("related_memories", related)
-        self.assertIn("dependencies", related)
+        self.assertEqual(related["status"], "ok")
+        self.assertIn("related_memories", related["data"])
+        self.assertNotIn("dependencies", related["data"])
 
 
 class TestRelationPointInTime(unittest.TestCase):
@@ -1758,7 +1768,7 @@ class TestRelationPointInTime(unittest.TestCase):
         b = self._mk("Tool-Level Inbound Fix B")
         store_relation(source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn)
 
-        result = get_related_memories(entity_id=b, db_connection=self.conn)
+        result = get_related_memories(entity_id=b, db_connection=self.conn)["data"]
         self.assertEqual(result["total_related_found"], 1)
         related_ids = {n["id"] for n in result["related_memories"]}
         self.assertEqual(related_ids, {a, b})
@@ -2197,7 +2207,11 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
 
         with patch(
             "saltmdb.domain.services.relation_service.log_event",
-            return_value="Error: simulated audit failure",
+            return_value={
+                "status": "rejected",
+                "errors": [{"code": "INTERNAL_ERROR", "message": "simulated audit failure"}],
+                "warnings": [],
+            },
         ):
             res = commit_consolidation(
                 parent_ids=[a, b],
@@ -2542,7 +2556,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertIn("REJECT_LOW_RELATION_SIMILARITY", res["errors"][0]["message"])
 
         row = self.conn.execute(
             "SELECT id FROM relations WHERE source_id = ? AND target_id = ?", (a, b)
@@ -2561,7 +2576,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             override_justification="deliberately linking orthogonal test fixtures for coverage",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation successfully stored", res["data"]["message"])
 
         events = self._override_events()
         self.assertEqual(len(events), 1, events)
@@ -2578,7 +2594,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="resolves", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation successfully stored", res["data"]["message"])
         self.assertEqual(self._override_events(), [])
 
     def test_store_relation_weak_predicate_bypasses_gate(self):
@@ -2588,7 +2605,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="depends_on", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation successfully stored", res["data"]["message"])
         self.assertEqual(self._override_events(), [])
 
     def test_store_relation_similar_to_is_rejected_as_legacy_readonly(self):
@@ -2602,7 +2620,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="similar_to", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: LEGACY_READONLY_PREDICATE"), res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertIn("LEGACY_READONLY_PREDICATE", res["errors"][0]["message"])
         self.assertEqual(self._override_events(), [])
 
         row = self.conn.execute(
@@ -2622,9 +2641,10 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="references", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: NONCANONICAL_PREDICATE"), res)
-        self.assertIn("related_to", res)
-        self.assertNotIn("REJECT_LOW_RELATION_SIMILARITY", res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertIn("NONCANONICAL_PREDICATE", res["errors"][0]["message"])
+        self.assertIn("related_to", res["errors"][0]["message"])
+        self.assertNotIn("REJECT_LOW_RELATION_SIMILARITY", res["errors"][0]["message"])
 
     def test_store_relation_rejects_contradictory_predicate_pair(self):
         a, _ = self._mk_vector_entity("Contradiction A", _axis_vector(0))
@@ -2646,7 +2666,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: REJECT_CONTRADICTORY_PREDICATE"), res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertIn("REJECT_CONTRADICTORY_PREDICATE", res["errors"][0]["message"])
 
         override_res = store_relation(
             source_id=a,
@@ -2655,7 +2676,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             override_justification="deliberately allowing a contradictory pair for test coverage",
             db_connection=self.conn,
         )
-        self.assertTrue(override_res.startswith("Relation successfully stored"), override_res)
+        self.assertEqual(override_res["status"], "ok", override_res)
+        self.assertIn("Relation successfully stored", override_res["data"]["message"])
 
         active_predicates = {
             r[0]
@@ -2682,8 +2704,9 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="resolves", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res)
-        self.assertIn("unresolved", res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertIn("REJECT_LOW_RELATION_SIMILARITY", res["errors"][0]["message"])
+        self.assertIn("unresolved", res["errors"][0]["message"])
 
         override_res = store_relation(
             source_id=a,
@@ -2692,7 +2715,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             override_justification="forcing a relation to an unscorable entity for coverage",
             db_connection=self.conn,
         )
-        self.assertTrue(override_res.startswith("Relation successfully stored"), override_res)
+        self.assertEqual(override_res["status"], "ok", override_res)
+        self.assertIn("Relation successfully stored", override_res["data"]["message"])
 
     def test_store_relation_gate_only_ever_writes_relations_and_events(self):
         a, _ = self._mk_vector_entity("Invariant A", _axis_vector(0))
@@ -2711,7 +2735,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             override_justification="invariant check override, no entity row should ever change",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation successfully stored", res["data"]["message"])
         after = _entities_snapshot()
         self.assertEqual(before, after)
 
@@ -2736,7 +2761,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             predicate="elaborates_on",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Relation successfully stored"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation successfully stored", res["data"]["message"])
         after = _entities_snapshot()
         self.assertEqual(before, after)
 
@@ -2817,7 +2843,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         res = store_relation(
             source_id=a, target_id=b, predicate="elaborates_on", db_connection=self.conn
         )
-        self.assertTrue(res.startswith("Relation already exists (no-op)"), res)
+        self.assertEqual(res["status"], "ok", res)
+        self.assertIn("Relation already exists (no-op)", res["data"]["message"])
         self.assertEqual(self._override_events(), [])
 
     def test_bulk_store_relations_gate_applies_per_item_and_aborts_batch(self):
@@ -2831,8 +2858,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             {"source_id": c, "target_id": d, "predicate": "elaborates_on"},  # low sim, no override
         ]
         results = bulk_store_relations(relations=batch, db_connection=self.conn)
-        self.assertEqual(len(results), 1, results)
-        self.assertEqual(results[0]["status"], "error", results)
+        self.assertEqual(results["status"], "rejected", results)
 
         # All-or-nothing: item 1's own edge must have been rolled back too.
         row = self.conn.execute(
@@ -2927,8 +2953,10 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 db_path=self.db_path,
             )
 
-        self.assertTrue(result.startswith("Relation successfully stored"), result)
-        self.assertTrue(duplicate.startswith("Relation already exists"), duplicate)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("Relation successfully stored", result["data"]["message"])
+        self.assertEqual(duplicate["status"], "ok", duplicate)
+        self.assertIn("Relation already exists", duplicate["data"]["message"])
         self.assertEqual(trigger.call_count, 2)
         self.assertEqual(
             [call.kwargs for call in trigger.call_args_list],
@@ -2962,8 +2990,10 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 db_path=self.db_path,
             )
 
-        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
-        self.assertTrue(result.startswith("Relation invalidated"), result)
+        self.assertEqual(stored["status"], "ok", stored)
+        self.assertIn("Relation successfully stored", stored["data"]["message"])
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("Relation invalidated", result["data"]["message"])
         trigger.assert_called_once_with(db_path=self.db_path, coordinator=None)
 
     def test_scenario_29_store_relation_forwards_coordinator_to_trigger(self):
@@ -2985,7 +3015,8 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 coordinator=coordinator,
             )
 
-        self.assertTrue(result.startswith("Relation successfully stored"), result)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("Relation successfully stored", result["data"]["message"])
         trigger.assert_called_once_with(db_path=self.db_path, coordinator=coordinator)
 
     def test_scenario_30_invalidate_relation_forwards_coordinator_to_trigger(self):
@@ -3000,7 +3031,8 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
+        self.assertEqual(stored["status"], "ok", stored)
+        self.assertIn("Relation successfully stored", stored["data"]["message"])
         coordinator = object()
 
         with patch(
@@ -3015,7 +3047,8 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 coordinator=coordinator,
             )
 
-        self.assertTrue(result.startswith("Relation invalidated"), result)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("Relation invalidated", result["data"]["message"])
         trigger.assert_called_once_with(db_path=self.db_path, coordinator=coordinator)
 
     def test_scenario_24_in_transaction_relation_writes_suppress_community_detection(self):
@@ -3050,8 +3083,10 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 self.conn.execute("ROLLBACK")
                 raise
 
-        self.assertTrue(stored.startswith("Relation successfully stored"), stored)
-        self.assertTrue(invalidated.startswith("Relation invalidated"), invalidated)
+        self.assertEqual(stored["status"], "ok", stored)
+        self.assertIn("Relation successfully stored", stored["data"]["message"])
+        self.assertEqual(invalidated["status"], "ok", invalidated)
+        self.assertIn("Relation invalidated", invalidated["data"]["message"])
         trigger.assert_not_called()
 
 

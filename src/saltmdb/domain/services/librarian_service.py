@@ -204,12 +204,15 @@ def _resolve_tag_id(conn: sqlite3.Connection, tag_name: str):
 
 def merge_tags(
     keep_tag: str, tags_to_merge: list, conn: sqlite3.Connection = None, db_path: str = None
-) -> str:
+) -> dict:
     """Merges one or more tags into an explicitly chosen canonical tag, repointing entity_tags associations.
 
     Unlike merge_tags_heuristics (which picks the canonical tag arbitrarily by SQL row order),
     this lets the caller pick which tag name survives as canonical.
     """
+    from saltmdb.utils import error_codes
+    from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
+
     should_close = False
     if not conn:
         db_path = db_path or get_db_path()
@@ -219,7 +222,15 @@ def merge_tags(
     try:
         canonical_id = _resolve_tag_id(conn, keep_tag)
         if not canonical_id:
-            return f"Error: keep_tag '{keep_tag}' does not exist in the tags table."
+            return rejected(
+                [
+                    envelope_error(
+                        error_codes.NOT_FOUND,
+                        f"keep_tag '{keep_tag}' does not exist in the tags table.",
+                        "keep_tag",
+                    )
+                ]
+            )
 
         merged: list[Any] = []
         skipped: list[Any] = []
@@ -252,7 +263,7 @@ def merge_tags(
 
         write_transaction_retrying(conn, _write)
 
-        return f"Merged {len(merged)} tag(s) into canonical tag '{keep_tag}': {merged}. Skipped: {skipped}"
+        return envelope_ok({"merged": merged, "skipped": skipped, "canonical_tag": keep_tag})
     finally:
         if should_close:
             close_connection(conn)

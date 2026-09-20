@@ -511,8 +511,8 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
 
         rejected = self._store_core("Core Number Six", content="Distinct content body number six.")
         self.assertIsInstance(rejected, dict)
-        self.assertEqual(rejected["status"], "REJECTED")
-        self.assertEqual(rejected["error_code"], "CORE_CAPACITY_EXCEEDED")
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertEqual(rejected["errors"][0]["code"], "CORE_CAPACITY_EXCEEDED")
         self.assertIn("count", rejected["violated_dimensions"])
         self.assertEqual(len(rejected["inventory"]), CORE_MAX_ACTIVE)
         # Secondary review finding: agents were previously missing the exact amount they must
@@ -568,7 +568,7 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
             db_connection=self.conn,
         )
         self.assertIsInstance(rejected, dict)
-        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertEqual(rejected["status"], "rejected")
 
     def test_duplicate_policy_does_not_bypass_capacity(self):
         for i in range(CORE_MAX_ACTIVE):
@@ -579,7 +579,7 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
             content="Distinct content body bypass.",
         )
         self.assertIsInstance(rejected, dict)
-        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertEqual(rejected["status"], "rejected")
 
 
 class TestDetailMemoryIds(CoreGovernanceDbTestBase):
@@ -759,8 +759,8 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             owner_id="tester",
             db_connection=self.conn,
         )
-        self.assertTrue(res.startswith("Error"), res)
-        self.assertIn("REJECT_CORE_ELABORATES_ON", res)
+        self.assertEqual(res["status"], "rejected", res)
+        self.assertEqual(res["errors"][0]["code"], "REJECT_CORE_ELABORATES_ON")
 
 
 class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
@@ -937,7 +937,8 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
         self._make_overdue(overdue_id)
 
         archived = archive_memory(entity_id=overdue_id, db_connection=self.conn)
-        self.assertIn("successfully archived", archived)
+        self.assertEqual(archived["status"], "ok")
+        self.assertIn("successfully archived", archived["data"]["message"])
 
     def test_content_enlargement_blocked_while_overdue(self):
         # Resolved review finding #1: the proposed content must be varied, quality-valid prose --
@@ -1685,7 +1686,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertIn("retained as core", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("retained as core", result["data"]["message"])
         row = self.conn.execute(
             "SELECT full_content, is_core, core_last_reviewed_by FROM entities WHERE id = ?",
             (entity_id,),
@@ -1706,7 +1708,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             owner_id="reviewer_agent",
             core_review_after=past,
         )
-        self.assertTrue(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "rejected", result)
 
     def test_retain_against_non_core_rejected(self):
         res = self._store_normal("Non Core Retain Target")
@@ -1718,7 +1720,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertTrue(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "rejected", result)
 
     def test_demote_turns_core_into_searchable_normal_memory(self):
         res = self._store_core("Demote Target Core")
@@ -1731,7 +1733,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertIn("demoted", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("demoted", result["data"]["message"])
         row = self.conn.execute(
             "SELECT is_core, status, core_review_after FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
@@ -1764,7 +1767,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertIn("no-op", second)
+        self.assertEqual(second["status"], "ok")
+        self.assertIn("no-op", second["data"]["message"])
 
     def test_archive_retires_memory_and_preserves_exact_id_retrievability(self):
         from saltmdb.domain.services.memory_service import fetch_memory_chunk
@@ -1779,7 +1783,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertIn("archived", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("archived", result["data"]["message"])
         row = self.conn.execute("SELECT status FROM entities WHERE id = ?", (entity_id,)).fetchone()
         self.assertEqual(row[0], "archived")
         content = fetch_memory_chunk(entity_id=entity_id, db_connection=self.conn)
@@ -1799,7 +1804,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="a_completely_different_reviewer",
         )
-        self.assertIn("archived", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("archived", result["data"]["message"])
 
     def test_archive_rejects_ordinary_active_non_core_memory(self):
         # Resolved review finding #3: review_core_memory(outcome='archive') must not become a
@@ -1814,8 +1820,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="bob",
         )
-        self.assertTrue(result.startswith("Error"), result)
-        self.assertIn("core memory", result)
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertIn("core memory", result["errors"][0]["message"])
         row = self.conn.execute("SELECT status FROM entities WHERE id = ?", (entity_id,)).fetchone()
         self.assertEqual(row[0], "raw")
 
@@ -1835,7 +1841,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertIn("no-op", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("no-op", result["data"]["message"])
 
     def test_archive_rejects_already_archived_never_core_memory(self):
         from saltmdb.domain.services.memory_service import archive_memory
@@ -1853,8 +1860,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         )
         # Must not masquerade as a reviewed core's no-op -- a never-core memory gets the
         # rejection, not the archived-former-core no-op message.
-        self.assertTrue(result.startswith("Error"), result)
-        self.assertIn("core memory", result)
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertIn("core memory", result["errors"][0]["message"])
 
     def test_archive_via_review_does_not_weaken_public_archive_memory_guard(self):
         from saltmdb.domain.services.memory_service import archive_memory
@@ -1864,7 +1871,8 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         result = archive_memory(
             entity_id=entity_id, owner_id="someone_else", db_connection=self.conn
         )
-        self.assertIn("owner mismatch", result)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("owner mismatch", result["errors"][0]["message"])
 
     def test_demote_and_archive_reject_supplied_core_review_after(self):
         res = self._store_core("Reject Review After Core")
@@ -1878,7 +1886,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             owner_id="reviewer_agent",
             core_review_after=future,
         )
-        self.assertTrue(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "rejected", result)
 
     def test_invalid_outcome_rejected(self):
         res = self._store_core("Invalid Outcome Core")
@@ -1890,7 +1898,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             review_rationale=self.RATIONALE,
             owner_id="reviewer_agent",
         )
-        self.assertTrue(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "rejected", result)
 
 
 if __name__ == "__main__":

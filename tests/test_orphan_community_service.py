@@ -397,7 +397,8 @@ class TestOrphanCommunityService(unittest.TestCase):
             predicate="depends_on",
             db_connection=self.conn,
         )
-        self.assertIn("successfully stored", relation_result, relation_result)
+        self.assertEqual(relation_result["status"], "ok", relation_result)
+        self.assertIn("successfully stored", relation_result["data"]["message"])
         self._insert_vector(cluster_a, _axis_vector(0))
         self._insert_vector(cluster_b, _axis_vector(0))
         self._insert_vector(orphan, _axis_vector(0))

@@ -45,17 +45,20 @@ class EntityDetailMixin(ViewerHandlerProtocol):
             # during rolling upgrades; both shapes are normalized for the panel.
             get_lineage = getattr(relation_service, "get_lineage", None)
             if get_lineage is not None:
+                from saltmdb.utils.envelope import is_rejected
+
                 ancestor_result = get_lineage(
                     entity_id=entity_id,
                     direction="ancestors",
                     max_depth=10,
                     db_connection=conn,
                 )
-                if isinstance(ancestor_result, dict) and ancestor_result.get("error"):
-                    self.send_json({"error": ancestor_result["error"]}, 404)
+                if isinstance(ancestor_result, dict) and is_rejected(ancestor_result):
+                    message = ancestor_result.get("errors", [{}])[0].get("message", "Unknown error")
+                    self.send_json({"error": message}, 404)
                     return
                 raw_nodes: list[tuple[dict, str]] = []
-                direction_nodes = ancestor_result.get("nodes", [])
+                direction_nodes = ancestor_result.get("data", {}).get("nodes", [])
                 raw_nodes.extend(
                     (node, "ancestors") for node in direction_nodes if isinstance(node, dict)
                 )

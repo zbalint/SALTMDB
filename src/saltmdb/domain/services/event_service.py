@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, UTC
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+from saltmdb.utils import error_codes
+from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
 from saltmdb.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -20,7 +22,7 @@ def log_event(
     db_path: str = None,
     coordinator=None,
     _in_transaction: bool = False,
-) -> str:
+) -> dict:
     """Appends an event to the append-only events ledger.
 
     _in_transaction=True skips the internal write_transaction_retrying wrapper (and defers
@@ -76,10 +78,12 @@ def log_event(
             from saltmdb.domain.services.librarian_service import trigger_librarian
 
             trigger_librarian(db_path=db_path, coordinator=coordinator)
-        return f"Event logged successfully with ID: {event_id}"
+        return envelope_ok(
+            {"id": event_id, "message": f"Event logged successfully with ID: {event_id}"}
+        )
     except Exception as e:
         logger.error("Error logging event: %s", e)
-        return f"Error logging event: {e}"
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)

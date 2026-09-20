@@ -28,11 +28,10 @@ logger = logging.getLogger(__name__)
 def classify_result(result: Any, raised: BaseException | None) -> tuple[str, str | None]:
     """Best-effort (status, error_code) classification from a tool call's outcome.
 
-    Tool return shapes are heterogeneous pre-envelope (Phase 1): a plain string ("Error: ..." on
-    failure), or a dict/list on success. This is deliberately loose and MUST be revisited once
-    §4.2's envelope is actually wired into tool responses (Phase 2+) -- at that point a dict with
-    `status: "rejected"` is unambiguous and this heuristic narrows to that one check. Telemetry
-    is diagnostic-only; a misclassified row here never affects a real request's outcome.
+    All 19 built-in tools return the standard envelope shape. The bare-string and other legacy
+    dict-shape branches below remain as defensive fallbacks for any future non-conforming caller;
+    they are not expected from the built-in tool set today. Telemetry is diagnostic-only, so a
+    misclassified row here never affects a real request's outcome.
     """
     if raised is not None:
         return "error", type(raised).__name__

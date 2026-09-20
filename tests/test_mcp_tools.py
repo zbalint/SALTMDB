@@ -189,7 +189,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tags=["#database"],
         )
         tags = tools.search_tags(query="data")
-        self.assertIsInstance(tags, list)
+        self.assertEqual(tags["status"], "ok")
+        self.assertIsInstance(tags["data"], list)
 
     def _tag_count_for_entity(self, entity_id):
         return self.conn.execute(
@@ -332,7 +333,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id1 = res1["data"]["id"]
 
         arch_res1 = tools.archive_memory(entity_id=id1)
-        self.assertIn("successfully archived", arch_res1)
+        self.assertEqual(arch_res1["status"], "ok")
+        self.assertIn("successfully archived", arch_res1["data"]["message"])
 
         res2 = tools.store_memory(
             content="Archive test bulk node 1",
@@ -366,7 +368,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
-        self.assertIn("Relation successfully stored", rel_res)
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
 
         # 'part_of' -- an agent-selectable, non-strong canonical predicate -- so this exercises
         # the bulk-shape plumbing itself, not the predicate-vocabulary gate (covered separately).
@@ -390,7 +393,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
-        self.assertIn("Relation successfully stored", rel_res)
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
 
         inv_res = tools.manage_relation(
             relations=[
@@ -408,7 +412,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(inv_res[0]["action"], "invalidate")
 
     def test_list_predicates_tool(self):
-        results = tools.list_predicates(query="elaborates")
+        results = tools.list_predicates(query="elaborates")["data"]
         names = {r["name"] for r in results}
         self.assertIn("elaborates_on", names)
 
@@ -420,7 +424,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.list_predicates(limit=3)
+        results = tools.list_predicates(limit=3)["data"]
         self.assertEqual(len(results), 3)
 
     def test_search_tags_respects_explicit_limit_kwarg(self):
@@ -431,7 +435,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.search_tags(limit=3)
+        results = tools.search_tags(limit=3)["data"]
         self.assertEqual(len(results), 3)
 
     def test_list_predicates_explicit_zero_limit_is_respected_not_defaulted(self):
@@ -442,7 +446,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.list_predicates(limit=0)
+        results = tools.list_predicates(limit=0)["data"]
         self.assertEqual(
             len(results),
             0,
@@ -457,7 +461,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.search_tags(limit=0)
+        results = tools.search_tags(limit=0)["data"]
         self.assertEqual(
             len(results),
             0,
@@ -479,7 +483,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
-        self.assertIn("Relation successfully stored", rel_res)
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
@@ -492,7 +497,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
 
         rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
-        self.assertIn("already exists", rel_res2)
+        self.assertEqual(rel_res2["status"], "ok")
+        self.assertIn("already exists", rel_res2["data"]["message"])
 
     def test_manage_relation_rejects_seeded_alias_with_resubmittable_corrected_call(self):
         # Phase 6 write-time gate (plan §5.8): manage_relation no longer silently substitutes a
@@ -520,7 +526,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(corrected_call["target_id"], id2)
 
         resubmit = tools.manage_relation(**corrected_call)
-        self.assertIn("Relation successfully stored", resubmit)
+        self.assertEqual(resubmit["status"], "ok")
+        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
 
     def test_store_memory_memory_type_round_trip(self):
         res = tools.store_memory(
@@ -594,10 +601,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
-        self.assertIn("successfully stored", rel_res)
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("successfully stored", rel_res["data"]["message"])
 
         deps_now = tools.get_related_memories(entity_id=id1, max_depth=1)
-        self.assertEqual(deps_now["total_related_found"], 1)
+        self.assertEqual(deps_now["data"]["total_related_found"], 1)
 
         # Lineage threading: consolidate two memories and confirm point_in_time excludes the
         # brand-new consolidated_from ancestry while an unrestricted (now) call includes it.
@@ -628,7 +636,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         c_id = cons_res["data"]["entity_id"]
 
         lineage_now = tools.get_lineage(entity_id=c_id)
-        self.assertEqual(lineage_now["total"], 2)
+        self.assertEqual(lineage_now["data"]["total"], 2)
 
     def test_inspect_memory_returns_snippet_not_content_with_lineage(self):
         content = (
@@ -734,9 +742,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             target_id=b_id,
             predicate="related_to",
         )
-        self.assertIn("Relation successfully stored", relation)
+        self.assertEqual(relation["status"], "ok")
+        self.assertIn("Relation successfully stored", relation["data"]["message"])
 
-        result = tools.get_related_memories(entity_id=a_id, direction="outbound")
+        result = tools.get_related_memories(entity_id=a_id, direction="outbound")["data"]
 
         self.assertTrue(result["related_memories"])
         for item in result["related_memories"]:
@@ -761,13 +770,14 @@ class TestMCPToolsWrapper(unittest.TestCase):
             target_id=b_id,
             predicate="related_to",
         )
-        self.assertIn("Relation successfully stored", relation)
+        self.assertEqual(relation["status"], "ok")
+        self.assertIn("Relation successfully stored", relation["data"]["message"])
 
         result = tools.get_related_memories(
             entity_id=a_id,
             direction="outbound",
             include_inspect=True,
-        )
+        )["data"]
         target = next(item for item in result["related_memories"] if item["id"] == b_id)
 
         for field in ("snippet", "status", "tags", "metadata"):
@@ -794,7 +804,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             target_id=b_id,
             predicate="related_to",
         )
-        self.assertIn("Relation successfully stored", relation)
+        self.assertEqual(relation["status"], "ok")
+        self.assertIn("Relation successfully stored", relation["data"]["message"])
 
         before = self.conn.execute(
             "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
@@ -803,7 +814,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             entity_id=a_id,
             direction="outbound",
             include_inspect=True,
-        )
+        )["data"]
         after = self.conn.execute(
             "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
         ).fetchone()[0]
@@ -826,13 +837,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id2 = res2["data"]["id"]
 
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
-        self.assertIn("Relation successfully stored", rel_res)
-        rel_id = rel_res.split("ID: ")[1].rstrip(")")
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
+        rel_id = rel_res["data"]["relation_id"]
 
         inv_res = tools.manage_relation(
             source_id=id1, target_id=id2, predicate="depends_on", invalidate=True
         )
-        self.assertIn("Relation invalidated", inv_res)
+        self.assertEqual(inv_res["status"], "ok")
+        self.assertIn("Relation invalidated", inv_res["data"]["message"])
 
         row = self.conn.execute(
             "SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)
@@ -862,8 +875,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
             predicate="depends_on",
             valid_at=custom_valid_at,
         )
-        self.assertIn("Relation successfully stored", rel_res)
-        rel_id = rel_res.split("ID: ")[1].rstrip(")")
+        self.assertEqual(rel_res["status"], "ok")
+        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
+        rel_id = rel_res["data"]["relation_id"]
 
         row = self.conn.execute("SELECT valid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
         self.assertEqual(row[0], custom_valid_at)
@@ -876,7 +890,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             invalidate=True,
             invalid_at=custom_invalid_at,
         )
-        self.assertIn("Relation invalidated", inv_res)
+        self.assertEqual(inv_res["status"], "ok")
+        self.assertIn("Relation invalidated", inv_res["data"]["message"])
 
         row2 = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE id = ?", (rel_id,)
@@ -1061,9 +1076,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         b = self._mk_vector_entity("Relation Gate Tool B", _axis(1))  # orthogonal -> low similarity
 
         res_no_override = tools.manage_relation(source_id=a, target_id=b, predicate="elaborates_on")
-        self.assertTrue(
-            res_no_override.startswith("Error: REJECT_LOW_RELATION_SIMILARITY"), res_no_override
-        )
+        self.assertEqual(res_no_override["status"], "rejected", res_no_override)
+        self.assertIn("REJECT_LOW_RELATION_SIMILARITY", res_no_override["errors"][0]["message"])
 
         res_with_override = tools.manage_relation(
             source_id=a,
@@ -1071,7 +1085,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
             predicate="elaborates_on",
             override_justification="deliberately forcing a low-similarity relation via the MCP tool wrapper",
         )
-        self.assertIn("Relation successfully stored", res_with_override)
+        self.assertEqual(res_with_override["status"], "ok")
+        self.assertIn("Relation successfully stored", res_with_override["data"]["message"])
 
         event = self.conn.execute(
             "SELECT agent_id, content FROM events WHERE type = 'relation_gate_override'"
@@ -1219,7 +1234,8 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             outcome="retain",
             review_rationale="C" * 20,
         )
-        self.assertIn("retained as core", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("retained as core", result["data"]["message"])
 
     def test_demote_via_mcp_tool(self):
         entity_id = self._store_core("MCP Demote Core")
@@ -1228,7 +1244,8 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             outcome="demote",
             review_rationale="C" * 20,
         )
-        self.assertIn("demoted", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("demoted", result["data"]["message"])
         row = self.conn.execute(
             "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
@@ -1241,16 +1258,16 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
             outcome="archive",
             review_rationale="C" * 20,
         )
-        self.assertIn("archived", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("archived", result["data"]["message"])
 
     def test_missing_required_fields_rejected(self):
-        # Matches dismiss_event's own established convention (mcp/tools.py): a genuinely missing
-        # required field raises ValueError at the dispatch boundary rather than returning an
-        # "Error: ..." string -- a malformed/incomplete *value* (e.g. review_rationale too
-        # short) still returns a string, exercised by the core_governance_service unit tests.
+        # review_core_memory's validation layer stops raising and starts returning per this
+        # spec (§12.1) -- a missing review_rationale is now a rejected envelope, matching every
+        # other validation failure this function reports, not a raised exception.
         entity_id = self._store_core("MCP Missing Fields Core")
-        with self.assertRaises(ValueError):
-            tools.review_core_memory(entity_id=entity_id, outcome="retain")
+        result = tools.review_core_memory(entity_id=entity_id, outcome="retain")
+        self.assertEqual(result["status"], "rejected")
 
     def test_get_core_bootstrap_digest_dispatch_entry(self):
         """Not a public MCP tool -- exercised directly through the daemon dispatch table, the
@@ -1351,12 +1368,12 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         result = tools.update_memory_metadata(
             entity_id=entity_id, metadata={"b": 99, "c": 3}
         )
-        self.assertIsInstance(result, str)
-        self.assertIn("updated", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("updated", result["data"]["message"])
 
         fetched = tools.get_memory(entity_id=entity_id)
         self.assertEqual(
-            json.loads(fetched["data"]["metadata"]),
+            fetched["data"]["metadata"],
             {"a": 1, "b": 99, "c": 3},
         )
 
@@ -1365,26 +1382,26 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         entity_id = stored["data"]["id"]
 
         result = tools.update_memory_metadata(entity_id=entity_id, metadata={})
-        self.assertIsInstance(result, str)
-        self.assertIn("unchanged", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("unchanged", result["data"]["message"])
 
         fetched = tools.get_memory(entity_id=entity_id)
-        self.assertEqual(json.loads(fetched["data"]["metadata"]), {"a": 1, "b": 2})
+        self.assertEqual(fetched["data"]["metadata"], {"a": 1, "b": 2})
 
     def test_nonexistent_entity_id_returns_error_string(self):
         result = tools.update_memory_metadata(
             entity_id="definitely-not-a-real-id-00000", metadata={"x": 1}
         )
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Error:"))
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "NOT_FOUND")
 
     def test_non_dict_metadata_returns_error_string(self):
         stored = self._store_memory()
         entity_id = stored["data"]["id"]
 
         result = tools.update_memory_metadata(entity_id=entity_id, metadata="not-a-dict")
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Error:"))
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
 
     def test_ambiguous_prefix_returns_error_string_naming_both_candidates(self):
         # No tags on these two: entity_tags rows carry a foreign key to entities.id, which
@@ -1413,9 +1430,9 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
 
         result = tools.update_memory_metadata(entity_id=shared_prefix, metadata={"x": 1})
 
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Error:"))
-        self.assertIn("multiple memories", result)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "AMBIGUOUS_ID_PREFIX")
+        self.assertIn("multiple memories", result["errors"][0]["message"])
 
         # No partial/unintended write happened to either candidate.
         meta_a = self.conn.execute(
@@ -1438,8 +1455,8 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         result = tools.update_memory_metadata(
             entity_id=entity_id, metadata={"note": "changed", "extra": True}
         )
-        self.assertIsInstance(result, str)
-        self.assertIn("updated", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("updated", result["data"]["message"])
 
         after = self.conn.execute(
             "SELECT is_core, core_reason, core_exit_condition, core_review_after "
@@ -1450,7 +1467,7 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
 
         fetched = tools.get_memory(entity_id=entity_id)
         self.assertEqual(
-            json.loads(fetched["data"]["metadata"]),
+            fetched["data"]["metadata"],
             {"note": "changed", "extra": True},
         )
 
@@ -1500,8 +1517,8 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
             tags=["#core-test"],
             is_core="yes",
         )
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
 
     def test_true_still_creates_a_core_with_lifecycle_fields(self):
         result = tools.store_memory(
@@ -1554,8 +1571,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
     def test_selectable_predicate_succeeds(self):
         id1, id2 = self._mk_pair("selectable")
         res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
-        self.assertIsInstance(res, str)
-        self.assertIn("Relation successfully stored", res)
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("Relation successfully stored", res["data"]["message"])
 
     def test_each_reserved_predicate_is_refused_naming_its_lifecycle_tool_with_no_corrected_call(
         self,
@@ -1591,7 +1608,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         self.assertEqual(corrected_call["target_id"], id2)
 
         resubmit = tools.manage_relation(**corrected_call)
-        self.assertIn("Relation successfully stored", resubmit)
+        self.assertEqual(resubmit["status"], "ok")
+        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
 
     def test_swap_alias_is_refused_and_corrected_call_swaps_ids_and_resubmits_successfully(self):
         # 'affects' -> 'caused_by' with source_id/target_id swapped (A affects B -> B caused_by
@@ -1607,7 +1625,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         self.assertEqual(corrected_call["target_id"], id1)
 
         resubmit = tools.manage_relation(**corrected_call)
-        self.assertIn("Relation successfully stored", resubmit)
+        self.assertEqual(resubmit["status"], "ok")
+        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
 
         row = self.conn.execute(
             "SELECT source_id, target_id FROM relations WHERE predicate = 'caused_by'"
@@ -1628,7 +1647,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         # a new edge, never to invalidate=True".
         id1, id2 = self._mk_pair("invalidate_bypass")
         create_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="related_to")
-        self.assertIn("Relation successfully stored", create_res)
+        self.assertEqual(create_res["status"], "ok")
+        self.assertIn("Relation successfully stored", create_res["data"]["message"])
 
         # (a) invalidating with the already-canonical predicate works, unsurprisingly.
         inv_res = tools.manage_relation(
@@ -1637,7 +1657,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             predicate="related_to",
             invalidate=True,
         )
-        self.assertIn("Relation invalidated", inv_res)
+        self.assertEqual(inv_res["status"], "ok")
+        self.assertIn("Relation invalidated", inv_res["data"]["message"])
 
         # (b) invalidating with a predicate that WOULD be gated on create ('relates_to' is an
         # alias, refused by test_same_direction_alias_is_refused_... above) still succeeds when
@@ -1651,13 +1672,13 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             predicate="relates_to",
             invalidate=True,
         )
-        self.assertIsInstance(
-            inv_res2,
-            str,
+        self.assertEqual(
+            inv_res2["status"],
+            "ok",
             "invalidate=True with a would-be-gated alias predicate must reach "
             "invalidate_relation directly, not the rejected-envelope gate",
         )
-        self.assertIn("Relation invalidated", inv_res2)
+        self.assertIn("Relation invalidated", inv_res2["data"]["message"])
 
     def test_bulk_one_valid_one_alias_rejects_whole_call_with_zero_side_effects_and_resubmits(
         self,
@@ -1878,7 +1899,8 @@ class TestLogEventEndToEnd(unittest.TestCase):
 
     def test_event_type_is_the_parameter_name(self):
         res = tools.log_event(event_type="decision", content="picked option A")
-        self.assertIn("Event logged successfully", res)
+        self.assertEqual(res["status"], "ok")
+        self.assertIn("Event logged successfully", res["data"]["message"])
 
     def test_no_agent_id_parameter_exists(self):
         with self.assertRaises(TypeError):
@@ -1886,7 +1908,7 @@ class TestLogEventEndToEnd(unittest.TestCase):
 
     def test_bound_owner_becomes_stored_agent_id(self):
         res = tools.log_event(event_type="issue", content="owner binding check")
-        event_id = res.split("ID: ")[1].split()[0]
+        event_id = res["data"]["id"]
         row = self.conn.execute("SELECT agent_id FROM events WHERE id = ?", (event_id,)).fetchone()
         self.assertEqual(row[0], "test_agent")
 
@@ -1899,7 +1921,7 @@ class TestLogEventEndToEnd(unittest.TestCase):
             agent_session_id=SESSION_IDENTITY.agent_session_id,
             db_connection=self.conn,
         )
-        event_id = res.split("ID: ")[1].split()[0]
+        event_id = res["data"]["id"]
         row = self.conn.execute(
             "SELECT agent_session_id FROM events WHERE id = ?", (event_id,)
         ).fetchone()
@@ -1914,7 +1936,7 @@ class TestLogEventEndToEnd(unittest.TestCase):
             agent_session_id=SESSION_IDENTITY.agent_session_id,
             db_connection=self.conn,
         )
-        event_id = res.split("ID: ")[1].split()[0]
+        event_id = res["data"]["id"]
         row = self.conn.execute(
             "SELECT agent_session_id FROM events WHERE id = ?", (event_id,)
         ).fetchone()
