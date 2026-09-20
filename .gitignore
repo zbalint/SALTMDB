@@ -39,9 +39,10 @@ test_*.db
 build/
 test_data/
 
-# Generated reports/audit output
+# Generated reports/audit output, and internal OMP-pipeline build specs (not user-facing docs)
 reports/
 plans/
+specs/
 test_db/
 
 # Local one-off Gate-D replay runners (may bind private evaluation inputs).
