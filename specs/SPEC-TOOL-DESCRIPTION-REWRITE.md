@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED, INCLUDES AMENDMENT 1 -- PRECONDITION SATISFIED**
+**LOCKED, INCLUDES AMENDMENTS 1-2 -- PRECONDITION SATISFIED**
 
 This spec's original hard precondition -- `SPEC-TOOL-CONTRACT-CONSISTENCY.md` (Spec 1) implemented,
 its acceptance suite passing, merged into `develop` -- is now satisfied: Spec 1 shipped as commit
@@ -465,8 +465,9 @@ After (opening paragraph per the locked reciprocal framing, memory `1446c55c`):
     resolves superseded matches and abstains (returns []) rather than return a weakly-relevant
     result; "history" keeps superseded results visible, labeled. tags_filter/context_id/
     memory_type_filter/is_core narrow the search; limit caps result count (default 5); cursor
-    pages through a larger result set (this tool does not expose a `has_more`/total-count signal
-    today -- an empty next page is your only current indicator that pagination is exhausted).
+    pages through a larger result set (there is no separate more-pages-remaining or total-count
+    signal today -- an empty next page is your only current indicator that pagination is
+    exhausted).
 
     Returns a bare list of memory dicts -- NOT the `{"status": ..., "data": ...}` envelope shape
     other SALTMDB tools use; each list item has its own fields (id, title, score, snippet, etc.)
@@ -1387,3 +1388,63 @@ tree a second time immediately before writing this amendment (not trusting the v
 fork's report alone) -- both confirmed byte-for-byte accurate. Full manual re-read of §15 and §19
 in isolation, as an agent with no other context would read them, confirms neither now claims
 anything the real source doesn't support. Status remains **LOCKED**.
+
+## Amendment 2
+
+OMP reported `BLOCKED -- SPEC ADJUDICATION REQUIRED` while implementing this spec (SALTMDB issue
+event `b959beb8-8efa-4e1d-8f20-0d204a7b1f71`): §7's locked "After" docstring text for
+`search_memory` requires the literal substring `` `has_more` `` (to tell an agent this field does
+not exist), while §22.2's acceptance check requires
+`rg -n 'has_more' src/saltmdb/mcp/tools.py` to show zero matches -- the exact text this section
+locks necessarily fails that check. OMP applied every other tool's rewrite, stopped after
+`search_memory` without running any further diagnostics or the acceptance script, and left its
+diff uncommitted and unmerged in this worktree, per this project's standing OMP-never-
+commits/never-merges rule.
+
+**Verified directly** (no implementation performed as part of this verification, per this
+project's spec-adjudication boundary): read §7's locked prose and §21/§22.2's locked acceptance
+text side by side in the spec at lock time; confirmed the sole occurrence of the string
+`has_more` inside the actual `@mcp.tool()`-decorated docstring content is this one clause, via
+`grep -n "has_more" src/saltmdb/mcp/tools.py` against OMP's own uncommitted working tree (single
+match, line 574, byte-identical to §7's locked text) -- not the byte-identical-but-separate
+occurrences in §1's Scope note, this section's own commentary, or §21/§22.2's prose, none of which
+land in `tools.py` and none of which the acceptance grep can even see.
+
+**Root cause**: §22.2's grep is a blunt proxy for the real, correctly-locked intent stated in
+§21 ("`search_memory`/`search_tags` gaining a `has_more` field ... none of that is described here
+as present, and none of it is added") -- it was written to catch an *affirmative* false claim
+that the field exists, but a literal substring match cannot distinguish that from a *negative*
+statement correctly telling an agent the field is absent. §7's own drafting needed the word to
+state the absence clearly and picked the same literal spelling §22.2's grep bans outright.
+
+**Decision**: reword §7's prose to convey the identical fact -- no more-pages-remaining/
+total-count signal exists, an empty next page is the only exhaustion indicator -- without using
+the literal substring `has_more`, rather than relaxing §22.2's check. Keeping §22.2's check exact
+and unchanged preserves it as a real regression tripwire: if a future edit ever does add a claim
+that a `has_more` field exists, this grep still catches it. Weakening the check to permit the
+substring conditionally (e.g. only when preceded by a negation) would require prose-pattern
+matching no longer expressible as the simple, auditable command §22.2 documents, and would blur
+the exact boundary between "describes absence" and "claims presence" that §21 depends on.
+
+**Fix applied to this document**: §7's "After" docstring text (`cursor pages through a larger
+result set (...)` clause) now reads "there is no separate more-pages-remaining or total-count
+signal today -- an empty next page is your only current indicator that pagination is exhausted."
+No other section's prose, no acceptance criterion, and no out-of-scope statement changed. §21 and
+§22.2 are untouched, word for word, from their original locked text.
+
+**Reconciliation check**: re-ran `grep -n "has_more" src/saltmdb/mcp/tools.py` against OMP's
+uncommitted working tree after mentally substituting the new §7 wording for the old at line 574 --
+zero matches, satisfying §22.2 as originally and still written. Re-read the full revised §7 clause
+in isolation, as an agent with no other context would, alongside §21/§22.2: it still correctly
+tells the agent the field does not exist, still names the one actual indicator of exhausted
+pagination (an empty next page), and asserts nothing about a `has_more`, total-count, or envelope
+shape this tool does not have.
+
+**Handoff**: no other section touched by this amendment; the two-file precondition table, §1's
+Scope note, and every other tool's section were re-checked for the same literal-substring
+collision (searched the full document for `has_more` again post-edit) and found nowhere else
+inside quoted docstring text -- only in commentary/prose that never lands in `tools.py`. OMP may
+resume: apply this section's corrected §7 wording to `search_memory`'s docstring at
+`src/saltmdb/mcp/tools.py:574` (replacing the clause OMP already applied verbatim from the
+pre-amendment spec text), then run the full §22 acceptance pass (static review items 1-4 plus the
+behavioral regression script) exactly as originally scoped. Status remains **LOCKED**.
