@@ -457,7 +457,8 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             review_rationale="Reviewed during regression test to clear the overdue state before retry.",
             owner_id="agent_c",
         )
-        self.assertIn("retained as core", review_msg)
+        self.assertEqual(review_msg["status"], "ok", review_msg)
+        self.assertIn("retained as core", review_msg["data"]["message"])
 
         res = commit_consolidation(
             parent_ids=[overdue_id, plain_partner],

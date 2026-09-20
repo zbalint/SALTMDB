@@ -44,6 +44,8 @@ from saltmdb.config import (
     CORE_MAX_REVIEW_DAYS,
     CORE_BOOTSTRAP_ERROR_MAX_CHARS,
 )
+from saltmdb.utils import error_codes
+from saltmdb.utils import envelope
 from saltmdb.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -317,8 +319,10 @@ def reconcile_detail_relations(
             _in_transaction=True,
             _allow_core_elaborates_on=True,
         )
-        if isinstance(res, str) and res.startswith("Error"):
-            raise RuntimeError(f"Failed to create detail relation for {detail_id}: {res}")
+        if envelope.is_rejected(res):
+            raise RuntimeError(
+                f"Failed to create detail relation for {detail_id}: {res['errors'][0]['message']}"
+            )
 
     removed = set(previous_detail_ids or []) - set(new_detail_ids or [])
     for detail_id in removed:
@@ -679,9 +683,15 @@ def check_capacity_admission(
     if "rendered_size" in violations:
         required_reduction["rendered_chars"] = rendered_len - CORE_MAX_RENDERED_CHARS
 
+    message = (
+        "Core capacity would be exceeded by this write -- no memory, relation, or other state "
+        "was created. Demote, archive, shorten, or consolidate existing core memories to make "
+        "room (see the inventory below), then retry."
+    )
     return {
-        "status": "REJECTED",
-        "error_code": "CORE_CAPACITY_EXCEEDED",
+        "status": "rejected",
+        "errors": [envelope.error("CORE_CAPACITY_EXCEEDED", message)],
+        "warnings": [],
         "violated_dimensions": violations,
         "limits": {
             "max_active": CORE_MAX_ACTIVE,
@@ -695,11 +705,7 @@ def check_capacity_admission(
         },
         "required_reduction": required_reduction,
         "inventory": build_inventory(current),
-        "message": (
-            "Core capacity would be exceeded by this write -- no memory, relation, or other state "
-            "was created. Demote, archive, shorten, or consolidate existing core memories to make "
-            "room (see the inventory below), then retry."
-        ),
+        "message": message,
     }
 
 
@@ -1030,7 +1036,7 @@ def review_core_memory(  # noqa: C901
     review_rationale: str,
     owner_id: str,
     core_review_after: str | None = None,
-) -> str:
+) -> dict:
     """Direct, synchronous operation -- not a request/queue/event (plan rule 59). `owner_id`
     identifies the REVIEWING agent; it need not match the entity's own owner and never transfers
     ownership (plan rule: reviewer identity, not an ownership permission)."""
@@ -1038,38 +1044,77 @@ def review_core_memory(  # noqa: C901
     from saltmdb.utils.text import resolve_entity_id
 
     if outcome not in ("retain", "demote", "archive"):
-        return "Error: outcome must be one of 'retain', 'demote', 'archive'."
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.VALIDATION_ERROR,
+                    "outcome must be one of 'retain', 'demote', 'archive'.",
+                    "outcome",
+                )
+            ]
+        )
     if not owner_id:
-        return "Error: owner_id is mandatory."
+        return envelope.rejected(
+            [envelope.error(error_codes.VALIDATION_ERROR, "owner_id is mandatory.", "owner_id")]
+        )
     if outcome in ("demote", "archive") and core_review_after is not None:
-        return f"Error: core_review_after must not be supplied for outcome='{outcome}'."
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.VALIDATION_ERROR,
+                    f"core_review_after must not be supplied for outcome='{outcome}'.",
+                    "core_review_after",
+                )
+            ]
+        )
     try:
         rationale = validate_core_review_rationale(review_rationale)
     except ValueError as e:
-        return f"Error: {e}"
+        return envelope.rejected(
+            [envelope.error(error_codes.VALIDATION_ERROR, str(e), "review_rationale")]
+        )
 
     resolved_id = resolve_entity_id(conn, entity_id)
     if not resolved_id:
-        return f"Error: Could not resolve entity '{entity_id}'."
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.NOT_FOUND,
+                    f"Could not resolve entity '{entity_id}'.",
+                    "entity_id",
+                )
+            ]
+        )
 
-    result_holder: dict[str, str] = {}
+    result_holder: dict[str, dict] = {}
 
     def _write(c):  # noqa: C901, PLR0911
         row = c.execute(
             "SELECT is_core, status FROM entities WHERE id = ?", (resolved_id,)
         ).fetchone()
         if not row:
-            result_holder["msg"] = f"Error: Memory '{resolved_id}' not found."
+            result_holder["result"] = envelope.rejected(
+                [
+                    envelope.error(
+                        error_codes.NOT_FOUND,
+                        f"Memory '{resolved_id}' not found.",
+                        "entity_id",
+                    )
+                ]
+            )
             return
         is_core_now, status = bool(row[0]), row[1]
         now = datetime.now(UTC).isoformat()
 
         if outcome == "retain":
             if not is_core_now or status == "archived":
-                result_holder["msg"] = (
+                message = (
                     f"Error: review_core_memory(outcome='retain') requires an active core "
                     f"memory; '{resolved_id}' is "
                     f"{'archived' if status == 'archived' else 'not core'}."
+                )
+                result_holder["result"] = envelope.rejected(
+                    [envelope.error(error_codes.CONFLICT, message, "entity_id")]
                 )
                 return
             try:
@@ -1082,21 +1127,34 @@ def review_core_memory(  # noqa: C901
                 else:
                     next_review = parse_core_review_after(core_review_after)
             except ValueError as e:
-                result_holder["msg"] = f"Error: {e}"
+                result_holder["result"] = envelope.rejected(
+                    [envelope.error(error_codes.VALIDATION_ERROR, str(e), "core_review_after")]
+                )
                 return
             c.execute(
                 "UPDATE entities SET core_review_after = ?, core_last_reviewed_at = ?, "
                 "core_last_reviewed_by = ?, core_review_rationale = ?, updated_at = ? WHERE id = ?",
                 (next_review, now, owner_id, rationale, now, resolved_id),
             )
-            result_holder["msg"] = (
-                f"Memory '{resolved_id}' retained as core; next review at {next_review}."
+            result_holder["result"] = envelope.ok(
+                {
+                    "id": resolved_id,
+                    "message": f"Memory '{resolved_id}' retained as core; next review at {next_review}.",
+                }
             )
             return
 
         if outcome == "demote":
             if not is_core_now:
-                result_holder["msg"] = f"Memory '{resolved_id}' is already non-core (no-op)."
+                result_holder["result"] = envelope.ok(
+                    {
+                        "id": resolved_id,
+                        "message": f"Memory '{resolved_id}' is already non-core (no-op).",
+                    },
+                    warnings=[
+                        envelope.warning(error_codes.ALREADY_DONE, "Memory was already non-core.")
+                    ],
+                )
                 return
             core_tag_row = c.execute("SELECT id FROM tags WHERE name = '#core'").fetchone()
             c.execute(
@@ -1110,7 +1168,12 @@ def review_core_memory(  # noqa: C901
                     "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
                     (resolved_id, core_tag_row[0]),
                 )
-            result_holder["msg"] = f"Memory '{resolved_id}' demoted from core to a normal memory."
+            result_holder["result"] = envelope.ok(
+                {
+                    "id": resolved_id,
+                    "message": f"Memory '{resolved_id}' demoted from core to a normal memory.",
+                }
+            )
             return
 
         # archive. Resolved review finding #3: review_core_memory reviews a CORE memory -- it
@@ -1119,13 +1182,24 @@ def review_core_memory(  # noqa: C901
         # is_core=1 reliably identifies a memory that either currently is, or formerly was, a
         # core -- the one signal usable for legacy rows with no separate "ever was core" column.
         if not is_core_now:
-            result_holder["msg"] = (
+            message = (
                 f"Error: review_core_memory(outcome='archive') requires a core memory; "
                 f"'{resolved_id}' is not a core memory. Use archive_memory for ordinary memories."
             )
+            result_holder["result"] = envelope.rejected(
+                [envelope.error(error_codes.CONFLICT, message, "entity_id")]
+            )
             return
         if status == "archived":
-            result_holder["msg"] = f"Memory '{resolved_id}' is already archived (no-op)."
+            result_holder["result"] = envelope.ok(
+                {
+                    "id": resolved_id,
+                    "message": f"Memory '{resolved_id}' is already archived (no-op).",
+                },
+                warnings=[
+                    envelope.warning(error_codes.ALREADY_DONE, "Memory was already archived.")
+                ],
+            )
             return
         from saltmdb.domain.services.memory_service.lifecycle import _archive_entity_unchecked
 
@@ -1135,7 +1209,9 @@ def review_core_memory(  # noqa: C901
             "core_review_rationale = ? WHERE id = ?",
             (now, owner_id, rationale, resolved_id),
         )
-        result_holder["msg"] = f"Memory '{resolved_id}' was reviewed and archived."
+        result_holder["result"] = envelope.ok(
+            {"id": resolved_id, "message": f"Memory '{resolved_id}' was reviewed and archived."}
+        )
 
     write_transaction_retrying(conn, _write)
-    return result_holder["msg"]
+    return result_holder["result"]

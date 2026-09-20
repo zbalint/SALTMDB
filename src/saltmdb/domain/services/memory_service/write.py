@@ -607,7 +607,8 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     Core-memory governance (see core_governance_service.py): `is_core=True` requires `scope=
     "shared"`, `core_reason`/`core_exit_condition` (each 20-500 characters), and admits a hard
     global cap on active-core count/per-memory length/rendered bootstrap size -- a capacity
-    failure returns a `status: "REJECTED"` dict with zero side effects (no memory, relation, or
+    failure returns a `status: "rejected"` envelope (`errors[0].code ==
+    "CORE_CAPACITY_EXCEEDED"`) with zero side effects (no memory, relation, or
     other state created), never a partial write. Omitting `core_reason`/`core_exit_condition`/
     `core_review_after`/`detail_memory_ids` on an UPDATE to an already-core memory preserves the
     existing values; supplying any of them while the effective memory is NOT core is rejected,
@@ -917,8 +918,10 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             },
         )
     except Exception as e:
+        from saltmdb.utils import error_codes
+
         logger.error("Error storing knowledge: %s", e)
-        return f"Error storing knowledge: {e}"
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)

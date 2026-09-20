@@ -20,6 +20,7 @@ from saltmdb.config import (
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.domain.services import reranker_service
 from saltmdb.utils.nlp import word_sim
+from saltmdb.utils.envelope import is_rejected
 
 from . import lifecycle, search_primitives
 from ._shared import logger
@@ -307,9 +308,13 @@ def bulk_archive_memory(archive_requests: list, db_connection=None, db_path: str
                 res = lifecycle.archive_memory(
                     entity_id=eid, owner_id=owner, db_connection=conn, _in_transaction=True
                 )
-                if res.startswith("Error"):
-                    raise RuntimeError(f"Bulk archive aborted (all-or-nothing): {res}")
-                results.append({"status": "success", "entity_id": eid, "result": res})
+                if is_rejected(res):
+                    raise RuntimeError(
+                        f"Bulk archive aborted (all-or-nothing): {res['errors'][0]['message']}"
+                    )
+                results.append(
+                    {"status": "success", "entity_id": eid, "result": res["data"]["message"]}
+                )
 
         write_transaction_retrying(conn, _write)
         return results

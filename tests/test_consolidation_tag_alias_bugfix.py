@@ -75,7 +75,9 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
         merge_res = librarian_service.merge_tags(
             keep_tag="#bugfix", tags_to_merge=["#fix"], conn=self.conn
         )
-        self.assertIn("Merged 1 tag(s)", merge_res)
+        self.assertEqual(merge_res["status"], "ok", merge_res)
+        self.assertEqual(merge_res["data"]["merged"], ["#fix"])
+        self.assertEqual(merge_res["data"]["canonical_tag"], "#bugfix")
 
         fix_row_after_merge = self._tag_row("#fix")
         self.assertEqual(

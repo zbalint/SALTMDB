@@ -140,7 +140,7 @@ class TestCommunityDetectionService(unittest.TestCase):
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        self.assertFalse(result.startswith("Error"), result)
+        self.assertEqual(result["status"], "ok", result)
         return result
 
     def _communities(self):
@@ -394,7 +394,8 @@ class TestCommunityDetectionService(unittest.TestCase):
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        self.assertTrue(invalidated.startswith("Relation invalidated"), invalidated)
+        self.assertEqual(invalidated["status"], "ok", invalidated)
+        self.assertIn("Relation invalidated", invalidated["data"]["message"])
         result = recompute_communities(db_connection=self.conn)
 
         self.assertEqual(result, {"status": "no_edges", "communities_created": 0})
@@ -692,7 +693,8 @@ class TestCommunityDetectionService(unittest.TestCase):
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        self.assertTrue(invalidated.startswith("Relation invalidated"), invalidated)
+        self.assertEqual(invalidated["status"], "ok", invalidated)
+        self.assertIn("Relation invalidated", invalidated["data"]["message"])
         lock_before = self.conn.execute(
             "SELECT last_run_at FROM _system_locks WHERE task_name = 'community_detection'"
         ).fetchone()[0]
@@ -724,7 +726,8 @@ class TestCommunityDetectionService(unittest.TestCase):
             db_connection=self.conn,
             db_path=self.db_path,
         )
-        self.assertTrue(reinvalidated.startswith("Relation invalidated"), reinvalidated)
+        self.assertEqual(reinvalidated["status"], "ok", reinvalidated)
+        self.assertIn("Relation invalidated", reinvalidated["data"]["message"])
         with patch("leidenalg.find_partition") as find_partition:
             legacy_empty = _run_community_detection_pass_impl(self.db_path)
         find_partition.assert_not_called()

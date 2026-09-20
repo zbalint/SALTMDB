@@ -33,10 +33,12 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         self.assertFalse(call["demote_superseded"])
 
     def test_consolidation_requires_title_and_content(self):
-        with self.assertRaisesRegex(ValueError, "title is required"):
-            _dispatch_commit_consolidation(parent_ids=["parent"], content="content")
-        with self.assertRaisesRegex(ValueError, "content is required"):
-            _dispatch_commit_consolidation(parent_ids=["parent"], title="title")
+        result = _dispatch_commit_consolidation(parent_ids=["parent"], content="content")
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("title is required", result["errors"][0]["message"])
+        result = _dispatch_commit_consolidation(parent_ids=["parent"], title="title")
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("content is required", result["errors"][0]["message"])
 
     @patch("saltmdb.daemon.dispatch.memory_service.get_memory", return_value="content")
     def test_get_memory_uses_explicit_id_fetch(self, fetch):

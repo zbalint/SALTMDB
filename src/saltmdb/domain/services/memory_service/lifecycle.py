@@ -20,7 +20,12 @@ from saltmdb.db.connection import (
 from saltmdb.utils.text import resolve_entity_id, resolve_id_prefix
 from saltmdb.utils.text import resolve_entity_ref
 from saltmdb.utils.text import large_content_descriptor
-from saltmdb.utils.envelope import error as envelope_error, ok as envelope_ok, rejected
+from saltmdb.utils.envelope import (
+    error as envelope_error,
+    ok as envelope_ok,
+    rejected,
+    warning as envelope_warning,
+)
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.text import compute_content_hash
@@ -46,13 +51,14 @@ def _lineage_nodes(result, direction: str) -> list[dict]:
     direction-specific ``get_lineage`` result.  Keeping this small adapter here lets
     explicit-memory reads remain compatible while the daemon/viewer callers migrate.
     """
-    if not isinstance(result, dict) or result.get("error"):
+    if not isinstance(result, dict) or result.get("error") or result.get("status") == "rejected":
         return []
-    candidates = result.get("nodes")
+    data = result.get("data", {})
+    candidates = data.get("nodes")
     if candidates is None:
-        candidates = result.get(direction)
+        candidates = data.get(direction)
     if candidates is None:
-        candidates = result.get("ancestors" if direction == "ancestors" else "descendants")
+        candidates = data.get("ancestors" if direction == "ancestors" else "descendants")
     if not isinstance(candidates, list):
         return []
     return [node for node in candidates if isinstance(node, dict)]
@@ -127,7 +133,7 @@ def _validate_replacement_inputs(  # noqa: PLR0911
         return _replacement_error(
             "MISSING_REASON", "reason is mandatory and cannot be empty.", "reason"
         )
-    if (
+    if tags is not None and (
         not isinstance(tags, list)
         or not tags
         or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
@@ -295,7 +301,6 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # without runtime assertions that disappear under optimized Python.
     entity_id = cast(str, entity_id)
     title = cast(str, title)
-    tags = cast(list[str], tags)
     content = cast(str, content)
     reason = cast(str, reason)
 
@@ -345,6 +350,9 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
 
         columns, before = _replacement_snapshot(conn, resolved_id)
+        from . import tags as tag_ops
+
+        inherited_tags = tag_ops.list_entity_tags(conn, resolved_id) if tags is None else None
         if not before:
             return _replacement_error(
                 "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
@@ -378,9 +386,13 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         inherited_type = before.get("memory_type") or "fact" if memory_type is None else memory_type
         inherited_metadata = before.get("metadata") if metadata is None else json.dumps(metadata)
 
+        effective_tags = inherited_tags if tags is None else tags
+        if effective_tags is None:
+            effective_tags = []
         inherited: dict[str, Any] = {
             field: value
             for field, value, supplied in (
+                ("tags", inherited_tags, tags is not None),
                 ("owner_id", inherited_owner, owner_id is not None),
                 ("context_id", inherited_context, context_id is not None),
                 ("scope", inherited_scope, scope is not None),
@@ -390,13 +402,13 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
         }
         changed: dict[str, Any] = {
             "title": new_title,
-            "tags": list(tags),
             "reason": reason.strip(),
         }
         changed.update(
             {
                 field: value
                 for field, value, supplied in (
+                    ("tags", list(effective_tags), tags is not None),
                     ("owner_id", inherited_owner, owner_id is not None),
                     ("context_id", inherited_context, context_id is not None),
                     ("scope", inherited_scope, scope is not None),
@@ -497,7 +509,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 f"INSERT INTO entities ({', '.join(insert_columns)}) VALUES ({placeholders})",
                 [replacement[column] for column in insert_columns],
             )
-            _insert_replacement_tags(c, new_id, tags, inherited_owner)
+            _insert_replacement_tags(c, new_id, effective_tags, inherited_owner)
 
             archived_at = now
             c.execute(
@@ -781,15 +793,15 @@ def _assemble_memory_record(
         "owner_id": row[7],
         "scope": row[8],
         "is_core": bool(row[9]),
-        "parent_ids": row[10],
+        "parent_ids": json.loads(row[10]) if row[10] else [],
         "valid_from": row[11],
         "valid_to": row[12],
-        "metadata": row[13],
+        "metadata": json.loads(row[13]) if row[13] else {},
         "context_id": row[14],
         "memory_type": row[15],
         "quality_score": row[16],
         "quality_status": row[17],
-        "quality_flags": row[18],
+        "quality_flags": json.loads(row[18]) if row[18] else [],
         "agent_session_id": row[19],
         "last_touched_session_id": row[20],
         "tags": tag_ops.list_entity_tags(conn, resolved_id),
@@ -951,13 +963,13 @@ def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, m
             close_connection(conn)
 
 
-def update_memory_metadata(
+def update_memory_metadata(  # noqa: C901
     entity_id: str,
     metadata: dict,
     agent_session_id: str | None = None,
     db_connection=None,
     db_path: str = None,
-) -> str:
+) -> dict[str, Any]:
     """Shallow-merges `metadata` into an existing memory's metadata dict without touching
     title/content/tags/content_hash/parent_ids -- coexists with (does not deprecate)
     store_memory(entity_id=..., metadata=...), which requires those fields restated
@@ -967,10 +979,22 @@ def update_memory_metadata(
     key with value null overwrites it to null (caller convention for "cleared") -- it is never
     stripped from the stored dict.
     """
+    from saltmdb.utils import error_codes
+
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
-        return "Error: entity_id is mandatory."
+        return rejected(
+            [envelope_error(error_codes.VALIDATION_ERROR, "entity_id is mandatory.", "entity_id")]
+        )
     if not isinstance(metadata, dict):
-        return "Error: metadata must be an object (dict)."
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "metadata must be an object (dict).",
+                    "metadata",
+                )
+            ]
+        )
 
     should_close = False
     conn = db_connection
@@ -981,24 +1005,42 @@ def update_memory_metadata(
     try:
         resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
         if candidates:
-            msg = (
-                f"Error: ID prefix '{entity_id}' matches multiple memories; "
-                "provide a longer prefix or full UUID."
+            item = envelope_error(
+                "AMBIGUOUS_ID_PREFIX",
+                f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
+                "entity_id",
             )
+            item["candidates"] = candidates
             if truncated:
-                msg += " (candidate list truncated)"
-            return msg
+                item["candidates_truncated"] = True
+            return rejected([item])
         if not resolved_id:
-            return f"Error: No memory matches entity_id '{entity_id}'."
+            return rejected(
+                [
+                    envelope_error(
+                        error_codes.NOT_FOUND,
+                        f"No memory matches entity_id '{entity_id}'.",
+                        "entity_id",
+                    )
+                ]
+            )
 
-        result_holder: dict[str, str] = {}
+        result_holder: dict[str, Any] = {}
 
         def _write(c):
             row = c.execute(
                 "SELECT metadata FROM entities WHERE id = ?", (resolved_id,)
             ).fetchone()
             if not row:
-                result_holder["msg"] = f"Error: Memory '{resolved_id}' not found."
+                result_holder["result"] = rejected(
+                    [
+                        envelope_error(
+                            error_codes.NOT_FOUND,
+                            f"Memory '{resolved_id}' not found.",
+                            "entity_id",
+                        )
+                    ]
+                )
                 return
             try:
                 current = json.loads(row[0]) if row[0] else {}
@@ -1014,21 +1056,32 @@ def update_memory_metadata(
                 (json.dumps(merged), now, agent_session_id, resolved_id),
             )
             changed_keys = sorted(metadata.keys())
-            result_holder["msg"] = (
+            message = (
                 f"Memory '{resolved_id}' metadata updated "
                 f"({len(changed_keys)} key(s): {', '.join(changed_keys)})."
                 if changed_keys
                 else f"Memory '{resolved_id}' metadata unchanged (empty patch)."
             )
+            result_holder["result"] = envelope_ok({"id": resolved_id, "message": message})
 
         write_transaction_retrying(conn, _write)
         return result_holder.get(
-            "msg", f"Error: metadata update for '{resolved_id}' did not complete."
+            "result",
+            rejected(
+                [
+                    envelope_error(
+                        error_codes.INTERNAL_ERROR,
+                        f"metadata update for '{resolved_id}' did not complete.",
+                    )
+                ]
+            ),
         )
+    except Exception as e:
+        logger.error("Error updating memory metadata: %s", e)
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)
-
 
 def fetch_memory_chunk(  # noqa: C901, PLR0911
     entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True
@@ -1158,15 +1211,25 @@ def archive_memory(  # noqa: PLR0911
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
-) -> str:
+) -> dict[str, Any]:
     """Explicitly archives (retires) a long-term memory.
 
     _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
     bulk_archive_memory, whose caller already holds an open write transaction around the
     whole batch (so the single-item write here must not open/commit its own nested transaction).
     """
+    from saltmdb.utils import error_codes
+
     if not entity_id:
-        return "Error: entity_id parameter is mandatory."
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "entity_id parameter is mandatory.",
+                    "entity_id",
+                )
+            ]
+        )
     should_close = False
     conn = db_connection
     if not conn:
@@ -1177,20 +1240,49 @@ def archive_memory(  # noqa: PLR0911
     try:
         resolved_id = resolve_entity_id(conn, entity_id)
         if not resolved_id:
-            return f"Error: Could not resolve entity '{entity_id}'"
+            return rejected(
+                [
+                    envelope_error(
+                        error_codes.NOT_FOUND,
+                        f"Could not resolve entity '{entity_id}'",
+                        "entity_id",
+                    )
+                ]
+            )
 
         cursor = conn.execute(
             "SELECT owner_id, scope, status FROM entities WHERE id = ?", (resolved_id,)
         )
         row = cursor.fetchone()
         if not row:
-            return f"Error: Memory '{resolved_id}' not found."
+            return rejected(
+                [
+                    envelope_error(
+                        error_codes.NOT_FOUND,
+                        f"Memory '{resolved_id}' not found.",
+                        "entity_id",
+                    )
+                ]
+            )
 
         existing_owner, scope, status = row
         if status == "archived":
-            return f"Memory '{resolved_id}' is already archived."
+            return envelope_ok(
+                {"id": resolved_id, "message": f"Memory '{resolved_id}' is already archived."},
+                warnings=[
+                    envelope_warning(error_codes.ALREADY_DONE, "Memory was already archived.")
+                ],
+            )
         if owner_id and existing_owner and existing_owner != owner_id:
-            return f"Error: Memory '{resolved_id}' owner mismatch."
+            return rejected(
+                [
+                    envelope_error(
+                        error_codes.CONFLICT,
+                        f"Memory '{resolved_id}' owner mismatch.",
+                        "owner_id",
+                    )
+                ]
+            )
 
         if _in_transaction:
             _archive_entity_unchecked(conn, resolved_id)
@@ -1201,10 +1293,12 @@ def archive_memory(  # noqa: PLR0911
 
             write_transaction_retrying(conn, _write)
 
-        return f"Memory '{resolved_id}' was successfully archived."
+        return envelope_ok(
+            {"id": resolved_id, "message": f"Memory '{resolved_id}' was successfully archived."}
+        )
     except Exception as e:
         logger.error("Error archiving memory: %s", e)
-        return f"Error archiving memory: {e}"
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(e))])
     finally:
         if should_close:
             close_connection(conn)

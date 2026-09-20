@@ -1,9 +1,8 @@
 """Uniform response envelope (agent API redesign plan §4.2).
 
-Not yet wired into any MCP tool's return value -- Phase 1 only builds the shared module and
-its tests. Tools adopt it incrementally as each is reshaped in later phases (§6). Building it
-now, ahead of any caller, keeps every subsequent phase's response shape identical and drift-
-proof: one envelope constructor, never a hand-rolled dict literal per tool.
+Wired into all 19 exposed mcp__saltmdb__* tools' return values as of
+SPEC-TOOL-CONTRACT-CONSISTENCY (completing §4.2's original "every tool" intent, which had
+stalled at 5/19 tools). One envelope constructor, never a hand-rolled dict literal per tool.
 
 Shape (§4.2):
     {

@@ -13,7 +13,7 @@ from saltmdb.config import LINEAGE_HISTORICAL_CAP
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.lineage_assembly_service import assemble_lineage
 from saltmdb.domain.services.memory_service import store_memory
-from saltmdb.domain.services.relation_service import get_lineage, store_relation
+from saltmdb.domain.services.relation_service import _get_lineage_raw, store_relation
 
 
 def _memory_id(result: str | dict[str, Any]) -> str:
@@ -287,7 +287,7 @@ class TestLineageAssemblyService(unittest.TestCase):
     def test_get_lineage_error_skips_only_failing_head(self):
         failing_head = self._memory("Failing head")
         working_head, ancestors = self._chain(1, "Working")
-        real_get_lineage = get_lineage
+        real_get_lineage = _get_lineage_raw
 
         def fake_get_lineage(entity_id: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
             if entity_id == failing_head:
@@ -295,7 +295,7 @@ class TestLineageAssemblyService(unittest.TestCase):
             return real_get_lineage(entity_id, *args, **kwargs)
 
         with patch(
-            "saltmdb.domain.services.lineage_assembly_service.get_lineage",
+            "saltmdb.domain.services.lineage_assembly_service._get_lineage_raw",
             side_effect=fake_get_lineage,
         ):
             result = assemble_lineage(

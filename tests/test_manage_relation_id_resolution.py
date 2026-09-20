@@ -51,7 +51,8 @@ class TestManageRelationIdResolution(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("successfully stored", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("successfully stored", result["data"]["message"])
         row = self.conn.execute(
             "SELECT source_id, target_id FROM relations WHERE predicate = 'related_to'"
         ).fetchone()
@@ -65,8 +66,9 @@ class TestManageRelationIdResolution(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("UNKNOWN_ENTITY_ID", result)
-        self.assertNotIn("FOREIGN KEY", result)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+        self.assertNotIn("FOREIGN KEY", result["errors"][0]["message"])
 
     def test_store_relation_ambiguous_prefix_lists_candidates(self):
         # Two entities sharing an 8-char prefix collide deliberately by forcing the id.
@@ -87,9 +89,10 @@ class TestManageRelationIdResolution(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("AMBIGUOUS_ID_PREFIX", result)
-        self.assertIn(id_a, result)
-        self.assertIn(id_b, result)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "AMBIGUOUS_ID_PREFIX")
+        self.assertIn(id_a, result["errors"][0]["message"])
+        self.assertIn(id_b, result["errors"][0]["message"])
 
     # -- invalidate_relation ----------------------------------------------
 
@@ -108,7 +111,8 @@ class TestManageRelationIdResolution(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("invalidated", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("invalidated", result["data"]["message"])
 
     def test_invalidate_relation_unknown_id_gives_named_error(self):
         target_id = _store(self.conn, "Invalidate Target Only")
@@ -118,8 +122,9 @@ class TestManageRelationIdResolution(unittest.TestCase):
             predicate="related_to",
             db_connection=self.conn,
         )
-        self.assertIn("UNKNOWN_ENTITY_ID", result)
-        self.assertNotIn("FOREIGN KEY", result)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+        self.assertNotIn("FOREIGN KEY", result["errors"][0]["message"])
 
     # -- consolidation parent resolution ------------------------------------
 

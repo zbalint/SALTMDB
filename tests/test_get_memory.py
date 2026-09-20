@@ -71,7 +71,15 @@ class TestGetMemory(unittest.TestCase):
 
         with patch(
             "saltmdb.domain.services.relation_service.get_lineage",
-            return_value={"nodes": [{"id": successor, "depth": 1, "status": "raw"}]},
+            return_value={
+                "status": "ok",
+                "data": {
+                    "nodes": [
+                        {"id": successor, "depth": 1, "status": "raw"},
+                    ],
+                },
+                "warnings": [],
+            },
             create=True,
         ) as lineage:
             result = get_memory(entity_id=archived, db_connection=self.conn)
@@ -80,6 +88,9 @@ class TestGetMemory(unittest.TestCase):
         self.assertEqual(result["data"]["id"], archived)
         self.assertEqual(result["data"]["status"], "archived")
         self.assertEqual(lineage.call_count, 2)
+        self.assertEqual(
+            [node["id"] for node in result["data"]["lineage"]["descendants"]], [successor]
+        )
 
     def test_ambiguous_prefix_is_structured_error(self):
         self._insert("a1b2c3d4-1234-1234-1234-123456789abc", "One")

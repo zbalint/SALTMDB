@@ -64,10 +64,13 @@ class TestRetrieveContextWiring(unittest.TestCase):
         )
 
     def test_dispatch_requires_string_query_but_allows_empty_string(self):
-        with self.assertRaises(ValueError):
-            dispatch._dispatch_retrieve_context(owner_id="owner")
-        with self.assertRaises(ValueError):
-            dispatch._dispatch_retrieve_context(query=123, owner_id="owner")
+        result_missing = dispatch._dispatch_retrieve_context(owner_id="owner")
+        self.assertEqual(result_missing["status"], "rejected")
+        self.assertEqual(result_missing["errors"][0]["code"], "VALIDATION_ERROR")
+
+        result_wrong_type = dispatch._dispatch_retrieve_context(query=123, owner_id="owner")
+        self.assertEqual(result_wrong_type["status"], "rejected")
+        self.assertEqual(result_wrong_type["errors"][0]["code"], "VALIDATION_ERROR")
 
         with patch.object(
             dispatch.retrieve_context_service,

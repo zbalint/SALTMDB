@@ -139,7 +139,7 @@ class TestDispatchToolTelemetryWiring(unittest.TestCase):
 
     def test_read_tool_call_is_recorded_as_ok(self):
         result = dispatch_tool("list_predicates", {"query": None, "limit": 10}, self.coordinator)
-        self.assertIsInstance(result, list)
+        self.assertEqual(result["status"], "ok")
         rows = self._telemetry_rows("list_predicates")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], "ok")
@@ -157,7 +157,8 @@ class TestDispatchToolTelemetryWiring(unittest.TestCase):
             },
             self.coordinator,
         )
-        self.assertIn("Event logged successfully", result)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Event logged successfully", result["data"]["message"])
         rows = self._telemetry_rows("log_event")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], "ok")

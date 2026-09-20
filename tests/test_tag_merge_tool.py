@@ -56,7 +56,8 @@ class TestTagMergeTool(unittest.TestCase):
         id2 = self._id(res2)
 
         merge_res = tools.merge_tags(keep_tag="#fix", tags_to_merge=["#bugfix"])
-        self.assertIn("Merged 1 tag(s)", merge_res)
+        self.assertEqual(merge_res["status"], "ok")
+        self.assertEqual(merge_res["data"]["merged"], ["#bugfix"])
 
         self.assertEqual(self._tag_names_for_entity(id1), ["#fix"])
         self.assertEqual(self._tag_names_for_entity(id2), ["#fix"])
@@ -83,11 +84,14 @@ class TestTagMergeTool(unittest.TestCase):
         id1 = self._id(res1)
 
         first = tools.merge_tags(keep_tag="#documentation", tags_to_merge=["#docs"])
-        self.assertIn("Merged 1 tag(s)", first)
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(first["data"]["merged"], ["#docs"])
         self.assertEqual(self._tag_names_for_entity(id1), ["#documentation"])
 
         second = tools.merge_tags(keep_tag="#documentation", tags_to_merge=["#docs"])
-        self.assertIn("Skipped", second)
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(second["data"]["merged"], [])
+        self.assertEqual(len(second["data"]["skipped"]), 1)
         self.assertEqual(self._tag_names_for_entity(id1), ["#documentation"])
 
     def test_plural_suffix_tags_auto_resolve_to_same_tag_at_write_time(self):
@@ -128,7 +132,8 @@ class TestTagMergeTool(unittest.TestCase):
         res = librarian_service.merge_tags(
             keep_tag="#does-not-exist", tags_to_merge=["#fix"], db_path=self.db_path
         )
-        self.assertIn("Error", res)
+        self.assertEqual(res["status"], "rejected")
+        self.assertEqual(res["errors"][0]["code"], "NOT_FOUND")
 
     def test_merge_tags_missing_alias_is_skipped_not_fatal(self):
         tools.store_memory(
@@ -137,8 +142,9 @@ class TestTagMergeTool(unittest.TestCase):
             tags=["#docs"],
         )
         res = tools.merge_tags(keep_tag="#docs", tags_to_merge=["#nonexistent-alias"])
-        self.assertIn("Merged 0 tag(s)", res)
-        self.assertIn("not found", res)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["data"]["merged"], [])
+        self.assertEqual(res["data"]["skipped"][0]["reason"], "not found")
 
 
 if __name__ == "__main__":
