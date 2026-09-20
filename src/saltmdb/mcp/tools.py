@@ -432,7 +432,10 @@ def merge_tags(
 
     entity_id (optional) targets an existing memory for a metadata-only update -- re-tagging,
     updating `metadata` (shallow-merged, existing keys not mentioned are preserved), or
-    backfilling core-governance fields -- without needing content unchanged-and-restated.
+    backfilling core-governance fields. `content`/`content_file_path` is still mandatory on this
+    path too (re-supply the unchanged body; omitting both is rejected with `MISSING_CONTENT`
+    regardless of entity_id) -- use update_memory_metadata instead for a metadata-only edit that
+    doesn't require restating title/content unchanged.
 
     Returns `{"status": "ok", "data": {"id": ..., "duplicate_candidates": [...] | None, ...},
     "warnings": [...]}` on success. Rejections you'll see in practice: an exact content-hash
@@ -629,6 +632,12 @@ def archive_memory(entity_id: str | list[str] | None = None) -> dict | list:
     lifecycle action for a memory that's no longer worth surfacing in ordinary search, without
     deleting its history: an archived memory stays fully visible via get_memory/get_lineage, and
     is excluded from search_memory's normal ranking (but not from `mode="history"`).
+
+    Works uniformly on core and non-core memories, with no rationale required -- `is_core` is
+    deliberately never cleared by archiving (only review_core_memory's `demote` outcome clears
+    it), so `is_core=1` on an archived row is an intentional "was once core" signal, not
+    staleness. For a deliberate, audited core-memory review with a mandatory rationale, use
+    review_core_memory(outcome="archive") instead (it requires the target to be an active core).
 
     entity_id accepts a single ID (or unambiguous ID prefix) OR a list of IDs. **The return
     shape depends on which you pass**: a single ID (or omitted) returns
