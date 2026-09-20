@@ -4,8 +4,8 @@
 
 > [!TIP]
 > * **Installation:** To install and register the MCP server, see the **[Installation Guide](INSTALL.md)**.
-> * **Developer Guide:** To learn how to configure your AI agents to utilize this memory system, read the **[Agent Integration & Design Guide](AGENT_GUIDE.md)**.
 > * **Architecture:** For the full technical design — storage engine, daemon model, search pipeline, quality gate, and core-memory governance — see **[docs/architecture.md](docs/architecture.md)**.
+> * **Usage:** No separate agent guide is needed — every MCP tool's own description documents when and how to use it, by design.
 
 ---
 
