@@ -2,15 +2,22 @@
 
 ## 0. Status
 
-**LOCKED, WITH A HARD PRECONDITION**
+**LOCKED, INCLUDES AMENDMENT 1 -- PRECONDITION SATISFIED**
 
-This spec's worktree and OMP handoff **must not be created until
-`SPEC-TOOL-CONTRACT-CONSISTENCY.md` (Spec 1) is implemented, its acceptance suite passes, and it
-is merged into `develop`** (locked grilling decision Q2). Every fact this document states about a
-tool's return shape, error codes, or parameter optionality traces to Spec 1's actual locked text,
-not to independent re-derivation -- if Spec 1 changes further before it ships (an OMP
-`BLOCKED`/adjudication amendment), this spec must be re-verified against the amended text before
-its own handoff, the same discipline Spec 1 itself applied when amending against real source.
+This spec's original hard precondition -- `SPEC-TOOL-CONTRACT-CONSISTENCY.md` (Spec 1) implemented,
+its acceptance suite passing, merged into `develop` -- is now satisfied: Spec 1 shipped as commit
+`cca563e`, merged `e8ce355`, full suite re-verified post-merge (`1726 passed, 18 subtests passed,
+0 failed`), pushed to `origin/develop`. A live regression (7 of `tools.py`'s return-type
+annotations left stale relative to Spec 1's runtime changes, breaking the real FastMCP call path
+for `log_event`/`search_tags`/`list_predicates`/`merge_tags`/`archive_memory`/
+`review_core_memory`/`update_memory_metadata`) was found and hotfixed separately, directly, as
+commit `d214433` -- unrelated to this spec's own docstring-content scope, already deployed live,
+not part of this document's remaining work. Every fact this document states about a tool's return
+shape, error codes, or parameter optionality traces to Spec 1's actual final locked text
+(including its own Amendments 1-4) -- re-verified directly against the real shipped source at
+`develop@e8ce355` in Amendment 1 below, which found and fixed two drifts introduced by Spec 1's
+own Amendment 2 landing after this document was originally drafted. This spec's worktree and OMP
+handoff may now proceed.
 
 **Scope**: may edit:
 - `src/saltmdb/mcp/tools.py` -- every one of the 19 `@mcp.tool()` function docstrings (and, where
@@ -927,10 +934,17 @@ failures are now the standard envelope shape rather than a bare `{"error": ...}`
 
     direction: "ancestors" (default) or "descendants". max_depth caps traversal hops (default 5).
 
-    Returns `{"status": "ok", "data": {"root": {...}, "ancestors": [...] | "descendants": [...],
-    ...}, "warnings": [...]}` -- the traversal result lives under `data`, not top-level.
-    `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR", "message": "...", "field":
-    "entity_id" | "direction" | "max_depth"}]}` for a missing/malformed parameter.
+    Returns `{"status": "ok", "data": {"entity_id": ..., "direction": ..., "root": {...},
+    "nodes": [...], "edges": [...], "total": ..., "total_nodes": ..., "graph_exhausted": ...,
+    "point_in_time": ..., "max_depth": ...}, "warnings": [...]}` -- `nodes` holds every node
+    found in the requested `direction` (the key is always `nodes`, never renamed to
+    `ancestors`/`descendants` -- `direction` itself is the only place those two words appear in
+    the response); `edges` lists the connecting lineage relations, each with
+    `source_id`/`target_id`/`predicate`/`depth`/`source_title`/`source_status`/`target_title`/
+    `target_status`. `graph_exhausted` is `true` when the traversal reached every real edge
+    within `max_depth` (nothing was cut off). `{"status": "rejected", "errors": [{"code":
+    "VALIDATION_ERROR", "message": "...", "field": "entity_id" | "direction" | "max_depth"}]}`
+    for a missing/malformed parameter.
 
     Example: `get_lineage(entity_id="a1b2c3", direction="descendants")` to see every memory that
     eventually replaced this one.
@@ -1167,8 +1181,9 @@ After:
     Returns `{"status": "ok", "data": {"id": ..., "message": "..."}, "warnings": [...]}` --
     demote/archive on an already-non-core/already-archived memory is an `ALREADY_DONE`-coded
     warning, not a rejection. `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR" |
-    "NOT_FOUND", "message": "..."}]}` for a malformed outcome/timestamp, an unresolvable
-    entity_id, or a `retain` against a non-core/archived memory.
+    "NOT_FOUND" | "CONFLICT", "message": "..."}]}` -- `VALIDATION_ERROR` for a malformed
+    outcome/timestamp, `NOT_FOUND` for an unresolvable entity_id, `CONFLICT` for a `retain`
+    against a memory that isn't currently an active core (already demoted or archived).
 
     Example: `review_core_memory(entity_id="abc123", outcome="retain",
     review_rationale="Still an active hazard; extending review window.")`.
@@ -1327,3 +1342,48 @@ print('OK')
 
 Must print `OK` with no assertion error and no uncaught exception -- reproducing, and confirming
 fixed, all four concrete friction points Codex's original skill-free audit found.
+
+## Amendment 1
+
+Independent verification pass (2026-09-20, coordinator plus a dedicated verification fork),
+performed after Spec 1 actually shipped and merged (`develop@e8ce355`) -- re-checking every one
+of this document's 19 per-tool factual claims directly against the real shipped source, not
+against Spec 1's own locked prose (which this document was originally drafted against, before
+Spec 1's Amendment 2 landed). No OMP work was in flight -- this is a pre-implementation
+correction, not an adjudication of an in-progress `BLOCKED` report. 17 of 19 tools were confirmed
+a clean match; two drifts were found, both traceable to Spec 1's Amendment 2 (the `get_lineage`
+internal-reader fanout fix) landing after this document was originally drafted:
+
+1. **§15 `get_lineage`'s claimed return shape was wrong, not just imprecise.** The original text
+   claimed `data` contains `"ancestors": [...] | "descendants": [...]` depending on `direction`.
+   Confirmed directly against `relation_service.py`'s `_get_lineage_raw` (:940-1091, feeding
+   `get_lineage`'s envelope wrapper at :1093-1118): the actual key is always `nodes` regardless of
+   `direction` (`direction` only ever appears as its own field, echoing back the parameter),
+   alongside `edges`, `total`, `total_nodes`, `graph_exhausted`, `point_in_time`, and `max_depth`
+   -- none of which the original text mentioned at all. An agent following the original docstring
+   as written would call `result["data"]["ancestors"]` and get a `KeyError` on every single call,
+   the exact class of failure this whole two-spec effort exists to prevent. **Fixed**: §15's
+   `Returns` line now states the real key set (`entity_id`, `direction`, `root`, `nodes`, `edges`,
+   `total`, `total_nodes`, `graph_exhausted`, `point_in_time`, `max_depth`), states plainly that
+   `nodes` is the one and only node-list key regardless of `direction`, and names `edges`' own
+   per-item fields.
+
+2. **§19 `review_core_memory`'s enumerated failure codes were incomplete.** The original text
+   listed only `VALIDATION_ERROR`/`NOT_FOUND` for every rejection. Confirmed directly against
+   `core_governance_service.py::review_core_memory` (:1109-1119): a `retain` against a memory that
+   isn't currently an active core (already demoted or archived) returns `error_codes.CONFLICT`,
+   not `VALIDATION_ERROR` or `NOT_FOUND` -- a real, distinct failure mode the original enumeration
+   silently dropped. **Fixed**: §19's `Returns` line now lists `CONFLICT` alongside the other two
+   codes, with each code's own triggering condition stated explicitly rather than left implicit.
+
+**Not touched, checked and confirmed still correct**: the §1 precondition table's `get_lineage`
+row already used generic "node data" wording rather than naming `ancestors`/`descendants` as
+response keys, so it required no correction. The §22 acceptance script's behavioral-regression
+check does not call `get_lineage` or `review_core_memory` at all, so no acceptance-script change
+was needed either.
+
+**Amendment pre-lock re-check**: independently re-ran both source reads above against the current
+tree a second time immediately before writing this amendment (not trusting the verification
+fork's report alone) -- both confirmed byte-for-byte accurate. Full manual re-read of §15 and §19
+in isolation, as an agent with no other context would read them, confirms neither now claims
+anything the real source doesn't support. Status remains **LOCKED**.
