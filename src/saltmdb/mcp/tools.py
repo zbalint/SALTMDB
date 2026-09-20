@@ -296,7 +296,7 @@ def log_event(
     content: str,
     context_id: str | None = None,
     error_code: str | None = None,
-) -> str:
+) -> dict:
     """Appends an event to the append-only events ledger.
 
     The bound owner (§4.5's per-session identity) is injected as the event's `agent_id` --
@@ -322,7 +322,7 @@ def log_event(
 
 
 @mcp.tool()
-def search_tags(query: str | None = None, limit: int | None = None) -> list:
+def search_tags(query: str | None = None, limit: int | None = None) -> dict:
     """Queries the database to suggest existing canonical tags matching a search query/substring, to prevent tag fragmentation. Use query='auth' to filter by tag name substring.
 
     Advisory discovery, not a prerequisite -- tags need not pre-exist; a new domain still
@@ -334,7 +334,7 @@ def search_tags(query: str | None = None, limit: int | None = None) -> list:
 
 
 @mcp.tool()
-def list_predicates(query: str | None = None, limit: int | None = None) -> list:
+def list_predicates(query: str | None = None, limit: int | None = None) -> dict:
     """Lists the closed relation-predicate vocabulary manage_relation accepts, optionally
     filtered by a search substring (e.g. query='resolve').
 
@@ -355,7 +355,7 @@ def list_predicates(query: str | None = None, limit: int | None = None) -> list:
 def merge_tags(
     keep_tag: str | None = None,
     tags_to_merge: list | str | None = None,
-) -> str:
+) -> dict:
     """Merges one or more fragmented/synonym tags into an explicitly chosen canonical tag, repointing all
     affected entities' tag associations. Use to fix folksonomy fragmentation (e.g. keep_tag='#docs',
     tags_to_merge=['#doc', '#documentation'])."""
@@ -576,7 +576,7 @@ def search_memory(
 
 
 @mcp.tool()
-def archive_memory(entity_id: str | list[str] | None = None) -> str | list:
+def archive_memory(entity_id: str | list[str] | None = None) -> dict | list:
     """Explicitly archives (retires) one or multiple long-term memories.
 
     Accepts entity_id as a single string ID OR a list of string IDs.
@@ -1205,7 +1205,7 @@ def review_core_memory(
     outcome: Literal["retain", "demote", "archive"] | None = None,
     review_rationale: str | None = None,
     core_review_after: str | None = None,
-) -> str:
+) -> dict:
     """Reviews an active core memory: retain (extend its next review date), demote (turn it back
     into an ordinary searchable memory), or archive (retire it) -- a direct, synchronous
     operation, never a request/queue/event.
@@ -1232,7 +1232,7 @@ def review_core_memory(
 
 
 @mcp.tool()
-def update_memory_metadata(entity_id: str, metadata: dict) -> str:
+def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
     """Shallow-merges `metadata` into an existing memory without requiring title/content/tags
     to be restated (unlike store_memory(entity_id=..., metadata=...), which needs those fields
     byte-identical for a metadata-only edit). Submitted keys overwrite/add; keys not mentioned
