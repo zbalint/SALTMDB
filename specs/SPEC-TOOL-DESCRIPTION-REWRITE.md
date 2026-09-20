@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED, INCLUDES AMENDMENT 1 -- PRECONDITION SATISFIED**
+**LOCKED, INCLUDES AMENDMENTS 1-3 -- PRECONDITION SATISFIED**
 
 This spec's original hard precondition -- `SPEC-TOOL-CONTRACT-CONSISTENCY.md` (Spec 1) implemented,
 its acceptance suite passing, merged into `develop` -- is now satisfied: Spec 1 shipped as commit
@@ -465,8 +465,9 @@ After (opening paragraph per the locked reciprocal framing, memory `1446c55c`):
     resolves superseded matches and abstains (returns []) rather than return a weakly-relevant
     result; "history" keeps superseded results visible, labeled. tags_filter/context_id/
     memory_type_filter/is_core narrow the search; limit caps result count (default 5); cursor
-    pages through a larger result set (this tool does not expose a `has_more`/total-count signal
-    today -- an empty next page is your only current indicator that pagination is exhausted).
+    pages through a larger result set (there is no separate more-pages-remaining or total-count
+    signal today -- an empty next page is your only current indicator that pagination is
+    exhausted).
 
     Returns a bare list of memory dicts -- NOT the `{"status": ..., "data": ...}` envelope shape
     other SALTMDB tools use; each list item has its own fields (id, title, score, snippet, etc.)
@@ -1303,23 +1304,21 @@ actually closed the gap it found):
 PYTHONPATH=src uv run python -c "
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service, relation_service
-import sqlite3
-conn = sqlite3.connect(':memory:')
-init_db(conn)
+conn = init_db(':memory:')
 
 # 1. revise_memory with tags omitted succeeds and inherits (the original confirmed bug).
-r1 = memory_service.store_memory(title='T', content='C', tags=['x'], owner_id='o', db_connection=conn)
+r1 = memory_service.store_memory(title='Fixture Title One', content='Fixture content body, long enough to clear the quality gate.', tags=['x'], owner_id='o', db_connection=conn)
 assert r1['status'] == 'ok', r1
 eid = r1['data']['id']
-r2 = memory_service.revise_memory(entity_id=eid, title='T2', content='C2', reason='fix', db_connection=conn)
+r2 = memory_service.revise_memory(entity_id=eid, title='Fixture Title One Revised', content='Fixture content body revised, long enough to clear the quality gate.', reason='fix', db_connection=conn)
 assert r2['status'] == 'ok', r2
-assert r2['data']['inherited'].get('tags') == ['x'], r2
+assert r2['data']['inherited'].get('tags') == ['#x'], r2
 new_id = r2['data']['new_id']
 
 # 2. revise_memory against an already-inactive target: a clean rejected() naming the successor,
 #    never a raised exception.
 try:
-    r3 = memory_service.revise_memory(entity_id=eid, title='T3', content='C3', reason='fix', db_connection=conn)
+    r3 = memory_service.revise_memory(entity_id=eid, title='Fixture Title One Re-Revised', content='Fixture content body re-revised, long enough to clear the quality gate.', reason='fix', db_connection=conn)
     assert r3['status'] == 'rejected', r3
 except Exception as e:
     raise AssertionError(f'revise_memory raised instead of returning rejected(): {e}')
@@ -1387,3 +1386,135 @@ tree a second time immediately before writing this amendment (not trusting the v
 fork's report alone) -- both confirmed byte-for-byte accurate. Full manual re-read of §15 and §19
 in isolation, as an agent with no other context would read them, confirms neither now claims
 anything the real source doesn't support. Status remains **LOCKED**.
+
+## Amendment 2
+
+OMP reported `BLOCKED -- SPEC ADJUDICATION REQUIRED` while implementing this spec (SALTMDB issue
+event `b959beb8-8efa-4e1d-8f20-0d204a7b1f71`): §7's locked "After" docstring text for
+`search_memory` requires the literal substring `` `has_more` `` (to tell an agent this field does
+not exist), while §22.2's acceptance check requires
+`rg -n 'has_more' src/saltmdb/mcp/tools.py` to show zero matches -- the exact text this section
+locks necessarily fails that check. OMP applied every other tool's rewrite, stopped after
+`search_memory` without running any further diagnostics or the acceptance script, and left its
+diff uncommitted and unmerged in this worktree, per this project's standing OMP-never-
+commits/never-merges rule.
+
+**Verified directly** (no implementation performed as part of this verification, per this
+project's spec-adjudication boundary): read §7's locked prose and §21/§22.2's locked acceptance
+text side by side in the spec at lock time; confirmed the sole occurrence of the string
+`has_more` inside the actual `@mcp.tool()`-decorated docstring content is this one clause, via
+`grep -n "has_more" src/saltmdb/mcp/tools.py` against OMP's own uncommitted working tree (single
+match, line 574, byte-identical to §7's locked text) -- not the byte-identical-but-separate
+occurrences in §1's Scope note, this section's own commentary, or §21/§22.2's prose, none of which
+land in `tools.py` and none of which the acceptance grep can even see.
+
+**Root cause**: §22.2's grep is a blunt proxy for the real, correctly-locked intent stated in
+§21 ("`search_memory`/`search_tags` gaining a `has_more` field ... none of that is described here
+as present, and none of it is added") -- it was written to catch an *affirmative* false claim
+that the field exists, but a literal substring match cannot distinguish that from a *negative*
+statement correctly telling an agent the field is absent. §7's own drafting needed the word to
+state the absence clearly and picked the same literal spelling §22.2's grep bans outright.
+
+**Decision**: reword §7's prose to convey the identical fact -- no more-pages-remaining/
+total-count signal exists, an empty next page is the only exhaustion indicator -- without using
+the literal substring `has_more`, rather than relaxing §22.2's check. Keeping §22.2's check exact
+and unchanged preserves it as a real regression tripwire: if a future edit ever does add a claim
+that a `has_more` field exists, this grep still catches it. Weakening the check to permit the
+substring conditionally (e.g. only when preceded by a negation) would require prose-pattern
+matching no longer expressible as the simple, auditable command §22.2 documents, and would blur
+the exact boundary between "describes absence" and "claims presence" that §21 depends on.
+
+**Fix applied to this document**: §7's "After" docstring text (`cursor pages through a larger
+result set (...)` clause) now reads "there is no separate more-pages-remaining or total-count
+signal today -- an empty next page is your only current indicator that pagination is exhausted."
+No other section's prose, no acceptance criterion, and no out-of-scope statement changed. §21 and
+§22.2 are untouched, word for word, from their original locked text.
+
+**Reconciliation check**: re-ran `grep -n "has_more" src/saltmdb/mcp/tools.py` against OMP's
+uncommitted working tree after mentally substituting the new §7 wording for the old at line 574 --
+zero matches, satisfying §22.2 as originally and still written. Re-read the full revised §7 clause
+in isolation, as an agent with no other context would, alongside §21/§22.2: it still correctly
+tells the agent the field does not exist, still names the one actual indicator of exhausted
+pagination (an empty next page), and asserts nothing about a `has_more`, total-count, or envelope
+shape this tool does not have.
+
+## Amendment 3
+
+OMP reported `BLOCKED -- SPEC ADJUDICATION REQUIRED` while implementing this spec: all 19
+docstrings and the 7 authorized return-annotation changes were applied and matched the locked
+text exactly (confirmed via AST-normalized diff against `HEAD` showing no runtime/parameter/
+signature changes), `ruff format --check` passed, and all four §22 static-review items passed --
+but the §22 behavioral regression script failed before its first assertion:
+`TypeError: expected str, bytes or os.PathLike object, not Connection`. OMP correctly identified
+the cause (the script called `init_db(conn)`, but `init_db` takes a database path and internally
+opens its own connection -- existing tests always call `init_db(path)`), correctly declined to
+patch `init_db`'s runtime behavior as an out-of-scope fix, and left its diff uncommitted and
+unmerged in the worktree, per this project's standing OMP-never-commits/never-merges rule.
+
+**Precedent**: this is not a new class of bug. SALTMDB memory `64fce4af` independently records
+the *exact same* three fixture defects in Spec 1's (`SPEC-TOOL-CONTRACT-CONSISTENCY.md`) own §17
+regression snippet, found and fixed the same way (spec-script fix only, no runtime change) during
+that spec's implementation, before this document was drafted.
+
+**Verified directly** (no implementation performed on `tools.py` or any other real source file, per
+this project's spec-adjudication boundary -- verification used only a throwaway probe script in
+the session scratchpad, run against the worktree's own installed environment, never committed):
+
+1. `src/saltmdb/db/schema.py:340` -- `def init_db(db_path: str = None) -> sqlite3.Connection`.
+   Confirmed via direct source read: it takes a path (or no argument, defaulting appropriately)
+   and returns the connection it opens; it does not accept a pre-opened `Connection`. The locked
+   script's `conn = sqlite3.connect(':memory:'); init_db(conn)` passes an already-open connection
+   where a path is expected -- exactly the `TypeError` OMP hit, and exactly the class of bug
+   `64fce4af` already documents for Spec 1's own §17 script.
+2. Ran the corrected call shape (`conn = init_db(':memory:')`) plus the script's original
+   `title='T', content='C'` fixtures against the worktree's real `memory_service.store_memory`:
+   reproduced a second, independent failure -- `Error: Title is too short (minimum 5 characters)`
+   (`validation.py:24`, `TITLE_MIN_LENGTH = 5`) -- confirming the same too-short-fixture defect
+   `64fce4af` also already found in Spec 1's analogous script.
+3. Ran the corrected call shape with realistic-length title/content fixtures end to end: this
+   reproduces a third defect the original script's own assertion would have hit even after fixes
+   1 and 2 -- `store_memory`'s tag normalization (`tags.py:18` `normalize_tag_name`) prefixes every
+   tag with `#`, so `tags=['x']` is stored and later read back as `['#x']`, not `['x']`. The
+   script's own `assert r2['data']['inherited'].get('tags') == ['x']` would fail against the real
+   (and correct) runtime behavior.
+4. With all three fixed -- `init_db(':memory:')` used directly, realistic-length title/content
+   fixtures, and the tag assertion corrected to `['#x']` -- the full four-part script ran clean to
+   completion and printed `OK`, with the worktree's `git status` unchanged (only OMP's own
+   `src/saltmdb/mcp/tools.py` diff, still uncommitted) before and after the probe.
+
+**Root cause**: §22's behavioral script was drafted as a fresh restatement of Spec 1's §17 script
+for this document's own acceptance purposes, rather than copied from -- or cross-checked against --
+Spec 1's own corrected, working version (which by the time of this document's drafting already
+existed only as an uncommitted probe fix in that spec's worktree, never folded back into either
+spec's canonical text). All three fixture defects are spec-authoring errors in the throwaway
+script text itself, not implementation defects, and not evidence of any problem with
+`init_db`, `store_memory`, or tag normalization, all three of which behave exactly as designed.
+
+**Decision**: fix §22's script text in this document (three edits: `init_db` call shape, fixture
+string lengths, tag-assertion normalization) rather than touching `init_db`, `store_memory`, or any
+other runtime file -- consistent with this project's standing rule that spec adjudication never
+extends the locked edit scope (§0: `mcp/tools.py` docstrings and authorized return annotations
+only) to fix a defect in the acceptance script itself.
+
+**Fix applied to this document**: §22's behavioral regression script, as it appears above, replaces
+`sqlite3.connect(':memory:')` + `init_db(conn)` with `conn = init_db(':memory:')`; replaces the
+`title='T', content='C'` / `title='T2', content='C2'` / `title='T3', content='C3'` fixtures with
+realistic-length title/content strings; and replaces the `== ['x']` tag assertion with
+`== ['#x']`. No other section's prose, no acceptance criterion's intent, and no out-of-scope
+statement changed. The script's four numbered assertions still exercise exactly the four original
+friction points named in §1/§22's own text.
+
+**Handoff**: OMP should resume from its current uncommitted worktree state (no other file besides
+`src/saltmdb/mcp/tools.py` needs any change) and re-run §22's corrected behavioral script exactly
+as it now appears in this document, plus the rest of the originally scoped acceptance pass (static
+review items 1-4, baseline lint/type/test commands). OMP's diff remains uncommitted and unmerged
+per standing policy; `final-review` runs once OMP reports the whole task done.
+
+**Handoff**: no other section touched by this amendment; the two-file precondition table, §1's
+Scope note, and every other tool's section were re-checked for the same literal-substring
+collision (searched the full document for `has_more` again post-edit) and found nowhere else
+inside quoted docstring text -- only in commentary/prose that never lands in `tools.py`. OMP may
+resume: apply this section's corrected §7 wording to `search_memory`'s docstring at
+`src/saltmdb/mcp/tools.py:574` (replacing the clause OMP already applied verbatim from the
+pre-amendment spec text), then run the full §22 acceptance pass (static review items 1-4 plus the
+behavioral regression script) exactly as originally scoped. Status remains **LOCKED**.
