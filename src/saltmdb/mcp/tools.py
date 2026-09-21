@@ -566,17 +566,28 @@ def store_memory(
     description="""Find individual memories matching a query or filters -- for locating a
     specific record, a duplicate check before storing, or historical/exploratory search. For
     task context assembled from matches AND their graph connections/lifecycle/conflicts in one
-    call, use retrieve_context instead; avoid calling both with the same query, since
-    retrieve_context already runs this search internally.
+    call, use retrieve_context instead: pass one or more hit ids from here as its entity_ids
+    anchor. retrieve_context performs no search of its own, so the two are complementary, not
+    redundant -- use this tool first to find/verify an anchor, then retrieve_context to expand
+    around it. Results are ranked by relevance, but the single most complete or authoritative
+    answer is not always the top hit -- it can rank 3rd-4th behind memories that only mention
+    the same keywords in passing; scan more than the first result before concluding nothing
+    useful exists.
 
     query_keywords is the search text (omit it to browse by tags_filter/context_id/etc. alone).
     mode controls result filtering: "broad" (default) is ordinary hybrid ranking; "strict"
-    resolves superseded matches and abstains (returns []) rather than return a weakly-relevant
-    result; "history" keeps superseded results visible, labeled. tags_filter/context_id/
-    memory_type_filter/is_core narrow the search; limit caps result count (default 5); cursor
-    pages through a larger result set (there is no separate more-pages-remaining or total-count
-    signal today -- an empty next page is your only current indicator that pagination is
-    exhausted).
+    resolves superseded matches (memories actually replaced via supersede_memory/revise_memory)
+    and abstains (returns []) rather than return a weakly-relevant result -- it does not resolve
+    which fact is current within an unstructured chronological history of events/facts (a bug
+    investigated across several attempts, for instance); "history" keeps superseded results
+    visible, labeled. tags_filter/context_id/memory_type_filter narrow the search; limit caps
+    result count (default 5); cursor pages through a larger result set (there is no separate
+    more-pages-remaining or total-count signal today -- an empty next page is your only current
+    indicator that pagination is exhausted). is_core restricts to the small, always-active core
+    tier (a scarce bootstrap-delivery mechanism, capped at a handful of entries) -- most durable
+    rules, preferences, and exceptions are deliberately NOT core, so a missing is_core=True hit
+    is not evidence that no rule or exception exists; omit is_core (or pass False) when checking
+    whether a rule has an exception, and rely on an unfiltered search instead.
 
     Returns a bare list of memory dicts -- NOT the `{"status": ..., "data": ...}` envelope shape
     other SALTMDB tools use; each list item has its own fields (id, title, score, snippet, etc.)
@@ -588,8 +599,6 @@ def store_memory(
     call get_memory, never a substitute for it -- absence of a detail from the preview is not
     evidence it's absent from the memory) or `drift_flag` (advisory only, re-verify the citation
     yourself rather than trusting either the flag or the original claim).
-
-    Example: `search_memory(query_keywords="DNS incident", mode="broad", limit=5)`.
     """
 )
 def search_memory(
@@ -1255,7 +1264,9 @@ def retrieve_context(
     get_related_memories + get_lineage would otherwise require composing by hand. This tool does
     not search; find the memory you want with search_memory first, then hand its id here to pull
     in what's connected to it. Using only search_memory or only retrieve_context is a usage
-    anti-pattern -- they are complementary, not alternatives.
+    anti-pattern -- they are complementary, not alternatives. No `memories[]` item, of either
+    strategy, ever carries full body content -- call get_memory afterward, selectively for
+    whichever returned items you'll actually cite, quote, or act on.
 
     Pass exactly one of entity_ids or query, matching your strategy -- never both, never neither.
     strategy="local" (default): entity_ids is required -- one or more memory IDs you already have
@@ -1289,9 +1300,23 @@ def retrieve_context(
     `metadata.community` in place of `metadata.fan_out`). Every item's own `retrieval_provenance`
     explains how it entered the result. Unlike before, a `strategy="local"` primary item never
     carries `relevance_preview`/`relevance_preview_meta` -- those were derived from query text,
-    which this strategy no longer has; you already know why you picked that anchor.
+    which this strategy no longer has; you already know why you picked that anchor. For
+    `strategy="local"`, `lineage` surfaces whether an anchor or expansion item was itself
+    revised from an earlier version -- useful for finding a memory's current, most-final state
+    among several that discuss the same evolving topic.
 
-    Example: `retrieve_context(entity_ids=["a1b2c3d4"], budget_tokens=4000)`.
+    `edges` (for `strategy="local"`) lists only relations directly between two entries in your
+    own `entity_ids` anchor set -- never a relation from an anchor to one of its expansion
+    neighbors (that provenance lives on the neighbor's own `retrieval_provenance` instead). A
+    single-anchor call always returns `edges: []`; that reflects this scope, not an empty
+    expansion.
+
+    `budget_tokens` packing is not anchor-aware: a caller-supplied anchor in `entity_ids` can
+    still be dropped out of `memories[]` entirely if the budget is too small to fit it (check
+    `metadata.budget.primary_dropped_count`/`primary_truncated` rather than assuming every
+    anchor you passed is present in the result), and `edges` can reference an entity_id that
+    did not survive packing. Prefer the server default budget unless you have verified a custom
+    one fits your anchors.
     """
     owner_id_ = _effective_owner()
     if strategy == "global":
