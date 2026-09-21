@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED** (Amendment 1 applied to §4.1 pre-implementation, see that section — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` before editing any tracked file; adjudicated and fixed without touching production or test code)
+**LOCKED** (Amendment 1 applied to §4.1, Amendment 2 applied to §2.2, both pre-implementation, see those sections — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` twice before editing any tracked file; both adjudicated and fixed without touching production or test code)
 
 **Scope — may edit:**
 - `src/saltmdb/domain/services/retrieve_context_service.py`
@@ -49,6 +49,8 @@ from saltmdb.utils.text import resolve_entity_ref
 **Do remove** `Callable` from the existing `from typing import Any, Callable, cast` line, changing it to `from typing import Any, cast`. Unlike `memory_service`, `Callable` has no mock-target dependency (grep-confirmed: its only use in this file, `Callable[..., list[dict[str, Any]] | dict[str, Any]]`, is inside the exact `search_fn = cast(...)` block §2.2 removes) — nothing else in the file or in any test references it, so leaving it in would be a genuine, unjustified F401.
 
 ### 2.2 `assemble_retrieve_context` signature and local-path body (replaces lines 24-96 of the pre-change file)
+
+**Amendment 2 (post-lock, pre-implementation adjudication)**: the replacement below originally still computed `effective_db_path` (the `A5 Amendment 4` fix -- resolving the real path behind a caller-supplied `db_connection` via `PRAGMA database_list`, so a downstream service call always receives the caller's actual database rather than silently falling back to `get_db_path()`'s global default) while also deleting that variable's only consumer: the `search_fn(..., db_path=effective_db_path)` call inside the exact `search_memory` block this same section removes. OMP correctly caught this live (`BLOCKED — SPEC ADJUDICATION REQUIRED`) before editing any tracked file: grep-confirmed `effective_db_path` has exactly one consumer in the whole pre-change file (the now-removed `search_fn` call), and reproduced this repo's real `ruff check` configuration (`pyproject.toml`'s `[tool.ruff.lint]` selects `F` and does not ignore `F841`) failing with `F841 Local variable 'effective_db_path' is assigned to but never used` against the originally-locked replacement. Verified independently before fixing (not trusted from OMP's report alone): confirmed via direct grep of the pre-change file that `effective_db_path` appears nowhere outside the block being replaced, and confirmed §5.4 of this very spec already documents, for the *test* side of this same fact, that "there is no sub-call receiving a `db_path` kwarg to assert against" post-change -- the service-layer replacement simply hadn't caught up to that same already-stated fact. The reason `effective_db_path` existed no longer holds under this rewrite: the entity-resolution loop that replaces `search_fn` reads directly off `conn` (`conn.execute(...)`), never needing a separately-resolved `db_path` string, and `_assemble_global_context(query, budget_tokens, conn)` was never passed one either (unchanged from the pre-change file, `cast`-confirmed by grep). The `db_path` *parameter* itself is untouched and still genuinely used, directly (not via `effective_db_path`), at `conn = get_connection(db_path or get_db_path())` when no connection is supplied. Fix: the `effective_db_path: str | None` declaration and its three-way `if`/`elif`/`else` assignment block are deleted outright from the replacement below -- dead code with a mechanically confirmed zero-consumer count, not a legitimate allowed consumer to prescribe. This does not reopen or contradict §4.1's Amendment 1 -- a separate, independently-discovered gap in the same locked section.
 
 Current signature and local-path opening (pre-change, lines 24-96 — see `Read` output already on record for this session; reproduced here for the exact anchor):
 
@@ -169,14 +171,6 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     if conn is None:
         conn = get_connection(db_path or get_db_path())
         should_close = True
-    effective_db_path: str | None
-    if db_path is not None:
-        effective_db_path = db_path
-    elif db_connection is not None:
-        row = cast(tuple[int, str, str], conn.execute("PRAGMA database_list").fetchone())
-        effective_db_path = row[2] or None
-    else:
-        effective_db_path = db_path or get_db_path()
 
     try:
         if strategy == "global":
