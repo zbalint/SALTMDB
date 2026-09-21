@@ -430,12 +430,22 @@ def merge_tags(
     (something that happened), procedure (how-to/runbook), decision (ADR-style rationale),
     preference (a durable user/agent preference).
 
-    entity_id (optional) targets an existing memory for a metadata-only update -- re-tagging,
-    updating `metadata` (shallow-merged, existing keys not mentioned are preserved), or
-    backfilling core-governance fields. `content`/`content_file_path` is still mandatory on this
-    path too (re-supply the unchanged body; omitting both is rejected with `MISSING_CONTENT`
-    regardless of entity_id) -- use update_memory_metadata instead for a metadata-only edit that
-    doesn't require restating title/content unchanged.
+    entity_id (optional) targets an existing memory for a metadata-only update -- updating
+    `metadata` (shallow-merged, existing keys not mentioned are preserved) or backfilling
+    core-governance fields. `content`/`content_file_path` is still mandatory on this path too
+    (re-supply the unchanged body; omitting both is rejected with `MISSING_CONTENT` regardless of
+    entity_id) -- use update_memory_metadata instead for a metadata-only edit that doesn't require
+    restating title/content unchanged.
+
+    On the entity_id path, a set of frozen fields (title, content, owner_id, context_id, scope,
+    memory_type, and tags among them) is rejected if the call's value would actually change what's
+    already stored -- this guard exists specifically so an omitted/defaulted parameter (e.g.
+    `scope` silently defaulting to "shared") can never overwrite an existing value that differs,
+    while still allowing lifecycle/core/retrieval fields to change in place. `tags` is frozen here
+    too: omitting it (leaving the existing tags untouched) is safe, but supplying a tag list that
+    differs from what's already stored is rejected the same as changing title/content -- **this
+    path does not support re-tagging**, use revise_memory/supersede_memory for that (or any other
+    frozen field you actually intend to change).
 
     Returns `{"status": "ok", "data": {"id": ..., "duplicate_candidates": [...] | None, ...},
     "warnings": [...]}` on success. Rejections you'll see in practice: an exact content-hash
@@ -583,7 +593,11 @@ def store_memory(
     visible, labeled. tags_filter/context_id/memory_type_filter narrow the search; limit caps
     result count (default 5); cursor pages through a larger result set (there is no separate
     more-pages-remaining or total-count signal today -- an empty next page is your only current
-    indicator that pagination is exhausted). is_core restricts to the small, always-active core
+    indicator that pagination is exhausted). agent_session_id filters to memories whose *creation*
+    session matches -- a memory created earlier and only revised/touched again during that
+    session will NOT match, since there is no separate filter for most-recently-touched session;
+    don't rely on this parameter alone to reconstruct everything a session worked on. is_core
+    restricts to the small, always-active core
     tier (a scarce bootstrap-delivery mechanism, capped at a handful of entries) -- most durable
     rules, preferences, and exceptions are deliberately NOT core, so a missing is_core=True hit
     is not evidence that no rule or exception exists; omit is_core (or pass False) when checking
@@ -1035,7 +1049,11 @@ def revise_memory(
     an already-inactive `entity_id` -- returns a clean `{"status": "rejected", "errors": [{...}],
     ...}` value; it never raises an exception across the tool boundary. An inactive target names
     its known successor in the rejection -- inspect it (get_memory) before retrying, rather than
-    reissuing the same call.
+    reissuing the same call. If there is no successor to inspect (the target is terminally
+    inactive, e.g. consolidated/archived with nothing further replacing it), neither revise_memory
+    nor supersede_memory can be used at all -- store a new memory with the correction instead,
+    then `manage_relation(predicate="corrects", source_id=<new memory>, target_id=<the inactive
+    entity_id>)` to link it without reviving the old one.
 
     Example: `revise_memory(entity_id="abc123", title="[Worker] Request timeout", content="The
     worker request timeout is 30 seconds.", reason="Corrected the unit from milliseconds.",
@@ -1050,6 +1068,14 @@ def revise_memory(
     one call per edge. Leave it False (the default) only when the revision might invalidate what
     an existing edge asserted about the old content, and stale edges should surface for review
     instead of silently carrying forward.
+
+    `repoint_relations=True` has two edge cases worth knowing before relying on it blindly: a
+    self-loop edge on the predecessor (an edge whose source and target are the same entity) is
+    left completely untouched -- still active on the archived predecessor, still listed in
+    `orphaned_semantic_edges` -- since the new entity is never allowed a self-referential edge
+    either; and if repointing would produce a source/target/predicate triple that's already an
+    active edge elsewhere, the old edge is still invalidated but no duplicate is created for the
+    new entity (silently dropped, not named in the response).
     """
     content, content_error = _resolve_content(content, content_file_path)
     if content_error is not None:
@@ -1099,7 +1125,12 @@ def supersede_memory(
     "changed": {...}, "semantic_relations_repointed": bool, "repointed_relations": [...], ...},
     "warnings": [...]}` on success, `{"status": "rejected", "errors": [{...}]}` -- naming known
     active successors and lineage -- when the target is already inactive. Never raises an
-    exception across the tool boundary for a validation problem.
+    exception across the tool boundary for a validation problem. If there is no successor to
+    inspect (the target is terminally inactive, e.g. consolidated/archived with nothing further
+    replacing it), neither supersede_memory nor revise_memory can be used at all -- store a new
+    memory with the correction instead, then `manage_relation(predicate="corrects",
+    source_id=<new memory>, target_id=<the inactive entity_id>)` to link it without reviving the
+    old one.
 
     Example: `supersede_memory(entity_id="abc123", title="[Roadmap] Q3 priorities", content="...
     (updated priorities)", reason="Priorities changed after the Q2 retro.")`.
@@ -1112,6 +1143,14 @@ def supersede_memory(
     should leave some edge intentionally stale against the old content; `repointed_relations`
     lists each old/new relation id pair actually rewritten. Pairs naturally with a large document
     already edited on disk via `content_file_path`, such as a wayfinder map's growing body.
+
+    `repoint_relations=True` has two edge cases worth knowing before relying on it blindly: a
+    self-loop edge on the predecessor (an edge whose source and target are the same entity) is
+    left completely untouched -- still active on the archived predecessor, still listed in
+    `orphaned_semantic_edges` -- since the new entity is never allowed a self-referential edge
+    either; and if repointing would produce a source/target/predicate triple that's already an
+    active edge elsewhere, the old edge is still invalidated but no duplicate is created for the
+    new entity (silently dropped, absent from `repointed_relations`).
     """
     content, content_error = _resolve_content(content, content_file_path)
     if content_error is not None:
