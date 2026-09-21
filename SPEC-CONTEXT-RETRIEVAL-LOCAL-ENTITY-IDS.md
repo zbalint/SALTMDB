@@ -2,12 +2,12 @@
 
 ## 0. Status
 
-**LOCKED**
+**LOCKED** (Amendment 1 applied to §4.1 pre-implementation, see that section — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` before editing any tracked file; adjudicated and fixed without touching production or test code)
 
 **Scope — may edit:**
 - `src/saltmdb/domain/services/retrieve_context_service.py`
 - `src/saltmdb/mcp/tools.py` (the `retrieve_context` tool function only — its docstring and signature)
-- `src/saltmdb/daemon/dispatch.py` (the `_dispatch_retrieve_context` function only)
+- `src/saltmdb/daemon/dispatch.py` (the `_dispatch_retrieve_context` function only, plus — per Amendment 1 — the one new top-of-file `from saltmdb.utils.envelope import error, rejected` import line §4.1 now requires; no other line in this file changes)
 - `tests/test_retrieve_context_service.py`
 - `tests/test_retrieve_context_wiring.py`
 - `tests/test_orphan_community_service.py` (one test method only — `test_scenario_14_assemble_retrieve_context_composes_orphan_assignment_end_to_end`)
@@ -433,27 +433,23 @@ def retrieve_context(
 
 ## 4. `src/saltmdb/daemon/dispatch.py`
 
-### 4.1 `_dispatch_retrieve_context` (replaces lines 613-629 of the pre-change file)
+### 4.1 `_dispatch_retrieve_context` (replaces lines 447-457 of the pre-change file)
 
-Pre-change:
+**Amendment 1 (post-lock, pre-implementation adjudication)**: the version originally locked here assumed `dispatch.py` already had a `_DispatchValidationError` exception class and an `error_codes` module, and that its shared per-field helpers (`_optional_int_or_none`, `_optional_strategy`, `_required_str_list`) already raised that exception and were caught/converted to `rejected()` envelopes at each call site. That assumption was wrong for this worktree: it was carried over from `develop`'s current `dispatch.py`, which picked up exactly that machinery from a separate, unrelated effort (`SPEC-TOOL-CONTRACT-CONSISTENCY`, merged to `develop` via `e8ce355`) that this branch's lineage (`context-aware-search`) never merged in -- confirmed `e8ce355` is not an ancestor of `feature/context-retrieval-local-entity-ids`. OMP correctly caught this live (`BLOCKED -- SPEC ADJUDICATION REQUIRED`) before editing any tracked file: grep confirmed zero occurrences of `_DispatchValidationError`/`error_codes`/`rejected`/`error` anywhere in this worktree's `dispatch.py`, whose actual established contract is that every one of its per-field helpers raises bare `ValueError`, uncaught, propagating straight through `dispatch_tool`'s `except BaseException: raise` (dispatch.py:527-529) -- there is no dispatch-layer envelope construction anywhere in this file today. Pulling `feature/tool-contract-consistency`'s merge into this branch to make the original text apply verbatim was rejected as the fix: it would drag a large, unrelated cross-cutting refactor into a branch scoped to one function, violating this spec's own locked "`_dispatch_retrieve_context` function only" edit boundary. The replacement below instead targets what actually exists in this worktree: `saltmdb.utils.envelope`'s `error`/`rejected` (real, already imported and used elsewhere in this exact codebase, e.g. `memory_service/lifecycle.py`'s `UNKNOWN_ENTITY_ID` sites) with bare string-literal codes -- the same convention §2.2 of this very spec already independently uses correctly (`"VALIDATION_ERROR"`, `"UNKNOWN_ENTITY_ID"`, `"AMBIGUOUS_ID_PREFIX"` as literals, no `error_codes` module reference anywhere in §2). No `_DispatchValidationError` class and no `error_codes` module are introduced. `strategy`/`budget_tokens` keep using the existing shared helpers exactly as today (bare `ValueError`, uncaught) -- consistent with every other still-unconverted dispatch function in this file, and untested by §6.2's assertions, which only require envelope-shaped rejections for the `entity_ids`/`query` checks below.
+
+Pre-change (verified against this worktree's actual current `dispatch.py:447-457`):
 
 ```python
 def _dispatch_retrieve_context(**kw):
     query = kw.get("query")
     if not isinstance(query, str):
-        return rejected([error(error_codes.VALIDATION_ERROR, "query is required", "query")])
-    try:
-        limit = _optional_int_or_none(kw, "limit")
-        budget_tokens = _optional_int_or_none(kw, "budget_tokens")
-        strategy = _optional_strategy(kw)
-    except _DispatchValidationError as exc:
-        return exc.payload
+        raise ValueError("query is required")
     return retrieve_context_service.assemble_retrieve_context(
         query=query,
         owner_id=kw.get("owner_id"),
-        limit=limit,
-        budget_tokens=budget_tokens,
-        strategy=strategy,
+        limit=_optional_int_or_none(kw, "limit"),
+        budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
+        strategy=_optional_strategy(kw),
     )
 ```
 
@@ -461,19 +457,16 @@ Replace with:
 
 ```python
 def _dispatch_retrieve_context(**kw):
-    try:
-        strategy = _optional_strategy(kw)
-        budget_tokens = _optional_int_or_none(kw, "budget_tokens")
-    except _DispatchValidationError as exc:
-        return exc.payload
+    strategy = _optional_strategy(kw)
+    budget_tokens = _optional_int_or_none(kw, "budget_tokens")
     if strategy == "global":
         if kw.get("entity_ids") is not None:
             return rejected(
-                [error(error_codes.VALIDATION_ERROR, "entity_ids is not valid for strategy=\"global\"", "entity_ids")]
+                [error("VALIDATION_ERROR", "entity_ids is not valid for strategy=\"global\"", "entity_ids")]
             )
         query = kw.get("query")
         if not isinstance(query, str):
-            return rejected([error(error_codes.VALIDATION_ERROR, "query is required", "query")])
+            return rejected([error("VALIDATION_ERROR", "query is required", "query")])
         return retrieve_context_service.assemble_retrieve_context(
             query=query,
             budget_tokens=budget_tokens,
@@ -481,17 +474,17 @@ def _dispatch_retrieve_context(**kw):
         )
     if kw.get("query") is not None:
         return rejected(
-            [error(error_codes.VALIDATION_ERROR, "query is not valid for strategy=\"local\"", "query")]
+            [error("VALIDATION_ERROR", "query is not valid for strategy=\"local\"", "query")]
         )
     entity_ids = kw.get("entity_ids")
     if not isinstance(entity_ids, list) or not entity_ids:
         return rejected(
-            [error(error_codes.VALIDATION_ERROR, "entity_ids is required and must be a non-empty list", "entity_ids")]
+            [error("VALIDATION_ERROR", "entity_ids is required and must be a non-empty list", "entity_ids")]
         )
-    try:
-        entity_ids = _required_str_list(kw, "entity_ids")
-    except _DispatchValidationError as exc:
-        return exc.payload
+    if not all(isinstance(item, str) for item in entity_ids):
+        return rejected(
+            [error("VALIDATION_ERROR", "entity_ids must be a list of strings", "entity_ids")]
+        )
     return retrieve_context_service.assemble_retrieve_context(
         entity_ids=entity_ids,
         budget_tokens=budget_tokens,
@@ -499,9 +492,15 @@ def _dispatch_retrieve_context(**kw):
     )
 ```
 
+Also add, alongside `dispatch.py`'s existing imports (there is no pre-existing `saltmdb.utils.envelope` import in this file to extend -- every current dispatch function that returns a `rejected()` envelope gets it by passing a service call's return value straight through, never by constructing one itself; this is the first `_dispatch_*` function in the file to construct one directly, which is why the import is new rather than an existing line being reused):
+
+```python
+from saltmdb.utils.envelope import error, rejected
+```
+
 (Rejects a caller supplying the wrong-strategy parameter explicitly, rather than the MCP tool wrapper's own silent discard in §3.1 being the only guard — §3.1's wrapper already forces the non-matching field to `None` before this point for calls that go through `tools.retrieve_context`, so this check is primarily a defense-in-depth guard for direct dispatch-layer callers/tests that bypass the wrapper, mirroring the same belt-and-suspenders posture already used for `entity_ids`'s own validation being checked at both dispatch and service layers.)
 
-(`_required_str_list` already exists in this file, lines 179-193, and already enforces "list of strings" -- reused as-is, not modified; it permits an empty list, which is why the explicit non-empty check above it is still needed, kept local to this function rather than changed in the shared helper since its other two callers, `tags` and `parent_ids`, legitimately allow empty lists. `owner_id` is dropped from the `local`-path call per §1/§3; still read via `kw.get("owner_id")` is now unnecessary for `local` and is not referenced at all in the replacement above.)
+(The `entity_ids` non-string-member check above is written inline rather than via the existing `_required_str_list` helper (dispatch.py:114-118) because that helper's contract is to *raise* bare `ValueError` on a non-string member -- correct for every one of its other two callers (`tags`, `parent_ids`), which are untouched by this spec and out of its locked edit scope, but wrong here: §6.2 requires `entity_ids=["ok", 123]` to come back as a returned `rejected()` envelope from `_dispatch_retrieve_context`, not a raised exception. Reusing the helper unmodified would fail that assertion; modifying the shared helper to return instead of raise would change behavior for its other two callers, outside this spec's "`_dispatch_retrieve_context` function only" scope. The inline check reproduces the same "list of strings" condition without touching the shared helper. `owner_id`/`limit` are dropped from the call entirely per §1/§3 -- `owner_id` is no longer read via `kw.get("owner_id")` anywhere in the replacement above, and `limit` no longer exists as a dispatch-layer concept at all per §2.5.)
 
 ## 5. `tests/test_retrieve_context_service.py`
 
