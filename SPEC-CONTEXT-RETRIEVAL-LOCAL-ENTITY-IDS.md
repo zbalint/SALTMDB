@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED** (Amendment 1 applied to §4.1, Amendment 2 applied to §2.2, Amendment 3 applied to §5.6/§9, Amendment 4 applied to §2.2 (a real one-line `mypy` fix plus rejection of a stale-partial-apply F401 claim and an out-of-scope pre-existing basedpyright finding), all pre-implementation, see those sections — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` four times before editing any tracked file; all four adjudicated and fixed, only one requiring an actual code-level correction, without touching production or test code)
+**LOCKED** (Amendment 1 applied to §4.1, Amendment 2 applied to §2.2, Amendment 3 applied to §5.6/§9, Amendment 4 applied to §2.2 (a real one-line `mypy` fix plus rejection of a stale-partial-apply F401 claim and an out-of-scope pre-existing basedpyright finding), Amendment 5 applied to §4.1 (merged two return statements into one to clear `PLR0911`), all pre-implementation except Amendment 5 (reported after OMP had already implemented the full amended spec and passed every other acceptance gate), see those sections — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` five times before ever committing or merging; all five adjudicated and fixed by amending this document only, never by editing OMP's own in-progress implementation)
 
 **Scope — may edit:**
 - `src/saltmdb/domain/services/retrieve_context_service.py`
@@ -480,13 +480,19 @@ def _dispatch_retrieve_context(**kw):
             [error("VALIDATION_ERROR", "query is not valid for strategy=\"local\"", "query")]
         )
     entity_ids = kw.get("entity_ids")
-    if not isinstance(entity_ids, list) or not entity_ids:
+    if (
+        not isinstance(entity_ids, list)
+        or not entity_ids
+        or not all(isinstance(item, str) for item in entity_ids)
+    ):
         return rejected(
-            [error("VALIDATION_ERROR", "entity_ids is required and must be a non-empty list", "entity_ids")]
-        )
-    if not all(isinstance(item, str) for item in entity_ids):
-        return rejected(
-            [error("VALIDATION_ERROR", "entity_ids must be a list of strings", "entity_ids")]
+            [
+                error(
+                    "VALIDATION_ERROR",
+                    "entity_ids is required and must be a non-empty list of strings",
+                    "entity_ids",
+                )
+            ]
         )
     return retrieve_context_service.assemble_retrieve_context(
         entity_ids=entity_ids,
@@ -494,6 +500,10 @@ def _dispatch_retrieve_context(**kw):
         strategy="local",
     )
 ```
+
+**Amendment 5 (post-lock, pre-implementation adjudication, applied after Amendment 4)**: OMP reported a fifth `BLOCKED — SPEC ADJUDICATION REQUIRED`, this time after implementing the full amended spec far enough to pass every other acceptance gate (`38 passed`, the `rg -U` three-match check, `git diff --check` clean, only the six permitted files touched, uncommitted and unmerged) — the sole remaining blocker was `PLR0911 Too many return statements (7 > 6)` on `_dispatch_retrieve_context` itself, from the exact §9 `ruff check` command. Verified directly: `pyproject.toml`'s `[tool.ruff.lint]` selects `PLR` with no `[tool.ruff.lint.pylint]` override and no `PLR0911` in its `ignore` list, so ruff's default `max-returns = 6` applies; reproduced the exact failure against the real, live, uncommitted worktree file (`PYTHONPATH=src uv run ruff check src/saltmdb/daemon/dispatch.py` → `PLR0911 Too many return statements (7 > 6)` at `dispatch.py:448:5`, matching OMP's report exactly) before touching anything. The Amendment-1 replacement above does genuinely have seven `return` statements (two in the `global` branch's guards plus its service call, three in the `local` branch's guards plus its service call) — a real gap this spec's own §4.1 introduced, not present pre-change (the pre-change function had exactly one `return`).
+
+No other `_dispatch_*` function in this file carries any complexity-suppressing `noqa` today (grep-confirmed), unlike `retrieve_context_service.py`'s own `assemble_retrieve_context`, which already carried a `# noqa: C901, PLR0912, PLR0915` before this spec touched it — i.e. `dispatch.py` has no established precedent for tolerating this class of complexity via suppression, so a genuine reduction to six returns was preferred here over adding a first-of-its-kind `# noqa: PLR0911`. Fix: merged the two `local`-path `entity_ids` validation checks (list/non-empty, then all-string-members) into one combined `if` with one shared `return`, dropping the count from seven to six. Confirmed this doesn't affect any locked test assertion: §5.5/§6.2 only ever assert `code`/`field` (`"VALIDATION_ERROR"`/`"entity_ids"`) for these cases, never a specific `message` string that would distinguish "missing/empty" from "non-string member" — both sub-cases already shared the same `code`+`field`, only their `message` text differed, and no locked assertion inspects `message` for either. Verified against a temporary edit to the live worktree file, then reverted before handing back (per this workflow's rule that only the spec is amended mid-implementation, never OMP's own in-progress diff): `ruff check src/saltmdb/daemon/dispatch.py` → `All checks passed!` with the merge applied; `ruff format --check` on the same temporary edit wanted only whitespace/line-wrap reformatting of the new combined block (cosmetic, standard `ruff format` output), not a further semantic change.
 
 Also add, alongside `dispatch.py`'s existing imports (there is no pre-existing `saltmdb.utils.envelope` import in this file to extend -- every current dispatch function that returns a `rejected()` envelope gets it by passing a service call's return value straight through, never by constructing one itself; this is the first `_dispatch_*` function in the file to construct one directly, which is why the import is new rather than an existing line being reused):
 
@@ -503,7 +513,7 @@ from saltmdb.utils.envelope import error, rejected
 
 (Rejects a caller supplying the wrong-strategy parameter explicitly, rather than the MCP tool wrapper's own silent discard in §3.1 being the only guard — §3.1's wrapper already forces the non-matching field to `None` before this point for calls that go through `tools.retrieve_context`, so this check is primarily a defense-in-depth guard for direct dispatch-layer callers/tests that bypass the wrapper, mirroring the same belt-and-suspenders posture already used for `entity_ids`'s own validation being checked at both dispatch and service layers.)
 
-(The `entity_ids` non-string-member check above is written inline rather than via the existing `_required_str_list` helper (dispatch.py:114-118) because that helper's contract is to *raise* bare `ValueError` on a non-string member -- correct for every one of its other two callers (`tags`, `parent_ids`), which are untouched by this spec and out of its locked edit scope, but wrong here: §6.2 requires `entity_ids=["ok", 123]` to come back as a returned `rejected()` envelope from `_dispatch_retrieve_context`, not a raised exception. Reusing the helper unmodified would fail that assertion; modifying the shared helper to return instead of raise would change behavior for its other two callers, outside this spec's "`_dispatch_retrieve_context` function only" scope. The inline check reproduces the same "list of strings" condition without touching the shared helper. `owner_id`/`limit` are dropped from the call entirely per §1/§3 -- `owner_id` is no longer read via `kw.get("owner_id")` anywhere in the replacement above, and `limit` no longer exists as a dispatch-layer concept at all per §2.5.)
+(The `entity_ids` non-string-member condition is checked inline, combined into the same `if` as the list/non-empty check per Amendment 5, rather than via the existing `_required_str_list` helper (dispatch.py:114-118), because that helper's contract is to *raise* bare `ValueError` on a non-string member -- correct for every one of its other two callers (`tags`, `parent_ids`), which are untouched by this spec and out of its locked edit scope, but wrong here: §6.2 requires `entity_ids=["ok", 123]` to come back as a returned `rejected()` envelope from `_dispatch_retrieve_context`, not a raised exception. Reusing the helper unmodified would fail that assertion; modifying the shared helper to return instead of raise would change behavior for its other two callers, outside this spec's "`_dispatch_retrieve_context` function only" scope. The inline, combined check reproduces the same "non-empty list of strings" condition without touching the shared helper. `owner_id`/`limit` are dropped from the call entirely per §1/§3 -- `owner_id` is no longer read via `kw.get("owner_id")` anywhere in the replacement above, and `limit` no longer exists as a dispatch-layer concept at all per §2.5.)
 
 ## 5. `tests/test_retrieve_context_service.py`
 
