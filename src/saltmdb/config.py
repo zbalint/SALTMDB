@@ -213,7 +213,7 @@ QG_HEADING_OR_LIST_MIN_LENGTH = 1500
 QG_MULTI_HEADING_MIN_LENGTH = 4000
 # Advisory-only (never blocks a write) -- flags a payload long enough that an agent following
 # saltmdb-usage's "write rich, comprehensive memories" guidance may legitimately exceed this,
-# see AGENT_GUIDE.md/skills/saltmdb-usage/SKILL.md for the explicit "safe to ignore" note.
+# see skills/saltmdb-usage/SKILL.md for the explicit "safe to ignore" note.
 QG_OVERSIZED_PAYLOAD_THRESHOLD = 8000
 
 # Large-content transport mitigation -- distinct from QG_OVERSIZED_PAYLOAD_THRESHOLD above, which

@@ -20,9 +20,10 @@ This skill packages the actual usage discipline behind SALTMDB — not tool-sche
 (load a tool's schema on demand for that), but the judgment calls: what makes a memory worth
 keeping, when to search, and what "done" looks like for a session. Without something like this
 loaded, a new agent gets the MCP tools and nothing that teaches good usage patterns beyond
-whatever it infers from the tool descriptions alone. This content is extracted from and stays in
-sync with `AGENT_GUIDE.md` §3–4 in the SALTMDB repo; if the two drift, the repo doc is
-authoritative.
+whatever it infers from the tool descriptions alone. This content is self-contained — the
+repo previously carried a parallel `AGENT_GUIDE.md` covering the same ground, but that file was
+removed outright (docs-restructuring effort, 2026-09-20) in favor of this skill plus the MCP
+tools' own docstrings; there is no separate external doc this is meant to track anymore.
 
 Deliberately excluded: anything not specific to SALTMDB itself (delegation-tool rules, general
 coding standards, harness-specific hook mechanics — those belong in their own skills/config,

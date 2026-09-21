@@ -20,4 +20,4 @@ SALTMDB is a local-first MCP memory server: it runs as a local process/daemon an
 
 ## Response
 
-This project is currently in **beta** (`0.x` versions). There is no fixed SLA for a response, but reports will be acknowledged and triaged as soon as possible.
+This project is currently in active pre-1.0 development (`0.x` alpha versions, working toward a beta release). There is no fixed SLA for a response, but reports will be acknowledged and triaged as soon as possible.

@@ -5,12 +5,12 @@ this well" knowledge doesn't have to live only in one user's personal harness co
 
 ## The gap this fills
 
-Today, everything an agent needs to know to use SALTMDB *well* (title/quality standards, search
-mode selection, the bootstrap → logging → wrap-up → consolidation lifecycle, the
-retrieval-outcome telemetry convention) either sits in `AGENT_GUIDE.md` — a doc an agent has to
-be told to go read — or, worse, only in a specific user's personal global instruction file. A new
-user installing SALTMDB gets the MCP tools and nothing that teaches good usage patterns unless
-they independently reconstruct it. Hooks (`hooks/`) enforce the *did-you-actually-do-it*
+Before this skill existed, everything an agent needed to know to use SALTMDB *well*
+(title/quality standards, search mode selection, the bootstrap → logging → wrap-up →
+consolidation lifecycle, the retrieval-outcome telemetry convention) either sat in a now-removed
+`AGENT_GUIDE.md` — a doc an agent had to be told to go read — or, worse, only in a specific
+user's personal global instruction file. A new user installing SALTMDB used to get the MCP tools
+and nothing that teaches good usage patterns unless they independently reconstructed it. Hooks (`hooks/`) enforce the *did-you-actually-do-it*
 at the moments that matter; skills teach the *why/when*. Neither replaces the other.
 
 ## Included

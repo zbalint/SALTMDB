@@ -35,6 +35,13 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+*(Recommended alternative)* This repo ships a committed `uv.lock` for deterministic, reproducible
+dependency resolution — see [astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/):
+```bash
+uv sync   # creates .venv and installs runtime deps
+uv run python -m saltmdb
+```
+
 ### Environment Variables
 
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).

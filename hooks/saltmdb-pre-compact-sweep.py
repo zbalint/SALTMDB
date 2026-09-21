@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SALTMDB Pre-Compact Sweep Hook Script
 Lifecycle event: PreCompact (Claude-Code-only today -- confirmed absent from Antigravity's and
-Copilot's own lifecycle event sets; AGENT_GUIDE.md §7).
+Copilot's own lifecycle event sets).
 
 Makes the sweep a real, standalone script instead of only existing as an inline "type": "agent"
 prompt block in claude-settings-example.json. Claude Code's native "agent"-type PreCompact hook

@@ -191,8 +191,11 @@ place of `~/.claude/hooks/...`.
 
 ## 📚 Detailed Documentation
 
-For a full conceptual guide, JSON schema details, and pre-tool decision protocols, read
-**[AGENT_GUIDE.md §7 (Session Automation via Lifecycle Hooks)](../AGENT_GUIDE.md#7-session-automation-via-lifecycle-hooks)**.
+For the conceptual overview of what each lifecycle event does, see
+**[docs/architecture.md §7 (Automated Session Lifecycle Hooks)](../docs/architecture.md#7-automated-session-lifecycle-hooks)**.
+For exact JSON schemas, per-harness payload shapes, and pre-tool decision protocols, read the
+scripts themselves — each one documents its own mechanism in its module docstring (see the file
+table above).
 
 For the usage discipline these hooks enforce (title/quality standards, search modes, the
 retrieval-outcome telemetry convention), see the **`saltmdb-usage`** skill in

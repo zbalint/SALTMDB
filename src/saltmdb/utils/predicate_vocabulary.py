@@ -20,7 +20,8 @@ Three closed categories plus one open alias table:
 - **Legacy, read-only (1):** ``similar_to``. Its existing edges stay readable/traversable
   forever (§1.4, information is never lost); no new ones may be created, by agents or the
   system, since the mechanical cosine-similarity auto-linker that used to create it was retired
-  before this redesign (AGENT_GUIDE.md:128, "don't use it yourself").
+  before this redesign (see MIGRATION.md's alpha.47/alpha.64 entries for the retirement and its
+  later, narrower reintroduction).
 - **Aliases (36):** drifted spellings from live-DB measurement (memory ``18575b72``), each
   mapped to its canonical replacement. 30 are same-direction renames; 6 also require swapping
   ``source_id``/``target_id`` because the drifted verb read the relationship from the opposite

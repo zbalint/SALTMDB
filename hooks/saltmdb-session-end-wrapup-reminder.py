@@ -2,10 +2,10 @@
 """SALTMDB Session Wrap-Up Reminder Hook Script
 Lifecycle event: SessionEnd (Claude Code) -- true session close, not every Stop/turn end.
 
-AGENT_GUIDE.md Phase C ("Session Wrap-up: Commit & Link") is a manual checklist today. This is
-pure automation, no judgment call: a fixed reminder to check get_events(order="oldest_first") for
-anything durable that only exists in the ephemeral event ledger before the session closes for
-good.
+Session wrap-up (checking for anything durable left only in the ephemeral event ledger) is
+otherwise a manual discipline with no dedicated doc. This is pure automation, no judgment call: a
+fixed reminder to check get_events(order="oldest_first") for anything durable that only exists in
+the ephemeral event ledger before the session closes for good.
 
 Best-effort by design: not all harnesses distinguish a true session close from an ordinary
 turn-level Stop, and a hook firing at session close may have nothing left to act on (the session
