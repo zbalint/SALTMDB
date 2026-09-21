@@ -35,6 +35,7 @@ We welcome contributions from the open-source community! Follow these steps to s
 
 * **Preserve Docstrings:** Maintain code documentation, type hints, and comment structures where possible.
 * **Database Safety:** Ensure that all changes to database schemas or routines do not disrupt sqlite3 concurrency features (WAL mode, transactions, timeout structures).
+* **No Direct DB Access:** Never open `saltmdb.db` with the `sqlite3` CLI, a DB browser, or any ad hoc script — not even read-only. The backend daemon (`src/saltmdb/daemon/`) is the sole process that opens this file by design; a second connection risks WAL lock contention, and any write path outside the daemon skips the secrets-redaction middleware and FTS5 sync triggers entirely, silently corrupting search/redaction state. Use the MCP tools, `saltmdb-cli`, or the Viewer instead — see [docs/architecture.md](docs/architecture.md)'s Single-Owner Backend Daemon section.
 * **Minimal External Dependencies:** Only add third-party packages when strictly necessary and when they ship prebuilt wheels for all supported platforms (Windows, Linux, macOS). New dependencies must be justified in the PR description.
 
 ### 2.1 Behavioral Coding Rules (AI-Agent & Human Contributors)
