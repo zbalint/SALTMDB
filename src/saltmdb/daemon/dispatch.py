@@ -28,6 +28,7 @@ from saltmdb.domain.services import (
     telemetry_service,
 )
 from typing import Any, Literal
+from saltmdb.utils.envelope import error, rejected
 
 logger = logging.getLogger(__name__)
 
@@ -445,15 +446,50 @@ def _dispatch_get_events(**kw):
 
 
 def _dispatch_retrieve_context(**kw):
-    query = kw.get("query")
-    if not isinstance(query, str):
-        raise ValueError("query is required")
+    strategy = _optional_strategy(kw)
+    budget_tokens = _optional_int_or_none(kw, "budget_tokens")
+    if strategy == "global":
+        if kw.get("entity_ids") is not None:
+            return rejected(
+                [
+                    error(
+                        "VALIDATION_ERROR",
+                        'entity_ids is not valid for strategy="global"',
+                        "entity_ids",
+                    )
+                ]
+            )
+        query = kw.get("query")
+        if not isinstance(query, str):
+            return rejected([error("VALIDATION_ERROR", "query is required", "query")])
+        return retrieve_context_service.assemble_retrieve_context(
+            query=query,
+            budget_tokens=budget_tokens,
+            strategy="global",
+        )
+    if kw.get("query") is not None:
+        return rejected(
+            [error("VALIDATION_ERROR", 'query is not valid for strategy="local"', "query")]
+        )
+    entity_ids = kw.get("entity_ids")
+    if (
+        not isinstance(entity_ids, list)
+        or not entity_ids
+        or not all(isinstance(item, str) for item in entity_ids)
+    ):
+        return rejected(
+            [
+                error(
+                    "VALIDATION_ERROR",
+                    "entity_ids is required and must be a non-empty list of strings",
+                    "entity_ids",
+                )
+            ]
+        )
     return retrieve_context_service.assemble_retrieve_context(
-        query=query,
-        owner_id=kw.get("owner_id"),
-        limit=_optional_int_or_none(kw, "limit"),
-        budget_tokens=_optional_int_or_none(kw, "budget_tokens"),
-        strategy=_optional_strategy(kw),
+        entity_ids=entity_ids,
+        budget_tokens=budget_tokens,
+        strategy="local",
     )
 
 

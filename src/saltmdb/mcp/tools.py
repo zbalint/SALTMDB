@@ -1077,51 +1077,73 @@ def get_related_memories(
 
 @mcp.tool()
 def retrieve_context(
-    query: str,
-    limit: int | None = None,
+    entity_ids: list[str] | None = None,
+    query: str | None = None,
     budget_tokens: int | None = None,
     strategy: Literal["local", "global"] | None = None,
 ) -> dict:
-    """Assembles graph-aware, budget-bounded local context for a query in one call: primary search
-    hits, one-hop predicate-allowlisted graph expansion, contradiction/conflict-set surfacing,
-    lifecycle/supersession history, and deterministic token-budget packing -- everything
-    search_memory + get_related_memories + get_lineage would otherwise require composing by hand.
+    """Assemble a budget-bounded memory context around a known anchor in one call: one-hop graph
+    expansion, contradiction surfacing, lifecycle history, and token-budget packing -- everything
+    get_related_memories + get_lineage would otherwise require composing by hand. This tool does
+    not search; find the memory you want with search_memory first, then hand its id here to pull
+    in what's connected to it. Using only search_memory or only retrieve_context is a usage
+    anti-pattern -- they are complementary, not alternatives.
 
-    Returns one memories[] array (each item tagged inclusion: "primary"|"expansion"|
-    "conflict_only", plus a retrieval_provenance explaining how it entered the result), the
-    in-network edges directly connecting primary hits, a lineage map for every surfaced head with a
-    known supersession chain (contradiction-flagged where relevant), conflict_sets for any
-    unresolved contradiction touching this result (a lifecycle-resolved one surfaces via lineage,
-    never here), and metadata.fan_out/metadata.budget truncation accounting. A primary-hit item may
-    also include relevance_preview/relevance_preview_meta -- the same query-focused extractive
-    preview search_memory returns, carried through unchanged (see search_memory's own description
-    for the field's exact semantics and budget-degradation contract); expansion/conflict_only items
-    never carry it, since they were never matched against the query directly.
+    Pass exactly one of entity_ids or query, matching your strategy -- never both, never neither.
+    strategy="local" (default): entity_ids is required -- one or more memory IDs you already have
+    (typically from your own prior search_memory call, get_lineage, or get_related_memories); each
+    is resolved the same flexible way get_memory resolves entity_id (full ID, short prefix, or
+    exact title). Every unresolvable or ambiguous id in the list rejects the whole call -- no
+    silent partial-list degradation. strategy="global": query is required instead (unchanged) --
+    it seeds from the nearest community-detection clusters by query-embedding similarity for
+    whole-topic breadth, trading graph-local depth for topic coverage; this strategy has its own
+    separate, not-yet-redesigned entity-anchored seeding path tracked in a follow-up effort, not
+    available yet. budget_tokens caps the total token payload of `memories[]` (server
+    default/ceiling apply if omitted).
 
-    limit controls how many primary search hits seed expansion (default 5, matching search_memory's
-    own default). budget_tokens caps the total token payload of memories[] (server default and hard
-    ceiling apply if omitted). All other traversal behavior -- which relation predicates expand
-    context, how far, and in which direction -- is fixed for this tool and not caller-configurable.
-    strategy selects the retrieval mode: "local" (the default) is the existing bounded one-hop-plus
-    expansion described above. "global" instead seeds from whichever leaf community-detection
-    clusters (see Milestone C) are nearest the query by embedding similarity, synthesizing a
-    representative-plus-ranked-members result per seeded community for whole-topic breadth rather
-    than one-hop-local depth -- it never runs the primary-search/expansion/conflict/lineage pipeline
-    above at all, so edges/lineage/conflict_sets are always empty and memories[] items instead carry
-    inclusion "community_representative"|"community_member" with a different retrieval_provenance
-    shape (community_id plus a similarity score) and metadata carries a new metadata.community
-    namespace in place of metadata.fan_out.
+    **Return shape note**: on success this tool does NOT use the `{"status": "ok", "data": ...}`
+    envelope other SALTMDB tools use -- it returns its own bespoke top-level shape directly. For
+    `strategy="local"` that top-level shape echoes the caller's own anchor back as `entity_ids`:
+    `{"entity_ids": [...], "memories": [...], "edges": [...], "lineage": {...},
+    "conflict_sets": [...], "metadata": {...}}`. For `strategy="global"` it instead echoes `query`
+    in that same top-level slot (unchanged) -- the two strategies' envelopes differ in this one
+    field while that asymmetry persists. Only a caller-input problem (a missing/empty/wrong-type
+    `entity_ids` for `local`, an unresolvable or ambiguous id anywhere in the list, or a missing
+    `query` for `global`) returns the standard `{"status": "rejected", "errors": [{"code": ...,
+    "field": ...}]}` envelope instead -- check for a top-level `"status"` key to distinguish the
+    two: its presence means rejection, its absence means the bespoke success shape above.
 
+    Each `memories[]` item is tagged `inclusion`: `"primary"` (a caller-supplied anchor),
+    `"expansion"` (reached via one-hop graph traversal), or `"conflict_only"` (force-included
+    because it contradicts something else in the result) for `strategy="local"`; or
+    `"community_representative"`/`"community_member"` for `strategy="global"` (which never
+    populates `edges`/`lineage`/`conflict_sets` at all -- always `[]`/`{}` -- and uses
+    `metadata.community` in place of `metadata.fan_out`). Every item's own `retrieval_provenance`
+    explains how it entered the result. Unlike before, a `strategy="local"` primary item never
+    carries `relevance_preview`/`relevance_preview_meta` -- those were derived from query text,
+    which this strategy no longer has; you already know why you picked that anchor.
+
+    Example: `retrieve_context(entity_ids=["a1b2c3d4"], budget_tokens=4000)`.
     """
     owner_id_ = _effective_owner()
+    if strategy == "global":
+        return _backend_or_raise().call(
+            "retrieve_context",
+            {
+                "entity_ids": None,
+                "query": query,
+                "budget_tokens": budget_tokens,
+                "strategy": "global",
+                "owner_id": owner_id_,
+            },
+        )
     return _backend_or_raise().call(
         "retrieve_context",
         {
-            "query": query,
-            "limit": limit,
+            "entity_ids": entity_ids,
+            "query": None,
             "budget_tokens": budget_tokens,
-            "strategy": strategy if strategy is not None else "local",
-            "owner_id": owner_id_,
+            "strategy": "local",
         },
     )
 

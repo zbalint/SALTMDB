@@ -405,9 +405,7 @@ class TestOrphanCommunityService(unittest.TestCase):
         recompute_result = recompute_communities(db_connection=self.conn)
         self.assertEqual(recompute_result["status"], "recomputed")
         result = assemble_retrieve_context(
-            "orphan composition query",
-            "orphan-community-test",
-            limit=1,
+            entity_ids=[orphan],
             db_connection=self.conn,
         )
 

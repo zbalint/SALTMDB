@@ -86,16 +86,12 @@ class TestRetrieveContextService(unittest.TestCase):
 
     def _assemble(
         self,
-        query: str,
+        entity_ids: list[str],
         *,
-        limit: int | None = None,
         budget_tokens: int | None = None,
-        owner_id: str = "retrieve-context-test",
     ) -> dict[str, Any]:
         return assemble_retrieve_context(
-            query,
-            owner_id,
-            limit=limit,
+            entity_ids,
             budget_tokens=budget_tokens,
             db_connection=self.conn,
         )
@@ -146,69 +142,20 @@ class TestRetrieveContextService(unittest.TestCase):
         )
         return primary_hits, expansion_result, budget_result
 
-    def _assert_empty_envelope(self, result: dict[str, Any], query: str) -> None:
-        self.assertEqual(
-            result,
-            {
-                "query": query,
-                "memories": [],
-                "edges": [],
-                "lineage": {},
-                "conflict_sets": [],
-                "metadata": {
-                    "strategy": "local",
-                    "fan_out": {
-                        "cap": 0,
-                        "eligible_count": 0,
-                        "truncated": False,
-                        "dropped_count": 0,
-                        "conflict_reserve": {
-                            "cap": config.CONTEXT_EXPANSION_CONTRADICTS_CAP,
-                            "eligible_count": 0,
-                            "truncated": False,
-                            "dropped_count": 0,
-                        },
-                        "orphan_community_reserve": {
-                            "cap": config.CONTEXT_EXPANSION_ORPHAN_COMMUNITY_CAP,
-                            "eligible_count": 0,
-                            "truncated": False,
-                            "dropped_count": 0,
-                        },
-                    },
-                    "budget": {
-                        "unit": "tokens",
-                        "limit": config.CONTEXT_BUDGET_DEFAULT_TOKENS,
-                        "used": 0,
-                        "primary_truncated": False,
-                        "primary_dropped_count": 0,
-                        "expansion_truncated": False,
-                        "expansion_dropped_count": 0,
-                        "conflict_reserve_tokens_used": 0,
-                        "orphan_community_reserve_tokens_used": 0,
-                    },
-                },
-            },
-        )
+    def test_missing_or_empty_entity_ids_is_rejected(self):
+        for entity_ids in (None, []):
+            result = assemble_retrieve_context(entity_ids=entity_ids, db_connection=self.conn)
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+            self.assertEqual(result["errors"][0]["field"], "entity_ids")
 
-    def test_zero_primary_hits_compose_the_all_empty_envelope(self):
-        query = "no matching primary hits"
-        with patch(
-            "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
-            return_value=[],
-        ):
-            result = self._assemble(query)
-
-        self._assert_empty_envelope(result, query)
-
-    def test_search_internal_error_sentinel_composes_as_empty_not_fatal(self):
-        query = "upstream failure"
-        with patch(
-            "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
-            return_value=[{"error": "boom"}],
-        ):
-            result = self._assemble(query)
-
-        self._assert_empty_envelope(result, query)
+    def test_unknown_entity_id_rejects_whole_anchor_set(self):
+        primary = self._memory("Resolvable anchor")
+        for entity_ids in ([str(uuid.uuid4())], [primary, str(uuid.uuid4())]):
+            result = self._assemble(entity_ids)
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+            self.assertEqual(result["errors"][0]["field"], "entity_ids")
 
     def test_single_dependency_chain_surfaces_primary_and_expansion_without_conflicts(self):
         primary = self._memory(
@@ -218,7 +165,7 @@ class TestRetrieveContextService(unittest.TestCase):
         expansion = self._memory("Dependency chain expansion")
         self._relation(primary, expansion, "depends_on")
 
-        result = self._assemble("single-dependency-query", limit=1)
+        result = self._assemble([primary])
 
         self.assertEqual(
             [memory["entity_id"] for memory in result["memories"]], [primary, expansion]
@@ -227,7 +174,7 @@ class TestRetrieveContextService(unittest.TestCase):
         self.assertEqual(primary_row["inclusion"], "primary")
         self.assertEqual(
             primary_row["retrieval_provenance"],
-            [{"reason": "primary_search", "rank": 1}],
+            [{"reason": "caller_supplied_anchor", "rank": 1}],
         )
         self.assertEqual(primary_row["title"], "Dependency chain primary")
         self.assertEqual(primary_row["memory_type"], "fact")
@@ -247,7 +194,7 @@ class TestRetrieveContextService(unittest.TestCase):
         self.assertEqual(result["edges"], [])
         self.assertEqual(result["conflict_sets"], [])
 
-    def test_primary_hit_surfaces_relevance_preview_expansion_hit_does_not(self):
+    def test_primary_hit_never_carries_relevance_preview_under_entity_ids_anchor(self):
         long_content = (
             "# Retrieve Context Preview Fixture\n\n"
             "The retrieve-context-preview-needle sits in this opening section.\n\n"
@@ -281,24 +228,14 @@ class TestRetrieveContextService(unittest.TestCase):
             )
         self.conn.commit()
 
-        result = self._assemble("retrieve-context-preview-needle")
+        result = self._assemble([primary])
 
         memories_by_id = {memory["entity_id"]: memory for memory in result["memories"]}
         primary_row = memories_by_id[primary]
         expansion_row = memories_by_id[expansion]
         self.assertEqual(primary_row["inclusion"], "primary")
-        self.assertIsInstance(primary_row["relevance_preview"], str)
-        self.assertTrue(primary_row["relevance_preview"])
-        self.assertIn(primary_row["relevance_preview"], long_content)
-        self.assertEqual(
-            primary_row["relevance_preview_meta"],
-            {
-                "auto_generated": True,
-                "extractive": True,
-                "query_specific": True,
-                "complete": False,
-            },
-        )
+        self.assertNotIn("relevance_preview", primary_row)
+        self.assertNotIn("relevance_preview_meta", primary_row)
         self.assertEqual(expansion_row["inclusion"], "expansion")
         self.assertNotIn("relevance_preview", expansion_row)
         self.assertNotIn("relevance_preview_meta", expansion_row)
@@ -309,7 +246,7 @@ class TestRetrieveContextService(unittest.TestCase):
         primary_b = self._memory("In-network primary B", f"{query} second")
         relation_id = self._relation(primary_a, primary_b, "depends_on")
 
-        result = self._assemble(query, limit=2)
+        result = self._assemble([primary_a, primary_b])
 
         self.assertEqual(
             {
@@ -342,7 +279,7 @@ class TestRetrieveContextService(unittest.TestCase):
             self._raw_relation(predecessor, ancestor, "supersedes")
             predecessor = ancestor
 
-        result = self._assemble("supersession-chain-query", limit=1)
+        result = self._assemble([head])
 
         self.assertEqual(set(result["lineage"]), {head})
         self.assertEqual(result["lineage"][head]["current"]["id"], head)
@@ -373,11 +310,7 @@ class TestRetrieveContextService(unittest.TestCase):
         )
         self.assertIn(dropped_head, packed["dropped_entity_ids"]["expansion"])
 
-        result = self._assemble(
-            "lineage-prune-query",
-            limit=1,
-            budget_tokens=primary_tokens,
-        )
+        result = self._assemble([primary], budget_tokens=primary_tokens)
 
         visible_ids = {memory["entity_id"] for memory in result["memories"]}
         self.assertNotIn(dropped_head, visible_ids)
@@ -395,7 +328,7 @@ class TestRetrieveContextService(unittest.TestCase):
         conflict_only = self._memory("Unresolved contradiction member")
         self._raw_relation(primary, conflict_only, "contradicts")
 
-        result = self._assemble("unresolved-contradiction-query", limit=1)
+        result = self._assemble([primary])
 
         rows_by_id = {memory["entity_id"]: memory for memory in result["memories"]}
         self.assertEqual(rows_by_id[conflict_only]["inclusion"], "conflict_only")
@@ -421,7 +354,7 @@ class TestRetrieveContextService(unittest.TestCase):
         self.conn.execute("UPDATE entities SET status='archived' WHERE id=?", (ancestor,))
         self.conn.commit()
 
-        result = self._assemble("resolved-contradiction-query", limit=1)
+        result = self._assemble([head])
 
         self.assertEqual(result["conflict_sets"], [])
         lineage = result["lineage"][head]
@@ -452,11 +385,7 @@ class TestRetrieveContextService(unittest.TestCase):
         )
         self.assertIn(expansion, packed["dropped_entity_ids"]["expansion"])
 
-        result = self._assemble(
-            "equal-visibility-query",
-            limit=1,
-            budget_tokens=primary_tokens,
-        )
+        result = self._assemble([primary], budget_tokens=primary_tokens)
 
         expansion_row = next(
             memory for memory in result["memories"] if memory["entity_id"] == expansion
@@ -496,11 +425,7 @@ class TestRetrieveContextService(unittest.TestCase):
             {conflict_expansion, ordinary_expansion},
         )
 
-        result = self._assemble(
-            "selective-reconciliation-query",
-            limit=1,
-            budget_tokens=primary_tokens,
-        )
+        result = self._assemble([primary], budget_tokens=primary_tokens)
 
         visible_ids = {memory["entity_id"] for memory in result["memories"]}
         self.assertIn(conflict_expansion, visible_ids)
@@ -517,7 +442,7 @@ class TestRetrieveContextService(unittest.TestCase):
         for neighbor in neighbors:
             self._relation(primary, neighbor, "depends_on")
 
-        result = self._assemble("fan-out-cap-query", limit=1)
+        result = self._assemble([primary])
 
         fan_out = result["metadata"]["fan_out"]
         cap = config.CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS
@@ -532,22 +457,6 @@ class TestRetrieveContextService(unittest.TestCase):
             sorted(neighbors)[:cap],
         )
 
-    def test_limit_one_honors_primary_search_count_before_expansion(self):
-        query = "primary-limit-query"
-        primary_a = self._memory("Limit primary A", f"{query} first")
-        primary_b = self._memory("Limit primary B", f"{query} second")
-
-        result = self._assemble(query, limit=1)
-
-        primary_rows = [memory for memory in result["memories"] if memory["inclusion"] == "primary"]
-        self.assertEqual(len(primary_rows), 1)
-        self.assertEqual(
-            primary_rows[0]["retrieval_provenance"], [{"reason": "primary_search", "rank": 1}]
-        )
-        self.assertEqual(
-            result["metadata"]["fan_out"]["cap"], config.CONTEXT_EXPANSION_TOP_K_RELATIONSHIPS
-        )
-        self.assertIn(primary_rows[0]["entity_id"], {primary_a, primary_b})
 
     def test_budget_tokens_above_ceiling_reports_configured_maximum(self):
         primary = self._memory(
@@ -555,11 +464,7 @@ class TestRetrieveContextService(unittest.TestCase):
             "budget-ceiling-query primary content",
         )
 
-        result = self._assemble(
-            "budget-ceiling-query",
-            limit=1,
-            budget_tokens=config.CONTEXT_BUDGET_MAX_TOKENS + 100_000,
-        )
+        result = self._assemble([primary], budget_tokens=config.CONTEXT_BUDGET_MAX_TOKENS + 100_000)
 
         self.assertEqual(result["metadata"]["budget"]["limit"], config.CONTEXT_BUDGET_MAX_TOKENS)
         self.assertIn(primary, {memory["entity_id"] for memory in result["memories"]})
@@ -599,19 +504,12 @@ class TestRetrieveContextService(unittest.TestCase):
                 "dropped_count": 0,
             },
         }
-        with (
-            patch(
-                "saltmdb.domain.services.retrieve_context_service.expand_context_candidates",
-                return_value=expansion_result,
-            ) as expand_context_candidates_mock,
-            patch(
-                "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
-                return_value=primary_hits,
-            ) as search_memory_mock,
-        ):
-            result = self._assemble("stale-conflict-query", limit=1)
+        with patch(
+            "saltmdb.domain.services.retrieve_context_service.expand_context_candidates",
+            return_value=expansion_result,
+        ) as expand_context_candidates_mock:
+            result = self._assemble([primary])
 
-        search_memory_mock.assert_called_once()
         expand_context_candidates_mock.assert_called_once()
         stale_row = next(memory for memory in result["memories"] if memory["entity_id"] == missing)
         self.assertEqual(stale_row["memory_type"], "unknown")
@@ -627,30 +525,11 @@ class TestRetrieveContextService(unittest.TestCase):
             "saltmdb.domain.services.retrieve_context_service.get_connection",
             wraps=real_get_connection,
         ) as get_connection:
-            result = assemble_retrieve_context(
-                "single-connection-query",
-                "retrieve-context-test",
-                limit=1,
-                db_path=self.db_path,
-            )
+            result = assemble_retrieve_context(entity_ids=[primary], db_path=self.db_path)
 
         self.assertIn(primary, {memory["entity_id"] for memory in result["memories"]})
         self.assertLessEqual(get_connection.call_count, 1)
 
-    def test_connection_only_passes_connection_database_path_to_search(self):
-        query = "connection-only-db-path"
-        with patch(
-            "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
-            return_value=[],
-        ) as search_memory:
-            result = assemble_retrieve_context(
-                query,
-                "retrieve-context-test",
-                db_connection=self.conn,
-            )
-
-        self._assert_empty_envelope(result, query)
-        self.assertEqual(search_memory.call_args.kwargs["db_path"], self.db_path)
 
     def test_global_populated_leaf_community_uses_community_pipeline_only(self):
         query = "global-community-query"
@@ -716,8 +595,7 @@ class TestRetrieveContextService(unittest.TestCase):
             ) as embed_text,
         ):
             result = assemble_retrieve_context(
-                query,
-                "retrieve-context-test",
+                query=query,
                 strategy="global",
                 budget_tokens=1000,
                 db_path=self.db_path,
@@ -822,8 +700,7 @@ class TestRetrieveContextService(unittest.TestCase):
             return_value=query_vector,
         ):
             result = assemble_retrieve_context(
-                query,
-                "retrieve-context-test",
+                query=query,
                 strategy="global",
                 db_connection=self.conn,
             )
@@ -880,21 +757,11 @@ class TestRetrieveContextService(unittest.TestCase):
         self.assertNotIn("fan_out", result["metadata"])
 
     def test_explicit_local_strategy_matches_omitted_strategy(self):
-        query = "local-strategy-regression"
-        with patch(
-            "saltmdb.domain.services.retrieve_context_service.memory_service.search_memory",
-            return_value=[],
-        ):
-            omitted = self._assemble(query)
-            explicit = assemble_retrieve_context(
-                query,
-                "retrieve-context-test",
-                strategy="local",
-                db_connection=self.conn,
-            )
-
+        fixture = self._memory("Local strategy fixture")
+        omitted = self._assemble([fixture])
+        explicit = assemble_retrieve_context(entity_ids=[fixture], strategy="local", db_connection=self.conn)
         self.assertEqual(omitted, explicit)
-        self._assert_empty_envelope(omitted, query)
+        self.assertEqual([memory["entity_id"] for memory in omitted["memories"] if memory["inclusion"] == "primary"], [fixture])
 
 
 if __name__ == "__main__":
