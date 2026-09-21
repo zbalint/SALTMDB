@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED** (Amendment 1 applied to §4.1, Amendment 2 applied to §2.2, both pre-implementation, see those sections — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` twice before editing any tracked file; both adjudicated and fixed without touching production or test code)
+**LOCKED** (Amendment 1 applied to §4.1, Amendment 2 applied to §2.2, Amendment 3 applied to §5.6/§9, all pre-implementation, see those sections — OMP correctly reported `BLOCKED — SPEC ADJUDICATION REQUIRED` three times before editing any tracked file; all three adjudicated and fixed without touching production or test code)
 
 **Scope — may edit:**
 - `src/saltmdb/domain/services/retrieve_context_service.py`
@@ -548,7 +548,38 @@ For every call site among these 11 that used `self._assemble(some_query_string, 
 - A test asserting `assemble_retrieve_context(entity_ids=None, db_connection=self.conn)` (and separately, `entity_ids=[]`) returns `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR", "field": "entity_ids"}]}` (mirror the exact assertion style `test_dispatch_requires_string_query_but_allows_empty_string` in `test_retrieve_context_wiring.py` used for its now-removed case).
 - A test asserting a single unresolvable id (a well-formed but nonexistent UUID) in an otherwise-valid `entity_ids` list returns `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID", "field": "entity_ids"}]}`, and that the whole call is rejected even when the list also contains a real, resolvable id (no partial success).
 
-**5.6 — `test_global_populated_leaf_community_uses_community_pipeline_only`, `test_global_without_communities_returns_empty_hierarchy_envelope`**: untouched, including their internal `patch("saltmdb.domain.services.retrieve_context_service.memory_service.search_memory")` context managers (harmless vestigial mocks on the `global` path both before and after this change) — do not "clean these up," their continued presence is exactly why §2.1 keeps the `memory_service` import alive. Confirm at edit time that neither test happens to also pass a now-removed `limit`/`owner_id` kwarg (positional-args check only; if either does, drop just that kwarg, changing nothing else).
+**5.6 — `test_global_populated_leaf_community_uses_community_pipeline_only`, `test_global_without_communities_returns_empty_hierarchy_envelope`**
+
+**Amendment 3 (post-lock, pre-implementation adjudication)**: originally specified as fully "untouched." That was wrong for one exact line in each, caught live by OMP (`BLOCKED — SPEC ADJUDICATION REQUIRED`, third round) after applying only the §2.2 service replacement and running these two tests fresh: both failed on the wrong string reaching `embed_text`/the result envelope (`embed_text('retrieve-context-test')` instead of `embed_text('global-community-query')`, and the mirror on the empty-envelope test), confirming a real parameter-order collision, not a false positive. Root cause, verified directly against this worktree's actual test source (`tests/test_retrieve_context_service.py:718-724` and `:824-829`): both calls are positional --
+```python
+assemble_retrieve_context(query, "retrieve-context-test", strategy="global", budget_tokens=1000, db_path=self.db_path)
+```
+and
+```python
+assemble_retrieve_context(query, "retrieve-context-test", strategy="global", db_connection=self.conn)
+```
+Under the *pre-change* signature (`query: str, owner_id: str | None, *, ...`), the first positional bound to `query` and the second to `owner_id` -- correctly, since that was the exact old order. Under §2.2's new signature (`entity_ids: list[str] | None = None, query: str | None = None, *, ...`), the same two positionals now bind `entity_ids = query_string` and `query = "retrieve-context-test"` -- silently wrong, not a crash, which is exactly why it only surfaced by running the tests rather than by static inspection. The original §5.6 instruction ("confirm neither test passes a now-removed `limit`/`owner_id` kwarg... if either does, drop just that kwarg") does not cover this: `"retrieve-context-test"` is not a *keyword* argument that can simply be dropped, it is the second *positional* argument, and dropping it without also converting the first positional to a keyword would leave `query` bound by position to whatever argument (if any) now follows -- not a safe mechanical no-op.
+
+Two ways to resolve this were weighed: (a) reorder §2.2's production signature to put `query` first (restoring positional compatibility for these two tests), or (b) rewrite these two test calls from positional to keyword form, since `owner_id` was dead weight for the `global` path even on the *pre-change* tree (confirmed via §1's own already-locked finding: `_assemble_global_context` never took `owner_id` to begin with, so `"retrieve-context-test"` was already being silently discarded before this spec, not merely repurposed by it). (a) was rejected: §5.1's `_assemble` test helper (already in-scope, already being rewritten by this spec, not "untouched") relies on `entity_ids` being the *first* positional parameter (`assemble_retrieve_context(entity_ids, budget_tokens=budget_tokens, db_connection=self.conn)`) -- reordering the signature would just move the identical class of silent-rebinding bug onto that call site instead of fixing it, at the cost of also touching production code to preserve two already-legacy test calls' incidental syntax. (b) is smaller, touches only the two lines actually responsible, and needs no production-code change beyond what §2.2 already specifies.
+
+**Resolution**: these two tests are no longer described as fully untouched. Every line in each stays exactly as-is (setup, patches, assertions, disposition) **except** the one call line, which changes from positional to keyword form, dropping the dead `"retrieve-context-test"` argument entirely (it corresponded to `owner_id`, fully removed from the signature per §1/§2.2, and was never consumed by the `global` path in the first place):
+```python
+result = assemble_retrieve_context(
+    query=query,
+    strategy="global",
+    budget_tokens=1000,
+    db_path=self.db_path,
+)
+```
+for `test_global_populated_leaf_community_uses_community_pipeline_only` (was lines 718-724 of the pre-amendment file), and
+```python
+result = assemble_retrieve_context(
+    query=query,
+    strategy="global",
+    db_connection=self.conn,
+)
+```
+for `test_global_without_communities_returns_empty_hierarchy_envelope` (was lines 824-829 of the pre-amendment file). Their internal `patch("saltmdb.domain.services.retrieve_context_service.memory_service.search_memory")` context managers, and every other line of both tests, are still genuinely untouched -- do not "clean these up," their continued presence is exactly why §2.1 keeps the `memory_service` import alive. This amendment does not reopen §5.1-§5.5/§5.7 or interact with Amendments 1/2 -- a separate, independently-discovered gap in the same locked section.
 
 **5.7 — `_assert_empty_envelope` helper (line 151)**: after §5.3/§5.4's edits, every one of its four callers (lines 203, 213, 654, 899 of the pre-change file) is gone — three deleted outright (§5.4), one (`test_explicit_local_strategy_matches_omitted_strategy`) rewritten to assert a populated result instead (§5.3). Remove this helper method entirely rather than leave it dead.
 
@@ -657,13 +688,13 @@ PYTHONPATH=src uv run pytest tests/test_retrieve_context_service.py tests/test_r
 
 Must exit 0. Pre-change baseline (run fresh this session, on `context-aware-search` tip `c7e977f`, before any edit in this spec): **40 passed** (`test_retrieve_context_service.py`: 20, `test_retrieve_context_wiring.py`: 5, `test_orphan_community_service.py`: 15). Post-change expected count, worked from §5-§7's exact dispositions, not re-derived: `test_retrieve_context_service.py` goes from 20 to 20 − 4 (§5.4 deletions) + 2 (§5.5 new) = 18 (renames in §5.3 change no count); `test_retrieve_context_wiring.py` stays at 5 (§6.2 replaces one method's body with a wider one covering more sub-cases, still one method — see §6.2's own wording); `test_orphan_community_service.py` stays at 15 (one test's body edited, §7.1, none added or removed). Total: **38 passed, 0 failed**. This is an exact expected count, not a range — a different total means either an §5-§7 disposition was missed or an extra test was added/removed that this spec did not call for; verify by diffing the actual test-method list against §5-§7's own enumeration, not just the aggregate number.
 
-Additionally, confirm no remaining reference to the removed call shape anywhere in the tree. This exact command was run against the pre-change tree at lock time and found exactly 8 matching call sites, individually traced to their owning test/function: the `_assemble` helper definition (§5.1), `test_one_connection_is_shared_across_search_and_graph_pipeline` (§5.2, converts), `test_connection_only_passes_connection_database_path_to_search` (§5.4, deletes), `test_global_populated_leaf_community_uses_community_pipeline_only` and `test_global_without_communities_returns_empty_hierarchy_envelope` (§5.6, both untouched — each calls `assemble_retrieve_context(query, "retrieve-context-test", strategy="global", ...)` positionally), `test_explicit_local_strategy_matches_omitted_strategy` (§5.3, rewrites), `dispatch.py`'s one call (§4.1, restructured — its `global` branch keeps matching), and `test_orphan_community_service.py`'s scenario 14 (§7.1, converts). `-U` (multiline mode) is required, since every real call site in this codebase wraps its arguments onto the following line rather than passing them inline:
+Additionally, confirm no remaining reference to the removed call shape anywhere in the tree. This exact command was run against the pre-change tree at lock time and found exactly 8 matching call sites, individually traced to their owning test/function: the `_assemble` helper definition (§5.1), `test_one_connection_is_shared_across_search_and_graph_pipeline` (§5.2, converts), `test_connection_only_passes_connection_database_path_to_search` (§5.4, deletes), `test_global_populated_leaf_community_uses_community_pipeline_only` and `test_global_without_communities_returns_empty_hierarchy_envelope` (§5.6 — **per Amendment 3, each gets exactly one line rewritten from positional to keyword form**; on the pre-change tree read at lock time both called `assemble_retrieve_context(query, "retrieve-context-test", strategy="global", ...)` positionally), `test_explicit_local_strategy_matches_omitted_strategy` (§5.3, rewrites), `dispatch.py`'s one call (§4.1, restructured — its `global` branch keeps matching), and `test_orphan_community_service.py`'s scenario 14 (§7.1, converts). `-U` (multiline mode) is required, since every real call site in this codebase wraps its arguments onto the following line rather than passing them inline:
 
 ```bash
 rg -U -n 'assemble_retrieve_context\(\s*\n?\s*(query\b|"[^"]*")' tests/ src/
 ```
 
-After the change, this must return **exactly three two-line matches, no more, no fewer**: `src/saltmdb/daemon/dispatch.py`'s `global` branch (§4.1), and the two untouched global-strategy tests named above in `tests/test_retrieve_context_service.py` (§5.6) — all three are the in-scope-preserved `global` path, not a missed `local` conversion. Any match in `tests/test_orphan_community_service.py`, any match on `test_one_connection_is_shared_across_search_and_graph_pipeline`'s or `test_explicit_local_strategy_matches_omitted_strategy`'s own lines, or a fourth/missing match anywhere, means a call site named in §5/§7 was missed or a `global`-path test was incorrectly touched.
+After the change, this must return **exactly three two-line matches, no more, no fewer**: `src/saltmdb/daemon/dispatch.py`'s `global` branch (§4.1), and the two global-strategy tests named above in `tests/test_retrieve_context_service.py` (§5.6, now in their Amendment-3 keyword form — the regex matches `query=query` on the line right after the opening paren identically to how it matched bare `query`, verified live: `query\b` is word-boundary-terminated by the following `=`, so this pattern's match count and the exact three sites it identifies are unaffected by Amendment 3) — all three are the in-scope-preserved `global` path, not a missed `local` conversion. Any match in `tests/test_orphan_community_service.py`, any match on `test_one_connection_is_shared_across_search_and_graph_pipeline`'s or `test_explicit_local_strategy_matches_omitted_strategy`'s own lines, or a fourth/missing match anywhere, means a call site named in §5/§7 was missed or a `global`-path test was incorrectly touched.
 
 Finally:
 
