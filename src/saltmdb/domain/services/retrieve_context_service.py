@@ -3,11 +3,13 @@
 import logging
 import sqlite3
 from datetime import UTC, datetime
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from saltmdb.config import get_db_path
 from saltmdb.db.connection import close_connection, get_connection
-from saltmdb.domain.services import memory_service
+
+# Required by string-resolved mock.patch targets.
+from saltmdb.domain.services import memory_service  # noqa: F401
 from saltmdb.domain.services.conflict_set_service import assemble_conflict_sets
 from saltmdb.domain.services.context_budget_service import pack_context_budget
 from saltmdb.domain.services.orphan_community_service import find_orphan_community_matches
@@ -17,83 +19,119 @@ from saltmdb.domain.services.context_expansion_service import (
     expand_context_candidates,
 )
 from saltmdb.domain.services.lineage_assembly_service import assemble_lineage
+from saltmdb.utils.envelope import error, rejected
+from saltmdb.utils.text import resolve_entity_ref
 
 logger = logging.getLogger(__name__)
 
 
 def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
-    query: str,
-    owner_id: str | None,
+    entity_ids: list[str] | None = None,
+    query: str | None = None,
     *,
-    limit: int | None = None,
     budget_tokens: int | None = None,
     strategy: str = "local",
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble local graph-aware context from one point-in-time and one database connection."""
+    """Assemble local graph-aware context from one point-in-time and one database connection.
+
+    strategy="local" (default): entity_ids is the required anchor set -- one or more memory IDs
+    the caller already has. strategy="global": query is the required anchor (unchanged; see
+    _assemble_global_context). Both parameters default to None at the signature level only so
+    one function can serve both strategies -- exactly one is semantically required depending on
+    strategy, enforced by the explicit validation block below, not by the type signature itself.
+    """
+    if strategy == "global":
+        if not query or not isinstance(query, str):
+            return rejected(
+                [error("VALIDATION_ERROR", 'query is required for strategy="global"', "query")]
+            )
+    else:
+        if not entity_ids or not isinstance(entity_ids, list):
+            return rejected(
+                [
+                    error(
+                        "VALIDATION_ERROR",
+                        "entity_ids is required and must be a non-empty list",
+                        "entity_ids",
+                    )
+                ]
+            )
+        if not all(isinstance(item, str) and item for item in entity_ids):
+            return rejected(
+                [
+                    error(
+                        "VALIDATION_ERROR",
+                        "entity_ids must be a list of non-empty strings",
+                        "entity_ids",
+                    )
+                ]
+            )
+
     should_close = False
     conn = db_connection
     if conn is None:
         conn = get_connection(db_path or get_db_path())
         should_close = True
-    effective_db_path: str | None
-    if db_path is not None:
-        effective_db_path = db_path
-    elif db_connection is not None:
-        row = cast(tuple[int, str, str], conn.execute("PRAGMA database_list").fetchone())
-        effective_db_path = row[2] or None
-    else:
-        effective_db_path = db_path or get_db_path()
 
     try:
         if strategy == "global":
+            assert query is not None  # narrowed by the validation block above
             return _assemble_global_context(query, budget_tokens, conn)
         pit = datetime.now(UTC).isoformat()
-        search_fn = cast(
-            Callable[..., list[dict[str, Any]] | dict[str, Any]],
-            memory_service.search_memory,
-        )
-        search_result = search_fn(
-            owner_id=owner_id,
-            query_keywords=query,
-            limit=limit if limit is not None else 5,
-            context_id=None,
-            agent_session_id=None,
-            tags_filter=None,
-            memory_type_filter=None,
-            is_core=None,
-            cursor=None,
-            mode="strict",
-            include_related=False,
-            return_diagnostics=False,
-            db_connection=conn,
-            db_path=effective_db_path,
-        )
-        search_hits = cast(list[dict[str, Any]], search_result)
-        if search_hits and "id" not in search_hits[0]:
-            logger.warning(
-                "search_memory reported an internal error for query %r: %s",
-                query,
-                search_hits[0].get("error"),
-            )
-            search_hits = []
 
-        primary_hits = [{"id": hit["id"], "score": hit["score"]} for hit in search_hits]
+        resolved_hits: list[dict[str, Any]] = []
+        unresolved_errors: list[dict[str, Any]] = []
+        for raw_id in cast(list[str], entity_ids):
+            resolved_id, candidates, truncated = resolve_entity_ref(conn, raw_id)
+            if candidates:
+                item = error(
+                    "AMBIGUOUS_ID_PREFIX",
+                    f"ID prefix '{raw_id}' matches multiple memories; provide a longer prefix or full UUID.",
+                    "entity_ids",
+                )
+                item["candidates"] = candidates
+                if truncated:
+                    item["candidates_truncated"] = True
+                unresolved_errors.append(item)
+                continue
+            if not resolved_id:
+                unresolved_errors.append(
+                    error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{raw_id}'.",
+                        "entity_ids",
+                    )
+                )
+                continue
+            row = conn.execute(
+                "SELECT title, memory_type FROM entities WHERE id = ?", (resolved_id,)
+            ).fetchone()
+            if row is None:
+                unresolved_errors.append(
+                    error(
+                        "UNKNOWN_ENTITY_ID",
+                        f"No memory matches entity_id '{raw_id}'.",
+                        "entity_ids",
+                    )
+                )
+                continue
+            resolved_hits.append({"id": resolved_id, "title": row[0], "memory_type": row[1]})
+
+        if unresolved_errors:
+            return rejected(unresolved_errors)
+
+        # No ranking exists for a caller-supplied anchor. A uniform placeholder score makes the
+        # tiebreak term in context_expansion_service.py and conflict_set_service.py's own
+        # max(...) comparisons constant across every candidate, so both sorts fall through
+        # unchanged to their next already-deterministic key -- see spec Why section.
+        primary_hits = [{"id": hit["id"], "score": 1.0} for hit in resolved_hits]
         primary_meta = {
-            hit["id"]: {
-                "title": hit["title"],
-                "memory_type": hit["memory_type"],
-                # relevance_preview/relevance_preview_meta are already computed by the internal
-                # search_memory call above (query-focused extractive preview, see orchestrator.py)
-                # -- surfaced here rather than discarded, per the same optional/budget-degraded
-                # contract search_memory itself uses (absent, not null, when preview was skipped).
-                "relevance_preview": hit.get("relevance_preview"),
-                "relevance_preview_meta": hit.get("relevance_preview_meta"),
-            }
-            for hit in search_hits
+            hit["id"]: {"title": hit["title"], "memory_type": hit["memory_type"]}
+            for hit in resolved_hits
         }
-        original_rank = {hit["id"]: index + 1 for index, hit in enumerate(search_hits)}
+        original_rank = {hit["id"]: index + 1 for index, hit in enumerate(resolved_hits)}
         primary_hit_ids_set = {hit["id"] for hit in primary_hits}
 
         expansion_result = expand_context_candidates(
@@ -198,21 +236,17 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
 
         memories: list[dict[str, Any]] = []
         for entity_id in final_primary_ids:
-            memory_item: dict[str, Any] = {
-                "entity_id": entity_id,
-                "title": primary_meta[entity_id]["title"],
-                "memory_type": primary_meta[entity_id]["memory_type"],
-                "inclusion": "primary",
-                "retrieval_provenance": [
-                    {"reason": "primary_search", "rank": original_rank[entity_id]}
-                ],
-            }
-            if primary_meta[entity_id]["relevance_preview"] is not None:
-                memory_item["relevance_preview"] = primary_meta[entity_id]["relevance_preview"]
-                memory_item["relevance_preview_meta"] = primary_meta[entity_id][
-                    "relevance_preview_meta"
-                ]
-            memories.append(memory_item)
+            memories.append(
+                {
+                    "entity_id": entity_id,
+                    "title": primary_meta[entity_id]["title"],
+                    "memory_type": primary_meta[entity_id]["memory_type"],
+                    "inclusion": "primary",
+                    "retrieval_provenance": [
+                        {"reason": "caller_supplied_anchor", "rank": original_rank[entity_id]}
+                    ],
+                }
+            )
 
         candidates_by_id = {
             candidate["entity_id"]: candidate
@@ -308,7 +342,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
         }
 
         return {
-            "query": query,
+            "entity_ids": entity_ids,
             "memories": memories,
             "edges": edges,
             "lineage": lineage_result,

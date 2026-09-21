@@ -48,70 +48,47 @@ class TestRetrieveContextWiring(unittest.TestCase):
         self.assertNotIn("retrieve_context", protocol.WRITE_TOOLS)
 
     def test_dispatch_forwards_omitted_optional_values_as_none(self):
+        with patch.object(dispatch.retrieve_context_service, "assemble_retrieve_context", return_value={}) as assemble:
+            dispatch._dispatch_retrieve_context(entity_ids=["e1"])
+        assemble.assert_called_once_with(entity_ids=["e1"], budget_tokens=None, strategy="local")
+
+    def test_dispatch_requires_nonempty_entity_ids_list(self):
+        for kwargs, field in (
+            ({}, "entity_ids"),
+            ({"entity_ids": []}, "entity_ids"),
+            ({"entity_ids": ["ok", 123]}, "entity_ids"),
+            ({"entity_ids": ["e1"], "query": "q"}, "query"),
+            ({"strategy": "global", "entity_ids": ["e1"], "query": "q"}, "entity_ids"),
+        ):
+            result = dispatch._dispatch_retrieve_context(**kwargs)
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+            self.assertEqual(result["errors"][0]["field"], field)
         with patch.object(
             dispatch.retrieve_context_service,
             "assemble_retrieve_context",
             return_value={},
         ) as assemble:
-            dispatch._dispatch_retrieve_context(query="q", owner_id="owner")
-
+            dispatch._dispatch_retrieve_context(entity_ids=["e1", "e2"])
         assemble.assert_called_once_with(
-            query="q",
-            owner_id="owner",
-            limit=None,
-            budget_tokens=None,
-            strategy="local",
-        )
-
-    def test_dispatch_requires_string_query_but_allows_empty_string(self):
-        with self.assertRaises(ValueError):
-            dispatch._dispatch_retrieve_context(owner_id="owner")
-        with self.assertRaises(ValueError):
-            dispatch._dispatch_retrieve_context(query=123, owner_id="owner")
-
-        with patch.object(
-            dispatch.retrieve_context_service,
-            "assemble_retrieve_context",
-            return_value={},
-        ) as assemble:
-            dispatch._dispatch_retrieve_context(query="", owner_id="owner")
-
-        assemble.assert_called_once_with(
-            query="",
-            owner_id="owner",
-            limit=None,
+            entity_ids=["e1", "e2"],
             budget_tokens=None,
             strategy="local",
         )
 
     def test_public_schema_exposes_query_controls_without_owner_id(self):
-        self.assertEqual(
-            list(inspect.signature(tools.retrieve_context).parameters),
-            ["query", "limit", "budget_tokens", "strategy"],
-        )
+        self.assertEqual(list(inspect.signature(tools.retrieve_context).parameters), ["entity_ids", "query", "budget_tokens", "strategy"])
         self.assertNotIn("owner_id", inspect.signature(tools.retrieve_context).parameters)
         registered = tools.mcp._tool_manager._tools["retrieve_context"]
         self.assertNotIn("owner_id", registered.parameters.get("properties", {}))
 
     def test_public_tool_reaches_real_dispatch_and_returns_envelope(self):
-        query = "wiring-end-to-end-query"
-        result = store_memory(
-            content=f"{query} fixture body",
-            title="Wiring end-to-end memory",
-            owner_id="wiring-owner",
-            db_connection=self.conn,
-        )
-        if not isinstance(result, dict):
-            self.fail(f"fixture store failed: {result}")
+        result = store_memory(content="Wiring end-to-end memory fixture body", title="Wiring end-to-end memory", owner_id="wiring-owner", db_connection=self.conn)
         self.assertEqual(result["status"], "ok")
-
-        envelope = tools.retrieve_context(query=query, limit=1)
-
-        self.assertEqual(
-            set(envelope),
-            {"query", "memories", "edges", "lineage", "conflict_sets", "metadata"},
-        )
-        self.assertEqual(envelope["query"], query)
+        entity_id = result["data"]["id"]
+        envelope = tools.retrieve_context(entity_ids=[entity_id])
+        self.assertEqual(set(envelope), {"entity_ids", "memories", "edges", "lineage", "conflict_sets", "metadata"})
+        self.assertEqual(envelope["entity_ids"], [entity_id])
 
 
 if __name__ == "__main__":
