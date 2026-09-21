@@ -1029,17 +1029,18 @@ def revise_memory(
     reissuing the same call.
 
     Example: `revise_memory(entity_id="abc123", title="[Worker] Request timeout", content="The
-    worker request timeout is 30 seconds.", reason="Corrected the unit from milliseconds.")` --
-    `tags`/`context_id`/`scope`/`memory_type` all omitted here are inherited from `abc123`
-    unchanged.
+    worker request timeout is 30 seconds.", reason="Corrected the unit from milliseconds.",
+    repoint_relations=True)` -- `tags`/`context_id`/`scope`/`memory_type` all omitted here are
+    inherited from `abc123` unchanged; `repoint_relations=True` carries every edge `abc123` already
+    had onto the new entity automatically.
 
-    `repoint_relations` (default False) opts in to server-side repointing: every active
-    non-lifecycle edge touching the predecessor is invalidated and recreated onto the new entity
-    atomically, instead of leaving `orphaned_semantic_edges` for you to walk and repoint by hand
-    via manage_relation. No predicate/direction filtering -- setting this flag is itself your
-    judgment that the replacement is identity-preserving continuity, not a change that should
-    leave any edge stale on purpose. Leave it False when the revision might invalidate what an
-    existing edge asserted about the old content.
+    Pass `repoint_relations=True` whenever the target has existing edges and this revision is
+    identity-preserving continuity (the common case, since revise_memory is for fixing a flawed
+    *representation*, not changing the underlying fact) -- otherwise the response's
+    `orphaned_semantic_edges` list is left for you to walk and repoint by hand via manage_relation,
+    one call per edge. Leave it False (the default) only when the revision might invalidate what
+    an existing edge asserted about the old content, and stale edges should surface for review
+    instead of silently carrying forward.
     """
     content, content_error = _resolve_content(content, content_file_path)
     if content_error is not None:
