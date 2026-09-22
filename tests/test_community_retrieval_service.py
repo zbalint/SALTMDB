@@ -458,9 +458,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
             _cosine_vector(0.7),
         )
 
-        with patch.object(
-            community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
-        ):
+        with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5):
             with patch.object(
                 community_retrieval_service, "embed_text", return_value=_axis_vector(0)
             ):
@@ -530,9 +528,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
             _cosine_vector(0.6),
         )
 
-        with patch.object(
-            community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5
-        ):
+        with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP", 0.5):
             with patch.object(
                 community_retrieval_service, "CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP", 0.5
             ):

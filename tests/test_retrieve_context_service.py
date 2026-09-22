@@ -459,7 +459,6 @@ class TestRetrieveContextService(unittest.TestCase):
             sorted(neighbors)[:cap],
         )
 
-
     def test_budget_tokens_above_ceiling_reports_configured_maximum(self):
         primary = self._memory(
             "Budget ceiling primary",
@@ -531,7 +530,6 @@ class TestRetrieveContextService(unittest.TestCase):
 
         self.assertIn(primary, {memory["entity_id"] for memory in result["memories"]})
         self.assertLessEqual(get_connection.call_count, 1)
-
 
     def test_global_populated_leaf_community_uses_community_pipeline_only(self):
         query = "global-community-query"
@@ -761,9 +759,18 @@ class TestRetrieveContextService(unittest.TestCase):
     def test_explicit_local_strategy_matches_omitted_strategy(self):
         fixture = self._memory("Local strategy fixture")
         omitted = self._assemble([fixture])
-        explicit = assemble_retrieve_context(entity_ids=[fixture], strategy="local", db_connection=self.conn)
+        explicit = assemble_retrieve_context(
+            entity_ids=[fixture], strategy="local", db_connection=self.conn
+        )
         self.assertEqual(omitted, explicit)
-        self.assertEqual([memory["entity_id"] for memory in omitted["memories"] if memory["inclusion"] == "primary"], [fixture])
+        self.assertEqual(
+            [
+                memory["entity_id"]
+                for memory in omitted["memories"]
+                if memory["inclusion"] == "primary"
+            ],
+            [fixture],
+        )
 
 
 if __name__ == "__main__":

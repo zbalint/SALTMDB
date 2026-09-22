@@ -1,4 +1,5 @@
 from typing import Any, Literal, cast
+
 from typing_extensions import TypedDict
 
 import json
@@ -180,6 +181,7 @@ _OWNER_INJECTED_TOOLS = frozenset(
         "get_related_memories",
         "review_core_memory",
         "retrieve_context",
+        "update_memory_metadata",
     }
 )
 
@@ -1181,7 +1183,8 @@ def get_memory(entity_id: str) -> dict:
 
     Explicit retrieval includes archived memories (an archived ID is never silently redirected to
     a successor) and always returns full content, status, and lineage -- unlike search_memory's
-    result items, which carry only a snippet/preview.
+    result items, which carry only a snippet/preview. A private memory owned by another caller
+    resolves as unknown; prefix candidates and lineage include only shared or owned memories.
 
     Returns `{"status": "ok", "data": {"id", "title", "content", "tags", "status", "lineage",
     ...}, "warnings": [...]}`. `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID" |
@@ -1201,6 +1204,7 @@ def inspect_memory(entity_id: str) -> dict:
     short `snippet` (first ~3 non-heading lines, truncated). Use this when you want to confirm a
     memory's identity/metadata/lineage, or aren't yet sure this is the one you want, without
     pulling the full body -- get_memory is the only path to full content once you're sure.
+    Private memories owned by another caller resolve as unknown, including ID prefixes.
 
     Returns `{"status": "ok", "data": {"id", "title", "snippet", "tags", "status", "lineage",
     ...}, "warnings": [...]}`; `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID" |
@@ -1226,6 +1230,8 @@ def get_lineage(
     remain fully visible, so historical provenance is never hidden by an archive.
 
     direction: "ancestors" (default) or "descendants". max_depth caps traversal hops (default 5).
+    Private roots owned by another caller resolve as unknown; hidden lineage nodes and edges
+    are omitted from otherwise visible roots.
 
     Returns `{"status": "ok", "data": {"entity_id": ..., "direction": ..., "root": {...},
     "nodes": [...], "edges": [...], "total": ..., "total_nodes": ..., "graph_exhausted": ...,
@@ -1268,7 +1274,8 @@ def get_related_memories(
     direction="both" (default) walks outbound and inbound edges independently and merges the
     results (a union of two single-direction traversals, not a true mixed-direction walk) --
     pass "outbound" or "inbound" to walk only one. include_inspect=True inlines each returned
-    node's inspect_memory fields (no full content/lineage).
+    node's inspect_memory fields (no full content/lineage). Private roots owned by another caller
+    resolve as unknown; hidden neighbors are omitted.
 
     Returns `{"status": "ok", "data": {"root": {...}, "related_memories": [...],
     "total_related_found": ..., "max_depth": ...}, "warnings": [...]}` -- `related_memories` is
@@ -1305,7 +1312,9 @@ def retrieve_context(
     in what's connected to it. Using only search_memory or only retrieve_context is a usage
     anti-pattern -- they are complementary, not alternatives. No `memories[]` item, of either
     strategy, ever carries full body content -- call get_memory afterward, selectively for
-    whichever returned items you'll actually cite, quote, or act on.
+    whichever returned items you'll actually cite, quote, or act on. Private anchors owned by
+    another caller resolve as unknown. Both strategies include only shared or owned memories
+    in expansion, lineage, conflicts, and community results.
 
     Pass exactly one of entity_ids or query, matching your strategy -- never both, never neither.
     strategy="local" (default): entity_ids is required -- one or more memory IDs you already have
@@ -1376,6 +1385,7 @@ def retrieve_context(
             "query": None,
             "budget_tokens": budget_tokens,
             "strategy": "local",
+            "owner_id": owner_id_,
         },
     )
 
@@ -1500,5 +1510,6 @@ def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
         {
             "entity_id": entity_id,
             "metadata": metadata,
+            "owner_id": _effective_owner(),
         },
     )

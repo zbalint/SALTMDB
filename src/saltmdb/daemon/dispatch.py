@@ -326,7 +326,7 @@ def _dispatch_get_memory(**kw):
         return exc.payload
     fetch = getattr(memory_service, "get_memory", None)
     if fetch is not None:
-        return fetch(entity_id=entity_id)
+        return fetch(entity_id=entity_id, owner_id=kw.get("owner_id"))
     return memory_service.fetch_memory_chunk(entity_id=entity_id)
 
 
@@ -335,7 +335,7 @@ def _dispatch_inspect_memory(**kw):
         entity_id = _required_str(kw, "entity_id")
     except _DispatchValidationError as exc:
         return exc.payload
-    return memory_service.inspect_memory(entity_id=entity_id)
+    return memory_service.inspect_memory(entity_id=entity_id, owner_id=kw.get("owner_id"))
 
 
 def _dispatch_archive_memory(**kw):
@@ -517,6 +517,7 @@ def _dispatch_update_memory_metadata(**kw):
     return memory_service.update_memory_metadata(
         entity_id=entity_id,
         metadata=kw.get("metadata"),
+        owner_id=kw.get("owner_id"),
         agent_session_id=kw.get("agent_session_id"),
     )
 
@@ -561,7 +562,12 @@ def _dispatch_get_lineage(**kw):
     # split across the daemon and domain layers.
     get_lineage = getattr(relation_service, "get_lineage", None)
     if get_lineage is not None:
-        return get_lineage(entity_id=entity_id, direction=direction, max_depth=max_depth)
+        return get_lineage(
+            entity_id=entity_id,
+            direction=direction,
+            max_depth=max_depth,
+            owner_id=kw.get("owner_id"),
+        )
     if direction == "descendants":
         raise RuntimeError("descendant lineage is unavailable until the lineage service is updated")
     return relation_service.analyze_lineage(entity_id=entity_id)
@@ -576,9 +582,12 @@ def _dispatch_get_related_memories(**kw):
             "entity_id": entity_id,
             "max_depth": max_depth,
             "direction": direction,
+            "owner_id": kw.get("owner_id"),
         }
+        include_inspect = False
         if "include_inspect" in kw:
-            related_kwargs["include_inspect"] = _optional_bool(kw, "include_inspect", False)
+            include_inspect = _optional_bool(kw, "include_inspect", False)
+            related_kwargs["include_inspect"] = include_inspect
     except _DispatchValidationError as exc:
         return exc.payload
     get_related = getattr(relation_service, "get_related_memories", None)
@@ -588,11 +597,8 @@ def _dispatch_get_related_memories(**kw):
         root_entity_id=entity_id,
         max_depth=max_depth,
         direction=direction,
-        **(
-            {"include_inspect": related_kwargs["include_inspect"]}
-            if "include_inspect" in related_kwargs
-            else {}
-        ),
+        include_inspect=include_inspect,
+        owner_id=kw.get("owner_id"),
     )
 
 
@@ -634,6 +640,7 @@ def _dispatch_retrieve_context(**kw):
             query=query,
             budget_tokens=budget_tokens,
             strategy="global",
+            owner_id=kw.get("owner_id"),
         )
     entity_ids = kw.get("entity_ids")
     entity_ids_invalid = (
@@ -654,6 +661,7 @@ def _dispatch_retrieve_context(**kw):
         entity_ids=entity_ids,
         budget_tokens=budget_tokens,
         strategy="local",
+        owner_id=kw.get("owner_id"),
     )
 
 

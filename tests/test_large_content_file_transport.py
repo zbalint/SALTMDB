@@ -144,9 +144,7 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         stored = self.conn.execute(
             "SELECT full_content FROM entities WHERE id = ?", (result["data"]["new_id"],)
         ).fetchone()[0]
-        self.assertEqual(
-            stored, "A complete and sufficiently descriptive newer body from a file."
-        )
+        self.assertEqual(stored, "A complete and sufficiently descriptive newer body from a file.")
 
     def test_get_memory_dumps_oversized_content_to_file(self):
         os.environ["SALTMDB_CONTENT_DUMP_DIR"] = tempfile.mkdtemp()

@@ -52,7 +52,9 @@ def resolve_entity_id(conn, input_val: str) -> str | None:
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
 
 
-def resolve_id_prefix(conn, prefix: str) -> tuple[str | None, list[dict], bool]:
+def resolve_id_prefix(
+    conn, prefix: str, owner_id: str | None = None
+) -> tuple[str | None, list[dict], bool]:
     """Resolve a short hex ID prefix (8..31 significant hex digits, dashes allowed) against
     entities.id. Matches active AND archived entities (mirrors fetch_memory_chunk's own lack
     of status filtering on exact-ID lookups -- no new visibility narrowing/widening).
@@ -80,8 +82,10 @@ def resolve_id_prefix(conn, prefix: str) -> tuple[str | None, list[dict], bool]:
     p_lower = p.lower()
     try:
         cursor = conn.execute(
-            "SELECT id, title, status, updated_at FROM entities WHERE id LIKE ? LIMIT 21",
-            (f"{p_lower}%",),
+            "SELECT id, title, status, updated_at FROM entities WHERE id LIKE ?"
+            + (" AND (owner_id = ? OR scope = 'shared')" if owner_id is not None else "")
+            + " LIMIT 21",
+            (f"{p_lower}%", owner_id) if owner_id is not None else (f"{p_lower}%",),
         )
         rows = cursor.fetchall()
     except sqlite3.Error as exc:
@@ -96,7 +100,9 @@ def resolve_id_prefix(conn, prefix: str) -> tuple[str | None, list[dict], bool]:
     return None, [], False
 
 
-def resolve_entity_ref(conn, raw_id: str) -> tuple[str | None, list[dict], bool]:
+def resolve_entity_ref(
+    conn, raw_id: str, owner_id: str | None = None
+) -> tuple[str | None, list[dict], bool]:
     """Composes resolve_entity_id + resolve_id_prefix into the one shared existence-checked
     resolution contract (agent API redesign §4.4): full UUID / title match, falling back to
     short hex-prefix matching when the first pass doesn't land on a real row. Existing
@@ -118,11 +124,23 @@ def resolve_entity_ref(conn, raw_id: str) -> tuple[str | None, list[dict], bool]
     resolved = resolve_entity_id(conn, raw_id)
     if resolved:
         try:
-            if conn.execute("SELECT 1 FROM entities WHERE id = ?", (resolved,)).fetchone():
+            if conn.execute(
+                "SELECT 1 FROM entities WHERE id = ?"
+                + (" AND (owner_id = ? OR scope = 'shared')" if owner_id is not None else ""),
+                (resolved, owner_id) if owner_id is not None else (resolved,),
+            ).fetchone():
                 return resolved, [], False
         except sqlite3.Error as exc:
             logger.debug("Existence check unavailable during entity-ref resolution: %s", exc)
-    prefix_id, candidates, truncated = resolve_id_prefix(conn, raw_id)
+    if owner_id is not None:
+        visible_title = conn.execute(
+            "SELECT id FROM entities WHERE title = ? AND status != 'archived' "
+            "AND (owner_id = ? OR scope = 'shared') ORDER BY updated_at DESC LIMIT 1",
+            (raw_id, owner_id),
+        ).fetchone()
+        if visible_title:
+            return visible_title[0], [], False
+    prefix_id, candidates, truncated = resolve_id_prefix(conn, raw_id, owner_id=owner_id)
     if candidates:
         return None, candidates, truncated
     if prefix_id:

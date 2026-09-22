@@ -45,6 +45,7 @@ def assemble_lineage(
     point_in_time: str | None = None,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
+    owner_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Assemble capped supersession history for every surfaced head candidate."""
     head_candidate_ids: set[str] = {hit["id"] for hit in primary_hits}
@@ -85,6 +86,7 @@ def assemble_lineage(
                 max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
                 point_in_time=pit,
                 db_connection=conn,
+                owner_id=owner_id,
             )
             if "error" in ancestors_result:
                 logger.warning(

@@ -697,7 +697,13 @@ def invalidate_relation(  # noqa: C901
             close_connection(conn)
 
 
-def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
+def _dependency_cte_sql(
+    direction: Literal["outbound", "inbound"],
+    root_id: str,
+    point_in_time: str,
+    max_depth: int,
+    owner_id: str | None,
+) -> tuple[str, list[str | int]]:
     """Builds the recursive-CTE query for one traversal direction. Parametrized purely by
     string substitution of which endpoint anchors/recurses/guards -- for direction="outbound"
     this produces text byte-identical to the query this function replaces, so that path is a
@@ -717,14 +723,29 @@ def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
         anchor_where = "r.target_id = ?"
         recursive_join = "r.target_id = dt.source_id"
         newly_reached = "r.source_id"
-    return f"""
+    visibility = (
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
+        "AND (e.owner_id = ? OR e.scope = 'shared')) "
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
+        "AND (e.owner_id = ? OR e.scope = 'shared'))"
+        if owner_id is not None
+        else ""
+    )
+    params: list[str | int] = [root_id, *([point_in_time] * 4)]
+    if owner_id is not None:
+        params.extend([owner_id, owner_id])
+    params.extend([max_depth, *([point_in_time] * 4)])
+    if owner_id is not None:
+        params.extend([owner_id, owner_id])
+    return (
+        f"""
     WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
         SELECT r.id, r.source_id, r.target_id, r.predicate, 1, r.source_id || '->' || {newly_reached}
         FROM relations r
         WHERE {anchor_where} AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
           AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
           AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?)) {visibility}
 
         UNION ALL
 
@@ -734,7 +755,7 @@ def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
         WHERE dt.depth < ? AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
           AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
           AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+          AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?)) {visibility}
           AND dt.path NOT LIKE '%' || {newly_reached} || '%'
     )
     SELECT dt.id, dt.source_id, e1.title, dt.target_id, e2.title, dt.predicate, dt.depth, dt.path
@@ -742,7 +763,9 @@ def _dependency_cte_sql(direction: Literal["outbound", "inbound"]) -> str:
     JOIN entities e1 ON dt.source_id = e1.id
     JOIN entities e2 ON dt.target_id = e2.id
     ORDER BY dt.depth ASC;
-    """
+    """,
+        params,
+    )
 
 
 def analyze_dependencies(  # noqa: C901, PLR0912
@@ -753,6 +776,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
     db_connection=None,
     db_path: str = None,
     include_inspect: bool = False,
+    owner_id: str | None = None,
 ) -> dict:
     """Recursively traces relational paths using SQL CTEs.
 
@@ -790,8 +814,13 @@ def analyze_dependencies(  # noqa: C901, PLR0912
     pit = point_in_time or datetime.now(UTC).isoformat()
 
     try:
-        cursor = conn.execute("SELECT id, title, status FROM entities WHERE id = ?", (root_id,))
-        root_row = cursor.fetchone()
+        root_row = conn.execute(
+            "SELECT id, title, status FROM entities WHERE id = ?"
+            + (" AND (owner_id = ? OR scope = 'shared')" if owner_id is not None else ""),
+            (root_id, owner_id) if owner_id is not None else (root_id,),
+        ).fetchone()
+        if not root_row and owner_id is not None:
+            return {"error": f"Could not resolve entity '{root_entity_id}'"}
         root_info = (
             {"id": root_row[0], "title": root_row[1], "status": root_row[2]}
             if root_row
@@ -803,10 +832,8 @@ def analyze_dependencies(  # noqa: C901, PLR0912
         )
         tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]] = []
         for d in directions_to_run:
-            cursor = conn.execute(
-                _dependency_cte_sql(d), (root_id, pit, pit, pit, pit, max_depth, pit, pit, pit, pit)
-            )
-            tagged_rows.extend((d, row) for row in cursor.fetchall())
+            sql, params = _dependency_cte_sql(d, root_id, pit, max_depth, owner_id)
+            tagged_rows.extend((d, row) for row in conn.execute(sql, params).fetchall())
         # Global shallowest-first ordering across both directions' independently-ordered result
         # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
         # direction's query happened to find a convergently-reachable relation first (matches
@@ -826,6 +853,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
                 include_lineage=False,
                 touch=False,
                 max_depth=max_depth,
+                owner_id=owner_id,
             )
             if root_inspect is not None:
                 nodes[0].update(root_inspect)
@@ -862,6 +890,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
                         include_lineage=False,
                         touch=False,
                         max_depth=max_depth,
+                        owner_id=owner_id,
                     )
                     if inspected is not None:
                         node.update(inspected)
@@ -944,6 +973,7 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     point_in_time: str = None,
     db_connection=None,
     db_path: str = None,
+    owner_id: str | None = None,
 ) -> dict:
     """Traverse lifecycle lineage in either direction.
 
@@ -978,6 +1008,14 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     pit = point_in_time or datetime.now(UTC).isoformat()
 
     try:
+        if (
+            owner_id is not None
+            and not conn.execute(
+                "SELECT 1 FROM entities WHERE id = ? AND (owner_id = ? OR scope = 'shared')",
+                (target_id, owner_id),
+            ).fetchone()
+        ):
+            return {"error": f"Could not resolve entity '{entity_id}'"}
         root_info = _lineage_node(conn, target_id)
         if max_depth == 0:
             return {
@@ -999,6 +1037,14 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
             AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
             AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
         """
+        visibility = (
+            "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
+            "AND (e.owner_id = ? OR e.scope = 'shared')) "
+            "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
+            "AND (e.owner_id = ? OR e.scope = 'shared'))"
+            if owner_id is not None
+            else ""
+        )
         if direction == "ancestors":
             seed_join = "r.source_id = ?"
             next_join = "r.source_id = l.next_id"
@@ -1018,13 +1064,13 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
                        {next_expression}, '|' || ? || '|' || {next_expression} || '|'
                 FROM relations r
                 WHERE {seed_join} AND r.predicate IN ({predicate_placeholders})
-                  {validity}
+                  {validity} {visibility}
                 UNION ALL
                 SELECT r.id, r.source_id, r.target_id, r.predicate, l.depth + 1,
                        {next_expression}, l.path || {next_expression} || '|'
                 FROM relations r JOIN lineage l ON {next_join}
                 WHERE l.depth < ? AND r.predicate IN ({predicate_placeholders})
-                  {validity}
+                  {validity} {visibility}
                   AND instr(l.path, '|' || {next_expression} || '|') = 0
             )
             SELECT relation_id, source_id, target_id, predicate, depth, next_id
@@ -1033,7 +1079,11 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # Root is repeated in the path seed. Each validity predicate receives pit in
         # SQL order; keep the parameter construction explicit to avoid binding drift.
         params: list[Any] = [target_id, target_id, *_LINEAGE_PREDICATES, pit, pit, pit, pit]
+        if owner_id is not None:
+            params.extend([owner_id, owner_id])
         params.extend([max_depth, *_LINEAGE_PREDICATES, pit, pit, pit, pit])
+        if owner_id is not None:
+            params.extend([owner_id, owner_id])
         rows = conn.execute(query, params).fetchall()
 
         edges: list[dict[str, Any]] = []
@@ -1097,6 +1147,7 @@ def get_lineage(
     point_in_time: str = None,
     db_connection=None,
     db_path: str = None,
+    owner_id: str | None = None,
 ) -> dict:
     """Envelope-shaped wrapper around :func:`_get_lineage_raw`.
 
@@ -1112,6 +1163,7 @@ def get_lineage(
         point_in_time=point_in_time,
         db_connection=db_connection,
         db_path=db_path,
+        owner_id=owner_id,
     )
     if "error" in result:
         return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])
@@ -1166,6 +1218,7 @@ def get_related_memories(
     db_connection=None,
     db_path: str = None,
     include_inspect: bool = False,
+    owner_id: str | None = None,
 ) -> dict:
     """Named graph API for semantic neighbours, backed by ``analyze_dependencies``.
 
@@ -1181,6 +1234,7 @@ def get_related_memories(
         point_in_time=point_in_time,
         direction=direction,
         include_inspect=include_inspect,
+        owner_id=owner_id,
         db_connection=db_connection,
         db_path=db_path,
     )

@@ -31,6 +31,7 @@ def _axis_vector(index: int, dim: int = DIM) -> list[float]:
 
 class TestRelevancePreviewMCP(unittest.TestCase):
     """MCP-level relevance-preview contract through the real tools/backend seam."""
+
     temp_dir: str = ""
     db_path: str = ""
     conn: sqlite3.Connection = cast(sqlite3.Connection, cast(object, None))
@@ -74,9 +75,7 @@ class TestRelevancePreviewMCP(unittest.TestCase):
                 (
                     f"{entity_id}::{chunk_index}",
                     entity_id,
-                    sqlite_vec.serialize_float32(
-                        _axis_vector(0 if chunk_index == 0 else 1)
-                    ),
+                    sqlite_vec.serialize_float32(_axis_vector(0 if chunk_index == 0 else 1)),
                     chunk_index,
                     chunk["char_start"],
                     chunk["char_end"],
@@ -98,19 +97,16 @@ class TestRelevancePreviewMCP(unittest.TestCase):
         )
         self.assertGreater(len(long_content), CHUNK_SIZE_CHARS)
         short_content = "Preview needle appears in this short memory."
-        self.assertEqual(
-            len(chunk_text(short_content, CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)), 1
-        )
+        self.assertEqual(len(chunk_text(short_content, CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)), 1)
 
         long_id = self._store("Long Preview Memory", long_content, "#preview-mcp")
         short_id = self._store("Short Preview Memory", short_content, "#preview-mcp")
         self._seed_chunk_embeddings(long_id)
         self._seed_chunk_embeddings(short_id)
 
-        with patch.object(
-            embedding_service, "embed_query_text", return_value=_axis_vector(0)
-        ), patch.object(
-            embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]
+        with (
+            patch.object(embedding_service, "embed_query_text", return_value=_axis_vector(0)),
+            patch.object(embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]),
         ):
             results = tools.search_memory(
                 query_keywords="preview needle", limit=5, mode="broad", include_related=False
@@ -134,7 +130,7 @@ class TestRelevancePreviewMCP(unittest.TestCase):
             self.assertTrue(item["relevance_preview"])
             self.assertEqual(item["relevance_preview_meta"], expected_meta)
             self.assertTrue(item["relevance_preview"].startswith(RELEVANCE_PREVIEW_WARNING_PREFIX))
-            excerpt = item["relevance_preview"][len(RELEVANCE_PREVIEW_WARNING_PREFIX):]
+            excerpt = item["relevance_preview"][len(RELEVANCE_PREVIEW_WARNING_PREFIX) :]
             self.assertIn(excerpt, stored_content)
 
     def test_browse_results_never_include_relevance_preview(self):

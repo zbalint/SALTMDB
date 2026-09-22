@@ -281,10 +281,12 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             self.assertEqual(invalid["error"]["code"], protocol.CALLER_SESSION_INVALID)
 
             record, error = state._validate_caller_session(
-                "lease", {
+                "lease",
+                {
                     "caller_agent_session_id": "session-fenced",
                     "caller_agent_session_capability": capability,
-                }, None
+                },
+                None,
             )
             self.assertIsNone(error)
             self.assertIsNotNone(record)
@@ -325,15 +327,11 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             state = self._state(foreground=True)
             state.coordinator = _ImmediateCoordinator(conn)
             state.handle_request(
-                protocol.build_request(
-                    "hello", {"agent_session_id": "session-a"}, token="tok"
-                ),
+                protocol.build_request("hello", {"agent_session_id": "session-a"}, token="tok"),
                 session_id=51,
             )
             hello_b = state.handle_request(
-                protocol.build_request(
-                    "hello", {"agent_session_id": "session-b"}, token="tok"
-                ),
+                protocol.build_request("hello", {"agent_session_id": "session-b"}, token="tok"),
                 session_id=52,
             )
             crossed = state.handle_request(

@@ -43,8 +43,14 @@ class TestMetadataFilterInjection(unittest.TestCase):
             " full_content, content_hash, memory_type, metadata, scope)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), ?, 'raw',"
             " ?, ?, ?, 'fact', ?, 'private')",
-            (entity_id, owner_id, entity_id, f"content for {entity_id}", entity_id,
-             json.dumps(metadata)),
+            (
+                entity_id,
+                owner_id,
+                entity_id,
+                f"content for {entity_id}",
+                entity_id,
+                json.dumps(metadata),
+            ),
         )
         self.conn.commit()
 

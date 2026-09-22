@@ -132,7 +132,7 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
                 _in_transaction=True,
             )
         except Exception:
-            pass
+            logger.warning("Could not log unexpected tag rejection", exc_info=True)
     sanitized_name = ("#" + sanitized_body) if sanitized_body else name
 
     if sanitized_name != name:

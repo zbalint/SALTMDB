@@ -45,8 +45,7 @@ class StatsMixin(ViewerHandlerProtocol):
         cur = conn.execute("SELECT COUNT(*) FROM events")
         stats["total_events"] = cur.fetchone()[0]
         cur = conn.execute(
-            "SELECT COUNT(*) FROM events "
-            "WHERE datetime(timestamp) >= datetime('now', '-24 hours')"
+            "SELECT COUNT(*) FROM events WHERE datetime(timestamp) >= datetime('now', '-24 hours')"
         )
         stats["events_last_24h"] = cur.fetchone()[0]
         cur = conn.execute("SELECT COUNT(*) FROM relations")
@@ -69,7 +68,9 @@ class StatsMixin(ViewerHandlerProtocol):
 
         gateway = getattr(self.server, "viewer_gateway", None)
         db_path = getattr(gateway, "db_path", None)
-        stats["db_size_bytes"] = os.path.getsize(db_path) if db_path and os.path.exists(db_path) else 0
+        stats["db_size_bytes"] = (
+            os.path.getsize(db_path) if db_path and os.path.exists(db_path) else 0
+        )
         stats["db_size_mb"] = round(stats["db_size_bytes"] / (1024 * 1024), 2)
 
         active_session_ids, liveness_known = _daemon_liveness(self.server)

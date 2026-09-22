@@ -40,6 +40,7 @@ def find_orphan_community_matches(  # noqa: C901, PLR0912, PLR0915
     *,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Find community members to force-include for zero-edge primary hits."""
     if not primary_hits:
@@ -72,6 +73,17 @@ def find_orphan_community_matches(  # noqa: C901, PLR0912, PLR0915
         )
 
         centroid_rows = fetch_leaf_community_centroids(conn)
+        if owner_id is not None:
+            visible_communities = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT DISTINCT cm.community_id FROM community_membership cm "
+                    "JOIN entities e ON e.id = cm.entity_id "
+                    "WHERE e.owner_id = ? OR e.scope = 'shared'",
+                    (owner_id,),
+                )
+            }
+            centroid_rows = [row for row in centroid_rows if row[0] in visible_communities]
         if not centroid_rows:
             return _zero_result()
         centroids = {
@@ -113,8 +125,11 @@ def find_orphan_community_matches(  # noqa: C901, PLR0912, PLR0915
         candidate_rows: list[tuple[str, str, str, float]] = []
         for orphan_id, community_id in orphan_assignment.items():
             member_rows = conn.execute(
-                "SELECT entity_id FROM community_membership WHERE community_id = ?",
-                (community_id,),
+                "SELECT cm.entity_id FROM community_membership cm "
+                "JOIN entities e ON e.id = cm.entity_id "
+                "WHERE cm.community_id = ?"
+                + (" AND (e.owner_id = ? OR e.scope = 'shared')" if owner_id is not None else ""),
+                (community_id, owner_id) if owner_id is not None else (community_id,),
             ).fetchall()
             member_ids = [
                 row[0]

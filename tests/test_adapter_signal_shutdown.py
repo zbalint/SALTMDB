@@ -131,7 +131,9 @@ class TestAdapterSignalShutdown(unittest.TestCase):
             daemon_proc, env = self._start_daemon()
             adapter_proc = self._start_adapter(env)
             session_ended_at_before = self._wait_for_session(adapter_proc)
-            self.assertIsNone(session_ended_at_before, "ended_at should be None while session is active")
+            self.assertIsNone(
+                session_ended_at_before, "ended_at should be None while session is active"
+            )
 
             adapter_proc.send_signal(sig)
             try:

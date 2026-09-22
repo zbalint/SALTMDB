@@ -262,7 +262,8 @@ def _spawn_daemon_process(db_path: str) -> None:
             # applies here.
             logger.warning(
                 "Primary daemon spawn failed (%s); retrying without CREATE_BREAKAWAY_FROM_JOB "
-                "-- daemon will remain tied to this process's Job Object if one exists", e,
+                "-- daemon will remain tied to this process's Job Object if one exists",
+                e,
             )
             popen_kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000
             proc = subprocess.Popen(  # nosec B603 -- see above.
@@ -564,12 +565,16 @@ class SessionConnection:
                         protocol.DAEMON_SHUTTING_DOWN,
                     )
                     if attempt == 0 and retryable:
-                        logger.info("Session hello failed; refreshing daemon discovery before retry")
+                        logger.info(
+                            "Session hello failed; refreshing daemon discovery before retry"
+                        )
                         continue
                     raise
                 self._sock = sock
                 self._auth_token = info["auth_token"]
-                self._session_capability = capability if self._agent_session_id is not None else None
+                self._session_capability = (
+                    capability if self._agent_session_id is not None else None
+                )
                 global _current_session
                 _current_session = self
                 logger.info(
@@ -581,7 +586,8 @@ class SessionConnection:
                     info.get("service_port"),
                 )
                 return
-            assert last_error is not None
+            if last_error is None:
+                raise RuntimeError("Session hello ended without a connection or error")
             raise last_error
 
     def close(self, *, send_goodbye: bool = True) -> None:
@@ -621,7 +627,9 @@ class SessionConnection:
                                 ack_error.get("message", ack_error.get("code", "unknown error")),
                             )
                     except (OSError, protocol.FrameError) as e:
-                        logger.debug("Best-effort goodbye failed (daemon likely already gone): %s", e)
+                        logger.debug(
+                            "Best-effort goodbye failed (daemon likely already gone): %s", e
+                        )
                 try:
                     sock.close()
                 except OSError:
@@ -720,8 +728,7 @@ def _intermediary_main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logger.info(
-        "Intermediary launcher started: pid=%d ppid=%d -- spawning daemon then exiting "
-        "immediately",
+        "Intermediary launcher started: pid=%d ppid=%d -- spawning daemon then exiting immediately",
         os.getpid(),
         os.getppid(),
     )

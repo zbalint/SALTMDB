@@ -539,6 +539,47 @@ def rerank_candidates_by_topic(
             close_connection(conn)
 
 
+def _select_relevance_preview_text(
+    full_content: str, chunks: list[tuple[int, int, int, float]]
+) -> str:
+    """Select scored chunks, include the opening span, then merge paragraph-bounded excerpts."""
+    total_chunks = len(chunks)
+    k = min(
+        RELEVANCE_PREVIEW_MAX_CHUNKS,
+        max(
+            RELEVANCE_PREVIEW_MIN_CHUNKS,
+            round(RELEVANCE_PREVIEW_CHUNK_PERCENT * total_chunks),
+        ),
+    )
+    by_score = sorted(chunks, key=lambda c: c[3])
+    selected = list(by_score[:k])
+
+    # The opening chunk is added, not substituted for the best scoring chunk.
+    if total_chunks > k and not any(c[0] == 0 for c in selected):
+        opening = next((c for c in chunks if c[0] == 0), None)
+        if opening is not None:
+            selected.append(opening)
+
+    expanded = []
+    for _chunk_index, char_start, char_end, _distance in selected:
+        back_limit = max(0, char_start - RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
+        boundary = full_content.rfind("\n\n", back_limit, char_start)
+        expanded_start = boundary + 2 if boundary != -1 else back_limit
+        fwd_limit = min(len(full_content), char_end + RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
+        boundary = full_content.find("\n\n", char_end, fwd_limit)
+        expanded_end = boundary if boundary != -1 else fwd_limit
+        expanded.append([expanded_start, expanded_end])
+
+    expanded.sort(key=lambda s: s[0])
+    merged: list[list[int]] = []
+    for start, end in expanded:
+        if merged and start <= merged[-1][1] + RELEVANCE_PREVIEW_MERGE_GAP_CHARS:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return SNIPPET_ELLIPSIS.join(full_content[s:e] for s, e in merged)
+
+
 def get_relevance_preview_data(
     query_text: str,
     candidate_ids: list[str],
@@ -628,53 +669,7 @@ def get_relevance_preview_data(
         results: dict[str, dict[str, str]] = {}
         for entity_id, chunks in by_entity.items():
             full_content = full_content_by_id.get(entity_id, "")
-            total_chunks = len(chunks)
-            k = min(
-                RELEVANCE_PREVIEW_MAX_CHUNKS,
-                max(
-                    RELEVANCE_PREVIEW_MIN_CHUNKS,
-                    round(RELEVANCE_PREVIEW_CHUNK_PERCENT * total_chunks),
-                ),
-            )
-            by_score = sorted(chunks, key=lambda c: c[3])  # ascending distance = best match first
-            selected = list(by_score[:k])
-
-            # Opening-chunk guarantee: ADDS chunk_index 0 when it isn't already selected on
-            # merit, it never displaces the top-scoring pick -- so worst case this is K+1
-            # chunks selected, not a swap that could silently drop the single best match when
-            # K == 1. (Deliberate: displacing the top pick would defeat the point of a
-            # query-focused preview for exactly the K=1 case that RELEVANCE_PREVIEW_MIN_CHUNKS
-            # makes common.)
-            if total_chunks > k and not any(c[0] == 0 for c in selected):
-                opening = next((c for c in chunks if c[0] == 0), None)
-                if opening is not None:
-                    selected.append(opening)
-
-            # Boundary-expand each selected chunk's (char_start, char_end) outward to the
-            # nearest "\n\n" (or string boundary), capped at RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS
-            # per side.
-            expanded = []
-            for chunk_index, char_start, char_end, _distance in selected:
-                back_limit = max(0, char_start - RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
-                boundary = full_content.rfind("\n\n", back_limit, char_start)
-                expanded_start = boundary + 2 if boundary != -1 else back_limit
-                fwd_limit = min(len(full_content), char_end + RELEVANCE_PREVIEW_MAX_EXPANSION_CHARS)
-                boundary = full_content.find("\n\n", char_end, fwd_limit)
-                expanded_end = boundary if boundary != -1 else fwd_limit
-                expanded.append([expanded_start, expanded_end])
-
-            # Merge overlapping/near-adjacent spans; sorting by start also yields document
-            # order for free, so no separate reorder step is needed afterward.
-            expanded.sort(key=lambda s: s[0])
-            merged: list[list[int]] = []
-            for start, end in expanded:
-                if merged and start <= merged[-1][1] + RELEVANCE_PREVIEW_MERGE_GAP_CHARS:
-                    merged[-1][1] = max(merged[-1][1], end)
-                else:
-                    merged.append([start, end])
-
-            text = SNIPPET_ELLIPSIS.join(full_content[s:e] for s, e in merged)
-            results[entity_id] = {"text": text}
+            results[entity_id] = {"text": _select_relevance_preview_text(full_content, chunks)}
 
         return results
     except Exception as e:

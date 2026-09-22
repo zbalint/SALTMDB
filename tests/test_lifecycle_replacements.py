@@ -212,7 +212,10 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         new_id = result["data"]["new_id"]
         self.assertTrue(result["data"]["semantic_relations_repointed"])
-        repointed = {(r["source_id"], r["target_id"], r["predicate"]) for r in result["data"]["repointed_relations"]}
+        repointed = {
+            (r["source_id"], r["target_id"], r["predicate"])
+            for r in result["data"]["repointed_relations"]
+        }
         self.assertEqual(
             repointed,
             {(new_id, neighbor_out, "depends_on"), (neighbor_in, new_id, "elaborates_on")},
@@ -371,9 +374,9 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["data"]["new_id"], fixed_new_id)
         # The old edge is invalidated regardless of the insert collision.
-        valid_to = self.conn.execute(
-            "SELECT valid_to FROM relations WHERE id = 'edge'"
-        ).fetchone()[0]
+        valid_to = self.conn.execute("SELECT valid_to FROM relations WHERE id = 'edge'").fetchone()[
+            0
+        ]
         self.assertIsNotNone(valid_to)
         # No relation id is reported for the skipped insert -- the pre-existing edge already
         # covers the triple, and repointed_relations must never name a row that doesn't exist.

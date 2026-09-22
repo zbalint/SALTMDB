@@ -104,7 +104,9 @@ def has_real_duplicate_candidates(data: dict, resp_text: str) -> bool:
         return bool(NEAR_DUPLICATE_PATTERN.search(resp_text))
     # Couldn't parse the response as an object -- fall back to a tightened regex that requires
     # at least one object inside the array, rather than matching the bare (always-present) key.
-    return bool(DUPLICATE_FALLBACK_PATTERN.search(resp_text) or NEAR_DUPLICATE_PATTERN.search(resp_text))
+    return bool(
+        DUPLICATE_FALLBACK_PATTERN.search(resp_text) or NEAR_DUPLICATE_PATTERN.search(resp_text)
+    )
 
 
 def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> None:

@@ -42,13 +42,17 @@ class TestDispatchRequestDefaults(unittest.TestCase):
 
     @patch("saltmdb.daemon.dispatch.memory_service.get_memory", return_value="content")
     def test_get_memory_uses_explicit_id_fetch(self, fetch):
-        self.assertEqual(_dispatch_get_memory(entity_id="entity-id"), "content")
-        fetch.assert_called_once_with(entity_id="entity-id")
+        self.assertEqual(
+            _dispatch_get_memory(entity_id="entity-id", owner_id="test_agent"), "content"
+        )
+        fetch.assert_called_once_with(entity_id="entity-id", owner_id="test_agent")
 
     @patch("saltmdb.daemon.dispatch.relation_service.get_lineage", return_value={"nodes": []})
     def test_get_lineage_defaults_to_ancestor_traversal(self, lineage):
-        _dispatch_get_lineage(entity_id="entity-id")
-        lineage.assert_called_once_with(entity_id="entity-id", direction="ancestors", max_depth=5)
+        _dispatch_get_lineage(entity_id="entity-id", owner_id="test_agent")
+        lineage.assert_called_once_with(
+            entity_id="entity-id", direction="ancestors", max_depth=5, owner_id="test_agent"
+        )
 
     @patch(
         "saltmdb.daemon.dispatch.relation_service.get_related_memories",
@@ -56,7 +60,9 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     )
     def test_get_related_memories_delegates_dependency_traversal(self, related):
         _dispatch_get_related_memories(entity_id="entity-id", max_depth=3)
-        related.assert_called_once_with(entity_id="entity-id", max_depth=3, direction="both")
+        related.assert_called_once_with(
+            entity_id="entity-id", max_depth=3, direction="both", owner_id=None
+        )
 
     @patch(
         "saltmdb.daemon.dispatch.relation_service.get_related_memories",
@@ -64,7 +70,9 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     )
     def test_get_related_memories_forwards_explicit_direction(self, related):
         _dispatch_get_related_memories(entity_id="entity-id", max_depth=3, direction="outbound")
-        related.assert_called_once_with(entity_id="entity-id", max_depth=3, direction="outbound")
+        related.assert_called_once_with(
+            entity_id="entity-id", max_depth=3, direction="outbound", owner_id=None
+        )
 
 
 if __name__ == "__main__":

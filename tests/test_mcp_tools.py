@@ -3,6 +3,7 @@ import tempfile
 import os
 import shutil
 import json
+import uuid
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
 from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -1136,6 +1137,488 @@ class TestMCPToolsWrapper(unittest.TestCase):
             self.assertNotIn("first call within a session", description)
 
 
+class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+        SESSION_IDENTITY.reset()
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        os.environ.pop("SALTMDB_DB_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _call_as(self, owner, tool_name, arguments):
+        # Reset models a separate configured MCP adapter process for each owner.
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner(owner)
+        result = await tools.mcp.call_tool(tool_name, arguments)
+        content = result[0] if isinstance(result[0], list) else result
+        return json.loads(content[0].text)
+
+    async def test_get_memory_hides_another_owners_private_full_id(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Owner A private title",
+                "content": "Owner A private body holds a distinct private fact for the cross-owner access test.",
+                "scope": "private",
+            },
+        )
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Owner A shared title",
+                "content": "Owner A shared body holds a distinct shared fact for the cross-owner access test.",
+                "scope": "shared",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        self.assertEqual(shared["status"], "ok", shared)
+        private_id = private["data"]["id"]
+        shared_id = shared["data"]["id"]
+
+        owner_a_private = await self._call_as("owner_a", "get_memory", {"entity_id": private_id})
+        owner_b_private = await self._call_as("owner_b", "get_memory", {"entity_id": private_id})
+        unknown = await self._call_as("owner_b", "get_memory", {"entity_id": "missing-id"})
+        owner_a_shared = await self._call_as("owner_a", "get_memory", {"entity_id": shared_id})
+        owner_b_shared = await self._call_as("owner_b", "get_memory", {"entity_id": shared_id})
+
+        self.assertIn("Owner A private body", owner_a_private["data"]["content"])
+        self.assertEqual(owner_b_private["status"], unknown["status"])
+        self.assertEqual(owner_b_private["errors"][0]["code"], unknown["errors"][0]["code"])
+        self.assertNotIn("Owner A private title", str(owner_b_private))
+        self.assertIn("Owner A shared body", owner_a_shared["data"]["content"])
+        self.assertIn("Owner A shared body", owner_b_shared["data"]["content"])
+
+    async def test_get_memory_hides_another_owners_private_prefix(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private prefix target",
+                "content": "A unique private prefix target for the cross-owner access test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        prefix = private["data"]["id"][:8]
+        result = await self._call_as("owner_b", "get_memory", {"entity_id": prefix})
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private prefix target", str(result))
+
+    async def test_get_memory_prefix_candidates_hide_private_match(self):
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Shared prefix match",
+                "content": "A shared match for the ambiguous prefix privacy test.",
+                "scope": "shared",
+            },
+        )
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private prefix match",
+                "content": "A private match for the ambiguous prefix privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(shared["status"], "ok", shared)
+        self.assertEqual(private["status"], "ok", private)
+        shared_id, private_id = shared["data"]["id"], private["data"]["id"]
+        colliding_private_id = shared_id[:8] + private_id[8:]
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute(
+            "UPDATE entities SET id = ? WHERE id = ?", (colliding_private_id, private_id)
+        )
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        result = await self._call_as(
+            "owner_b",
+            "get_memory",
+            {"entity_id": shared_id[:8]},
+        )
+        self.assertNotIn(colliding_private_id, str(result))
+        self.assertNotIn("Private prefix match", str(result))
+
+    async def test_inspect_memory_hides_another_owners_private_id(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private inspection target",
+                "content": "Private inspection content must stay invisible to another owner.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        private_id = private["data"]["id"]
+        result = await self._call_as("owner_b", "inspect_memory", {"entity_id": private_id})
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+        self.assertNotIn("Private inspection target", str(result))
+
+    async def test_get_memory_hides_private_lineage_of_shared_memory(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private lineage predecessor",
+                "content": "Private predecessor body for the shared revision lineage case.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        revised = await self._call_as(
+            "owner_a",
+            "revise_memory",
+            {
+                "entity_id": private["data"]["id"],
+                "title": "Shared lineage successor",
+                "content": "Shared successor body for the revised lineage case.",
+                "reason": "Publish corrected shared fact",
+                "scope": "shared",
+            },
+        )
+        self.assertEqual(revised["status"], "ok", revised)
+        shared_id = revised["data"]["new_id"]
+        result = await self._call_as("owner_b", "get_memory", {"entity_id": shared_id})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private lineage predecessor", str(result))
+
+    async def test_get_lineage_hides_private_predecessor_of_shared_memory(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private lineage graph node",
+                "content": "A private predecessor for the public lineage graph test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        revised = await self._call_as(
+            "owner_a",
+            "revise_memory",
+            {
+                "entity_id": private["data"]["id"],
+                "title": "Shared lineage graph root",
+                "content": "A shared successor for the public lineage graph test.",
+                "reason": "Publish shared revision",
+                "scope": "shared",
+            },
+        )
+        self.assertEqual(revised["status"], "ok", revised)
+        result = await self._call_as(
+            "owner_b",
+            "get_lineage",
+            {"entity_id": revised["data"]["new_id"], "direction": "ancestors"},
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private lineage graph node", str(result))
+
+    async def test_get_related_memories_hides_private_neighbor(self):
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Shared relation root",
+                "content": "A shared root for the public relation traversal test.",
+                "scope": "shared",
+            },
+        )
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private relation neighbor",
+                "content": "A private neighbor for the public relation traversal test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(shared["status"], "ok", shared)
+        self.assertEqual(private["status"], "ok", private)
+        relation = await self._call_as(
+            "owner_a",
+            "manage_relation",
+            {
+                "source_id": shared["data"]["id"],
+                "target_id": private["data"]["id"],
+                "predicate": "related_to",
+            },
+        )
+        self.assertEqual(relation["status"], "ok", relation)
+        result = await self._call_as(
+            "owner_b",
+            "get_related_memories",
+            {"entity_id": shared["data"]["id"]},
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private relation neighbor", str(result))
+
+    async def test_retrieve_context_local_rejects_private_anchor(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private local anchor",
+                "content": "A private anchor for the public local context retrieval test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"entity_ids": [private["data"]["id"]]},
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
+        self.assertNotIn("Private local anchor", str(result))
+
+    async def test_retrieve_context_local_hides_private_neighbor(self):
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Shared local anchor",
+                "content": "A shared anchor for the local context expansion privacy test.",
+                "scope": "shared",
+            },
+        )
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private local neighbor",
+                "content": "A private neighbor for the local context expansion privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(shared["status"], "ok", shared)
+        self.assertEqual(private["status"], "ok", private)
+        relation = await self._call_as(
+            "owner_a",
+            "manage_relation",
+            {
+                "source_id": shared["data"]["id"],
+                "target_id": private["data"]["id"],
+                "predicate": "depends_on",
+            },
+        )
+        self.assertEqual(relation["status"], "ok", relation)
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"entity_ids": [shared["data"]["id"]]},
+        )
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private local neighbor", str(result))
+
+    async def test_retrieve_context_local_hides_private_lineage(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private local predecessor",
+                "content": "A private predecessor for the local context lineage privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        revised = await self._call_as(
+            "owner_a",
+            "revise_memory",
+            {
+                "entity_id": private["data"]["id"],
+                "title": "Shared local successor",
+                "content": "A shared successor for the local context lineage privacy test.",
+                "reason": "Publish shared revision",
+                "scope": "shared",
+            },
+        )
+        self.assertEqual(revised["status"], "ok", revised)
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"entity_ids": [revised["data"]["new_id"]]},
+        )
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private local predecessor", str(result))
+
+    async def test_retrieve_context_local_hides_private_conflict(self):
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Shared conflict anchor",
+                "content": "A shared anchor for the local conflict privacy test.",
+                "scope": "shared",
+            },
+        )
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private conflicting memory",
+                "content": "A private contradiction for the local conflict privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(shared["status"], "ok", shared)
+        self.assertEqual(private["status"], "ok", private)
+        relation = await self._call_as(
+            "owner_a",
+            "manage_relation",
+            {
+                "source_id": shared["data"]["id"],
+                "target_id": private["data"]["id"],
+                "predicate": "contradicts",
+            },
+        )
+        self.assertEqual(relation["status"], "ok", relation)
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"entity_ids": [shared["data"]["id"]]},
+        )
+        self.assertNotIn(private["data"]["id"], str(result))
+        self.assertNotIn("Private conflicting memory", str(result))
+
+    async def test_retrieve_context_global_hides_private_community_member(self):
+        import sqlite_vec
+
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private global community member",
+                "content": "A private member for the global community retrieval privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        private_id = private["data"]["id"]
+        community_id = str(uuid.uuid4())
+        embedding = sqlite_vec.serialize_float32([1.0] + [0.0] * 383)
+        self.conn.execute(
+            "INSERT INTO communities (id, representative_entity_id, member_count, level, created_at) VALUES (?, ?, 1, 0, ?)",
+            (community_id, private_id, "2026-09-22T00:00:00+00:00"),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 0)",
+            (private_id, community_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
+            (community_id, embedding),
+        )
+        self.conn.execute(
+            "INSERT OR REPLACE INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+            (private_id, embedding),
+        )
+        self.conn.commit()
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"strategy": "global", "query": "private global community member"},
+        )
+        self.assertNotIn(private_id, str(result))
+        self.assertNotIn("Private global community member", str(result))
+
+    async def test_retrieve_context_local_hides_private_orphan_community_match(self):
+        import sqlite_vec
+
+        shared = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Shared orphan anchor",
+                "content": "A shared orphan anchor for the local community privacy test.",
+                "scope": "shared",
+            },
+        )
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private orphan community member",
+                "content": "A private community member for the local orphan privacy test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(shared["status"], "ok", shared)
+        self.assertEqual(private["status"], "ok", private)
+        shared_id, private_id = shared["data"]["id"], private["data"]["id"]
+        community_id = str(uuid.uuid4())
+        embedding = sqlite_vec.serialize_float32([1.0] + [0.0] * 383)
+        self.conn.execute(
+            "INSERT INTO communities (id, representative_entity_id, member_count, level, created_at) VALUES (?, ?, 1, 0, ?)",
+            (community_id, private_id, "2026-09-22T00:00:00+00:00"),
+        )
+        self.conn.execute(
+            "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, 0)",
+            (private_id, community_id),
+        )
+        self.conn.execute(
+            "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
+            (community_id, embedding),
+        )
+        for entity_id in (shared_id, private_id):
+            self.conn.execute(
+                "INSERT OR REPLACE INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+                (entity_id, embedding),
+            )
+        self.conn.commit()
+        result = await self._call_as(
+            "owner_b",
+            "retrieve_context",
+            {"entity_ids": [shared_id]},
+        )
+        self.assertNotIn(private_id, str(result))
+        self.assertNotIn("Private orphan community member", str(result))
+
+    async def test_update_memory_metadata_rejects_other_owners_private_id(self):
+        private = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Private metadata target",
+                "content": "A private target for the cross-owner metadata update test.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(private["status"], "ok", private)
+        private_id = private["data"]["id"]
+        result = await self._call_as(
+            "owner_b",
+            "update_memory_metadata",
+            {"entity_id": private_id, "metadata": {"intruder": True}},
+        )
+        owner_a_view = await self._call_as(
+            "owner_a",
+            "get_memory",
+            {"entity_id": private_id},
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertNotIn("intruder", owner_a_view["data"]["metadata"])
+
+
 class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
     """Live-verification regression (2026-08-19): every prior test called
     tools.consolidate_memories(...) as a plain Python function, which never exercises FastMCP's
@@ -1365,9 +1848,7 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         stored = self._store_memory(metadata={"a": 1, "b": 2})
         entity_id = stored["data"]["id"]
 
-        result = tools.update_memory_metadata(
-            entity_id=entity_id, metadata={"b": 99, "c": 3}
-        )
+        result = tools.update_memory_metadata(entity_id=entity_id, metadata={"b": 99, "c": 3})
         self.assertEqual(result["status"], "ok")
         self.assertIn("updated", result["data"]["message"])
 
@@ -1473,7 +1954,9 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
 
     def test_store_memory_entity_id_metadata_path_still_works_unchanged(self):
         title = "Legacy Metadata Path Memory"
-        content = "Sufficiently long content body for the quality gate to accept without issue here."
+        content = (
+            "Sufficiently long content body for the quality gate to accept without issue here."
+        )
         tags = ["#metadata-test"]
         stored = tools.store_memory(title=title, content=content, tags=tags)
         self.assertEqual(stored["status"], "ok")

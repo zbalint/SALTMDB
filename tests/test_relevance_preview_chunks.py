@@ -25,6 +25,7 @@ def _axis_vector(index: int, dim: int = DIM) -> list[float]:
 
 class TestRelevancePreviewChunks(unittest.TestCase):
     """Unit tests for extractive chunk selection against controlled vector fixtures."""
+
     temp_dir: str = ""
     db_path: str = ""
     conn: sqlite3.Connection = cast(sqlite3.Connection, cast(object, None))
@@ -77,7 +78,9 @@ class TestRelevancePreviewChunks(unittest.TestCase):
 
     @staticmethod
     def _sections(count: int, width: int = 48) -> tuple[str, list[tuple[int, int]]]:
-        sections = [f"chunk-{index}-" + ("x" * (width - len(f"chunk-{index}-"))) for index in range(count)]
+        sections = [
+            f"chunk-{index}-" + ("x" * (width - len(f"chunk-{index}-"))) for index in range(count)
+        ]
         content = "".join(sections)
         offsets = []
         start = 0
@@ -97,9 +100,7 @@ class TestRelevancePreviewChunks(unittest.TestCase):
         self._insert_chunk(entity_id, 2, _axis_vector(1), *offsets[2], content_hash)
         self._insert_chunk(entity_id, 3, _axis_vector(1), *offsets[3], content_hash)
 
-        with patch.object(
-            embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]
-        ):
+        with patch.object(embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]):
             result = get_relevance_preview_data("query", [entity_id], self.db_path)
 
         preview = result[entity_id]["text"]
@@ -116,9 +117,7 @@ class TestRelevancePreviewChunks(unittest.TestCase):
             vector = _axis_vector(0) if chunk_index in (1, 2) else _axis_vector(1)
             self._insert_chunk(entity_id, chunk_index, vector, start, end, content_hash)
 
-        with patch.object(
-            embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]
-        ):
+        with patch.object(embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]):
             result = get_relevance_preview_data("query", [entity_id], self.db_path)
 
         preview = result[entity_id]["text"]
@@ -136,9 +135,7 @@ class TestRelevancePreviewChunks(unittest.TestCase):
         self._insert_chunk(fresh_id, 0, _axis_vector(0), 0, 13, "fresh-hash")
         self._insert_chunk(stale_id, 0, _axis_vector(0), 0, 13, "old-hash")
 
-        with patch.object(
-            embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]
-        ):
+        with patch.object(embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]):
             result = get_relevance_preview_data(
                 "query", [fresh_id, zero_id, stale_id], self.db_path
             )

@@ -114,7 +114,9 @@ class TestViewerReworkContracts(unittest.TestCase):
             ("diagnostics", "nav-item", "Diagnostics"),
         )
         for view, class_name, label in expected_navigation:
-            self.assertIn(f'<button data-view="{view}" class="{class_name}">{label}</button>', shell)
+            self.assertIn(
+                f'<button data-view="{view}" class="{class_name}">{label}</button>', shell
+            )
         for obsolete_label in ("Memory Explorer", "Relationships", "Operations"):
             self.assertNotIn(f'class="nav-item">{obsolete_label}</button>', shell)
 
@@ -168,15 +170,30 @@ class TestViewerReworkContracts(unittest.TestCase):
         self._insert_entity("target")
         self._insert_entity("orphan")
         self._insert_relation("linked", "target")
-        self.conn.execute("UPDATE entities SET agent_session_id = ? WHERE id = ?", ("memory-session", "linked"))
+        self.conn.execute(
+            "UPDATE entities SET agent_session_id = ? WHERE id = ?", ("memory-session", "linked")
+        )
         now = datetime.now(UTC)
         self.conn.execute(
             "INSERT INTO events (id, timestamp, agent_id, type, content, agent_session_id) VALUES (?, ?, ?, ?, ?, ?)",
-            ("recent-event", now.isoformat(), "viewer_test", "decision", "Recent event", "event-session"),
+            (
+                "recent-event",
+                now.isoformat(),
+                "viewer_test",
+                "decision",
+                "Recent event",
+                "event-session",
+            ),
         )
         self.conn.execute(
             "INSERT INTO events (id, timestamp, agent_id, type, content) VALUES (?, ?, ?, ?, ?)",
-            ("old-event", (now - timedelta(hours=25)).isoformat(), "viewer_test", "decision", "Old event"),
+            (
+                "old-event",
+                (now - timedelta(hours=25)).isoformat(),
+                "viewer_test",
+                "decision",
+                "Old event",
+            ),
         )
         self.conn.execute(
             "INSERT INTO _agent_sessions (session_id, cwd, started_at) VALUES (?, ?, ?)",

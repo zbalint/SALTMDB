@@ -33,6 +33,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     strategy: str = "local",
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble local graph-aware context from one point-in-time and one database connection.
 
@@ -77,14 +78,15 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
 
     try:
         if strategy == "global":
-            assert query is not None  # narrowed by the validation block above
-            return _assemble_global_context(query, budget_tokens, conn)
+            return _assemble_global_context(
+                cast(str, query), budget_tokens, conn, owner_id=owner_id
+            )
         pit = datetime.now(UTC).isoformat()
 
         resolved_hits: list[dict[str, Any]] = []
         unresolved_errors: list[dict[str, Any]] = []
         for raw_id in cast(list[str], entity_ids):
-            resolved_id, candidates, truncated = resolve_entity_ref(conn, raw_id)
+            resolved_id, candidates, truncated = resolve_entity_ref(conn, raw_id, owner_id=owner_id)
             if candidates:
                 item = error(
                     "AMBIGUOUS_ID_PREFIX",
@@ -138,6 +140,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
             cast(list[PrimaryHit], primary_hits),
             point_in_time=pit,
             db_connection=conn,
+            owner_id=owner_id,
         )
         conflict_sets_result = assemble_conflict_sets(
             expansion_result,
@@ -161,6 +164,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
             primary_hits,
             excluded_for_orphan_lookup,
             db_connection=conn,
+            owner_id=owner_id,
         )
         orphan_community_entity_ids = {
             match["entity_id"] for match in orphan_result["orphan_community_matches"]
@@ -178,6 +182,7 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
             primary_hits,
             point_in_time=pit,
             db_connection=conn,
+            owner_id=owner_id,
         )
 
         member_to_conflict_set: dict[str, str] = {}
@@ -355,9 +360,9 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
 
 
 def _assemble_global_context(
-    query: str, budget_tokens: int | None, conn: sqlite3.Connection
+    query: str, budget_tokens: int | None, conn: sqlite3.Connection, *, owner_id: str | None = None
 ) -> dict[str, Any]:
-    seed_result = seed_and_rank_communities(query, db_connection=conn)
+    seed_result = seed_and_rank_communities(query, db_connection=conn, owner_id=owner_id)
     representative_entity_ids = {
         match["entity_id"] for match in seed_result["representative_matches"]
     }

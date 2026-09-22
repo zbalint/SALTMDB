@@ -924,9 +924,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     )
 
         preview_map: dict[str, dict[str, str]] = {}
-        if sanitized_query and rows:
+        if sanitized_query and rows and query_keywords is not None:
             preview_map = search_primitives.get_relevance_preview_data(
-                query_keywords, [r[0] for r in rows], db_path
+                query_keywords, [r[0] for r in rows], db_path or get_db_path()
             )
         cumulative_preview_chars = 0
         results = []
@@ -981,7 +981,10 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             if drift_flag:
                 item["drift_flag"] = drift_flag
 
-            if eid in preview_map and cumulative_preview_chars < RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS:
+            if (
+                eid in preview_map
+                and cumulative_preview_chars < RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS
+            ):
                 preview_text = preview_map[eid]["text"]
                 item["relevance_preview"] = RELEVANCE_PREVIEW_WARNING_PREFIX + preview_text
                 item["relevance_preview_meta"] = {

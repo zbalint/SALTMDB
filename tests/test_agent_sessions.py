@@ -85,8 +85,12 @@ class TestAgentSessions(unittest.TestCase):
         )
 
     def test_rehello_does_not_move_activity_backwards(self):
-        record_session(self.conn, "session-monotonic", "/project", "2024-01-01T12:00:00+00:00", "codex")
-        record_session(self.conn, "session-monotonic", "/other", "2024-01-01T11:00:00+00:00", "other")
+        record_session(
+            self.conn, "session-monotonic", "/project", "2024-01-01T12:00:00+00:00", "codex"
+        )
+        record_session(
+            self.conn, "session-monotonic", "/other", "2024-01-01T11:00:00+00:00", "other"
+        )
         row = self.conn.execute(
             "SELECT cwd, owner_id, started_at, last_activity_at, ended_at "
             "FROM _agent_sessions WHERE session_id = ?",
@@ -120,7 +124,8 @@ class TestAgentSessions(unittest.TestCase):
             {"owner_id", "last_activity_at", "ended_at", "ended_reason"}.issubset(columns)
         )
         cwd_column = next(
-            row for row in migrated.execute("PRAGMA table_info(_agent_sessions)").fetchall()
+            row
+            for row in migrated.execute("PRAGMA table_info(_agent_sessions)").fetchall()
             if row[1] == "cwd"
         )
         self.assertEqual(cwd_column[3], 0, "cwd must be nullable for incomplete registrations")
@@ -166,8 +171,12 @@ class TestAgentSessions(unittest.TestCase):
         self.assertEqual(
             row,
             (
-                "/enriched", "2024-01-01T10:00:00+00:00", "codex",
-                "2024-01-01T11:00:00+00:00", None, None,
+                "/enriched",
+                "2024-01-01T10:00:00+00:00",
+                "codex",
+                "2024-01-01T11:00:00+00:00",
+                None,
+                None,
             ),
         )
         reopened.close()
@@ -214,7 +223,8 @@ class TestAgentSessions(unittest.TestCase):
             ("closed-1",),
         ).fetchone()
         self.assertEqual(
-            row, ("2024-01-01T09:15:00+00:00", "goodbye"),
+            row,
+            ("2024-01-01T09:15:00+00:00", "goodbye"),
             "reconcile must not overwrite a real goodbye's ended_reason",
         )
 

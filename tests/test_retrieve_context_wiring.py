@@ -52,7 +52,9 @@ class TestRetrieveContextWiring(unittest.TestCase):
             dispatch.retrieve_context_service, "assemble_retrieve_context", return_value={}
         ) as assemble:
             dispatch._dispatch_retrieve_context(entity_ids=["e1"])
-        assemble.assert_called_once_with(entity_ids=["e1"], budget_tokens=None, strategy="local")
+        assemble.assert_called_once_with(
+            entity_ids=["e1"], budget_tokens=None, strategy="local", owner_id=None
+        )
 
     def test_dispatch_requires_nonempty_entity_ids_list(self):
         for kwargs, field in (
@@ -76,6 +78,7 @@ class TestRetrieveContextWiring(unittest.TestCase):
             entity_ids=["e1", "e2"],
             budget_tokens=None,
             strategy="local",
+            owner_id=None,
         )
 
     def test_public_schema_exposes_query_controls_without_owner_id(self):

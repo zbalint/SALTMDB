@@ -23,7 +23,7 @@ run "$VENV/bin/mypy" src
 run "$VENV/bin/bandit" -c pyproject.toml -r src -q
 run "$VENV/bin/pip-audit" --skip-editable
 run "$VENV/bin/deptry" src
-run "$VENV/bin/pytest" -q
+run "$VENV/bin/pytest" -q tests/ hooks/tests/
 
 echo
 echo "==> All verification checks passed."

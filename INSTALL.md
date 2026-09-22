@@ -226,7 +226,7 @@ Once a daemon is running with the viewer enabled, open your browser and navigate
 To verify that the database schemas, triggers, and lock rules operate correctly, run the unified unit tests:
 
 ```bash
-python -m unittest discover tests
+python -m pytest tests/ hooks/tests/
 ```
 
 When upgrading an existing database, take and verify a physical SQLite backup before reconnecting

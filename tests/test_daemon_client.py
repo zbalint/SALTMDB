@@ -468,10 +468,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(
-            [
-                request["params"]["caller_agent_session_capability"]
-                for request in sent_requests
-            ],
+            [request["params"]["caller_agent_session_capability"] for request in sent_requests],
             ["first-capability", "retry-capability"],
         )
 
@@ -532,10 +529,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
         self.assertEqual(result, "ok")
         force_reconnect.assert_called_once()
         self.assertEqual(
-            [
-                request["params"]["caller_agent_session_capability"]
-                for request in sent_requests
-            ],
+            [request["params"]["caller_agent_session_capability"] for request in sent_requests],
             ["old-capability", "reconnected-capability"],
         )
 
@@ -615,9 +609,7 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         # Same DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP |
         # CREATE_NO_WINDOW combo as the daemon spawn itself -- the intermediary needs the same
         # console/job isolation to survive long enough to spawn its own child.
-        self.assertEqual(
-            kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000
-        )
+        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000)
 
     def test_win32_intermediary_spawn_falls_back_to_direct_on_oserror(self):
         """If even the intermediary fails to spawn (e.g. job disallows breakaway outright), fall
@@ -645,9 +637,7 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         # Microsoft's docs: that signal goes to every process attached to the console regardless
         # of process group. CREATE_NO_WINDOW is restored defense-in-depth (Win11/Copilot visible-
         # terminal-window bug, 2026-08-27).
-        self.assertEqual(
-            kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000
-        )
+        self.assertEqual(kwargs["creationflags"], 0x00000008 | 0x01000000 | 0x00000200 | 0x08000000)
 
     def test_win32_direct_spawn_falls_back_without_breakaway_on_oserror(self):
         seen_creationflags = []

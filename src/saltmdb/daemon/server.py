@@ -480,7 +480,7 @@ class _DaemonState:
                 protocol.MALFORMED_REQUEST,
                 "caller session metadata must be non-empty strings",
             )
-        if caller_session_id is not None:
+        if isinstance(caller_session_id, str) and isinstance(capability, str):
             with self._leases_changed:
                 record = next(
                     (
@@ -779,22 +779,23 @@ def _log_windows_job_diagnostics() -> None:
         import ctypes
         import ctypes.wintypes as wt
 
+        windll = getattr(ctypes, "windll")
+        get_last_error = getattr(ctypes, "get_last_error")
+
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         pid = os.getpid()
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        handle = windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            in_job: bool | str = f"OpenProcess failed (err={ctypes.get_last_error()})"
+            in_job: bool | str = f"OpenProcess failed (err={get_last_error()})"
         else:
             try:
                 result = wt.BOOL()
-                ok = ctypes.windll.kernel32.IsProcessInJob(handle, None, ctypes.byref(result))
+                ok = windll.kernel32.IsProcessInJob(handle, None, ctypes.byref(result))
                 in_job = (
-                    bool(result.value)
-                    if ok
-                    else f"IsProcessInJob failed (err={ctypes.get_last_error()})"
+                    bool(result.value) if ok else f"IsProcessInJob failed (err={get_last_error()})"
                 )
             finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                windll.kernel32.CloseHandle(handle)
         logger.info("Windows job-object diagnostic: pid=%d in_job=%s", pid, in_job)
     except Exception:
         logger.warning("Windows job-object diagnostic logging failed (non-fatal)", exc_info=True)
@@ -1088,7 +1089,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     signal.signal(signal.SIGINT, _request_shutdown)
     logger.info(
         "Signal handlers registered: %s (pid=%d)",
-        "SIGINT+SIGTERM" if sys.platform != "win32" else "SIGINT only (win32 has no real SIGTERM delivery)",
+        "SIGINT+SIGTERM"
+        if sys.platform != "win32"
+        else "SIGINT only (win32 has no real SIGTERM delivery)",
         os.getpid(),
     )
 
@@ -1097,7 +1100,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     except KeyboardInterrupt:
         logger.info("serve_forever() interrupted by KeyboardInterrupt (pid=%d)", os.getpid())
         _request_shutdown()
-    logger.info("serve_forever() returned; main thread blocking on watcher_thread.join() (pid=%d)", os.getpid())
+    logger.info(
+        "serve_forever() returned; main thread blocking on watcher_thread.join() (pid=%d)",
+        os.getpid(),
+    )
 
     # serve_forever() only returns once the watcher thread has called service_server.shutdown()
     # from within _shutdown_sequence() -- i.e. shutdown is already fully underway. If this (main)
@@ -1166,7 +1172,10 @@ def _shutdown_sequence(
         pass
 
     logger.info("SALTMDB daemon shutdown complete.")
-    logger.info("About to call os._exit(0) now (pid=%d) -- this is the last line this process will ever log.", os.getpid())
+    logger.info(
+        "About to call os._exit(0) now (pid=%d) -- this is the last line this process will ever log.",
+        os.getpid(),
+    )
     # Forceful exit rather than a normal interpreter shutdown: ThreadPoolExecutor's worker
     # threads are non-daemon, so a hung/slow background task would otherwise keep this process
     # alive well past the guard release -- an accepted, bounded resource-retention tail per §6's

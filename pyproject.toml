@@ -14,6 +14,8 @@ license = "AGPL-3.0-only"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.28.1,<2.0.0",
+    "anyio>=4.0.0,<5.0.0",
+    "typing-extensions>=4.0.0,<5.0.0",
     "sqlite-vec>=0.1.9,<0.2.0",
     "fastembed>=0.8.0,<0.9.0",
     "numpy>=1.26.0,<3.0.0",
@@ -96,3 +98,6 @@ skips = ["B608"]
 [tool.deptry]
 exclude = ["tests", ".venv"]
 pep621_dev_dependency_groups = ["dev"]
+
+[tool.deptry.package_module_name_map]
+python-igraph = "igraph"

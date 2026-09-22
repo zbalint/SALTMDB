@@ -64,7 +64,9 @@ def _lineage_nodes(result, direction: str) -> list[dict]:
     return [node for node in candidates if isinstance(node, dict)]
 
 
-def _memory_lineage(entity_id: str, conn, max_depth: int = 10) -> dict[str, list[dict]]:
+def _memory_lineage(
+    entity_id: str, conn, max_depth: int = 10, owner_id: str | None = None
+) -> dict[str, list[dict]]:
     """Read both lifecycle directions without ever substituting a successor.
 
     ``get_lineage`` is the Phase 3 relation-service entry point.  The fallback is
@@ -94,14 +96,29 @@ def _memory_lineage(entity_id: str, conn, max_depth: int = 10) -> dict[str, list
         # The legacy ancestor response includes the addressed root at depth zero;
         # explicit-memory lineage describes neighbours, so omit that duplicate.
         "ancestors": [
-            node for node in _lineage_nodes(ancestors, "ancestors") if node.get("id") != entity_id
+            node
+            for node in _lineage_nodes(ancestors, "ancestors")
+            if isinstance(node.get("id"), str)
+            and node["id"] != entity_id
+            and _can_read_entity(conn, node["id"], owner_id)
         ],
         "descendants": [
             node
             for node in _lineage_nodes(descendants, "descendants")
-            if node.get("id") != entity_id
+            if isinstance(node.get("id"), str)
+            and node["id"] != entity_id
+            and _can_read_entity(conn, node["id"], owner_id)
         ],
     }
+
+
+def _can_read_entity(conn, entity_id: str, owner_id: str | None) -> bool:
+    return owner_id is None or bool(
+        conn.execute(
+            "SELECT 1 FROM entities WHERE id = ? AND (owner_id = ? OR scope = 'shared')",
+            (entity_id, owner_id),
+        ).fetchone()
+    )
 
 
 def _replacement_error(code: str, message: str, field: str | None = None) -> dict:
@@ -366,7 +383,10 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             from .validation import validate_memory_input
 
             validate_memory_input(
-                new_title, new_content, metadata if metadata is not None else before.get("metadata"), tags
+                new_title,
+                new_content,
+                metadata if metadata is not None else before.get("metadata"),
+                tags,
             )
         except ValueError as exc:
             return _replacement_error("INVALID_MEMORY", str(exc))
@@ -594,8 +614,8 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if _in_transaction:
                 new_id, relation_id, repointed_relations, still_orphaned_ids = _write(conn)
             else:
-                new_id, relation_id, repointed_relations, still_orphaned_ids = write_transaction_retrying(
-                    conn, _write
+                new_id, relation_id, repointed_relations, still_orphaned_ids = (
+                    write_transaction_retrying(conn, _write)
                 )
         except _LifecycleRejected as exc:
             return exc.payload
@@ -723,6 +743,7 @@ def _assemble_memory_record(
     include_lineage: bool,
     touch: bool = True,
     max_depth: int = 10,
+    owner_id: str | None = None,
 ) -> dict | None:
     """Shared field-assembly for get_memory / inspect_memory / get_related_memories's
     include_inspect=True embedding. Returns None if resolved_id no longer resolves to a row
@@ -793,7 +814,11 @@ def _assemble_memory_record(
         "owner_id": row[7],
         "scope": row[8],
         "is_core": bool(row[9]),
-        "parent_ids": json.loads(row[10]) if row[10] else [],
+        "parent_ids": [
+            parent_id
+            for parent_id in (json.loads(row[10]) if row[10] else [])
+            if _can_read_entity(conn, parent_id, owner_id)
+        ],
         "valid_from": row[11],
         "valid_to": row[12],
         "metadata": json.loads(row[13]) if row[13] else {},
@@ -814,7 +839,7 @@ def _assemble_memory_record(
         _, snippet = extract_title_and_snippet(row[2])
         data["snippet"] = snippet
     if include_lineage:
-        data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth)
+        data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth, owner_id=owner_id)
     return data
 
 
@@ -824,6 +849,7 @@ def get_memory(
     db_path: str = None,
     *,
     max_depth: int = 10,
+    owner_id: str | None = None,
 ) -> dict:
     """Return one explicitly addressed memory, including archived history.
 
@@ -844,7 +870,7 @@ def get_memory(
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -855,7 +881,7 @@ def get_memory(
             if truncated:
                 item["candidates_truncated"] = True
             return rejected([item])
-        if not resolved_id:
+        if not resolved_id or not _can_read_entity(conn, resolved_id, owner_id):
             return rejected(
                 [
                     envelope_error(
@@ -874,6 +900,7 @@ def get_memory(
             include_lineage=True,
             touch=True,
             max_depth=max_depth,
+            owner_id=owner_id,
         )
         if data is None:
             return rejected(
@@ -894,7 +921,14 @@ def get_memory(
             close_connection(conn)
 
 
-def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, max_depth: int = 10) -> dict:
+def inspect_memory(
+    entity_id: str,
+    db_connection=None,
+    db_path: str = None,
+    *,
+    max_depth: int = 10,
+    owner_id: str | None = None,
+) -> dict:
     """Lighter-weight sibling to get_memory: identical field set minus `content` (replaced by a
     `snippet`). Lineage IS included here (matching get_memory's own already-accepted cost for a
     standalone call) -- only get_related_memories's include_inspect=True embedding drops it.
@@ -913,7 +947,7 @@ def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, m
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -924,7 +958,7 @@ def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, m
             if truncated:
                 item["candidates_truncated"] = True
             return rejected([item])
-        if not resolved_id:
+        if not resolved_id or not _can_read_entity(conn, resolved_id, owner_id):
             return rejected(
                 [
                     envelope_error(
@@ -943,6 +977,7 @@ def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, m
             include_lineage=True,
             touch=True,
             max_depth=max_depth,
+            owner_id=owner_id,
         )
         if data is None:
             return rejected(
@@ -965,10 +1000,11 @@ def inspect_memory(entity_id: str, db_connection=None, db_path: str = None, *, m
 
 def update_memory_metadata(  # noqa: C901
     entity_id: str,
-    metadata: dict,
+    metadata: Any,
     agent_session_id: str | None = None,
     db_connection=None,
     db_path: str = None,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Shallow-merges `metadata` into an existing memory's metadata dict without touching
     title/content/tags/content_hash/parent_ids -- coexists with (does not deprecate)
@@ -1003,7 +1039,7 @@ def update_memory_metadata(  # noqa: C901
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -1014,7 +1050,12 @@ def update_memory_metadata(  # noqa: C901
             if truncated:
                 item["candidates_truncated"] = True
             return rejected([item])
-        if not resolved_id:
+        if not resolved_id or (
+            owner_id is not None
+            and not conn.execute(
+                "SELECT 1 FROM entities WHERE id = ? AND owner_id = ?", (resolved_id, owner_id)
+            ).fetchone()
+        ):
             return rejected(
                 [
                     envelope_error(
@@ -1028,9 +1069,7 @@ def update_memory_metadata(  # noqa: C901
         result_holder: dict[str, Any] = {}
 
         def _write(c):
-            row = c.execute(
-                "SELECT metadata FROM entities WHERE id = ?", (resolved_id,)
-            ).fetchone()
+            row = c.execute("SELECT metadata FROM entities WHERE id = ?", (resolved_id,)).fetchone()
             if not row:
                 result_holder["result"] = rejected(
                     [
@@ -1082,6 +1121,7 @@ def update_memory_metadata(  # noqa: C901
     finally:
         if should_close:
             close_connection(conn)
+
 
 def fetch_memory_chunk(  # noqa: C901, PLR0911
     entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True

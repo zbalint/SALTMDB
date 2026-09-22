@@ -17,7 +17,7 @@ We welcome contributions from the open-source community! Follow these steps to s
    ```bash
    # Install uv once: https://docs.astral.sh/uv/getting-started/installation/
    uv sync --extra dev   # creates .venv and installs runtime + dev tooling deps
-   uv run python -m unittest discover -s tests   # or: uv run <any command>
+   uv run python -m pytest tests/ hooks/tests/   # or: uv run <any command>
    ```
    A manual `venv`/`pip` setup still works if you'd rather not use `uv`:
    ```bash
@@ -78,7 +78,7 @@ that check some of these mechanically).
 15. Don't copy-paste logic that already exists elsewhere — import/reuse it.
 
 **Self-verification**
-16. Run `PYTHONPATH=src python -m unittest discover -s tests` as a mandatory last step before
+16. Run `PYTHONPATH=src python -m pytest tests/ hooks/tests/` as a mandatory last step before
     declaring any code change done — inspect real failures, fix, re-run.
 17. For new features, prefer writing/extending a failing test first, then implement to green.
 
@@ -97,7 +97,7 @@ Every modification must pass the unit test suite before submission.
    ```
 2. Run the unit test suite (matches the command CI enforces in `.github/workflows/python-tests.yml`):
    ```bash
-   PYTHONPATH=src python -m pytest tests/
+   PYTHONPATH=src python -m pytest tests/ hooks/tests/
    ```
 3. Start or use the SALTMDB daemon with the viewer enabled first (it is enabled by default; set
    `SALTMDB_VIEWER_ENABLED=true` if needed). Then check the viewer status by running:

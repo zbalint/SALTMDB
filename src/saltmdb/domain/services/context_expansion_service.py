@@ -56,6 +56,7 @@ def expand_context_candidates(
     point_in_time: str | None = None,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Expand primary hits through one allowed graph hop for later context assembly."""
     should_close = False
@@ -81,6 +82,7 @@ def expand_context_candidates(
                     direction="both",
                     point_in_time=pit,
                     db_connection=conn,
+                    owner_id=owner_id,
                 ),
             )
             if "error" in traversal:
