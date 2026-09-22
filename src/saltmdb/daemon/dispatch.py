@@ -167,6 +167,25 @@ def _optional_direction(kw: dict[str, Any]) -> Literal["outbound", "inbound", "b
     return value
 
 
+def _optional_lineage_direction(kw: dict[str, Any]) -> Literal["ancestors", "descendants"]:
+    value = kw.get("direction") or "ancestors"
+    if value == "ancestors":
+        return "ancestors"
+    if value == "descendants":
+        return "descendants"
+    raise _DispatchValidationError(
+        rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    "direction must be 'ancestors' or 'descendants'",
+                    "direction",
+                )
+            ]
+        )
+    )
+
+
 def _required_str(kw: dict[str, Any], key: str) -> str:
     value = kw.get(key)
     if not isinstance(value, str) or not value:
@@ -313,21 +332,12 @@ def _dispatch_search_memory(**kw):
 
 
 def _dispatch_get_memory(**kw):
-    """Fetch one entity through the explicit-ID service contract.
-
-    ``get_memory`` is introduced by Phase 3.  Keep a narrow fallback to the existing fetch
-    primitive while the domain service is migrated, so the adapter/daemon surface can land
-    independently of the service implementation.  The fallback is deliberately not a redirect:
-    ``fetch_memory_chunk`` addresses exactly the supplied entity and includes archived rows.
-    """
+    """Fetch one entity through the explicit-ID service contract, owner-scoped."""
     try:
         entity_id = _required_str(kw, "entity_id")
     except _DispatchValidationError as exc:
         return exc.payload
-    fetch = getattr(memory_service, "get_memory", None)
-    if fetch is not None:
-        return fetch(entity_id=entity_id, owner_id=kw.get("owner_id"))
-    return memory_service.fetch_memory_chunk(entity_id=entity_id)
+    return memory_service.get_memory(entity_id=entity_id, owner_id=kw.get("owner_id"))
 
 
 def _dispatch_inspect_memory(**kw):
@@ -542,35 +552,17 @@ def _dispatch_get_last_session_digest(**kw):
 def _dispatch_get_lineage(**kw):
     try:
         entity_id = _required_str(kw, "entity_id")
-        direction = kw.get("direction") or "ancestors"
-        if direction not in {"ancestors", "descendants"}:
-            return rejected(
-                [
-                    error(
-                        error_codes.VALIDATION_ERROR,
-                        "direction must be 'ancestors' or 'descendants'",
-                        "direction",
-                    )
-                ]
-            )
+        direction = _optional_lineage_direction(kw)
         max_depth = _optional_int(kw, "max_depth", 5)
     except _DispatchValidationError as exc:
         return exc.payload
 
-    # The Phase-3 service entry point supports both directions and all lifecycle predicates.  The
-    # fallback preserves ancestor behaviour against the pre-Phase-3 service while development is
-    # split across the daemon and domain layers.
-    get_lineage = getattr(relation_service, "get_lineage", None)
-    if get_lineage is not None:
-        return get_lineage(
-            entity_id=entity_id,
-            direction=direction,
-            max_depth=max_depth,
-            owner_id=kw.get("owner_id"),
-        )
-    if direction == "descendants":
-        raise RuntimeError("descendant lineage is unavailable until the lineage service is updated")
-    return relation_service.analyze_lineage(entity_id=entity_id)
+    return relation_service.get_lineage(
+        entity_id=entity_id,
+        direction=direction,
+        max_depth=max_depth,
+        owner_id=kw.get("owner_id"),
+    )
 
 
 def _dispatch_get_related_memories(**kw):

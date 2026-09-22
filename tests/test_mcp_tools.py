@@ -1371,6 +1371,71 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(private["data"]["id"], str(result))
         self.assertNotIn("Private relation neighbor", str(result))
 
+    async def test_get_related_memories_resolves_own_title_despite_other_owners_newer_collision(
+        self,
+    ):
+        # owner_b's private memory is stored first, so owner_a's same-titled memory below has a
+        # strictly later updated_at -- the unfiltered title lookup that resolve_entity_id() alone
+        # performs would pick owner_a's row, which must not shadow owner_b's own valid title match.
+        owned = await self._call_as(
+            "owner_b",
+            "store_memory",
+            {
+                "title": "Duplicate Title Collision",
+                "content": "Owner B's own memory, must resolve for owner_b by title.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(owned["status"], "ok", owned)
+        colliding = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Duplicate Title Collision",
+                "content": "Owner A's private memory, must never resolve for owner_b.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(colliding["status"], "ok", colliding)
+        result = await self._call_as(
+            "owner_b",
+            "get_related_memories",
+            {"entity_id": "Duplicate Title Collision"},
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(colliding["data"]["id"], str(result))
+        self.assertNotIn("Owner A's private memory", str(result))
+
+    async def test_get_lineage_resolves_own_title_despite_other_owners_newer_collision(self):
+        owned = await self._call_as(
+            "owner_b",
+            "store_memory",
+            {
+                "title": "Duplicate Lineage Title Collision",
+                "content": "Owner B's own memory, must resolve for owner_b by title.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(owned["status"], "ok", owned)
+        colliding = await self._call_as(
+            "owner_a",
+            "store_memory",
+            {
+                "title": "Duplicate Lineage Title Collision",
+                "content": "Owner A's private memory, must never resolve for owner_b.",
+                "scope": "private",
+            },
+        )
+        self.assertEqual(colliding["status"], "ok", colliding)
+        result = await self._call_as(
+            "owner_b",
+            "get_lineage",
+            {"entity_id": "Duplicate Lineage Title Collision", "direction": "ancestors"},
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertNotIn(colliding["data"]["id"], str(result))
+        self.assertNotIn("Owner A's private memory", str(result))
+
     async def test_retrieve_context_local_rejects_private_anchor(self):
         private = await self._call_as(
             "owner_a",

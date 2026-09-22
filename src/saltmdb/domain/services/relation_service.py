@@ -22,7 +22,7 @@ from saltmdb.utils.envelope import (
     warning as envelope_warning,
 )
 from saltmdb.utils import envelope
-from saltmdb.utils.text import resolve_entity_id, resolve_entity_ref, compute_content_hash
+from saltmdb.utils.text import resolve_entity_ref, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
@@ -805,7 +805,9 @@ def analyze_dependencies(  # noqa: C901, PLR0912
         conn = get_connection(db_path)
         should_close = True
 
-    root_id = resolve_entity_id(conn, root_entity_id)
+    root_id, _root_candidates, _root_truncated = resolve_entity_ref(
+        conn, root_entity_id, owner_id=owner_id
+    )
     if not root_id:
         if should_close:
             close_connection(conn)
@@ -999,7 +1001,9 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
         conn = get_connection(db_path)
         should_close = True
 
-    target_id = resolve_entity_id(conn, entity_id)
+    target_id, _target_candidates, _target_truncated = resolve_entity_ref(
+        conn, entity_id, owner_id=owner_id
+    )
     if not target_id:
         if should_close:
             close_connection(conn)
@@ -1008,14 +1012,6 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     pit = point_in_time or datetime.now(UTC).isoformat()
 
     try:
-        if (
-            owner_id is not None
-            and not conn.execute(
-                "SELECT 1 FROM entities WHERE id = ? AND (owner_id = ? OR scope = 'shared')",
-                (target_id, owner_id),
-            ).fetchone()
-        ):
-            return {"error": f"Could not resolve entity '{entity_id}'"}
         root_info = _lineage_node(conn, target_id)
         if max_depth == 0:
             return {
