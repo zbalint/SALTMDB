@@ -129,6 +129,10 @@ RELEVANCE_PREVIEW_MERGE_GAP_CHARS = 50  # two expanded spans within this many ch
 RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS = 20000  # cumulative cap across one search_memory
 # response's previews combined; never removes a result row, only omits relevance_preview
 # on lower-ranked results once the running total would exceed this
+RELEVANCE_PREVIEW_WARNING_PREFIX = (
+    "[UNVERIFIED PREVIEW -- call get_memory before citing as fact] "
+)  # prepended to relevance_preview text itself so the warning survives at the point the
+# model actually reads and cites the string, not just in the docstring/schema around it
 
 # Stage-2 chunk candidate generation (search_memory's opt-in
 # ``use_chunk_candidates`` path).  The values are intentionally a small, explicit experiment

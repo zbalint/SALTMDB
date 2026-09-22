@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 import sqlite_vec
 
-from saltmdb.config import CHUNK_OVERLAP_CHARS, CHUNK_SIZE_CHARS
+from saltmdb.config import (
+    CHUNK_OVERLAP_CHARS,
+    CHUNK_SIZE_CHARS,
+    RELEVANCE_PREVIEW_WARNING_PREFIX,
+)
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import embedding_service
 from saltmdb.mcp import tools
@@ -129,7 +133,9 @@ class TestRelevancePreviewMCP(unittest.TestCase):
             self.assertIsInstance(item["relevance_preview"], str)
             self.assertTrue(item["relevance_preview"])
             self.assertEqual(item["relevance_preview_meta"], expected_meta)
-            self.assertIn(item["relevance_preview"], stored_content)
+            self.assertTrue(item["relevance_preview"].startswith(RELEVANCE_PREVIEW_WARNING_PREFIX))
+            excerpt = item["relevance_preview"][len(RELEVANCE_PREVIEW_WARNING_PREFIX):]
+            self.assertIn(excerpt, stored_content)
 
     def test_browse_results_never_include_relevance_preview(self):
         entity_id = self._store(
