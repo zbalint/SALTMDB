@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, UTC
 from typing import Literal
 
-from saltmdb.config import get_db_path
+from saltmdb.config import get_db_path, MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils.text import compute_content_hash
 from saltmdb.utils.nlp import evaluate_memory_quality
@@ -620,6 +620,9 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if not content or not content.strip():
         return "Error: content is mandatory and cannot be empty."
+
+    if len(content) > MAX_MEMORY_CONTENT_CHARS:
+        return f"Error: content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)})."
 
     if scope not in ("private", "shared"):
         return "Error: scope must be either 'private' or 'shared'"

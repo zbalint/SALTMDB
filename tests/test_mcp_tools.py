@@ -4,6 +4,7 @@ import os
 import shutil
 import json
 import uuid
+from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
 from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -167,6 +168,32 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         self.assertEqual(dup_res["status"], "rejected")
         self.assertEqual(dup_res["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
+
+    def test_store_memory_rejects_content_over_maximum(self):
+        result = tools.store_memory(
+            content="x" * (MAX_MEMORY_CONTENT_CHARS + 1),
+            title="Oversized Content",
+            tags=["#length-cap"],
+        )
+        self.assertEqual(
+            result,
+            f"Error: content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {MAX_MEMORY_CONTENT_CHARS + 1}).",
+        )
+
+    def test_store_memory_accepts_content_at_maximum(self):
+        section = (
+            "## Length Boundary\n\n"
+            "This paragraph records durable context for the configured memory content limit.\n\n"
+        )
+        content = (section * (MAX_MEMORY_CONTENT_CHARS // len(section) + 1))[
+            :MAX_MEMORY_CONTENT_CHARS
+        ]
+        result = tools.store_memory(
+            content=content,
+            title="Length Boundary Content",
+            tags=["#length-cap"],
+        )
+        self.assertEqual(result["status"], "ok")
 
     def test_get_events_filters_by_context_and_agent(self):
         # Phase 6 (plan §5.7): log_event/get_events no longer have `mode` -- context_id/

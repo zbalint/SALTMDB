@@ -648,6 +648,9 @@ EMBED_STALL_PENDING_AGE_THRESHOLD_S = 300
 # create/promote/enlarge a core memory, never just advisory.
 CORE_MAX_ACTIVE = 5  # max non-archived is_core=1 entities at once, global across the whole DB
 CORE_MAX_CONTENT_CHARS = 2500  # max full_content per core, Unicode code points (len(text))
+MAX_MEMORY_CONTENT_CHARS = 40_000  # max full_content for any memory write (store/revise/
+# supersede/consolidate); a strict superset of CORE_MAX_CONTENT_CHARS's tighter core-only cap --
+# see SPEC-MEMORY-CONTENT-LENGTH-CAP.md for the measured trigger this margins against.
 CORE_MAX_RENDERED_CHARS = 15000  # max exact rendered bootstrap digest, Unicode code points
 CORE_REASON_MIN_CHARS = 20
 CORE_REASON_MAX_CHARS = 500

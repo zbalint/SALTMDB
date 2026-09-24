@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import (
@@ -160,6 +161,16 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
             ],
             1,
         )
+
+    def test_consolidate_rejects_content_over_maximum(self):
+        result = consolidate_memories(
+            parent_ids=["not-a-real-parent"],
+            title="Oversized Canonical Summary",
+            content="x" * (MAX_MEMORY_CONTENT_CHARS + 1),
+            db_connection=self.conn,
+        )
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "CONTENT_TOO_LONG")
 
     def test_bulk_success_preserves_each_item_worklist(self):
         parent_a = self._parent("Bulk Parent A")

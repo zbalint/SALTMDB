@@ -12,6 +12,7 @@ from saltmdb.config import (
     RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
     RELATION_GATE_STRONG_PREDICATES,
     RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS,
+    MAX_MEMORY_CONTENT_CHARS,
 )
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.utils import error_codes
@@ -1417,6 +1418,11 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not title or not content:
         return _consolidation_rejected(
             "MISSING_REQUIRED_FIELDS", "title and content are mandatory."
+        )
+    if len(content) > MAX_MEMORY_CONTENT_CHARS:
+        return _consolidation_rejected(
+            "CONTENT_TOO_LONG",
+            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)}).",
         )
 
     should_close = False

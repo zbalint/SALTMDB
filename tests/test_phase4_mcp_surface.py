@@ -1,7 +1,12 @@
+import os
+import tempfile
 import inspect
 import unittest
 from unittest.mock import patch
 
+from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
+from saltmdb.db.schema import init_db
+from saltmdb.domain.services.memory_service.lifecycle import revise_memory, supersede_memory
 from saltmdb.daemon import dispatch, protocol
 from saltmdb.mcp import tools
 from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -85,6 +90,40 @@ class TestPhase4McpSurface(unittest.TestCase):
         self.assertEqual(self.backend.calls[0][1]["entity_id"], "old")
         self.assertEqual(self.backend.calls[0][1]["reason"], "Fix an incomplete representation")
         self.assertEqual(self.backend.calls[1][1]["memory_type"], "decision")
+
+    def test_revise_rejects_content_over_maximum(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conn = init_db(os.path.join(temp_dir, "test.db"))
+            try:
+                result = revise_memory(
+                    entity_id="not-a-real-memory",
+                    title="Revised Content",
+                    content="x" * (MAX_MEMORY_CONTENT_CHARS + 1),
+                    tags=["#length-cap"],
+                    reason="Boundary validation test",
+                    db_connection=conn,
+                )
+            finally:
+                conn.close()
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "CONTENT_TOO_LONG")
+
+    def test_supersede_rejects_content_over_maximum(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conn = init_db(os.path.join(temp_dir, "test.db"))
+            try:
+                result = supersede_memory(
+                    entity_id="not-a-real-memory",
+                    title="Superseded Content",
+                    content="x" * (MAX_MEMORY_CONTENT_CHARS + 1),
+                    tags=["#length-cap"],
+                    reason="Boundary validation test",
+                    db_connection=conn,
+                )
+            finally:
+                conn.close()
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "CONTENT_TOO_LONG")
 
     def test_lifecycle_registration_and_protocol_classification(self):
         for name in ("revise_memory", "supersede_memory", "consolidate_memories"):

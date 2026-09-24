@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, UTC
 from typing import Any, cast, Literal
 
-from saltmdb.config import get_db_path
+from saltmdb.config import get_db_path, MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.connection import (
     get_connection,
     is_coordinator_connection,
@@ -145,6 +145,12 @@ def _validate_replacement_inputs(  # noqa: PLR0911
     if not isinstance(content, str) or not content.strip():
         return _replacement_error(
             "MISSING_CONTENT", "content is mandatory and cannot be empty.", "content"
+        )
+    if len(content) > MAX_MEMORY_CONTENT_CHARS:
+        return _replacement_error(
+            "CONTENT_TOO_LONG",
+            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)}).",
+            "content",
         )
     if not isinstance(reason, str) or not reason.strip():
         return _replacement_error(
