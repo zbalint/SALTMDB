@@ -98,6 +98,15 @@ DEDUP_CROSS_ENCODER_THRESHOLD = 4.0
 CHUNK_SIZE_CHARS = 1200
 CHUNK_OVERLAP_CHARS = 200
 
+# Max chunks embedded per embed_texts() call in embed_texts_in_batches(). embed_texts() passes
+# its whole input to fastembed as one internal batch, and the attention buffer that call needs
+# scales with batch size -- an unbounded call over a large chunk set previously froze a host
+# outright (scripts/benchmarking/run_retrieval_bakeoff.py's incident) and separately caused a
+# WSL2 OOM (the Needle-evaluation benchmark's run_experiment1.py, fixed there via the identical
+# 32-item batching this constant now applies in production). Chunking the call site fixes the
+# actual buffer-size excess rather than requiring a memory ceiling to merely fail safely.
+EMBEDDING_BATCH_SIZE = 32
+
 # Cross-chunk topic scoring (search_memory's mode="strict" relevance-gate evidence, see
 # src/saltmdb/domain/services/memory_service/search_primitives.py:_score_topics_with_fallback --
 # the retired full-pool topic-reranking path no longer exists; RERANK_CANDIDATE_POOL_SIZE now

@@ -2,6 +2,7 @@ import unittest
 import os
 import tempfile
 import shutil
+from unittest.mock import patch
 
 import numpy as np
 
@@ -9,6 +10,7 @@ from saltmdb.domain.services.embedding_service import (
     _is_valid_local_model,
     embed_text,
     embed_texts,
+    embed_texts_in_batches,
     compute_entity_chunk_embeddings,
 )
 
@@ -76,6 +78,61 @@ class TestEmbedTexts(unittest.TestCase):
             )
 
 
+class TestEmbedTextsInBatches(unittest.TestCase):
+    def test_empty_list_returns_empty_list(self):
+        self.assertEqual(embed_texts_in_batches([]), [])
+
+    def test_calls_embed_texts_in_bounded_batches_and_preserves_order(self):
+        calls = []
+
+        def fake_embed_texts(texts):
+            calls.append(list(texts))
+            return [[float(len(t))] for t in texts]
+
+        texts = [f"row-{i}" for i in range(10)]
+        with patch(
+            "saltmdb.domain.services.embedding_service.embed_texts",
+            side_effect=fake_embed_texts,
+        ):
+            result = embed_texts_in_batches(texts, batch_size=4)
+
+        self.assertEqual(calls, [texts[0:4], texts[4:8], texts[8:10]])
+        self.assertEqual(result, [[float(len(t))] for t in texts])
+
+    def test_never_calls_embed_texts_with_more_than_batch_size_items(self):
+        calls = []
+
+        def fake_embed_texts(texts):
+            calls.append(len(texts))
+            return [[0.0] for _ in texts]
+
+        with patch(
+            "saltmdb.domain.services.embedding_service.embed_texts",
+            side_effect=fake_embed_texts,
+        ):
+            embed_texts_in_batches([f"x{i}" for i in range(75)], batch_size=32)
+
+        self.assertEqual(calls, [32, 32, 11])
+        self.assertTrue(all(n <= 32 for n in calls))
+
+    def test_default_batch_size_matches_config_constant(self):
+        from saltmdb.config import EMBEDDING_BATCH_SIZE
+
+        calls = []
+
+        def fake_embed_texts(texts):
+            calls.append(len(texts))
+            return [[0.0] for _ in texts]
+
+        with patch(
+            "saltmdb.domain.services.embedding_service.embed_texts",
+            side_effect=fake_embed_texts,
+        ):
+            embed_texts_in_batches([f"x{i}" for i in range(EMBEDDING_BATCH_SIZE + 5)])
+
+        self.assertEqual(calls, [EMBEDDING_BATCH_SIZE, 5])
+
+
 class TestComputeEntityChunkEmbeddings(unittest.TestCase):
     def test_short_content_produces_one_chunk(self):
         rows = compute_entity_chunk_embeddings("entity-1", "Short content, one chunk expected.")
@@ -107,6 +164,31 @@ class TestComputeEntityChunkEmbeddings(unittest.TestCase):
         self.assertEqual(compute_entity_chunk_embeddings("entity-3", ""), [])
         self.assertEqual(compute_entity_chunk_embeddings("entity-3", "   "), [])
         self.assertEqual(compute_entity_chunk_embeddings("entity-3", None), [])
+
+    def test_large_content_never_sends_embed_texts_more_than_batch_size_chunks(self):
+        """Regression test for the unbounded single embed_texts() call that previously caused a
+        host freeze (Gate D bakeoff) and a WSL2 OOM (Needle evaluation) elsewhere in this
+        project -- compute_entity_chunk_embeddings must route through embed_texts_in_batches,
+        never call embed_texts directly with an entity's full chunk list.
+        """
+        from saltmdb.config import EMBEDDING_BATCH_SIZE
+
+        full_content = "".join(f"paragraph-{i:05d} " for i in range(4000))  # ~60,000 chars
+        batch_sizes = []
+
+        def fake_embed_texts(texts):
+            batch_sizes.append(len(texts))
+            return [[0.0] * 384 for _ in texts]
+
+        with patch(
+            "saltmdb.domain.services.embedding_service.embed_texts",
+            side_effect=fake_embed_texts,
+        ):
+            rows = compute_entity_chunk_embeddings("entity-4", full_content)
+
+        self.assertGreater(len(batch_sizes), 1, "content should require more than one batch")
+        self.assertTrue(all(n <= EMBEDDING_BATCH_SIZE for n in batch_sizes))
+        self.assertEqual(sum(batch_sizes), len(rows))
 
 
 if __name__ == "__main__":

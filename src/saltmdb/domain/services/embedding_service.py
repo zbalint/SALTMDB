@@ -12,7 +12,7 @@ try:
 except ImportError:
     sqlite_vec = None
 
-from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS
+from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS, EMBEDDING_BATCH_SIZE
 from saltmdb.utils.chunking import chunk_text
 
 logger = logging.getLogger(__name__)
@@ -726,6 +726,22 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return results
 
 
+def embed_texts_in_batches(
+    texts: list[str], batch_size: int = EMBEDDING_BATCH_SIZE
+) -> list[list[float]]:
+    """Embed many texts via bounded-size embed_texts() calls instead of one unbounded call.
+
+    embed_texts() passes its whole input to fastembed as a single internal batch; see
+    EMBEDDING_BATCH_SIZE's definition (config.py) for the two real incidents this previously
+    caused. Chunking the call site into fixed-size batches -- rather than raising a memory
+    ceiling to merely fail safely -- is the fix proven there, applied here verbatim.
+    """
+    embeddings: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        embeddings.extend(embed_texts(texts[start : start + batch_size]))
+    return embeddings
+
+
 # BGE (BAAI/bge-small-en-v1.5, the model get_model() loads) is an asymmetric embedding model:
 # it was trained with a query-side instruction prefix that document-side text never gets, and
 # omitting it on the query side leaves retrieval quality on the table. embed_text/embed_texts
@@ -771,12 +787,15 @@ def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[d
     directly usable offsets into full_content with no prefix-length arithmetic required by any
     consumer. Whether/how title should factor into chunk-level retrieval is left to whichever
     later rework phase first consumes this table.
+
+    Uses embed_texts_in_batches (not embed_texts directly) so a large full_content's chunk count
+    can never force one unbounded fastembed batch call -- see EMBEDDING_BATCH_SIZE's definition.
     """
     chunks = chunk_text(full_content or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
     if not chunks:
         return []
 
-    vectors = embed_texts([c["text"] for c in chunks])
+    vectors = embed_texts_in_batches([c["text"] for c in chunks])
     return [
         {
             "id": f"{entity_id}::{i}",
