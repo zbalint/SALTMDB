@@ -69,8 +69,9 @@ The conversation-trace Phase 1 capture path is registered directly in the harnes
 examples, not through a Python subprocess. `hooks/claude-settings-example.json` and
 `hooks/codex-settings-example.json` each register three native `mcp_tool` entries:
 
-Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` before enabling these
-registrations.
+Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` in the MCP server's
+`env` (the adapter process gates the `capture_trace_*` tools -- the shared daemon has no flag and
+always captures) before enabling these registrations.
 
 - `UserPromptSubmit` calls `capture_trace_start` with the harness-specific literal and
   `${session_id}`, `${prompt_id}`/`${turn_id}`, and `${prompt}`.

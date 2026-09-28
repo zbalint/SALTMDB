@@ -8,7 +8,7 @@ import uuid6
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from saltmdb.config import get_db_path, is_trace_capture_enabled
+from saltmdb.config import get_db_path
 from saltmdb.db.connection import close_connection, get_connection, write_transaction_retrying
 from saltmdb.utils.envelope import error, ok, rejected, warning
 from saltmdb.utils.text import compute_content_hash, extract_title_and_snippet
@@ -35,17 +35,6 @@ def _open_connection(db_connection, db_path: str | None):
     if db_connection is not None:
         return db_connection, False
     return get_connection(db_path or get_db_path()), True
-
-
-def _capture_disabled() -> dict[str, Any]:
-    return rejected(
-        [
-            error(
-                "TRACE_CAPTURE_DISABLED",
-                "Trace capture is not enabled. Set SALTMDB_TRACE_CAPTURE_ENABLED=true to enable.",
-            )
-        ]
-    )
 
 
 def _sweep_abandoned_traces(
@@ -105,9 +94,6 @@ def capture_trace_start(
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Create an idempotent pending trace for one harness turn."""
-    if not is_trace_capture_enabled():
-        return _capture_disabled()
-
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         _sweep_abandoned_traces(conn, agent_session_id=agent_session_id)
@@ -168,8 +154,6 @@ def capture_trace_memory_link(
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Idempotently link the current entity revision to the current trace."""
-    if not is_trace_capture_enabled():
-        return _capture_disabled()
     if just_run_tool_name not in _LINK_OPERATIONS:
         return rejected(
             [error("INVALID_WRITE_OPERATION", "The tool is not a supported trace-linked write.")]
@@ -271,9 +255,6 @@ def capture_trace_complete(
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Transition a pending trace to completed, without overwriting terminal states."""
-    if not is_trace_capture_enabled():
-        return _capture_disabled()
-
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         now = datetime.now(UTC).isoformat()

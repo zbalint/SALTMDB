@@ -7,6 +7,7 @@ import logging
 import re
 from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
+from saltmdb.config import is_trace_capture_enabled
 from saltmdb.daemon import protocol
 
 # core_governance_service.parse_is_core is a pure/stateless helper (no DB access), safe to call
@@ -1213,6 +1214,24 @@ def get_memory(entity_id: str, include_trace_provenance: bool = False) -> dict:
     )
 
 
+def _trace_capture_disabled() -> dict | None:
+    """Adapter-side feature gate for the capture_trace_* tools. The flag is read from this MCP
+    server process's own env -- never the shared daemon's, whose env is whichever client happened
+    to spawn it first -- so the daemon-side trace service always captures."""
+    if is_trace_capture_enabled():
+        return None
+    from saltmdb.utils.envelope import error, rejected
+
+    return rejected(
+        [
+            error(
+                "TRACE_CAPTURE_DISABLED",
+                "Trace capture is not enabled. Set SALTMDB_TRACE_CAPTURE_ENABLED=true to enable.",
+            )
+        ]
+    )
+
+
 @mcp.tool()
 def capture_trace_start(
     harness: Literal["codex", "claude_code"],
@@ -1227,6 +1246,8 @@ def capture_trace_start(
 
     Returns {"status": "ok", "data": {"id", "status": "pending"}, "warnings": [...]}.
     """
+    if (disabled := _trace_capture_disabled()) is not None:
+        return disabled
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "capture_trace_start",
@@ -1258,6 +1279,8 @@ def capture_trace_memory_link(
     "warnings": [...]} -- an unknown turn or entity is reported as {"status": "rejected", ...},
     which the calling hook must treat as non-fatal.
     """
+    if (disabled := _trace_capture_disabled()) is not None:
+        return disabled
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "capture_trace_memory_link",
@@ -1279,6 +1302,8 @@ def capture_trace_complete(harness_turn_id: str, final_assistant_message: str) -
 
     Returns {"status": "ok", "data": {"trace_id", "status"}, "warnings": [...]}.
     """
+    if (disabled := _trace_capture_disabled()) is not None:
+        return disabled
     owner_id_ = _effective_owner()
     return _backend_or_raise().call(
         "capture_trace_complete",

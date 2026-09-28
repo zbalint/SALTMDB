@@ -14,11 +14,9 @@ class TestTraceService(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "trace-service.db")
         self.conn = init_db(self.db_path)
-        os.environ["SALTMDB_TRACE_CAPTURE_ENABLED"] = "true"
 
     def tearDown(self):
         self.conn.close()
-        os.environ.pop("SALTMDB_TRACE_CAPTURE_ENABLED", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _start(self, turn_id="turn-a", owner_id="owner-a", agent_session_id="agent-session-a"):
@@ -345,35 +343,6 @@ class TestTraceService(unittest.TestCase):
                 "agent-session-a", "owner-b", "turn-a", "not accepted", db_connection=self.conn
             )["warnings"][0]["code"],
             "UNKNOWN_TRACE",
-        )
-
-    def test_capture_disabled_rejects_all_capture_writes_but_reads_work(self):
-        from saltmdb.domain.services import trace_service
-
-        trace_id = self._start(turn_id="disabled-read")
-        self._entity()
-        os.environ["SALTMDB_TRACE_CAPTURE_ENABLED"] = "false"
-        start = trace_service.capture_trace_start(
-            "disabled-session", "owner-a", "claude_code", "session", "disabled", "prompt",
-            db_connection=self.conn,
-        )
-        link = trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "disabled-read", "entity-a", "store_memory",
-            db_connection=self.conn,
-        )
-        complete = trace_service.capture_trace_complete(
-            "agent-session-a", "owner-a", "disabled-read", "message", db_connection=self.conn
-        )
-        fetched = trace_service.get_trace("owner-a", trace_id, db_connection=self.conn)
-        searched = trace_service.search_traces("owner-a", db_connection=self.conn)
-
-        for result in (start, link, complete):
-            self.assertEqual(result["status"], "rejected")
-            self.assertEqual(result["errors"][0]["code"], "TRACE_CAPTURE_DISABLED")
-        self.assertEqual(fetched["status"], "ok")
-        self.assertEqual(searched["status"], "ok")
-        self.assertEqual(
-            self.conn.execute("SELECT COUNT(*) FROM conversation_traces").fetchone()[0], 1
         )
 
 

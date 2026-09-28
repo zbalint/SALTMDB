@@ -45,7 +45,10 @@ class TestTraceMcpTools(unittest.TestCase):
             self.assertNotIn("agent_session_id", inspect.signature(function).parameters)
 
     def test_wrappers_bind_owner_and_never_accept_caller_owner(self):
-        with patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend):
+        with (
+            patch.dict(os.environ, {"SALTMDB_TRACE_CAPTURE_ENABLED": "true"}),
+            patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+        ):
             tools.capture_trace_start("codex", "codex-session", "turn-1", "prompt")
             tools.capture_trace_memory_link("turn-1", "entity-1", "store_memory")
             tools.capture_trace_complete("turn-1", "assistant answer")
@@ -62,6 +65,25 @@ class TestTraceMcpTools(unittest.TestCase):
         for tool_name, kwargs in calls.items():
             if tool_name != "search_traces":
                 self.assertNotIn("agent_session_id", kwargs)
+
+    def test_capture_tools_reject_without_backend_call_when_flag_disabled(self):
+        env = {k: v for k, v in os.environ.items() if k != "SALTMDB_TRACE_CAPTURE_ENABLED"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+        ):
+            results = [
+                tools.capture_trace_start("codex", "codex-session", "turn-1", "prompt"),
+                tools.capture_trace_memory_link("turn-1", "entity-1", "store_memory"),
+                tools.capture_trace_complete("turn-1", "assistant answer"),
+            ]
+            searched = tools.search_traces()
+
+        for result in results:
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["errors"][0]["code"], "TRACE_CAPTURE_DISABLED")
+        self.assertEqual([name for name, _ in self.backend.calls], ["search_traces"])
+        self.assertEqual(searched["status"], "ok")
 
     def test_get_memory_forwards_trace_provenance_opt_in(self):
         with patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend):
