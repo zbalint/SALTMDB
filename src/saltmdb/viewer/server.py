@@ -22,10 +22,18 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     viewer_gateway: Any
     # Bound on concurrent request threads; connections beyond it are closed at once.
     max_connections = 64
+    # Socket deadline (seconds) applied to every accepted connection: a client that stalls
+    # mid-request is disconnected instead of holding a server thread forever.
+    request_timeout = 15
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._connection_slots = threading.BoundedSemaphore(self.max_connections)
         super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        connection, client_address = super().get_request()
+        connection.settimeout(self.request_timeout)
+        return connection, client_address
 
     def process_request(self, request, client_address):
         if not self._connection_slots.acquire(blocking=False):

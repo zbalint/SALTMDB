@@ -52,11 +52,11 @@ class TestViewerServerSlowClients(unittest.TestCase):
 
     def test_the_default_request_timeout_is_bounded(self):
         # The stall test below patches the timeout to keep it fast; this pins the real default.
-        self.assertIsNotNone(SALTMDBHandler.timeout)
-        self.assertTrue(0 < SALTMDBHandler.timeout <= 60)
+        self.assertIsNotNone(SALTMDBTCPServer.request_timeout)
+        self.assertTrue(0 < SALTMDBTCPServer.request_timeout <= 60)
 
     def test_a_client_that_stalls_mid_request_is_disconnected(self):
-        with patch.object(SALTMDBHandler, "timeout", 0.3):
+        with patch.object(SALTMDBTCPServer, "request_timeout", 0.3):
             port = self._serve()
             with socket.create_connection(("127.0.0.1", port)) as sock:
                 sock.sendall(b"GET /api/sta")  # never finishes the request line
@@ -64,7 +64,7 @@ class TestViewerServerSlowClients(unittest.TestCase):
 
     def test_connections_beyond_the_cap_are_shed_immediately(self):
         with (
-            patch.object(SALTMDBHandler, "timeout", 5),
+            patch.object(SALTMDBTCPServer, "request_timeout", 5),
             patch.object(SALTMDBTCPServer, "max_connections", 1),
         ):
             port = self._serve()
