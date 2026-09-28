@@ -62,6 +62,11 @@
     if (handler) element.addEventListener('click', handler);
     return element;
   };
+  // Async UI handlers run outside render()'s try/catch: route their failures to the notice bar
+  // instead of leaving an unhandled rejection and a control that silently did nothing.
+  const guarded = (handler) => async (...args) => {
+    try { await handler(...args); } catch (err) { if (err.name !== 'AbortError') setNotice(err.message || String(err)); }
+  };
   const setBusy = (element, busy) => element.setAttribute('aria-busy', String(busy));
   const copyText = async (value, label = 'Text') => {
     try {
@@ -305,7 +310,7 @@
       const query = inputField('Hybrid retrieval query', 'Search the memory graph', state.hybridQuery);
       const sessionField = inputField('Session ID', 'Filter by agent session ID', state.hybridSessionId);
       form.append(mode.wrap, query.wrap, sessionField.wrap, button('Search memories', 'primary', undefined, 'submit'));
-      form.addEventListener('submit', async event => {
+      form.addEventListener('submit', guarded(async event => {
         event.preventDefault(); state.hybridQuery = query.element.value.trim();
         state.hybridSessionId = sessionField.element.value.trim();
         if (!state.hybridQuery) { result.replaceChildren(node('p', 'Enter a query to run hybrid retrieval.', 'muted')); return; }
@@ -320,7 +325,7 @@
           });
           result.replaceChildren(section(`${data.results.length} ranked matches`, 'Broad hybrid retrieval combines the established lexical and semantic backend signals.'), renderTable(['Memory', 'Score', 'Type', 'Owner'], rows, 'No matching active memories.'));
         } finally { setBusy(result, false); }
-      });
+      }));
       view.replaceChildren(section('Explore memories', 'Hybrid Search returns ranked backend retrieval results. Browse / audit list remains the pageable metadata workspace.'), form, result);
       if (state.hybridQuery) form.requestSubmit();
       return;
@@ -353,15 +358,15 @@
         const tags = node('td'); tags.append(tagList(entity.tags)); row.append(memory, typeCell, lifecycleCell, tags); return row;
       });
       const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Memory pages');
-      const previous = button('Previous', '', () => list(currentParams, page - 1)); previous.disabled = page <= 1;
-      const next = button('Next', '', () => list(currentParams, page + 1)); next.disabled = page >= data.total_pages;
+      const previous = button('Previous', '', guarded(() => list(currentParams, page - 1))); previous.disabled = page <= 1;
+      const next = button('Next', '', guarded(() => list(currentParams, page + 1))); next.disabled = page >= data.total_pages;
       pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} memories`, 'muted'), next);
       const dateSummary = data.date_from || data.date_to ? ` · ${data.date_field} dates ${data.date_from || '…'} to ${data.date_to || '…'} (inclusive UTC)` : '';
       result.replaceChildren(section(`${data.total_count} memories`, `${data.sort.replace('_', ' ')}${dateSummary}. Browse filters are applied before paging.`), renderTable(['Memory', 'Type', 'Lifecycle', 'Tags'], rows), pager);
       state.explorerPage = page;
       } finally { setBusy(result, false); }
     };
-    form.addEventListener('submit', async event => {
+    form.addEventListener('submit', guarded(async event => {
       event.preventDefault(); const params = new URLSearchParams();
       [['q', q.value], ['id_prefix', prefix.value], ['tag', tag.value], ['session_id', sessionField.element.value], ['status', lifecycle.element.value], ['memory_type', type.element.value], ['sort', sort.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
       if (core.element.checked) params.set('is_core', 'true');
@@ -371,7 +376,7 @@
         if (dateTo.element.value) params.set('date_to', dateTo.element.value);
       }
       state.explorerPreset = Object.fromEntries(params); state.explorerPage = 1; await list(params, 1);
-    });
+    }));
     view.replaceChildren(section('Explore memories', 'Browse a pageable audit list with explicit metadata filters. Core-memory filtering is available. Use Hybrid Search for ranked semantic-plus-lexical retrieval.'), form, result);
     const initial = new URLSearchParams(state.explorerPreset); await list(initial, state.explorerPage);
   };
@@ -517,14 +522,14 @@
         const data = await api(`/api/sessions?${params}`);
         const rows = data.sessions.map(sessionRow);
         const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Session pages');
-        const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
-        const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
+        const previous = button('Previous', '', guarded(() => list(page - 1))); previous.disabled = page <= 1;
+        const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
         result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'Traces', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
         state.sessionsPage = page;
       } finally { setBusy(result, false); }
     };
-    form.addEventListener('submit', event => {
+    form.addEventListener('submit', guarded(async event => {
       event.preventDefault();
       const params = new URLSearchParams();
       [
@@ -537,8 +542,8 @@
         ['date_to', dateTo.element.value],
         ['sort', sortField.element.value],
       ].forEach(([key, value]) => { if (value) params.set(key, value); });
-      state.sessionsPreset = Object.fromEntries(params); state.sessionsPage = 1; list(1);
-    });
+      state.sessionsPreset = Object.fromEntries(params); state.sessionsPage = 1; await list(1);
+    }));
     view.replaceChildren(section('Agent sessions', 'Browse memories and events grouped by the MCP session that created or touched them.'), form, result);
     await list(state.sessionsPage);
   };
@@ -604,7 +609,7 @@
       result.replaceChildren(...contents);
       } finally { setBusy(result, false); }
     };
-    form.addEventListener('submit', async event => { event.preventDefault(); await load(input.value.trim()); });
+    form.addEventListener('submit', guarded(async event => { event.preventDefault(); await load(input.value.trim()); }));
     view.replaceChildren(section('Memory Map', 'A bounded visual neighborhood centered on one memory.'), form, result);
     if (state.focusRelationshipInput) { state.focusRelationshipInput = false; input.focus(); }
     if (state.relationRoot) await load(state.relationRoot);
@@ -625,19 +630,19 @@
         const qualityRows = data.items.map(item => { const row = node('tr'); const lifecycle = node('td'); lifecycle.append(statusBadge(item.status)); const embeddingCell = node('td'); embeddingCell.append(statusBadge(item.embedding_status || 'pending')); const flags = node('td'); flags.append(tagList(item.quality_flags)); row.append(memoryCell(item), lifecycle, embeddingCell, node('td', item.quality_status || 'Not evaluated'), flags); return row; });
         const orphanRows = data.orphan_raw.map(item => { const row = node('tr'); row.append(memoryCell(item)); return row; });
         const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Quality pages');
-        const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
-        const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
+        const previous = button('Previous', '', guarded(() => list(page - 1))); previous.disabled = page <= 1;
+        const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.items_total} signals`, 'muted'), next);
         const orphanNote = data.orphan_raw_total > data.orphan_raw.length ? `Showing ${data.orphan_raw.length} of ${data.orphan_raw_total}.` : '';
         fragment.append(attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), pager, section('Raw memories without relations', orphanNote), renderTable(['Memory'], orphanRows));
         result.replaceChildren(fragment); state.qualityPage = page;
       } finally { setBusy(result, false); }
     };
-    form.addEventListener('submit', event => {
+    form.addEventListener('submit', guarded(async event => {
       event.preventDefault(); const params = new URLSearchParams();
       [['embedding_status', embedding.element.value], ['quality_status', qualityState.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
-      state.qualityPreset = Object.fromEntries(params); state.qualityPage = 1; list(1);
-    });
+      state.qualityPreset = Object.fromEntries(params); state.qualityPage = 1; await list(1);
+    }));
     view.replaceChildren(section('Memory Quality', 'Read-only signals to focus maintenance work.'), form, result);
     await list(state.qualityPage);
   };
@@ -679,15 +684,16 @@
     const grid = node('div', undefined, 'grid'); [['Ready', embeddingData.ready, 'ok'], ['Pending', embeddingData.pending, 'pending'], ['Failed', embeddingData.failed, 'failed'], ['Archived', embeddingData.archived, 'archived']].forEach(item => grid.append(metric(...item)));
     fragment.append(section('Embedding diagnostics', 'A local projection for inspection; it is not a similarity decision.'), grid);
     const projection = node('section', undefined, 'card'); projection.append(section('2D embedding projection', 'Calculates a bounded local projection of ready embeddings only when requested.'));
-    const projectionResult = node('div'); projection.append(button('Load projection', '', async () => {
+    const projectionResult = node('div'); projection.append(button('Load projection', '', guarded(async () => {
       const scatterData = await api('/api/scatterplot'); projectionResult.replaceChildren();
       if (scatterData.error) projectionResult.append(node('p', scatterData.error, 'muted'));
       else if (!scatterData.points?.length) projectionResult.append(node('p', 'No ready embeddings are available to project yet.', 'muted'));
       else {
         const plot = node('div', undefined, 'scatterplot'); const svg = svgNode('svg', { viewBox: '0 0 760 300', role: 'img', 'aria-label': 'Two dimensional embedding projection' }); const xs = scatterData.points.map(point => point.x); const ys = scatterData.points.map(point => point.y); const minX = Math.min(...xs); const minY = Math.min(...ys); const xSpan = Math.max(...xs) - minX || 1; const ySpan = Math.max(...ys) - minY || 1;
-        scatterData.points.forEach(point => { const circle = svgNode('circle', { cx: 30 + (point.x - minX) / xSpan * 700, cy: 270 - (point.y - minY) / ySpan * 240, r: 4, class: `scatter-point status-${point.status}`, tabindex: '0', role: 'button', 'aria-label': point.title }); circle.addEventListener('click', () => openDetail(point.id)); svg.append(circle); }); plot.append(svg); projectionResult.append(plot);
+        scatterData.points.forEach(point => { const circle = svgNode('circle', { cx: 30 + (point.x - minX) / xSpan * 700, cy: 270 - (point.y - minY) / ySpan * 240, r: 4, class: `scatter-point status-${point.status}`, tabindex: '0', role: 'button', 'aria-label': point.title }); circle.addEventListener('click', () => openDetail(point.id)); circle.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDetail(point.id); } }); svg.append(circle); }); plot.append(svg); projectionResult.append(plot);
+        if (scatterData.truncated) projectionResult.append(node('p', `Showing the newest ${scatterData.points.length} of ${scatterData.total_ready} ready embeddings.`, 'muted'));
       }
-    }), projectionResult); fragment.append(projection);
+    })), projectionResult); fragment.append(projection);
     view.replaceChildren(fragment);
   };
 

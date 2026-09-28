@@ -39,6 +39,25 @@ class TestViewerFrontendContracts(unittest.TestCase):
             with self.subTest(expected):
                 self.assertIn(expected, body)
 
+    def test_scatterplot_points_are_keyboard_operable_and_report_sampling(self):
+        body = self._function_body("diagnostics", "loaders")
+        self.assertIn("addEventListener('keydown'", body)
+        self.assertIn("event.key === 'Enter' || event.key === ' '", body)
+        self.assertIn("event.preventDefault()", body)
+        self.assertIn("scatterData.truncated", body)
+        self.assertIn("scatterData.total_ready", body)
+
+    def test_async_ui_actions_cannot_fail_silently(self):
+        # Submit handlers and pagers run outside render()'s try/catch, so each must go through
+        # the guarded() wrapper that reports failures in the notice bar.
+        self.assertNotIn("addEventListener('submit', async", self.script)
+        self.assertNotRegex(self.script, r"addEventListener\('submit', (?!guarded)")
+        for pager_call in ("() => list(currentParams,", "() => list(page"):
+            with self.subTest(pager_call):
+                self.assertNotIn(f"button('Previous', '', {pager_call}", self.script)
+                self.assertNotIn(f"button('Next', '', {pager_call}", self.script)
+        self.assertGreaterEqual(self.script.count("guarded("), 12)
+
 
 if __name__ == "__main__":
     unittest.main()
