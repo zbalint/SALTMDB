@@ -33,9 +33,13 @@
 - `tests/test_mcp_tools.py` (Amendment 3 — narrowly: only `test_mcp_tool_count_regression_guard`'s
   `19`→`24` value and its explanatory message string, extending it by one clause; nothing else in
   this file)
-- `tests/test_phase3_mcp_surface.py` (Amendment 3 — narrowly: only `test_tool_count_and_registration`'s
-  `19`→`24` value at line 37 and its preceding history comment (lines 30-36), extended by one
-  sentence; nothing else in this file)
+- `tests/test_phase3_mcp_surface.py` — narrowly, two authorized sites:
+  - (Amendment 3) `test_tool_count_and_registration`'s `19`→`24` value at line 37 and its preceding
+    history comment (lines 30-36), extended by one sentence.
+  - (Amendment 4) `test_graph_tools_have_small_explicit_schemas`'s `tools.get_memory` parameter-list
+    assertion at line 49 (`["entity_id"]` → `["entity_id", "include_trace_provenance"]`), matching
+    §7's `include_trace_provenance: bool = False` addition to the public `get_memory` wrapper.
+  Nothing else in this file.
 - `tests/test_phase4_mcp_surface.py` (Amendment 3 — narrowly: only
   `test_lifecycle_tools_are_typed_and_old_name_is_not_public`'s `19`→`24` value at line 43 and its
   preceding history comment (lines 37-42), extended by one sentence; nothing else in this file)
@@ -1244,3 +1248,64 @@ implementation removed, worktree clean, no commit/merge) — confirmed independe
 `git status`/`git log` in the worktree this session (clean, still at Amendment-2 commit `ce7a996`).
 No re-verification of already-written code is needed; OMP should resume implementation from the
 current (amended) spec.
+
+---
+
+## Amendment 4 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §7 requires the public `tools.get_memory` wrapper to gain
+`include_trace_provenance: bool = False` as a new parameter. `tests/test_phase3_mcp_surface.py`'s
+`test_graph_tools_have_small_explicit_schemas` (line 49) exact-compares
+`list(inspect.signature(tools.get_memory).parameters)` against the literal `["entity_id"]`.
+Amendment 3 authorized editing this file, but narrowly, only for the tool-count assertion
+(`test_tool_count_and_registration`) — not this separate signature assertion in a different test
+method in the same file. Exposing the parameter (as §7 requires) fails this test as locked; hiding
+it violates §7. OMP correctly declined to widen Amendment 3's narrow authorization on its own
+initiative and reported the second, distinct contradiction rather than silently exceeding scope.
+
+**Verified against the actual worktree** (not just OMP's citation): read `test_phase3_mcp_surface.py`
+lines 48-57 directly — confirmed `test_graph_tools_have_small_explicit_schemas` asserts exact
+parameter lists for all three graph-read tools (`get_memory`, `get_lineage`, `get_related_memories`),
+of which only `get_memory`'s is affected by this spec (§0/§16 confirm `get_lineage`/
+`get_related_memories` are untouched — no other assertion in this method needs a change). Read §7
+directly — confirmed it requires exactly this addition, worded as "the **only** call site that
+exposes the new parameter publicly," i.e. §7 itself already anticipated this being the sole affected
+signature. Grepped the whole tree for any *other* exact-signature assertion on `get_memory`
+(`inspect.signature(tools.get_memory`/`inspect.signature(get_memory`/`signature(memory_service`) —
+exactly one match, this same line 49; no second site to fix in the same pass this time (unlike
+Amendment 3's three-site count problem). Also confirmed, directly against the live worktree, that
+OMP's own uncommitted partial implementation already has `tools.get_memory` at
+`src/saltmdb/mcp/tools.py:1187` reading
+`def get_memory(entity_id: str, include_trace_provenance: bool = False) -> dict:` — exactly matching
+§7, so no implementation change is needed here, only the test assertion.
+
+**Resolution**: widened the existing `tests/test_phase3_mcp_surface.py` §0 entry (originally added by
+Amendment 3) from a single narrow authorization to two, both still narrowly scoped — the original
+tool-count site, plus this line-49 signature assertion, updated from `["entity_id"]` to
+`["entity_id", "include_trace_provenance"]`. Nothing else in this file, or any other file, is
+authorized by this amendment. §17's acceptance bar is unchanged.
+
+**Non-blocking observation from OMP's evidence, not itself adjudicated**: OMP's report also noted the
+pre-edit §17 baseline shifted to "1739 passed, 12 skipped, 1 deselected, 1 failed," one fewer pass
+than the original lock-time baseline (1740 passed) plus a *different* failing test than the one §17
+already deselects — and that the newly-failing test passed 1/1 in isolation, with no relation-code
+or relation-test file touched by this feature. This reads as ordinary test-order-dependent flakiness
+in an unrelated area, not a new contradiction requiring an amendment — but this specific symptom has
+not been independently verified against a SALTMDB-repo precedent in this adjudication (a superficially
+similar pass/fail-flip pattern is documented for a *different* codebase, ACIE, in memory `46e9d174`;
+that memory does not apply here and is not cited as grounding). OMP's own diagnosis stands on its own
+evidence (isolated re-run passed 1/1, no relation-code/relation-test file in this feature's diff) and
+followed this project's own protocol correctly (isolate, confirm unrelated, don't fix out-of-scope,
+don't block on it) — noted here only so a future session isn't puzzled by the count mismatch in OMP's
+evidence block, not as a claim that this exact flake has recurred before in this repo.
+
+No tracked files were changed by this adjudication beyond the spec itself. OMP's uncommitted partial
+diff (`config.py`, `dispatch.py`, `protocol.py`, `db/schema.py`, `lifecycle.py`, `orchestrator.py`,
+`mcp/tools.py`, `viewer/routes/entity_detail.py`, `viewer/routes/sessions.py`,
+`trace_service.py` (new), `tests/test_trace_service.py` (new)) was left in place this time, not
+reverted — confirmed via `git status` in the worktree this session: every changed/new path is
+already within §0's allowlist (as it stood before this amendment), `git diff --check` reported clean
+by OMP, and nothing in it needed touching to resolve this contradiction. OMP should resume from
+exactly where it left off: apply the now-authorized `test_mcp_tools.py`/`test_phase3_mcp_surface.py`/
+`test_phase4_mcp_surface.py` edits (Amendments 3 and 4, both now available), then continue
+implementation per the current (amended) spec.
