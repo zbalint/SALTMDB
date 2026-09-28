@@ -30,6 +30,15 @@
 - `tests/test_viewer_routes.py`
 - `tests/test_config.py`
 - `hooks/tests/test_capture_hooks.py` (new)
+- `tests/test_mcp_tools.py` (Amendment 3 — narrowly: only `test_mcp_tool_count_regression_guard`'s
+  `19`→`24` value and its explanatory message string, extending it by one clause; nothing else in
+  this file)
+- `tests/test_phase3_mcp_surface.py` (Amendment 3 — narrowly: only `test_tool_count_and_registration`'s
+  `19`→`24` value at line 37 and its preceding history comment (lines 30-36), extended by one
+  sentence; nothing else in this file)
+- `tests/test_phase4_mcp_surface.py` (Amendment 3 — narrowly: only
+  `test_lifecycle_tools_are_typed_and_old_name_is_not_public`'s `19`→`24` value at line 43 and its
+  preceding history comment (lines 37-42), extended by one sentence; nothing else in this file)
 
 **Does not touch (explicit — see §16):**
 - `src/saltmdb/embedding_service.py`, `src/saltmdb/domain/services/memory_service/search_primitives.py` (Phase 2 — trace embeddings/channels)
@@ -1161,3 +1170,77 @@ was removed after the contradiction was confirmed, worktree clean, no commit/mer
 independently via `git status`/`git log` in the worktree this session (clean, still at the
 Amendment-1 commit `7bd44e4`). No re-verification of already-written code is needed; OMP should
 resume implementation from the current (amended) spec.
+
+---
+
+## Amendment 3 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §6.3 requires 5 new `@mcp.tool()` wrappers, taking the live MCP registry
+from 19 to 24 registered tools. `tests/test_mcp_tools.py::test_mcp_tool_count_regression_guard`
+hard-codes `registered_count == 19`. That file is outside §0's "may edit/create" allowlist, so OMP
+could not update the stale count without violating §0, and could not satisfy §6.3 without either
+omitting a required wrapper or breaking that guard test. OMP correctly declined to guess and
+reported both the requirement and the blocking assertion.
+
+**Verified against the actual worktree** (not just OMP's one citation): this exact contradiction
+shape has occurred before in this project — memory `aeff65d9` documents an identical
+`BLOCKED`/adjudication on a different feature (Milestone A slice A5, `retrieve_context`, 18→19),
+where the count guard's own precedent (grepping the whole tree for every
+`len(tools.mcp._tool_manager._tools)`/hardcoded-registry-count site rather than trusting OMP's
+single citation) surfaced two more sites beyond the one OMP had reported. Re-ran the identical check
+against this worktree (`grep -rn "_tool_manager._tools\|tool_count_regression\|len(tools\." tests/`)
+and confirmed the same pattern recurs exactly: two more hardcoded `19`s exist beyond
+`test_mcp_tools.py`, both already updated by that prior A5 amendment from `18` to `19` (so this spec
+was locked against a tree already carrying A5's fix, and inherits its exact three-site shape):
+- `tests/test_mcp_tools.py:1147-1157` (`test_mcp_tool_count_regression_guard`) — OMP's own citation,
+  confirmed: `registered_count == 19` with an explanatory f-string message.
+- `tests/test_phase3_mcp_surface.py:30-37` (`test_tool_count_and_registration`) — not cited by OMP,
+  found independently: `self.assertEqual(len(tools.mcp._tool_manager._tools), 19)` at line 37,
+  preceded by a 7-line history comment (lines 30-36) that explicitly cross-references
+  `test_mcp_tools.py`'s guard as "the authoritative count."
+- `tests/test_phase4_mcp_surface.py:36-43` (`test_lifecycle_tools_are_typed_and_old_name_is_not_public`)
+  — not cited by OMP, found independently: `self.assertEqual(len(tools.mcp._tool_manager._tools), 19)`
+  at line 43, preceded by a 6-line history comment (lines 37-42) with the fullest phase-by-phase
+  count history (`19 -> 18 -> 16 -> 17 -> 18 -> 19`, i.e. Phase 4/6/7/API-ergonomics/A5).
+- Re-ran a broader sweep for any *other* hardcoded-length assertion on a tool registry
+  (`grep -rn "len(dispatch\|len(protocol\|len(.*DISPATCH_TABLE\|len(.*MUTATING_TOOLS\|len(.*WRITE_TOOLS\|len(.*READ_TOOLS\|len(.*_OWNER_INJECTED_TOOLS" tests/ src/`)
+  — zero matches; no test hardcodes a count on `dispatch.DISPATCH_TABLE`, `protocol.READ_TOOLS`/
+  `WRITE_TOOLS`, or `_OWNER_INJECTED_TOOLS` directly, only the three MCP-registry-size assertions
+  above needed touching, exactly mirroring `aeff65d9`'s own finding for A5.
+
+**Why the original spec missed this**: the same root cause `aeff65d9` already named as a standing
+lesson for this project — a blanket "does not touch: any existing test file" is never itself
+grepped for a load-bearing conflict the way a positive scope entry is; a new tool's mere
+*existence* invalidates a hardcoded-count assertion in a file the new code never otherwise touches.
+This spec's pre-lock gate ran the file-list/allowlist reconciliation (Amendment 1's own gap) but,
+like A5's original lock, did not re-run this specific check against the tool-count guards.
+
+**Resolution** (mirrors `aeff65d9`'s exactly, scope-widening not bar-lowering): §0's "Scope — may
+edit/create" list now includes all three files, each narrowly scoped to only the tool-count
+assertion and its adjacent explanatory comment (added above, in place) — no other line in any of
+the three files may change. §17's acceptance bar (full suite must exit 0) is unchanged, not
+relaxed. OMP should update, at minimum:
+- `test_mcp_tools.py`'s `19`→`24` and its f-string message, extended with a clause naming the 5 new
+  Phase 1 trace tools (`capture_trace_start`, `capture_trace_memory_link`, `capture_trace_complete`,
+  `search_traces`, `get_trace`), mirroring the message's existing "after X was added (Milestone Y)"
+  phrasing for each prior entry.
+- `test_phase3_mcp_surface.py`'s `19`→`24` at line 37, with its history comment (lines 30-36)
+  extended by one sentence: "Phase 1 conversation-trace-provenance added 5 new tools (19 -> 24)."
+- `test_phase4_mcp_surface.py`'s `19`→`24` at line 43, with its history comment (lines 37-42)
+  extended the same way.
+
+**Gate re-run against this amendment**: re-checked §16 ("Out of scope") and §17 (Acceptance) for any
+reference to a stale count that would also need updating — none found, neither section mentions a
+tool count. Re-checked §15.2's existing `test_dispatch_types.py` guidance (only edit it if it
+generically enumerates `DISPATCH_TABLE`/`MUTATING_TOOLS`) — unaffected by this amendment, a
+different kind of assertion (table membership, not registry size). No other file in the "does not
+touch" list (§0) was found to contain a hardcoded tool-count assertion — the broader `len(dispatch`/
+`len(protocol` sweep above covers that list's own files
+(`daemon/dispatch.py`/`daemon/protocol.py` are edited-scope, not "does not touch," but were checked
+for completeness) as well as the test tree generally.
+
+No tracked files were changed by OMP before this block (per OMP's own report: partial
+implementation removed, worktree clean, no commit/merge) — confirmed independently via
+`git status`/`git log` in the worktree this session (clean, still at Amendment-2 commit `ce7a996`).
+No re-verification of already-written code is needed; OMP should resume implementation from the
+current (amended) spec.
