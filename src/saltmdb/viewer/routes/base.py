@@ -42,10 +42,17 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.close_connection = True
             logger.debug("Client connection aborted during request: %s", e)
 
+    def _send_dynamic_headers(self):
+        """Headers for responses that can carry memory content: never cached, never sniffed."""
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def send_json(self, data, status=200):
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self._send_dynamic_headers()
             headers = getattr(self, "headers", None)
             origin = headers.get("Origin", "") if headers else ""
             if origin:
@@ -61,6 +68,7 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
         try:
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self._send_dynamic_headers()
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
