@@ -20,6 +20,7 @@
 - `hooks/saltmdb-capture-trace-memory-link.py` (new)
 - `hooks/saltmdb-capture-trace-complete.py` (new)
 - `hooks/claude-settings-example.json`
+- `hooks/codex-settings-example.json` (new)
 - `hooks/README.md`
 - `MIGRATION.md`
 - `tests/test_trace_service.py` (new)
@@ -950,3 +951,40 @@ uv run ruff check src/saltmdb/db/schema.py src/saltmdb/domain/services/trace_ser
   src/saltmdb/viewer/routes/entity_detail.py src/saltmdb/viewer/routes/sessions.py \
   src/saltmdb/config.py hooks/ && uv run mypy src/saltmdb/domain/services/trace_service.py
 ```
+
+---
+
+## Amendment 1 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §0's "Scope — may edit/create" allowlist (original lines 7-31) omitted
+`hooks/codex-settings-example.json`, while §0's own "does not touch" list (original line 36) and
+§13 (original lines 761-766) both required creating it. OMP correctly refused to guess which side
+was authoritative and reported both file-existence and file-non-existence as spec-mandated.
+
+**Verified against the actual spec text** (not just OMP's report): confirmed real — the "does not
+touch" list's own parenthetical literally states "a `codex-settings-example.json` addition is
+Phase 1 work per §13," directly contradicting its own list membership, while the "may edit/create"
+list above it never listed the file at all. This was a scope-derivation gap from the original
+lock: the allowlist was drafted before §13's Codex-example requirement was finalized in the same
+pass, and the two were never reconciled against each other (exactly the failure shape the pre-lock
+gate's step 3 exists to catch — missed here).
+
+**Resolution** (option 1 of the two OMP offered — widen scope, not remove the requirement): added
+`hooks/codex-settings-example.json (new)` to §0's "Scope — may edit/create" list, immediately after
+`hooks/claude-settings-example.json`. No other section needed a change — §13's own description of
+the file's required content (mirror `claude-settings-example.json`'s structure, register all 3 new
+scripts for Codex's `UserPromptSubmit`/`PostToolUse`/`Stop` events) was already complete and
+consistent; only the allowlist was missing the entry. The "does not touch" list's parenthetical
+already correctly described this file as Phase 1 work, so it required no change either — it was
+the allowlist that was wrong, not the rationale.
+
+**Gate re-run against this amendment**: checked every other section for the same file name
+(`rg -n "codex-settings-example" docs/SPEC-CONVERSATION-TRACE-PROVENANCE-PHASE1.md`) — exactly the
+two original references (the now-consistent "does not touch" parenthetical, and §13's requirement)
+plus this amendment and the now-added allowlist entry; no third, conflicting mention exists. No
+other file name was found to have the same allowlist/requirement mismatch (spot-checked every
+other `(new)`-marked file in §13/§15 against the allowlist — all already present).
+
+No tracked files were changed by OMP before this block (confirmed via `git status`/`git log` in
+the worktree — clean, still at the pre-amendment spec-lock commit), so no re-verification of
+already-written code is needed; OMP should resume implementation from the current (amended) spec.
