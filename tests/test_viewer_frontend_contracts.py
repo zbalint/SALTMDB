@@ -97,7 +97,6 @@ class TestViewerFrontendContracts(unittest.TestCase):
             "formatTimestamp(event.timestamp)", self._function_body("openEventDetail", "activity")
         )
 
-
     def test_activity_view_has_filters_and_paging(self):
         body = self._function_body("activity", "openSessionDetail")
         for expected in (
@@ -117,7 +116,6 @@ class TestViewerFrontendContracts(unittest.TestCase):
         self.assertNotIn("/api/events?limit=20", body)
         self.assertIn("activityPage: 1, activityPreset: {}", self.script)
 
-
     def test_memory_map_exposes_the_bounded_neighborhood_controls(self):
         body = self._function_body("relationships", "quality")
         for expected in (
@@ -135,6 +133,35 @@ class TestViewerFrontendContracts(unittest.TestCase):
             with self.subTest(expected):
                 self.assertIn(expected, body)
         self.assertIn("relationOptions: {}", self.script)
+
+    def test_view_state_lives_in_the_url_for_refresh_and_back_forward(self):
+        for expected in (
+            "const encodeViewState = ()",
+            "const applyViewState = (hash)",
+            "history.pushState",
+            "history.replaceState",
+            "addEventListener('popstate'",
+            "applyViewState(location.hash)",
+        ):
+            with self.subTest(expected):
+                self.assertIn(expected, self.script)
+        # The saved state must be applied before the very first render.
+        boot = self.script[self.script.index("connection('checking'") :]
+        self.assertLess(boot.index("applyViewState(location.hash)"), boot.index("render()"))
+        # Every filterable view's preset and page participates.
+        encode = self.script[
+            self.script.index("const presetKeys") : self.script.index("const applyViewState")
+        ]
+        for token in (
+            "explorerPreset",
+            "activityPreset",
+            "sessionsPreset",
+            "qualityPreset",
+            "sessionDetailId",
+            "relationRoot",
+        ):
+            with self.subTest(token):
+                self.assertIn(token, encode)
 
 
 if __name__ == "__main__":

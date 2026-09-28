@@ -370,7 +370,7 @@
       pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} memories`, 'muted'), next);
       const dateSummary = data.date_from || data.date_to ? ` · ${data.date_field} dates ${data.date_from || '…'} to ${data.date_to || '…'} (inclusive UTC)` : '';
       result.replaceChildren(section(`${data.total_count} memories`, `${data.sort.replace('_', ' ')}${dateSummary}. Browse filters are applied before paging.`), renderTable(['Memory', 'Type', 'Lifecycle', 'Tags'], rows), pager);
-      state.explorerPage = page;
+      state.explorerPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', guarded(async event => {
@@ -421,7 +421,7 @@
         const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} events`, 'muted'), next);
         result.replaceChildren(section(`${data.total_count} events`, 'Read-only operational evidence, newest first. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows, 'No events match these filters.'), pager);
-        state.activityPage = page;
+        state.activityPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', guarded(async event => {
@@ -560,7 +560,7 @@
         const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
         result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'Traces', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
-        state.sessionsPage = page;
+        state.sessionsPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', guarded(async event => {
@@ -688,7 +688,7 @@
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.items_total} signals`, 'muted'), next);
         const orphanNote = data.orphan_raw_total > data.orphan_raw.length ? `Showing ${data.orphan_raw.length} of ${data.orphan_raw_total}.` : '';
         fragment.append(attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), pager, section('Raw memories without relations', orphanNote), renderTable(['Memory'], orphanRows));
-        result.replaceChildren(fragment); state.qualityPage = page;
+        result.replaceChildren(fragment); state.qualityPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', guarded(async event => {
@@ -750,6 +750,43 @@
     view.replaceChildren(fragment);
   };
 
+  // Shareable/restorable view state: the hash carries the view, its filters, page, and the
+  // selected session or map root, so refresh and back/forward return to the same place.
+  const presetKeys = { explorer: 'explorerPreset', activity: 'activityPreset', sessions: 'sessionsPreset', quality: 'qualityPreset' };
+  const pageKeys = { explorer: 'explorerPage', activity: 'activityPage', sessions: 'sessionsPage', quality: 'qualityPage' };
+  const encodeViewState = () => {
+    const params = new URLSearchParams({ view: state.view });
+    Object.entries(state[presetKeys[state.view]] || {}).forEach(([key, value]) => params.set(`f.${key}`, value));
+    if (state[pageKeys[state.view]] > 1) params.set('page', String(state[pageKeys[state.view]]));
+    if (state.view === 'sessions' && state.sessionDetailId) params.set('session', state.sessionDetailId);
+    if (state.view === 'relationships' && state.relationRoot) params.set('root', state.relationRoot);
+    return params.toString();
+  };
+  const applyViewState = (hash) => {
+    const params = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+    const requested = params.get('view');
+    if (!requested || !Object.prototype.hasOwnProperty.call(names, requested)) return false;
+    state.view = requested;
+    if (Object.prototype.hasOwnProperty.call(presetKeys, requested)) {
+      const preset = {}; params.forEach((value, key) => { if (key.startsWith('f.')) preset[key.slice(2)] = value; });
+      state[presetKeys[requested]] = preset;
+      state[pageKeys[requested]] = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
+    }
+    state.sessionDetailId = requested === 'sessions' ? params.get('session') || '' : '';
+    if (requested === 'relationships') state.relationRoot = params.get('root') || '';
+    return true;
+  };
+  const syncLocation = () => {
+    const next = `#${encodeViewState()}`;
+    const navKey = [state.view, state.view === 'sessions' ? state.sessionDetailId : '', state.view === 'relationships' ? state.relationRoot : ''].join('|');
+    if (location.hash !== next) {
+      // Moving to another view/session/root is a navigation (back button returns); filter and page tweaks replace in place.
+      if (state.navKey !== undefined && state.navKey !== navKey) history.pushState(null, '', next);
+      else history.replaceState(null, '', next);
+    }
+    state.navKey = navKey;
+  };
+
   const loaders = { overview, explorer, activity, sessions, relationships, quality, operations, tags, diagnostics };
   const render = async () => {
     state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
@@ -758,7 +795,7 @@
       if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
     });
     setBusy(view, true);
-    try { status.textContent = 'Refreshing'; await loaders[state.view](); status.textContent = 'Updated just now'; } catch (err) { if (err.name !== 'AbortError') showError(err); } finally { setBusy(view, false); }
+    try { status.textContent = 'Refreshing'; await loaders[state.view](); status.textContent = 'Updated just now'; syncLocation(); } catch (err) { if (err.name !== 'AbortError') showError(err); } finally { setBusy(view, false); }
   };
   // A background refresh replaces the view's DOM, which drops keyboard focus (and the dialog
   // invoker), so it must not run while a dialog is open or focus is inside the view.
@@ -789,5 +826,6 @@
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
   window.addEventListener('beforeunload', () => { clearInterval(state.poller); state.renderController?.abort(); state.detailController?.abort(); });
-  connection('checking', 'Checking connection…'); render(); schedule();
+  window.addEventListener('popstate', () => { if (applyViewState(location.hash)) render(); });
+  connection('checking', 'Checking connection…'); applyViewState(location.hash); render(); schedule();
 })();
