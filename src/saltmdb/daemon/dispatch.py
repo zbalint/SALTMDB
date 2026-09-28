@@ -26,6 +26,7 @@ from saltmdb.domain.services import (
     relation_service,
     retrieve_context_service,
     telemetry_service,
+    trace_service,
 )
 from typing import Any, Literal
 
@@ -335,8 +336,15 @@ def _dispatch_get_memory(**kw):
     """Fetch one entity through the explicit-ID service contract, owner-scoped."""
     try:
         entity_id = _required_str(kw, "entity_id")
+        include_trace_provenance = _optional_bool(kw, "include_trace_provenance", False)
     except _DispatchValidationError as exc:
         return exc.payload
+    if include_trace_provenance:
+        return memory_service.get_memory(
+            entity_id=entity_id,
+            owner_id=kw.get("owner_id"),
+            include_trace_provenance=True,
+        )
     return memory_service.get_memory(entity_id=entity_id, owner_id=kw.get("owner_id"))
 
 
@@ -681,6 +689,11 @@ DISPATCH_TABLE = {
     "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
     "get_last_session_digest": _dispatch_get_last_session_digest,
+    "capture_trace_start": lambda **kw: trace_service.capture_trace_start(**kw),
+    "capture_trace_memory_link": lambda **kw: trace_service.capture_trace_memory_link(**kw),
+    "capture_trace_complete": lambda **kw: trace_service.capture_trace_complete(**kw),
+    "search_traces": lambda **kw: trace_service.search_traces(**kw),
+    "get_trace": lambda **kw: trace_service.get_trace(**kw),
 }
 
 # Tool calls that can mutate persistent state.  The daemon server calls these
@@ -698,6 +711,9 @@ MUTATING_TOOLS = frozenset(
         "consolidate_memories",
         "review_core_memory",
         "update_memory_metadata",
+        "capture_trace_start",
+        "capture_trace_memory_link",
+        "capture_trace_complete",
     }
 )
 
@@ -708,6 +724,8 @@ def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
         if tool in {"store_memory", "log_event", "manage_relation"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
+    if tool in {"search_traces", "get_trace"}:
+        kwargs = {**kwargs, "coordinator": coordinator}
     return fn(**kwargs)
 
 

@@ -33,8 +33,8 @@ class TestPhase3McpSurface(unittest.TestCase):
         # added afterward (16 -> 17, API-ergonomics Gap 1), then inspect_memory (17 -> 18,
         # API-ergonomics Gap 2). Milestone A slice A5 added retrieve_context (18 -> 19). See
         # test_mcp_tools.py's test_mcp_tool_count_regression_guard for the authoritative count
-        # guard.
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 19)
+        # guard. Phase 1 conversation-trace-provenance added 5 new tools (19 -> 24).
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 24)
         self.assertIn("get_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("get_lineage", dispatch.DISPATCH_TABLE)
         self.assertIn("get_related_memories", dispatch.DISPATCH_TABLE)
@@ -46,7 +46,10 @@ class TestPhase3McpSurface(unittest.TestCase):
         self.assertNotIn("fetch_full", params)
 
     def test_graph_tools_have_small_explicit_schemas(self):
-        self.assertEqual(list(inspect.signature(tools.get_memory).parameters), ["entity_id"])
+        self.assertEqual(
+            list(inspect.signature(tools.get_memory).parameters),
+            ["entity_id", "include_trace_provenance"],
+        )
         self.assertEqual(
             list(inspect.signature(tools.get_lineage).parameters),
             ["entity_id", "direction", "max_depth"],

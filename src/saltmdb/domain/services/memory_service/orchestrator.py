@@ -996,6 +996,27 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 cumulative_preview_chars += len(preview_text)
             results.append(item)
 
+        trace_counts = {item["id"]: 0 for item in results}
+        if results:
+            trace_ids = list(trace_counts)
+            trace_placeholders = ",".join("?" for _ in trace_ids)
+            trace_rows = conn.execute(
+                f"""
+                SELECT entity_id, COUNT(DISTINCT trace_id)
+                FROM trace_memory_links
+                WHERE entity_id IN ({trace_placeholders})
+                  AND trace_id IN (
+                      SELECT id FROM conversation_traces WHERE owner_id = ?
+                  )
+                GROUP BY entity_id
+                """,
+                [*trace_ids, owner_id],
+            ).fetchall()
+            for trace_entity_id, count in trace_rows:
+                trace_counts[trace_entity_id] = count
+        for item in results:
+            item["trace_evidence_count"] = trace_counts[item["id"]]
+
         if return_diagnostics:
             return {"results": results, "diagnostics": diagnostics}
         return results

@@ -1,11 +1,21 @@
 import os
 import unittest
-from saltmdb.config import get_viewer_host, get_viewer_port, is_viewer_enabled
+from saltmdb.config import (
+    get_viewer_host,
+    get_viewer_port,
+    is_trace_capture_enabled,
+    is_viewer_enabled,
+)
 
 
 class TestConfigViewer(unittest.TestCase):
     def setUp(self):
-        self.env_keys = ["SALTMDB_VIEWER_PORT", "SALTMDB_VIEWER_HOST", "SALTMDB_VIEWER_ENABLED"]
+        self.env_keys = [
+            "SALTMDB_VIEWER_PORT",
+            "SALTMDB_VIEWER_HOST",
+            "SALTMDB_VIEWER_ENABLED",
+            "SALTMDB_TRACE_CAPTURE_ENABLED",
+        ]
         self.orig_env = {}
         for key in self.env_keys:
             if key in os.environ:
@@ -52,6 +62,14 @@ class TestConfigViewer(unittest.TestCase):
                 f"Expected is_viewer_enabled() to be False for value {falsy_val!r}",
             )
 
+
+    def test_trace_capture_disabled_by_default(self):
+        self.assertFalse(is_trace_capture_enabled())
+
+    def test_trace_capture_accepts_truthy_values(self):
+        for truthy_val in ["1", "true", "TRUE", "yes", "on", " On "]:
+            os.environ["SALTMDB_TRACE_CAPTURE_ENABLED"] = truthy_val
+            self.assertTrue(is_trace_capture_enabled())
 
 if __name__ == "__main__":
     unittest.main()

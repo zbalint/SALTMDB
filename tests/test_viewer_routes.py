@@ -278,6 +278,69 @@ class TestViewerAgentSessions(unittest.TestCase):
         handler.get_entity_detail("touched-only")
         self.assertEqual(captured["data"]["agent_session_id"], "sess-b")
         self.assertEqual(captured["data"]["last_touched_session_id"], "sess-a")
+    def test_get_entity_detail_returns_bounded_ordered_trace_provenance(self):
+        self._insert_entity(
+            "trace-entity",
+            "2026-09-01T08:00:00+00:00",
+            "2026-09-01T08:00:00+00:00",
+        )
+        self._insert_entity(
+            "empty-trace-entity",
+            "2026-09-01T08:00:00+00:00",
+            "2026-09-01T08:00:00+00:00",
+        )
+        for index in range(6):
+            created_at = f"2026-09-0{index + 1}T10:00:00+00:00"
+            self.conn.execute(
+                """
+                INSERT INTO conversation_traces
+                    (id, agent_session_id, owner_id, harness, harness_session_id,
+                     harness_turn_id, status, user_prompt, user_prompt_hash,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, 'claude_code', ?, ?, 'completed', ?, ?, ?, ?)
+                """,
+                (
+                    f"trace-{index}",
+                    f"agent-{index}",
+                    "owner-a",
+                    f"harness-{index}",
+                    f"turn-{index}",
+                    f"Prompt {index}",
+                    f"hash-{index}",
+                    created_at,
+                    created_at,
+                ),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO trace_memory_links
+                    (id, trace_id, entity_id, content_hash, write_operation, created_at)
+                VALUES (?, ?, ?, ?, 'store_memory_new', ?)
+                """,
+                (
+                    f"link-{index}",
+                    f"trace-{index}",
+                    "trace-entity",
+                    f"content-hash-{index}",
+                    created_at,
+                ),
+            )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_entity_detail("trace-entity")
+        provenance = captured["data"]["trace_provenance"]
+        self.assertEqual(len(provenance), 5)
+        self.assertEqual(
+            [item["trace_id"] for item in provenance],
+            ["trace-5", "trace-4", "trace-3", "trace-2", "trace-1"],
+        )
+
+        empty = self._capture(handler)
+        handler.get_entity_detail("empty-trace-entity")
+        self.assertEqual(empty["data"]["trace_provenance"], [])
+
 
     def test_get_events_agent_session_id_filter(self):
         self._insert_event(
@@ -334,6 +397,45 @@ class TestViewerAgentSessions(unittest.TestCase):
         session_order = [s["session_id"] for s in captured["data"]["sessions"]]
         self.assertEqual(session_order.index("sess-a"), 0)
         self.assertLess(session_order.index("sess-a"), session_order.index("sess-old"))
+
+    def test_get_sessions_includes_trace_only_lifecycle_session(self):
+        self.conn.execute(
+            """
+            INSERT INTO _agent_sessions
+                (session_id, cwd, owner_id, started_at, last_activity_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("trace-only", "/project", "owner-a", "2026-09-01T10:00:00+00:00", None, None),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO conversation_traces
+                (id, agent_session_id, owner_id, harness, harness_session_id,
+                 harness_turn_id, status, user_prompt, user_prompt_hash,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, 'codex', ?, ?, 'pending', ?, ?, ?, ?)
+            """,
+            (
+                "trace-only-row",
+                "trace-only",
+                "owner-a",
+                "codex-session",
+                "turn-1",
+                "prompt",
+                "prompt-hash",
+                "2026-09-01T10:01:00+00:00",
+                "2026-09-01T10:01:00+00:00",
+            ),
+        )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_sessions({})
+
+        session = next(row for row in captured["data"]["sessions"] if row["session_id"] == "trace-only")
+        self.assertEqual(session["trace_count"], 1)
+        self.assertEqual(session["liveness"], "unknown")
 
     def test_get_sessions_id_prefix_filter_and_pagination(self):
         for i in range(3):
@@ -760,6 +862,26 @@ class TestViewerAgentSessions(unittest.TestCase):
             "decision",
             agent_session_id="full-session",
         )
+        self.conn.execute(
+            """
+            INSERT INTO conversation_traces
+                (id, agent_session_id, owner_id, harness, harness_session_id,
+                 harness_turn_id, status, user_prompt, user_prompt_hash,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, 'claude_code', ?, ?, 'completed', ?, ?, ?, ?)
+            """,
+            (
+                "full-trace",
+                "full-session",
+                "owner-full",
+                "harness-session",
+                "turn-full",
+                "trace prompt",
+                "prompt-hash",
+                "2026-08-25T08:50:00+00:00",
+                "2026-08-25T08:50:00+00:00",
+            ),
+        )
 
         handler = self._handler_with_known_empty_liveness()
         captured = self._capture(handler)
@@ -776,6 +898,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.assertEqual(data["ended_reason"], "goodbye")
         self.assertEqual(data["memory_count"], 1)
         self.assertEqual(data["event_count"], 1)
+        self.assertEqual(data["trace_count"], 1)
 
     def test_get_session_detail_active_session(self):
         self.conn.execute(

@@ -234,3 +234,45 @@ CREATE INDEX IF NOT EXISTS idx_entities_agent_session
 Existing rows remain NULL because no real host session identifier was previously stored. New
 writes populate both entity columns on creation; targeted updates change only
 `last_touched_session_id`.
+
+## DDL Migrations (Conversation-Trace Provenance, Phase 1)
+
+Phase 1 adds durable conversation-trace rows and idempotent memory-link records. `init_db()` applies
+the schema automatically on startup; production operators applying the migration manually should
+take a verified backup first and run:
+
+```sql
+CREATE TABLE IF NOT EXISTS conversation_traces (
+    id TEXT PRIMARY KEY,
+    agent_session_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code')),
+    harness_session_id TEXT NOT NULL,
+    harness_turn_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','completed','incomplete')),
+    user_prompt TEXT NOT NULL,
+    user_prompt_hash TEXT NOT NULL,
+    final_assistant_message TEXT,
+    final_assistant_message_hash TEXT,
+    capture_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_session_harnessturn
+    ON conversation_traces(agent_session_id, harness_turn_id);
+CREATE INDEX IF NOT EXISTS idx_traces_owner_status
+    ON conversation_traces(owner_id, status);
+
+CREATE TABLE IF NOT EXISTS trace_memory_links (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES conversation_traces(id) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    write_operation TEXT NOT NULL CHECK(write_operation IN
+        ('store_memory_new','store_memory_update','revise_memory','supersede_memory','consolidate_memories')),
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tracelinks_idem
+    ON trace_memory_links(trace_id, entity_id, content_hash);
+```

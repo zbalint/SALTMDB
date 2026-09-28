@@ -84,6 +84,26 @@ def _merge_event_rows(sessions: dict[str, dict], rows) -> None:
         if last_event and (entry["last_seen"] is None or last_event > entry["last_seen"]):
             entry["last_seen"] = last_event
 
+def _merge_trace_rows(sessions: dict[str, dict], rows) -> None:
+    for row in rows:
+        if hasattr(row, "keys"):
+            sid = row["sid"]
+            trace_count = row["trace_count"]
+        else:
+            sid, trace_count = row[0], row[1]
+        entry = sessions.setdefault(
+            sid,
+            {
+                "session_id": sid,
+                "memory_count": 0,
+                "event_count": 0,
+                "first_seen": None,
+                "last_seen": None,
+            },
+        )
+        entry["trace_count"] = trace_count
+
+
 
 def _liveness_for(row, sid: str, active_session_ids: set[str], liveness_known: bool) -> str:
     """active > lost > ended > unknown, in that priority order.
@@ -163,6 +183,15 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
         GROUP BY agent_session_id
         """
     ).fetchall()
+    trace_rows = conn.execute(
+        """
+        SELECT agent_session_id AS sid, COUNT(*) AS trace_count
+        FROM conversation_traces
+        WHERE agent_session_id IS NOT NULL
+        GROUP BY agent_session_id
+        """
+    ).fetchall()
+
     lifecycle_rows = conn.execute(
         "SELECT session_id, cwd, owner_id, started_at, last_activity_at, ended_at, ended_reason "
         "FROM _agent_sessions"
@@ -171,6 +200,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
     sessions: dict[str, dict] = {}
     _merge_memory_rows(sessions, memory_rows)
     _merge_event_rows(sessions, event_rows)
+    _merge_trace_rows(sessions, trace_rows)
     _merge_lifecycle_rows(sessions, lifecycle_rows, active_session_ids, liveness_known)
     for entry in sessions.values():
         entry.setdefault("cwd", None)
@@ -179,6 +209,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
         entry.setdefault("last_activity_at", None)
         entry.setdefault("ended_at", None)
         entry.setdefault("ended_reason", None)
+        entry.setdefault("trace_count", 0)
         entry.setdefault("liveness", "unknown")
     return list(sessions.values())
 
@@ -298,8 +329,12 @@ class SessionsMixin(ViewerHandlerProtocol):
                 "SELECT COUNT(*) FROM events WHERE agent_session_id = ?",
                 (session_id,),
             ).fetchone()[0]
+            trace_count = conn.execute(
+                "SELECT COUNT(*) FROM conversation_traces WHERE agent_session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
 
-            if lifecycle_row is None and memory_count == 0 and event_count == 0:
+            if lifecycle_row is None and memory_count == 0 and event_count == 0 and trace_count == 0:
                 self.send_json({"error": "Session not found"}, 404)
                 return
 
@@ -332,6 +367,7 @@ class SessionsMixin(ViewerHandlerProtocol):
                     "ended_reason": ended_reason,
                     "memory_count": memory_count,
                     "event_count": event_count,
+                    "trace_count": trace_count,
                 }
             )
         except Exception as e:

@@ -163,6 +163,26 @@ class EntityDetailMixin(ViewerHandlerProtocol):
             outgoing = relation_preview("outgoing")
             incoming = relation_preview("incoming")
             all_rels = outgoing + incoming
+            trace_rows = conn.execute(
+                """SELECT ct.id, ct.harness, ct.created_at, ct.status
+                   FROM trace_memory_links tml
+                   JOIN conversation_traces ct ON tml.trace_id = ct.id
+                   WHERE tml.entity_id = ?
+                   ORDER BY ct.created_at DESC
+                   LIMIT 5""",
+                (entity_id,),
+            ).fetchall()
+
+            trace_provenance = [
+                {
+                    "trace_id": trace_row[0],
+                    "harness": trace_row[1],
+                    "created_at": trace_row[2],
+                    "status": trace_row[3],
+                }
+                for trace_row in trace_rows
+            ]
+
 
             detail = {
                 "id": row[0],
@@ -198,6 +218,7 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                     "incoming_count": relation_counts[1] or 0,
                     "list_url": f"/api/entities/{urllib.parse.quote(entity_id, safe='')}/relations",
                 },
+                "trace_provenance": trace_provenance,
             }
             self.send_json(detail)
         except Exception as e:

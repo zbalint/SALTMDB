@@ -750,6 +750,7 @@ def _assemble_memory_record(
     touch: bool = True,
     max_depth: int = 10,
     owner_id: str | None = None,
+    include_trace_provenance: bool = False,
 ) -> dict | None:
     """Shared field-assembly for get_memory / inspect_memory / get_related_memories's
     include_inspect=True embedding. Returns None if resolved_id no longer resolves to a row
@@ -837,6 +838,12 @@ def _assemble_memory_record(
         "last_touched_session_id": row[20],
         "tags": tag_ops.list_entity_tags(conn, resolved_id),
     }
+    if include_trace_provenance:
+        from saltmdb.domain.services import trace_service
+
+        data["trace_provenance"] = trace_service.entity_trace_provenance(
+            conn, resolved_id, owner_id=owner_id, limit=5
+        )
     if include_content:
         data.update(large_content_descriptor(row[2]))
     else:
@@ -856,6 +863,7 @@ def get_memory(
     *,
     max_depth: int = 10,
     owner_id: str | None = None,
+    include_trace_provenance: bool = False,
 ) -> dict:
     """Return one explicitly addressed memory, including archived history.
 
@@ -907,6 +915,7 @@ def get_memory(
             touch=True,
             max_depth=max_depth,
             owner_id=owner_id,
+            include_trace_provenance=include_trace_provenance,
         )
         if data is None:
             return rejected(

@@ -63,6 +63,29 @@ still unset when a *later* daemon incarnation starts up instead gets backdated a
 renders a stored `ended_at` as `ended` or `lost` depending on `ended_reason`, and uses `unknown` when
 daemon liveness is unavailable or no `ended_at` is set yet. Session rows are retained indefinitely.
 
+## Conversation trace provenance (native `mcp_tool` hooks)
+
+The conversation-trace Phase 1 capture path is registered directly in the harness settings
+examples, not through a Python subprocess. `hooks/claude-settings-example.json` and
+`hooks/codex-settings-example.json` each register three native `mcp_tool` entries:
+
+Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` before enabling these
+registrations.
+
+- `UserPromptSubmit` calls `capture_trace_start` with the harness-specific literal and
+  `${session_id}`, `${prompt_id}`/`${turn_id}`, and `${prompt}`.
+- `PostToolUse` matches only the four successful memory-write tool names and calls
+  `capture_trace_memory_link` with `${tool_response.data.id}` and `${tool_name}`.
+- `Stop` calls `capture_trace_complete` with the current turn identifier and
+  `${last_assistant_message}`.
+
+Native registration preserves the adapter's trusted `agent_session_id`; do not replace these
+entries with a CLI or standalone Python bridge. The nested `tool_response.data.id` interpolation
+must be verified once in a live Claude Code session and once in a live Codex session before
+enabling the examples: perform one successful `store_memory`, then confirm a
+`trace_memory_links` row through `get_trace` or `search_traces`. A template-resolution miss is
+non-fatal because `capture_trace_memory_link` rejects an empty or unknown entity id.
+
 ## Naming convention
 
 `saltmdb-<lifecycle-event>-<purpose>[-<harness>].py`, where `<lifecycle-event>` is one of
@@ -78,6 +101,7 @@ every body is fully shared).
 | File | Host harness | Description |
 | :--- | :--- | :--- |
 | [`claude-settings-example.json`](claude-settings-example.json) | Claude Code | Global settings snippet for `~/.claude/settings.json`: `SessionStart`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SessionEnd`. |
+| [`codex-settings-example.json`](codex-settings-example.json) | Codex | Native `mcp_tool` settings snippet for the three conversation-trace capture events. |
 | [`antigravity-settings-example.json`](antigravity-settings-example.json) | Antigravity CLI (`agy`) | Settings snippet for `~/.gemini/antigravity-cli/settings.json`: `PreInvocation`, `PreToolUse`. |
 | [`copilot-hooks-example.json`](copilot-hooks-example.json) | GitHub Copilot CLI | Spec template for `.github/hooks/saltmdb.json`: `sessionStart`, `preToolUse`, `agentStop`. |
 

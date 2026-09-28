@@ -31,6 +31,9 @@ WRITE_TOOLS = frozenset(
         "consolidate_memories",
         "review_core_memory",
         "update_memory_metadata",
+        "capture_trace_start",
+        "capture_trace_memory_link",
+        "capture_trace_complete",
     }
 )
 READ_TOOLS = frozenset(
@@ -44,6 +47,8 @@ READ_TOOLS = frozenset(
         "get_related_memories",
         "retrieve_context",
         "get_events",
+        "search_traces",
+        "get_trace",
         # Internal-only (no public MCP tool): returns the already-rendered core-memory bootstrap
         # digest via core_governance_service.render_bootstrap_response. Read-only -- classified
         # here so the RPC mid-call-failure contract (client.py) retries it like any other read.

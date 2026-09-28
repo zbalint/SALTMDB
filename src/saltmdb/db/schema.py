@@ -614,6 +614,49 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             FOREIGN KEY (target_id) REFERENCES entities(id) ON DELETE CASCADE
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_traces (
+            id TEXT PRIMARY KEY,
+            agent_session_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code')),
+            harness_session_id TEXT NOT NULL,
+            harness_turn_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending','completed','incomplete')),
+            user_prompt TEXT NOT NULL,
+            user_prompt_hash TEXT NOT NULL,
+            final_assistant_message TEXT,
+            final_assistant_message_hash TEXT,
+            capture_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_session_harnessturn "
+            "ON conversation_traces(agent_session_id, harness_turn_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_owner_status "
+            "ON conversation_traces(owner_id, status)"
+        )
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS trace_memory_links (
+            id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL REFERENCES conversation_traces(id) ON DELETE CASCADE,
+            entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            content_hash TEXT NOT NULL,
+            write_operation TEXT NOT NULL CHECK(write_operation IN
+                ('store_memory_new','store_memory_update','revise_memory','supersede_memory','consolidate_memories')),
+            created_at TEXT NOT NULL
+        );
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracelinks_idem "
+            "ON trace_memory_links(trace_id, entity_id, content_hash)"
+        )
 
         # One-time dedup backfill: collapse pre-existing duplicate (source_id, target_id, predicate)
         # rows to the earliest-inserted one before the UNIQUE index below is created (a raw

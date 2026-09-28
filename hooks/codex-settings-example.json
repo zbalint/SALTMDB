@@ -1,0 +1,58 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "saltmdb",
+            "tool": "capture_trace_start",
+            "input": {
+              "harness": "codex",
+              "harness_session_id": "${session_id}",
+              "harness_turn_id": "${turn_id}",
+              "user_prompt": "${prompt}"
+            },
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__saltmdb__store_memory|mcp__saltmdb__revise_memory|mcp__saltmdb__supersede_memory|mcp__saltmdb__consolidate_memories",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "saltmdb",
+            "tool": "capture_trace_memory_link",
+            "input": {
+              "harness_turn_id": "${turn_id}",
+              "entity_id": "${tool_response.data.id}",
+              "just_run_tool_name": "${tool_name}"
+            },
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "saltmdb",
+            "tool": "capture_trace_complete",
+            "input": {
+              "harness_turn_id": "${turn_id}",
+              "final_assistant_message": "${last_assistant_message}"
+            },
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
