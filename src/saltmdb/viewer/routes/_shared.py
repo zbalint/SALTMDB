@@ -50,3 +50,21 @@ def _utc_day_bound(raw: str, *, end_exclusive: bool) -> str:
     if end_exclusive:
         parsed += timedelta(days=1)
     return parsed.isoformat()
+
+
+def active_relation_filter(as_of: str | None = None, alias: str = "r") -> tuple[str, list[str]]:
+    """SQL condition + params keeping only relations valid at ``as_of`` (default: now).
+
+    One predicate for every current-state Viewer relation surface, so the graph, lists,
+    per-entity pages, detail counts and neighborhood can never disagree about an edge.
+    """
+    when = as_of or datetime.now(UTC).isoformat()
+    sql = " AND ".join(
+        [
+            f"({alias}.valid_from IS NULL OR datetime({alias}.valid_from) <= datetime(?))",
+            f"({alias}.valid_to IS NULL OR datetime({alias}.valid_to) > datetime(?))",
+            f"({alias}.valid_at IS NULL OR datetime({alias}.valid_at) <= datetime(?))",
+            f"({alias}.invalid_at IS NULL OR datetime({alias}.invalid_at) > datetime(?))",
+        ]
+    )
+    return sql, [when] * 4

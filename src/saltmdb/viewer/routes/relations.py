@@ -8,7 +8,11 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from saltmdb.viewer.routes._shared import MAX_RELATION_LIMIT, _bounded_query_int
+from saltmdb.viewer.routes._shared import (
+    MAX_RELATION_LIMIT,
+    _bounded_query_int,
+    active_relation_filter,
+)
 
 if TYPE_CHECKING:
     from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
@@ -48,8 +52,11 @@ class RelationsMixin(ViewerHandlerProtocol):
             if predicate_filter:
                 where_clauses.append("r.predicate = ?")
                 params.append(predicate_filter)
+            validity_sql, validity_params = active_relation_filter()
+            where_clauses.append(validity_sql)
+            params.extend(validity_params)
 
-            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            where_sql = "WHERE " + " AND ".join(where_clauses)
 
             conn = self.get_db_connection()
             cursor = conn.execute(
@@ -120,8 +127,11 @@ class RelationsMixin(ViewerHandlerProtocol):
             offset = (page - 1) * limit
 
             predicate_filter = query.get("predicate", [None])[0]
-            where_sql = "WHERE r.predicate = ?" if predicate_filter else ""
-            params = [predicate_filter] if predicate_filter else []
+            validity_sql, validity_params = active_relation_filter()
+            where_sql = "WHERE " + (
+                "r.predicate = ? AND " + validity_sql if predicate_filter else validity_sql
+            )
+            params = ([predicate_filter] if predicate_filter else []) + validity_params
 
             conn = self.get_db_connection()
             cursor = conn.execute(
@@ -227,15 +237,9 @@ class RelationsMixin(ViewerHandlerProtocol):
                 if predicate:
                     clauses.append("r.predicate = ?")
                     params.append(predicate)
-                clauses.extend(
-                    [
-                        "(r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))",
-                        "(r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))",
-                        "(r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))",
-                        "(r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))",
-                    ]
-                )
-                params.extend([as_of, as_of, as_of, as_of])
+                validity_sql, validity_params = active_relation_filter(as_of)
+                clauses.append(validity_sql)
+                params.extend(validity_params)
                 if not include_archived:
                     clauses.append(
                         "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
@@ -288,13 +292,8 @@ class RelationsMixin(ViewerHandlerProtocol):
                 f"SELECT id, title, status FROM entities WHERE id IN ({','.join('?' for _ in seen)}) ORDER BY title, id",
                 list(seen),
             ).fetchall()
-            count_filters = [
-                "(r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))",
-                "(r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))",
-                "(r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))",
-                "(r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))",
-            ]
-            count_params = [as_of, as_of, as_of, as_of]
+            count_validity_sql, count_params = active_relation_filter(as_of)
+            count_filters = [count_validity_sql]
             if predicate:
                 count_filters.append("r.predicate = ?")
                 count_params.append(predicate)
@@ -358,6 +357,9 @@ class RelationsMixin(ViewerHandlerProtocol):
                 where, params = "r.target_id = ?", [entity_id]
             elif direction == "outgoing":
                 where, params = "r.source_id = ?", [entity_id]
+            validity_sql, validity_params = active_relation_filter()
+            where = f"({where}) AND {validity_sql}"
+            params = params + validity_params
             total = conn.execute(
                 f"SELECT COUNT(*) FROM relations r WHERE {where}", params
             ).fetchone()[0]

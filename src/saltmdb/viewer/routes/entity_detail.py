@@ -6,6 +6,7 @@ import urllib.parse
 from typing import TYPE_CHECKING
 
 from saltmdb.domain.services import relation_service
+from saltmdb.viewer.routes._shared import active_relation_filter
 
 if TYPE_CHECKING:
     from saltmdb.viewer.routes._protocol import ViewerHandlerProtocol
@@ -132,11 +133,12 @@ class EntityDetailMixin(ViewerHandlerProtocol):
             )
             tags = [r[0] for r in tag_cursor.fetchall()]
 
+            validity_sql, validity_params = active_relation_filter()
             relation_counts = conn.execute(
-                """SELECT SUM(CASE WHEN source_id = ? THEN 1 ELSE 0 END),
-                          SUM(CASE WHEN target_id = ? THEN 1 ELSE 0 END)
-                   FROM relations WHERE source_id = ? OR target_id = ?""",
-                (entity_id, entity_id, entity_id, entity_id),
+                f"""SELECT SUM(CASE WHEN r.source_id = ? THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN r.target_id = ? THEN 1 ELSE 0 END)
+                   FROM relations r WHERE (r.source_id = ? OR r.target_id = ?) AND {validity_sql}""",
+                (entity_id, entity_id, entity_id, entity_id, *validity_params),
             ).fetchone()
 
             def relation_preview(direction):
@@ -144,9 +146,10 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                 rows = conn.execute(
                     f"""SELECT r.id, r.source_id, e1.title, r.target_id, e2.title, r.predicate
                         FROM relations r LEFT JOIN entities e1 ON r.source_id = e1.id
-                        LEFT JOIN entities e2 ON r.target_id = e2.id WHERE r.{column} = ?
+                        LEFT JOIN entities e2 ON r.target_id = e2.id
+                        WHERE r.{column} = ? AND {validity_sql}
                         ORDER BY r.created_at DESC, r.id DESC LIMIT 10""",
-                    (entity_id,),
+                    (entity_id, *validity_params),
                 ).fetchall()
                 return [
                     {
