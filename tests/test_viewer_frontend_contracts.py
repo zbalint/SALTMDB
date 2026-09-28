@@ -98,5 +98,25 @@ class TestViewerFrontendContracts(unittest.TestCase):
         )
 
 
+    def test_activity_view_has_filters_and_paging(self):
+        body = self._function_body("activity", "openSessionDetail")
+        for expected in (
+            "inputField('Event type'",
+            "inputField('Agent'",
+            "inputField('Session ID'",
+            "inputField('Context ID'",
+            "inputField('Text'",
+            "/api/events?${",
+            "setAttribute('aria-label', 'Activity pages')",
+            "state.activityPreset",
+            "state.activityPage",
+            "guarded(",
+        ):
+            with self.subTest(expected):
+                self.assertIn(expected, body)
+        self.assertNotIn("/api/events?limit=20", body)
+        self.assertIn("activityPage: 1, activityPreset: {}", self.script)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@
     view: 'overview', renderController: null, detailController: null, poller: null,
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
-    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {},
+    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, activityPage: 1, activityPreset: {},
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -401,9 +401,36 @@
   };
 
   const activity = async () => {
-    const data = await api('/api/events?limit=20'); const rows = data.events.map(event => {
-      const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(timeCell(event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
-    }); view.replaceChildren(section('Recent activity', 'Read-only operational evidence. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows));
+    const form = node('form', undefined, 'toolbar');
+    const typeField = inputField('Event type', 'e.g. decision, issue', state.activityPreset.type || '');
+    const agentField = inputField('Agent', 'Agent id', state.activityPreset.agent_id || '');
+    const sessionField = inputField('Session ID', 'Agent session ID', state.activityPreset.agent_session_id || '');
+    const contextField = inputField('Context ID', 'Context or thread ID', state.activityPreset.context_id || '');
+    const textField = inputField('Text', 'Text within the event content', state.activityPreset.q || '');
+    form.append(typeField.wrap, agentField.wrap, sessionField.wrap, contextField.wrap, textField.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.activityPreset = {}; state.activityPage = 1; render(); }));
+    const result = node('div');
+    const list = async (page = 1) => {
+      setBusy(result, true);
+      try {
+        const params = new URLSearchParams(state.activityPreset); params.set('page', String(page)); params.set('limit', '20');
+        const data = await api(`/api/events?${params}`); const rows = data.events.map(event => {
+          const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(timeCell(event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
+        });
+        const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Activity pages');
+        const previous = button('Previous', '', guarded(() => list(page - 1))); previous.disabled = page <= 1;
+        const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
+        pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} events`, 'muted'), next);
+        result.replaceChildren(section(`${data.total_count} events`, 'Read-only operational evidence, newest first. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows, 'No events match these filters.'), pager);
+        state.activityPage = page;
+      } finally { setBusy(result, false); }
+    };
+    form.addEventListener('submit', guarded(async event => {
+      event.preventDefault(); const params = new URLSearchParams();
+      [['type', typeField.element.value.trim()], ['agent_id', agentField.element.value.trim()], ['agent_session_id', sessionField.element.value.trim()], ['context_id', contextField.element.value.trim()], ['q', textField.element.value.trim()]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      state.activityPreset = Object.fromEntries(params); state.activityPage = 1; await list(1);
+    }));
+    view.replaceChildren(section('Recent activity', 'Filter the append-only event ledger by type, agent, session, context or text.'), form, result);
+    await list(state.activityPage);
   };
 
   const openSessionDetail = (sessionId) => { state.sessionDetailId = sessionId; render(); };
