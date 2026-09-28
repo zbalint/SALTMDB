@@ -247,8 +247,15 @@ def search_traces(
     cursor: str | None = None,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
 ) -> dict:
 ```
+
+- **`coordinator` (Amendment 2)**: internal-only, never part of the public `@mcp.tool()` wrapper's
+  signature (§6.3) — injected by `dispatch.py` exactly the way `store_memory`'s own `coordinator`
+  kwarg already is (§3.6 explains why this tool needs it despite staying out of `MUTATING_TOOLS`).
+  Used solely to run the abandonment sweep (§3.6) before the read; never used to route the read
+  itself onto the coordinator thread.
 
 - `query_keywords` is accepted but inert in Phase 1 (no `trace_fts`/`trace_embeddings` tables
   exist yet — Phase 2 only). If `query_keywords` is provided, include a `warning("TRACE_SEARCH_NOT_YET_SEMANTIC", ...)`
@@ -277,8 +284,12 @@ def get_trace(
     trace_id: str,
     db_connection=None,
     db_path: str = None,
+    coordinator=None,
 ) -> dict:
 ```
+
+- **`coordinator` (Amendment 2)**: same internal-only injection and same purpose as
+  `search_traces`'s own `coordinator` param above — runs the abandonment sweep only, never the read.
 
 - `SELECT ... FROM conversation_traces WHERE id = ? AND owner_id = ?` — a trace owned by a
   different caller resolves as unknown (mirrors `get_memory`'s `_can_read_entity` convention,
@@ -298,12 +309,18 @@ def get_trace(
 ### 3.6 Abandonment sweep
 
 ```python
-def _sweep_abandoned_traces(conn, *, agent_session_id: str | None = None, timeout_seconds: int = 3600) -> int:
+def _sweep_abandoned_traces(
+    conn,
+    *,
+    agent_session_id: str | None = None,
+    owner_id: str | None = None,
+    timeout_seconds: int = 3600,
+) -> int:
 ```
 
 - **Trigger: lazy/opportunistic, not a new background thread.** Called at the top of
-  `capture_trace_start` (scoped to that call's own `agent_session_id`) and at the top of
-  `search_traces`/`get_trace` (scoped to `owner_id`, unscoped by `agent_session_id`, bounded to
+  `capture_trace_start` (scoped to that call's own `agent_session_id`, `owner_id=None`) and at the
+  top of `search_traces`/`get_trace` (scoped to `owner_id`, `agent_session_id=None`, bounded to
   pending rows only). This is a deliberate Phase 1 simplification, not an oversight: the plan
   itself only specifies the *detection signal* (event-driven off `_agent_sessions.ended_at`, with a
   timeout fallback), not a trigger mechanism, and `daemon/server.py` already runs one dedicated
@@ -317,13 +334,60 @@ def _sweep_abandoned_traces(conn, *, agent_session_id: str | None = None, timeou
   follow-up, not a Phase 1 requirement.
 - Event-driven path: `UPDATE conversation_traces SET status = 'incomplete', updated_at = ? WHERE
   status = 'pending' AND agent_session_id IN (SELECT session_id FROM _agent_sessions WHERE
-  ended_at IS NOT NULL) [AND agent_session_id = ? -- when scoped]`.
+  ended_at IS NOT NULL) [AND agent_session_id = ? -- when scoped by session] [AND owner_id = ? --
+  when scoped by owner]`.
 - Fallback path (only for sessions `_agent_sessions` hasn't resolved either way): `UPDATE
   conversation_traces SET status = 'incomplete', updated_at = ? WHERE status = 'pending' AND
-  created_at < ? [AND agent_session_id = ? -- when scoped]`, with the cutoff computed from
-  `timeout_seconds` (default 3600, matching plan §4).
+  created_at < ? [AND agent_session_id = ? -- when scoped by session] [AND owner_id = ? -- when
+  scoped by owner]`, with the cutoff computed from `timeout_seconds` (default 3600, matching plan
+  §4). The two optional filters are mutually exclusive per call site (never both supplied in Phase
+  1 — `capture_trace_start` passes `agent_session_id` only, `search_traces`/`get_trace` pass
+  `owner_id` only), but the function itself does not enforce that exclusivity; it simply appends
+  whichever filters are non-`None`.
 - Returns the count of rows transitioned (used only by tests; callers of `capture_trace_start`/
   `search_traces`/`get_trace` discard it).
+
+### 3.7 How `search_traces`/`get_trace` run the sweep without becoming mutating tools (Amendment 2)
+
+`search_traces` and `get_trace` must stay out of `MUTATING_TOOLS`/`WRITE_TOOLS` (§4/§5) — the sweep
+is an internal consistency-maintenance side effect, not something the caller's retry semantics
+should key off (see Amendment 2 below for the full reasoning). But `_sweep_abandoned_traces` is a
+write, and `db/connection.py`'s `get_connection()` returns a `PRAGMA query_only=ON` connection for
+any thread outside `DbWriteCoordinator`'s own worker thread or an explicit `coordinator.submit`
+call (confirmed by direct read, `db/connection.py:96-101`) — so the sweep cannot simply run inline
+against whatever connection `search_traces`/`get_trace` would otherwise open. Resolution: route
+only the sweep through a synchronous, scoped `coordinator.submit` call, then open an ordinary
+connection for the actual read, exactly mirroring `store_memory`'s existing optional-`coordinator`
+convention (`write.py:592`, used to call `trigger_librarian`) and that function's own
+`if coordinator is not None: ... else: <direct fallback>` shape (`librarian_service.py:25-38`):
+
+```python
+if coordinator is not None:
+    coordinator.submit(
+        "trace-sweep:" + _caller_tool_name,  # "search_traces" or "get_trace"
+        lambda conn: _sweep_abandoned_traces(conn, owner_id=owner_id),
+        priority="foreground",  # default wait=True -- blocks until the sweep commits
+    )
+else:
+    # Direct-mode / unit-test fallback, no live coordinator -- runs the sweep on whatever
+    # connection the read itself would use, via this module's existing db_connection/db_path
+    # optional-connection convention (identical to get_memory's own resolution,
+    # lifecycle.py:872-876: `conn = db_connection or get_connection(db_path or get_db_path())`,
+    # closed by the caller iff it opened it).
+    _sweep_abandoned_traces(conn, owner_id=owner_id)
+```
+
+`priority="foreground"`/`wait=True` (the `submit()` default, `db_write_coordinator.py:83-105`) is
+required, not `wait=False`/background: the sweep must run at the top of `search_traces`/`get_trace`,
+*before* the read query executes, so a trace that just became stale is visible as `incomplete` in
+this same call's result — a fire-and-forget background write would race the read that follows it
+in the same function and could return a stale `pending` status. This is safe for
+`DbWriteCoordinator.submit`'s own retry-relevant semantics too: `_sweep_abandoned_traces` is
+naturally idempotent (its `UPDATE ... WHERE status = 'pending'` is a no-op once a row is already
+`incomplete`), so a mid-call failure during the sweep and a subsequent retry of the whole
+`search_traces`/`get_trace` call (§5, READ_TOOLS) never produces a duplicate or incorrect side
+effect — which is exactly the property that makes it correct for these two tools to stay classified
+as read/retry-safe despite this internal write.
 
 ---
 
@@ -349,12 +413,39 @@ Add exactly the first 3 (`capture_trace_start`, `capture_trace_memory_link`,
 `get_trace` are read-only, same reasoning as `search_memory`/`get_memory` staying out of that
 frozenset.
 
-No change to `_dispatch_tool_inner`'s branching logic (lines 705+) — the 3 mutating capture tools
-don't need the `coordinator` kwarg injection that `store_memory`/`log_event`/`manage_relation` get
-(line 708's special-cased set), since none of them calls `trigger_librarian` or anything else that
-needs a coordinator reference. Confirm this at implementation time by checking whether any Phase 1
-trace-service function ends up needing `coordinator` — if one does, add it to that same
-special-cased set rather than introducing a new branch.
+The 3 mutating capture tools don't need the `coordinator` kwarg injection that
+`store_memory`/`log_event`/`manage_relation` get (line 708's special-cased set), since none of them
+calls `trigger_librarian` or anything else that needs a coordinator reference — they already run
+entirely on the coordinator's own writer thread (via `MUTATING_TOOLS`' `coordinator.submit(f"tool:
+{tool}", ...)` routing), so any nested `get_connection()` call inside them transparently resolves
+to the coordinator's connection through the `_coordinator_connection` ContextVar
+(`db/connection.py:20-22,96-101`, set for the duration of the job by
+`db_write_coordinator.py:216-221`) — no explicit `coordinator` object needed.
+
+**Amendment 2**: `search_traces`/`get_trace` need the `coordinator` object itself, despite staying
+out of `MUTATING_TOOLS` — see §3.7 for why (their own internal abandonment-sweep write, §3.6, needs
+a scoped synchronous coordinator round-trip; the read itself must not be routed through the
+coordinator). `_dispatch_tool_inner` (lines 705+) gets one small addition, a second branch after the
+existing `MUTATING_TOOLS` check, for exactly these two tool names:
+
+```python
+def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
+    fn = DISPATCH_TABLE[tool]
+    if tool in MUTATING_TOOLS:
+        if tool in {"store_memory", "log_event", "manage_relation"}:
+            kwargs = {**kwargs, "coordinator": coordinator}
+        return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
+    if tool in {"search_traces", "get_trace"}:
+        kwargs = {**kwargs, "coordinator": coordinator}
+    return fn(**kwargs)
+```
+
+This is the only change to `_dispatch_tool_inner`. `search_traces`/`get_trace` are still called via
+plain `fn(**kwargs)` on the request-handling thread (not `coordinator.submit`) — only their own
+internal sweep call (§3.7) goes through the coordinator, and only for the duration of that one
+scoped write. `MUTATING_TOOLS`, `WRITE_TOOLS` (§5), and `_OWNER_INJECTED_TOOLS` (§6.2) are
+unaffected by this amendment — `search_traces`/`get_trace` remain correctly classified as
+non-mutating/read tools in all three.
 
 ---
 
@@ -988,3 +1079,85 @@ other `(new)`-marked file in §13/§15 against the allowlist — all already pre
 No tracked files were changed by OMP before this block (confirmed via `git status`/`git log` in
 the worktree — clean, still at the pre-amendment spec-lock commit), so no re-verification of
 already-written code is needed; OMP should resume implementation from the current (amended) spec.
+
+---
+
+## Amendment 2 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §3.6 requires `search_traces`/`get_trace` to lazily run the abandonment
+sweep (a write) at the top of each call; §4 keeps both tools out of `MUTATING_TOOLS`. OMP traced the
+consequence precisely: `daemon/server.py:896-900` enables the daemon connection boundary after
+bootstrap, and `db/connection.py:96-101`'s `get_connection()` then returns a `PRAGMA query_only=ON`
+connection for any call outside coordinator scope — which is exactly the scope `search_traces`/
+`get_trace` run in, since `dispatch.py`'s `_dispatch_tool_inner` only routes `MUTATING_TOOLS`
+through `coordinator.submit`. §0 forbids editing `daemon/server.py`/`daemon/client.py`, and no
+allowed coordinator path existed in the spec as locked. OMP correctly declined to open an ad-hoc
+writer connection in `trace_service.py`, which would have bypassed the write-coordinator invariant
+outright, and correctly declined to guess which of §3.6/§4 was authoritative.
+
+**Verified against the actual code** (not just OMP's citations — read directly, this session, in
+the worktree): `db/connection.py:96-101` confirmed exactly as OMP described. `dispatch.py`'s
+`_dispatch_tool_inner` (pre-amendment) confirmed to call `fn(**kwargs)` directly, with no coordinator
+access, for any tool not in `MUTATING_TOOLS`. `db/connection.py:20-22`'s `_coordinator_connection`
+`ContextVar` confirmed set only inside `db_write_coordinator.py:216-221`'s `_in_transaction` wrapper,
+itself only entered from the writer thread's own `_execute_job` — so no code path outside an
+explicit `coordinator.submit` call, on any thread, can ever obtain a writable connection once the
+daemon boundary is enabled. This is a real contradiction, not a misreading: as locked, §3.6
+specified a write with no code path capable of executing it from where §4 places these two tools.
+
+**Resolution** (narrow fix, not a reclassification): keep `search_traces`/`get_trace` out of
+`MUTATING_TOOLS`/`WRITE_TOOLS` — reclassifying them as mutating (OMP's option 3) was considered and
+rejected, because `protocol.WRITE_TOOLS`/`READ_TOOLS` governs the RPC mid-call-failure retry
+contract (`mcp/tools.py:222-263`, §5), and these two tools' own response is genuinely safe to retry
+regardless of the sweep's outcome — the sweep is `_sweep_abandoned_traces`'s own naturally
+idempotent `UPDATE ... WHERE status = 'pending'`, so relabeling them `WRITE_TOOLS` would incorrectly
+suppress safe auto-retry on a `MID_CALL_FAILURE` for what remains, from the caller's perspective, a
+pure read. Removing the sweep entirely (OMP's option 2) was also rejected: it would silently
+reintroduce staleness this feature exists to avoid (a `search_traces`/`get_trace` caller could see a
+`pending` trace for a session that has actually ended), and the plan's own design already committed
+to this as the tools' opportunistic sweep trigger (memory `5c778689`, point 3).
+
+Instead (OMP's option 1, narrowed): the sweep alone — not the read — gets a scoped, synchronous
+coordinator round-trip, using the same `coordinator=None`-optional-parameter convention `write.py`
+already uses for `store_memory`'s own `coordinator` kwarg (`write.py:592`), and the same
+`if coordinator is not None: submit else: direct-fallback` shape `trigger_librarian` already uses
+(`librarian_service.py:25-38`). Concretely (full detail now in §3.4/§3.5/§3.6/§3.7/§4 above, edited
+in place rather than only described here):
+- `search_traces`/`get_trace` gain an internal-only `coordinator=None` parameter (§3.4/§3.5) — never
+  exposed by the public `@mcp.tool()` wrappers (§6.3 unchanged).
+- `_sweep_abandoned_traces` gains an `owner_id` parameter and matching `AND owner_id = ?` SQL filter
+  (§3.6) — a second, smaller gap found while resolving this one: §3.6 as locked already *said*
+  "scoped to `owner_id`" in prose for the `search_traces`/`get_trace` trigger point, but neither the
+  function signature nor its SQL actually had an `owner_id` filter to scope by. Fixed in the same
+  edit rather than leaving it for a third BLOCKED report.
+- `dispatch.py`'s `_dispatch_tool_inner` (§4) gets one new branch, after the existing
+  `MUTATING_TOOLS` check, injecting `coordinator` into `search_traces`/`get_trace`'s kwargs without
+  adding them to `MUTATING_TOOLS` or routing their call through `coordinator.submit` — only their own
+  internal sweep call does that, via `priority="foreground"` (blocking) so the sweep's effect is
+  visible to the read that immediately follows it in the same function call.
+- `WRITE_TOOLS`/`READ_TOOLS` (§5), `_OWNER_INJECTED_TOOLS` (§6.2), and the public wrapper signatures
+  (§6.3) are all unchanged — this amendment touches only §3.4/§3.5/§3.6/§4, plus the new §3.7
+  explaining the mechanism.
+
+**Gate re-run against this amendment**: re-read §0's file list — no new file is touched by this
+amendment (all edits land in `trace_service.py` and `dispatch.py`, both already in the "may
+edit/create" list); no `daemon/server.py`/`daemon/client.py` edit is introduced, so §0's "does not
+touch" list still holds exactly as written. Re-read §15.1's abandonment-sweep test bullet — it
+already requires confirming the sweep is "actually invoked by calling `capture_trace_start`/
+`search_traces`/`get_trace`," which still covers this mechanism without needing its own wording
+change; a test exercising `search_traces`/`get_trace`'s sweep path with no live `DbWriteCoordinator`
+exercises the `coordinator=None` direct-fallback branch (§3.7), which is itself worth having
+positive coverage for — noted here for OMP rather than added as a new numbered requirement, since
+§15.1 already generically requires covering both the event-driven and fallback sweep *paths*, and
+this is a connection-plumbing detail of how those paths get invoked, not a new scenario. Checked for
+a third occurrence of the same coordinator-scope gap elsewhere in the spec: `capture_trace_start`
+(already `MUTATING_TOOLS`) and `capture_trace_memory_link`/`capture_trace_complete` (same) need no
+equivalent change — confirmed in the updated §4 text above, they already receive a writable
+connection transparently via the `_coordinator_connection` `ContextVar`, since their entire function
+body already executes on the writer thread.
+
+No tracked files were changed by OMP before this block (per OMP's own report: partial implementation
+was removed after the contradiction was confirmed, worktree clean, no commit/merge) — confirmed
+independently via `git status`/`git log` in the worktree this session (clean, still at the
+Amendment-1 commit `7bd44e4`). No re-verification of already-written code is needed; OMP should
+resume implementation from the current (amended) spec.
