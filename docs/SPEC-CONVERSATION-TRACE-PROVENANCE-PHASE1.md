@@ -15,10 +15,7 @@
 - `src/saltmdb/viewer/routes/entity_detail.py`
 - `src/saltmdb/viewer/routes/sessions.py`
 - `src/saltmdb/config.py`
-- `hooks/_saltmdb_hook_common.py`
-- `hooks/saltmdb-capture-trace-start.py` (new)
-- `hooks/saltmdb-capture-trace-memory-link.py` (new)
-- `hooks/saltmdb-capture-trace-complete.py` (new)
+- `hooks/_saltmdb_hook_common.py` (Amendment 5 — struck: no longer edited by this spec; see §12)
 - `hooks/claude-settings-example.json`
 - `hooks/codex-settings-example.json` (new)
 - `hooks/README.md`
@@ -29,7 +26,8 @@
 - `tests/test_viewer_sessions.py`
 - `tests/test_viewer_routes.py`
 - `tests/test_config.py`
-- `hooks/tests/test_capture_hooks.py` (new)
+- `hooks/tests/test_capture_hook_config.py` (new — Amendment 5, replaces the originally-planned
+  `hooks/tests/test_capture_hooks.py`; see §13/§15.6)
 - `tests/test_mcp_tools.py` (Amendment 3 — narrowly: only `test_mcp_tool_count_regression_guard`'s
   `19`→`24` value and its explanatory message string, extending it by one clause; nothing else in
   this file)
@@ -48,7 +46,9 @@
 - `src/saltmdb/embedding_service.py`, `src/saltmdb/domain/services/memory_service/search_primitives.py` (Phase 2 — trace embeddings/channels)
 - `scripts/benchmarking/**` (Phase 3)
 - `hooks/antigravity-settings-example.json`, `hooks/copilot-hooks-example.json` (no Codex/Antigravity/Copilot example changes — a `codex-settings-example.json` addition is Phase 1 work per §13, but the *existing* antigravity/copilot files are untouched)
-- Any existing hook script (`saltmdb-checkable-fact-drift-sweep.py`, `saltmdb-post-tool-failure-circuit-breaker.py`, `saltmdb-post-tool-response-nudges.py`, `saltmdb-pre-compact-sweep.py`, `saltmdb-pre-tool-search-gate.py`, `saltmdb-session-end-wrapup-reminder.py`, `saltmdb-session-start-bootstrap.py`, `saltmdb-skill-review-sweep.py`, `saltmdb-stop-critique-gate.py`, `saltmdb-stop-retrieval-outcome-gate.py`) — none of these is modified; the 3 new capture events are new scripts, not additions to existing ones
+- Any existing hook script (`saltmdb-checkable-fact-drift-sweep.py`, `saltmdb-post-tool-failure-circuit-breaker.py`, `saltmdb-post-tool-response-nudges.py`, `saltmdb-pre-compact-sweep.py`, `saltmdb-pre-tool-search-gate.py`, `saltmdb-session-end-wrapup-reminder.py`, `saltmdb-session-start-bootstrap.py`, `saltmdb-skill-review-sweep.py`, `saltmdb-stop-critique-gate.py`, `saltmdb-stop-retrieval-outcome-gate.py`) — none of these is modified; the 3 new capture events are native `mcp_tool` hook-config entries (Amendment 5), not scripts at all
+- `hooks/saltmdb-capture-trace-start.py`, `hooks/saltmdb-capture-trace-memory-link.py`,
+  `hooks/saltmdb-capture-trace-complete.py` (Amendment 5 — none of these 3 files is created; see §13)
 - `src/saltmdb/domain/services/relation_service.py` (its 2 `_assemble_memory_record` call sites at lines 850/887 are read-only callers; the new `include_trace_provenance` param defaults to `False` and neither call site passes it — confirmed no diff needed there, see §7)
 - `src/saltmdb/domain/services/memory_service/lifecycle.py`'s `inspect_memory` (its `_assemble_memory_record` call site at line 972 is likewise unaffected by the default-`False` param — no diff)
 - `src/saltmdb/mcp/identity.py`, `src/saltmdb/daemon/server.py`, `src/saltmdb/daemon/client.py` (identity/RPC transport is unchanged — the new tools ride the existing `agent_session_id`/capability-token machinery verbatim, confirmed empirically per plan §3; no new trust mechanism)
@@ -808,54 +808,87 @@ pattern) as `"trace_count": trace_count`.
 
 ## 12. `hooks/_saltmdb_hook_common.py`
 
-Extend the alias-tolerant `get_field` helper's known aliases (no change to `get_field`'s own
-implementation, lines 39-46) — the 3 new hook scripts need 3 field names not currently referenced
-anywhere in this file: a turn/prompt identifier (`prompt_id` on Claude Code, `turn_id` on Codex —
-both map to `harness_turn_id`), the harness's own session identifier (`session_id`/`sessionId`),
-and the final assistant message text at `Stop` (`last_assistant_message`/`lastAssistantMessage` —
-confirm the exact field name(s) each harness's `Stop` payload actually uses by reading both
-harnesses' current hook documentation before writing the script bodies; the plan's own §1 already
-did this research once — reuse its findings rather than re-deriving, and if the plan doc doesn't
-state the exact field name literally, treat this as a narrow, targeted doc-read task scoped to
-exactly that one fact, not a re-investigation).
-
-Add one new shared helper, `harness_name(data: dict) -> Literal["codex", "claude_code", ""]`,
-detecting which harness sent the payload (needed by all 3 new scripts to populate
-`conversation_traces.harness`) — base it on whatever harness-identifying signal the existing hook
-scripts already use elsewhere in this file or `README.md`'s "Design principle" section (e.g. a
-harness-specific field present in one payload shape and absent in the other); do not invent a new
-detection mechanism if one already exists in this codebase's hook plumbing.
+**Struck by Amendment 5 — no change to this file.** This section originally required extending
+`get_field`'s alias list and adding a `harness_name()` helper for 3 Python capture scripts that
+Amendment 5 establishes never exist (see §13). No Python code anywhere in this feature ever parses
+a hook payload for `harness_turn_id`/`harness_session_id`/`user_prompt`/`last_assistant_message`/
+`harness` — the native `mcp_tool` hook mechanism (§13) resolves all of these via the harness's own
+template-variable substitution, entirely outside SALTMDB's Python code, and `harness` itself is a
+literal hardcoded string in each settings-example file (`"claude_code"` in
+`claude-settings-example.json`, `"codex"` in `codex-settings-example.json`), never runtime-detected
+— each file is already harness-specific by construction, so there is nothing to detect.
 
 ---
 
-## 13. New hook scripts
+## 13. New hook registrations (Amendment 5 — no new Python scripts; native `mcp_tool` hooks only)
 
-Three new scripts, following the exact structural convention of the existing 9
-(`hooks/saltmdb-*.py` — docstring block naming the lifecycle event(s)/harness(es)/registered
-tool(s), `sys.path.insert` + import from `_saltmdb_hook_common`, fail-open on any parse error per
-README's "Output emission" principle, non-blocking always since none of these 3 events is a
-permission gate):
+**No Python script files are created for these 3 events.** This section originally required 3 new
+`hooks/saltmdb-*.py` scripts that would themselves "call" the capture tools — Amendment 5 corrects
+this: a hook script is a spawned subprocess with no MCP session of its own (confirmed directly,
+`hooks/README.md`'s own words for exactly this limitation: "a bare script has no MCP tool context
+of its own"), so no script can invoke an MCP tool while carrying the calling adapter's trusted,
+server-injected `agent_session_id` (§6.2's whole defense-in-depth rationale for owner/session
+injection depends on that trust). The plan document already resolved this, before this spec was
+even written, as **Option A**: "`mcp_tool` hook reuses the existing adapter connection" (plan §3) —
+a lifecycle event is registered directly as a `"type": "mcp_tool"` entry in the harness's own
+settings JSON, naming the target tool and templating its arguments from harness-supplied fields;
+the harness itself makes the call, over its own already-authenticated MCP connection, with no
+script in between. Plan §3 explicitly rejected the alternative (a dedicated CLI/script bridge,
+"Option B") as unneeded surface once Option A was empirically confirmed live on both harnesses
+(memories `9eb3c174` Claude Code, `f81f6361` Codex — both confirm a hook-triggered `mcp_tool` call
+carries the exact same `agent_session_id` as the live conversation's own in-session tool calls).
+§13 as originally locked cited this same empirical work but then contradicted its own conclusion by
+routing the actual invocation through a script anyway — that contradiction is what OMP correctly
+surfaced.
 
-- **`hooks/saltmdb-capture-trace-start.py`** — `UserPromptSubmit` (both harnesses). Extracts
-  `harness_turn_id`/`harness_session_id`/`user_prompt`/harness name via the common helpers, calls
-  `mcp__saltmdb__capture_trace_start` (via whatever mechanism the existing hook scripts use to
-  invoke an `mcp_tool`-type hook — this is registration-only, matching README's "only registration
-  is harness-specific" principle; the script body itself is the same for both harnesses).
-- **`hooks/saltmdb-capture-trace-memory-link.py`** — `PostToolUse` (both harnesses), registered
-  only for `store_memory`/`revise_memory`/`supersede_memory`/`consolidate_memories`. Reads
-  `tool_name`/`tool_input`/`tool_response` (reusing `saltmdb-post-tool-response-nudges.py`'s
-  existing `response_object()`-style parsing convention for extracting the written `entity_id`
-  from the response, since that script already solves "response can be a nested object or a raw
-  JSON string depending on harness" for this exact response shape — do not re-derive that parsing
-  logic from scratch). Filters to successful calls only (no error field in the response) before
-  calling `capture_trace_memory_link`.
-- **`hooks/saltmdb-capture-trace-complete.py`** — `Stop` (both harnesses). Extracts
-  `harness_turn_id`/final assistant message text, calls `capture_trace_complete`.
+Add exactly 3 new `"type": "mcp_tool"` hook entries, one per event, to both
+`hooks/claude-settings-example.json` (existing file, extended) and `hooks/codex-settings-example.json`
+(new file, §0). Each entry's `server` is `"saltmdb"`, `tool` is the capture tool's exact name, and
+`input` supplies its arguments via the harness's own `${field}` template substitution:
 
-All 3 fail open (no `systemMessage`/blocking output at all on any internal error — silently exit 0)
-since a capture failure must never block the harness's own lifecycle event (plan §10). On a
-`{"status": "rejected", ...}` response from the capture tool, also exit 0 silently — per §3's own
-non-fatal-to-the-hook contract.
+- **`UserPromptSubmit`**, matcher `"*"`, tool `capture_trace_start`: `input` = `{"harness":
+  "claude_code"` (or `"codex"`, literal per file — see §12) `, "harness_session_id": "${session_id}",
+  "harness_turn_id": "${prompt_id}"` (Codex: `"${turn_id}"`) `, "user_prompt": "${prompt}"}`.
+- **`PostToolUse`**, matcher `"mcp__saltmdb__store_memory|mcp__saltmdb__revise_memory|mcp__saltmdb__supersede_memory|mcp__saltmdb__consolidate_memories"`
+  (the matcher itself is the tool-name filter — no script-side `tool_name` check needed), tool
+  `capture_trace_memory_link`: `input` = `{"harness_turn_id": "${prompt_id}"` (Codex: `"${turn_id}"`)
+  `, "entity_id": "${tool_response.data.id}", "just_run_tool_name": "${tool_name}"}`.
+- **`Stop`**, matcher `"*"`, tool `capture_trace_complete`: `input` = `{"harness_turn_id":
+  "${prompt_id}"` (Codex: `"${turn_id}"`) `, "final_assistant_message": "${last_assistant_message}"}`.
+
+All `timeout: 15`, matching the existing command-type hooks' own timeout convention in the same
+files. Every capture tool's own non-fatal-rejection contract (§3.1-§3.3: a `DO NOTHING`/no-match/
+already-terminal outcome is `status: "ok"`, never an error) is what makes this safe with no
+script-side filtering: a failed `store_memory` call (no `data.id` in its response) templates
+`entity_id` to an empty/unresolved value, and `capture_trace_memory_link`'s own entity-existence
+check (§3.2) rejects that gracefully exactly as it would any other unknown `entity_id` — no
+"successful calls only" pre-filter is needed on the hook side, because the tool itself already
+degrades safely.
+
+**Known unverified risk, explicitly flagged rather than silently assumed** (mirrors the existing
+Codex-restart operational note below in kind, not resolved by this amendment): `saltmdb-post-tool-
+response-nudges.py` exists specifically because at least one harness has historically delivered
+`tool_response` as a raw JSON-encoded *string* rather than a parsed nested object for some tool
+responses — a shape that a template engine doing plain field-path lookups (`${tool_response.data.id}`)
+cannot dereference through. Whether Claude Code's and Codex's `mcp_tool` hook templating can resolve
+a *nested* path (`tool_response.data.id`), and whether either harness delivers `tool_response` in
+the string-encoded shape for this specific `PostToolUse` case, is **not empirically confirmed** —
+the two prior live tests (`9eb3c174`, `f81f6361`) only confirmed flat, harness-level fields
+(`session_id`, `turn_id`), never a nested path into the just-run tool's own response payload. If
+nested-path resolution fails silently on either harness, `capture_trace_memory_link` would receive
+an empty/literal-unsubstituted `entity_id` and gracefully no-op (per the paragraph above — never a
+hard failure, per §3.2's contract) but memory-write provenance links would silently never record
+for that harness. **This must be verified live, once, on each harness, before enabling either hook
+config in a real session** (e.g. `store_memory` once, then `get_trace`/`search_traces` or a direct
+`trace_memory_links` read to confirm a link was actually recorded) — it is explicitly not a Phase 1
+code deliverable, not resolvable by this repo's own test suite (§15.6 validates the JSON's own shape
+and content, not the harness's runtime template resolution), and not part of this spec's §17
+acceptance bar, for the same reason the Codex-restart item below isn't: it requires a live harness
+session to observe, not code this repository can control.
+
+All 3 events rely entirely on each capture tool's own non-fatal contract (previous two paragraphs)
+for graceful degradation — there is no separate "fail open" behavior to specify for a script, because
+there is no script to fail.
 
 **Per-harness recursion note (plan §15's TDD matrix item)**: verify empirically, once, during
 implementation, that a `PostToolUse` hook matcher broad enough to also match
@@ -864,11 +897,12 @@ implementation, that a `PostToolUse` hook matcher broad enough to also match
 not something this spec can pre-verify without running a live harness session.
 
 **Codex hook-config example**: add `hooks/codex-settings-example.json` (new file, following
-`claude-settings-example.json`'s existing structure) registering all 3 new scripts for Codex's
-`UserPromptSubmit`/`PostToolUse`/`Stop` events — `hooks/README.md` currently has no Codex example
-at all (confirmed, plan §14); this is Phase 1's first one. Do not add a corresponding Antigravity
-or Copilot example — those harnesses are out of scope for this feature entirely (not mentioned
-anywhere in the plan's identity-binding investigation, which covered only Codex and Claude Code).
+`claude-settings-example.json`'s existing structure) registering all 3 new `mcp_tool` hook entries
+for Codex's `UserPromptSubmit`/`PostToolUse`/`Stop` events — `hooks/README.md` currently has no
+Codex example at all (confirmed, plan §14); this is Phase 1's first one. Do not add a corresponding
+Antigravity or Copilot example — those harnesses are out of scope for this feature entirely (not
+mentioned anywhere in the plan's identity-binding investigation, which covered only Codex and Claude
+Code).
 
 **Operational note, not a spec requirement**: the plan (§3) flagged that Codex's hook-approval flow
 can restart its adapter mid-flow, minting a new `agent_session_id` — confirmed safe at first-install
@@ -972,18 +1006,27 @@ for one with none.
 Extend with `is_trace_capture_enabled()`'s default-off behavior and each accepted truthy string
 value (`"1"`, `"true"`, `"yes"`, `"on"`, case-insensitive per the existing pattern's `.strip().lower()`).
 
-### 15.6 `hooks/tests/test_capture_hooks.py` (new)
+### 15.6 `hooks/tests/test_capture_hook_config.py` (new — Amendment 5, replaces the originally-planned
+`hooks/tests/test_capture_hooks.py`)
 
-Mirrors the structure of the 3 existing files in `hooks/tests/` (read `test_session_start_bootstrap.py`
-as the closest analog — a hook that also calls out to an MCP tool via subprocess/mocked stdin-JSON
-fixture). Covers: payload parsing for both harnesses' field-name variants (`prompt_id` vs `turn_id`,
-etc., including a pre-field-added degradation case if the plan's §15 "incl. pre-v2.1.196
-absent-field degradation" note applies to any of the 3 new events specifically — confirm this
-against the plan doc's own research before asserting it does); fail-open behavior on malformed
-stdin; the `store_memory`-response `entity_id` extraction for both a nested-object and a
-raw-JSON-string `tool_response` shape (mirroring `saltmdb-post-tool-response-nudges.py`'s own
-dual-shape handling, §13); Windows path/subprocess compatibility, extending the existing
-alias-tolerant helpers exactly as the other hook tests already do.
+No Python capture scripts exist to unit-test (§13, Amendment 5) — this file instead validates the
+JSON hook-configuration artifacts directly, using plain `json.load`, not a subprocess/mocked-stdin
+fixture (there is no script to invoke):
+- Both `hooks/claude-settings-example.json` and `hooks/codex-settings-example.json` parse as valid
+  JSON.
+- Each file has exactly one `mcp_tool`-type hook entry under `UserPromptSubmit`, `PostToolUse`
+  (alongside that harness's pre-existing entries, still present and unchanged), and `Stop`, with
+  `server == "saltmdb"` and `tool` equal to `capture_trace_start`/`capture_trace_memory_link`/
+  `capture_trace_complete` respectively.
+- Each entry's `input` dict has exactly the keys §13 specifies for it (no extra, none missing), and
+  `PostToolUse`'s `matcher` is exactly the 4-tool-name alternation §13 gives (not a broader or
+  narrower pattern).
+- `claude-settings-example.json`'s `harness` literal is `"claude_code"`; `codex-settings-example.json`'s
+  is `"codex"` (§12's "no runtime detection, hardcoded per file" resolution, asserted directly rather
+  than left implicit).
+- No pre-existing hook entry in either file was altered (diff the untouched keys/values against
+  what `git show` gives for the pre-amendment file, or assert their literal content, whichever this
+  worktree's existing test conventions prefer).
 
 ---
 
@@ -1309,3 +1352,120 @@ by OMP, and nothing in it needed touching to resolve this contradiction. OMP sho
 exactly where it left off: apply the now-authorized `test_mcp_tools.py`/`test_phase3_mcp_surface.py`/
 `test_phase4_mcp_surface.py` edits (Amendments 3 and 4, both now available), then continue
 implementation per the current (amended) spec.
+
+---
+
+## Amendment 5 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §13 required all 3 Python capture scripts to exist and themselves invoke
+the capture tools. OMP found this structurally impossible: a hook subprocess script has no MCP
+context of its own — it can only emit hook JSON or shell out to the read-only CLI — while the only
+mechanism that *does* preserve the adapter's trusted identity (a native `mcp_tool`-type hook
+registration) bypasses any script entirely, invoking the tool directly from the harness's own
+already-authenticated connection. Inventing a script-to-MCP bridge would either fabricate an
+untrusted identity or require a new capability surface this spec's §0 forbids touching
+(`daemon/server.py`/`daemon/client.py`). OMP correctly refused to guess and asked for the contract
+gap to be resolved rather than silently picking a side.
+
+**Verified directly, not trusted from OMP's framing alone**:
+- Read `hooks/README.md`'s own documented limitation verbatim: describing
+  `saltmdb-pre-compact-sweep.py`'s fallback-to-`claude -p`/`codex exec` design, it states plainly "a
+  bare script has no MCP tool context of its own" — this project's own documentation already
+  confirms OMP's core claim, independently of anything OMP said.
+- Read `docs/conversation-trace-provenance-plan.md` §3 directly: it already adopted **Option A**
+  ("`mcp_tool` hook reuses the existing adapter connection... No new capability mechanism, no new
+  trust boundary") and explicitly rejected **Option B** (a dedicated CLI/script bridge) as "unneeded
+  surface" once Option A was empirically confirmed live. This resolution predates this spec — §13 as
+  originally locked cited the same empirical tests (memories `9eb3c174`, `f81f6361`) but then
+  contradicted the very conclusion those tests established by routing invocation through a script
+  anyway. Read both memories' full content directly (not from search preview) to confirm exactly
+  what was tested: both are pure `settings.local.json` configuration changes — a `"type": "mcp_tool"`
+  hook entry added directly to the harness's own settings file, no Python script involved at any
+  point in either test.
+- Read OMP's own uncommitted partial diff directly: `hooks/claude-settings-example.json` (modified)
+  and `hooks/codex-settings-example.json` (new, untracked) already contain exactly the 3 correct
+  native `mcp_tool` hook entries this amendment formalizes — `UserPromptSubmit`→`capture_trace_start`,
+  `PostToolUse` (matcher-scoped to the 4 write tools)→`capture_trace_memory_link`, `Stop`→
+  `capture_trace_complete` — using `${session_id}`/`${prompt_id}`(`${turn_id}` on Codex)/`${prompt}`/
+  `${tool_response.data.id}`/`${tool_name}`/`${last_assistant_message}` templating, `timeout: 15`
+  matching the existing command-type hooks' convention. OMP had already independently arrived at the
+  correct mechanism before reporting BLOCKED — it stopped because §13's literal text still demanded
+  Python scripts it correctly judged redundant/impossible to write meaningfully on top of this,
+  rather than because it lacked a working design.
+- Attempted to independently verify, live, whether either harness's `mcp_tool` templating can
+  resolve a *nested* JSON path (`${tool_response.data.id}`) rather than only the flat top-level
+  fields the two prior empirical tests confirmed (`session_id`, `prompt_id`) — this session's own
+  attempt to add a temporary probe hook to this repository's own `.claude/settings.local.json`
+  (mirroring memory `9eb3c174`'s exact method) was blocked by Claude Code's own self-modification
+  guardrail (editing a live hook config that would alter this session's own runtime behavior). Not
+  worked around, per that guardrail's own instructions. This leaves the nested-path question
+  genuinely open — addressed below rather than assumed either way.
+
+**Resolution**: §13 rewritten in place (no longer requiring any `hooks/saltmdb-capture-trace-*.py`
+file) to specify the native `mcp_tool` hook-entry mechanism directly, matching OMP's own already-
+correct draft exactly (field-for-field, matcher-for-matcher). §12 (`hooks/_saltmdb_hook_common.py`)
+struck entirely — no Python code anywhere in this feature parses a hook payload, so its originally-
+required `get_field` alias extensions and `harness_name()` helper are unneeded; `harness` is instead
+a literal hardcoded string per settings-example file (`"claude_code"`/`"codex"`), never
+runtime-detected, since each file is already harness-specific by construction. §0's allowlist updated
+to match: the 3 script paths and `_saltmdb_hook_common.py` removed from "may edit/create" (the
+former now explicitly listed under "does not touch — not created"); `hooks/tests/test_capture_hooks.py`
+renamed to `hooks/tests/test_capture_hook_config.py` and its required content (§15.6) redefined from
+hook-subprocess behavior tests to direct JSON-structure validation of the two settings-example files
+— a real, buildable, durable regression test, not a dropped requirement.
+
+Also resolved, explicitly, why no script-side "successful calls only" pre-filter (§13's original
+text for `capture_trace_memory_link`) is needed: every capture tool's own contract (§3.1-§3.3) is
+already gracefully non-fatal on a missing/unknown `entity_id` — a failed `store_memory` call has no
+`data.id` in its response, so the templated `entity_id` comes out empty/unresolved, and
+`capture_trace_memory_link` rejects it exactly the same non-fatal way it rejects any other unknown
+`entity_id` (§3.2). The `PostToolUse` `matcher` itself is the tool-name filter; nothing else needs
+filtering.
+
+**What this amendment does not resolve, and says so explicitly**: whether `${tool_response.data.id}`-
+style nested-path templating actually works on either harness, and whether either harness ever
+delivers `tool_response` as a raw JSON-encoded string for this specific case (the exact shape
+`saltmdb-post-tool-response-nudges.py` already had to solve for elsewhere in this codebase) rather
+than a parsed object a template engine could dereference — remains genuinely unverified after this
+adjudication's own attempted probe was blocked by a tool-level guardrail, not resolved by research.
+New §13 text names this explicitly as a required live pre-enablement verification step (one manual
+check per harness: write a memory, confirm a `trace_memory_links` row was actually recorded),
+mirrored in framing and acceptance-bar treatment on the adjacent, already-accepted Codex-restart
+operational note — this project's own established precedent for a live-harness-runtime question that
+cannot be resolved by this repository's own code or test suite. This is not a corner cut: it is the
+same category of open item the original spec already accepted for a structurally identical reason,
+made explicit here rather than silently assumed working the way §13's original `${tool_response.data.id}`
+template (already present in OMP's draft) implicitly was.
+
+**Gate re-run against this amendment**: grepped the full spec for every remaining reference to the
+3 script filenames and the old test filename — the only hits left are this amendment's own
+`Amendment 5` annotations and the §0 "does not touch" clarification, both intentional (naming what
+was removed, for traceability), no stale requirement anywhere still assumes a script exists. Checked
+§6.3's public wrapper docstrings ("invoked by SALTMDB's own lifecycle hooks... not intended for
+direct agent use") — accurate regardless of mechanism, needed no change. Checked §17's acceptance
+command and `rg` leak-check — neither hardcodes a script filename, both remain correct unchanged.
+
+**Worktree state at adjudication time (re-checked directly, not assumed from OMP's report)**: `git
+status` this session found the worktree had moved on from the exact snapshot OMP's report described
+— OMP had continued working past the point of its BLOCKED report and, before this adjudication
+landed, had already: applied the Amendments 3+4 test-file edits (`tests/test_mcp_tools.py`,
+`tests/test_phase3_mcp_surface.py`, `tests/test_phase4_mcp_surface.py`, all now modified and
+correct per those amendments); modified `hooks/_saltmdb_hook_common.py` to add `harness_name`/
+`harness_turn_id`/`harness_session_id`/`user_prompt`/`final_assistant_message`/`response_object`
+helpers; and written all 3 now-struck script files (`hooks/saltmdb-capture-trace-start.py`,
+`-memory-link.py`, `-complete.py`, confirmed by direct read — not invokers, but
+`build_tool_request(data) -> dict | None` request-builder functions returning a
+`{"mcp_tool": TOOL_NAME, ...}` shape, i.e. OMP had already independently started down the
+"request-builder/test adapter" half of its own offered option 1 before reporting BLOCKED on the
+other half). None of this is spec-compliant post-Amendment-5 for the hook layer specifically — the
+Amendments 3+4 test edits are correct and should stay; the `_saltmdb_hook_common.py` diff and all 3
+script files are now dead work under the resolution above and must be **discarded**, not built on:
+`git checkout -- hooks/_saltmdb_hook_common.py` and `rm hooks/saltmdb-capture-trace-start.py
+hooks/saltmdb-capture-trace-memory-link.py hooks/saltmdb-capture-trace-complete.py`. The two
+settings-example files (`hooks/claude-settings-example.json` modified,
+`hooks/codex-settings-example.json` new/untracked) are already exactly spec-compliant as written —
+confirmed field-for-field against the new §13 text above — and need no further change. OMP should
+resume by: discarding the struck files per the commands above, writing
+`hooks/tests/test_capture_hook_config.py` per the redefined §15.6, updating `hooks/README.md`'s new
+subsection to describe the `mcp_tool` mechanism (not scripts), then continuing per the current
+(amended) spec.
