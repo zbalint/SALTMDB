@@ -118,5 +118,24 @@ class TestViewerFrontendContracts(unittest.TestCase):
         self.assertIn("activityPage: 1, activityPreset: {}", self.script)
 
 
+    def test_memory_map_exposes_the_bounded_neighborhood_controls(self):
+        body = self._function_body("relationships", "quality")
+        for expected in (
+            "select('Depth'",
+            "inputField('Predicate'",
+            "checkboxField('Include archived'",
+            "inputField('As of (UTC)'",
+            "depth",
+            "predicate",
+            "exclude_archived",
+            "as_of",
+            "state.relationOptions",
+            "graph-legend",
+        ):
+            with self.subTest(expected):
+                self.assertIn(expected, body)
+        self.assertIn("relationOptions: {}", self.script)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@
     view: 'overview', renderController: null, detailController: null, poller: null,
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
-    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, activityPage: 1, activityPreset: {},
+    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, activityPage: 1, activityPreset: {}, relationOptions: {},
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -624,11 +624,22 @@
 
   const relationships = async () => {
     const form = node('form', '', 'toolbar'); const rootField = inputField('Root memory ID', 'Memory ID', state.relationRoot);
-    const { element: input } = rootField; form.append(rootField.wrap, button('Explore graph', 'primary', undefined, 'submit')); const result = node('div');
+    const { element: input } = rootField; const result = node('div');
+    const options = state.relationOptions;
+    const depthField = select('Depth', [['1', '1 hop'], ['2', '2 hops']], options.depth || '1');
+    const predicateField = inputField('Predicate', 'e.g. depends_on', options.predicate || '');
+    const archivedField = checkboxField('Include archived', options.includeArchived === true);
+    const asOfField = inputField('As of (UTC)', 'YYYY-MM-DDTHH:MM', options.asOf || ''); asOfField.element.type = 'datetime-local';
+    form.append(rootField.wrap, depthField.wrap, predicateField.wrap, archivedField.wrap, asOfField.wrap, button('Explore graph', 'primary', undefined, 'submit'));
     const load = async root => {
       if (!root) return; setBusy(result, true);
       try {
-      const data = await api(`/api/relations/neighborhood?entity_id=${encodeURIComponent(root)}`); state.relationRoot = root;
+      const chosen = state.relationOptions;
+      const params = new URLSearchParams({ entity_id: root, depth: chosen.depth || '1' });
+      if (chosen.predicate) params.set('predicate', chosen.predicate);
+      if (chosen.includeArchived) params.set('exclude_archived', 'false');
+      if (chosen.asOf) params.set('as_of', `${chosen.asOf}Z`);
+      const data = await api(`/api/relations/neighborhood?${params}`); state.relationRoot = root;
       const graph = normalizeGraph(data);
       const rows = graph.edges.map(edge => {
         const source = graph.nodes.find(item => item.id === edge.source); const target = graph.nodes.find(item => item.id === edge.target);
@@ -638,12 +649,20 @@
       if (data.returned_edges === 0) contents.push(node('p', 'No active relations for this memory', 'muted'));
       if (graph.malformedEdges) contents.push(node('p', `${graph.malformedEdges} malformed relations could not be rendered.`, 'error'));
       if (data.truncated) contents.push(node('p', `Showing ${data.returned_edges} of ${data.total_matching_edges} relations; ${data.omitted_edge_count} omitted by limit.`, 'muted'));
-      if (graph.edges.length) contents.push(renderGraph(graph));
+      if (graph.edges.length) {
+        const legend = node('p', undefined, 'graph-legend muted'); legend.append('Node colour = lifecycle: ');
+        ['raw', 'consolidated', 'archived'].forEach(kind => legend.append(statusBadge(kind), ' '));
+        contents.push(legend, renderGraph(graph));
+      }
       contents.push(renderTable(['Relation', 'Source', 'Target'], rows, data.returned_edges === 0 ? 'No active relations for this memory' : 'No renderable relations.'));
       result.replaceChildren(...contents);
       } finally { setBusy(result, false); }
     };
-    form.addEventListener('submit', guarded(async event => { event.preventDefault(); await load(input.value.trim()); }));
+    form.addEventListener('submit', guarded(async event => {
+      event.preventDefault();
+      state.relationOptions = { depth: depthField.element.value, predicate: predicateField.element.value.trim(), includeArchived: archivedField.element.checked, asOf: asOfField.element.value };
+      await load(input.value.trim());
+    }));
     view.replaceChildren(section('Memory Map', 'A bounded visual neighborhood centered on one memory.'), form, result);
     if (state.focusRelationshipInput) { state.focusRelationshipInput = false; input.focus(); }
     if (state.relationRoot) await load(state.relationRoot);
