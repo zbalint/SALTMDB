@@ -84,6 +84,7 @@ def _merge_event_rows(sessions: dict[str, dict], rows) -> None:
         if last_event and (entry["last_seen"] is None or last_event > entry["last_seen"]):
             entry["last_seen"] = last_event
 
+
 def _merge_trace_rows(sessions: dict[str, dict], rows) -> None:
     for row in rows:
         if hasattr(row, "keys"):
@@ -102,7 +103,6 @@ def _merge_trace_rows(sessions: dict[str, dict], rows) -> None:
             },
         )
         entry["trace_count"] = trace_count
-
 
 
 def _liveness_for(row, sid: str, active_session_ids: set[str], liveness_known: bool) -> str:
@@ -334,7 +334,12 @@ class SessionsMixin(ViewerHandlerProtocol):
                 (session_id,),
             ).fetchone()[0]
 
-            if lifecycle_row is None and memory_count == 0 and event_count == 0 and trace_count == 0:
+            if (
+                lifecycle_row is None
+                and memory_count == 0
+                and event_count == 0
+                and trace_count == 0
+            ):
                 self.send_json({"error": "Session not found"}, 404)
                 return
 

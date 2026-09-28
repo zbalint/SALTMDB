@@ -93,7 +93,6 @@ class TestTraceMcpTools(unittest.TestCase):
         self.assertEqual(kwargs["entity_id"], "entity-1")
         self.assertTrue(kwargs["include_trace_provenance"])
 
-
     def test_rpc_backend_mints_capture_session_identity(self):
         backend = tools.RpcBackend()
         rpc_call = cast(Callable[[str, dict[str, object]], object], backend.call)
@@ -120,9 +119,7 @@ class TestTraceMcpTools(unittest.TestCase):
         from saltmdb.daemon import dispatch
         from saltmdb.db.schema import init_db
 
-        dispatch_table = cast(
-            dict[str, Callable[..., object]], getattr(dispatch, "DISPATCH_TABLE")
-        )
+        dispatch_table = cast(dict[str, Callable[..., object]], getattr(dispatch, "DISPATCH_TABLE"))
 
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "trace-mcp.db")

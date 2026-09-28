@@ -91,10 +91,20 @@ class TestTraceService(unittest.TestCase):
         trace_id = self._start()
         self._entity()
         first = trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "turn-a", "entity-a", "store_memory", db_connection=self.conn
+            "agent-session-a",
+            "owner-a",
+            "turn-a",
+            "entity-a",
+            "store_memory",
+            db_connection=self.conn,
         )
         second = trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "turn-a", "entity-a", "store_memory", db_connection=self.conn
+            "agent-session-a",
+            "owner-a",
+            "turn-a",
+            "entity-a",
+            "store_memory",
+            db_connection=self.conn,
         )
 
         self.assertEqual(first["data"]["trace_id"], trace_id)
@@ -113,7 +123,12 @@ class TestTraceService(unittest.TestCase):
         trace_id = self._start()
         self._entity()
         trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "turn-a", "entity-a", "store_memory", db_connection=self.conn
+            "agent-session-a",
+            "owner-a",
+            "turn-a",
+            "entity-a",
+            "store_memory",
+            db_connection=self.conn,
         )
         updated = datetime.now(UTC).isoformat()
         content = "Updated entity content"
@@ -122,7 +137,12 @@ class TestTraceService(unittest.TestCase):
             (compute_content_hash(content), content, updated, "entity-a"),
         )
         result = trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "turn-a", "entity-a", "store_memory", db_connection=self.conn
+            "agent-session-a",
+            "owner-a",
+            "turn-a",
+            "entity-a",
+            "store_memory",
+            db_connection=self.conn,
         )
 
         self.assertTrue(result["data"]["linked"])
@@ -228,7 +248,9 @@ class TestTraceService(unittest.TestCase):
         repeated = trace_service.capture_trace_complete(
             "agent-session-a", "owner-a", "turn-a", "replacement", db_connection=self.conn
         )
-        fetched = trace_service.get_trace("owner-a", completed["data"]["trace_id"], db_connection=self.conn)
+        fetched = trace_service.get_trace(
+            "owner-a", completed["data"]["trace_id"], db_connection=self.conn
+        )
 
         self.assertEqual(started["data"]["status"], "pending")
         self.assertEqual(completed["data"]["status"], "completed")
@@ -267,7 +289,9 @@ class TestTraceService(unittest.TestCase):
         close_session(self.conn, "ended-session", datetime.now(UTC).isoformat())
         ended_result = trace_service.search_traces("owner-a", db_connection=self.conn)
         self.assertEqual(
-            next(item for item in ended_result["data"]["results"] if item["trace_id"] == ended_trace)["status"],
+            next(
+                item for item in ended_result["data"]["results"] if item["trace_id"] == ended_trace
+            )["status"],
             "incomplete",
         )
 
@@ -303,7 +327,11 @@ class TestTraceService(unittest.TestCase):
         trace_id = self._start(turn_id="search")
         self._entity()
         trace_service.capture_trace_memory_link(
-            "agent-session-a", "owner-a", "search", "entity-a", "store_memory",
+            "agent-session-a",
+            "owner-a",
+            "search",
+            "entity-a",
+            "store_memory",
             db_connection=self.conn,
         )
         trace_service.capture_trace_complete(
@@ -328,13 +356,22 @@ class TestTraceService(unittest.TestCase):
         trace_id = self._start()
         self._entity()
         self.assertEqual(
-            trace_service.get_trace("owner-b", trace_id, db_connection=self.conn)["errors"][0]["code"],
+            trace_service.get_trace("owner-b", trace_id, db_connection=self.conn)["errors"][0][
+                "code"
+            ],
             "UNKNOWN_TRACE_ID",
         )
-        self.assertEqual(trace_service.search_traces("owner-b", db_connection=self.conn)["data"]["results"], [])
+        self.assertEqual(
+            trace_service.search_traces("owner-b", db_connection=self.conn)["data"]["results"], []
+        )
         self.assertEqual(
             trace_service.capture_trace_memory_link(
-                "agent-session-a", "owner-b", "turn-a", "entity-a", "store_memory", db_connection=self.conn
+                "agent-session-a",
+                "owner-b",
+                "turn-a",
+                "entity-a",
+                "store_memory",
+                db_connection=self.conn,
             )["errors"][0]["code"],
             "UNKNOWN_TRACE",
         )

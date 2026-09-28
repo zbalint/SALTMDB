@@ -62,7 +62,6 @@ class TestConfigViewer(unittest.TestCase):
                 f"Expected is_viewer_enabled() to be False for value {falsy_val!r}",
             )
 
-
     def test_trace_capture_disabled_by_default(self):
         self.assertFalse(is_trace_capture_enabled())
 
@@ -70,6 +69,7 @@ class TestConfigViewer(unittest.TestCase):
         for truthy_val in ["1", "true", "TRUE", "yes", "on", " On "]:
             os.environ["SALTMDB_TRACE_CAPTURE_ENABLED"] = truthy_val
             self.assertTrue(is_trace_capture_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()

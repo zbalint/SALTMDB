@@ -39,21 +39,30 @@ class TestCaptureHookConfig(unittest.TestCase):
             link = self._capture_entry(settings, "PostToolUse", "capture_trace_memory_link")
             complete = self._capture_entry(settings, "Stop", "capture_trace_complete")
 
-            self.assertEqual(start["input"], {
-                "harness": harness,
-                "harness_session_id": "${session_id}",
-                "harness_turn_id": f"${{{turn_field}}}",
-                "user_prompt": "${prompt}",
-            })
-            self.assertEqual(link["input"], {
-                "harness_turn_id": f"${{{turn_field}}}",
-                "entity_id": "${tool_response.data.id}",
-                "just_run_tool_name": "${tool_name}",
-            })
-            self.assertEqual(complete["input"], {
-                "harness_turn_id": f"${{{turn_field}}}",
-                "final_assistant_message": "${last_assistant_message}",
-            })
+            self.assertEqual(
+                start["input"],
+                {
+                    "harness": harness,
+                    "harness_session_id": "${session_id}",
+                    "harness_turn_id": f"${{{turn_field}}}",
+                    "user_prompt": "${prompt}",
+                },
+            )
+            self.assertEqual(
+                link["input"],
+                {
+                    "harness_turn_id": f"${{{turn_field}}}",
+                    "entity_id": "${tool_response.data.id}",
+                    "just_run_tool_name": "${tool_name}",
+                },
+            )
+            self.assertEqual(
+                complete["input"],
+                {
+                    "harness_turn_id": f"${{{turn_field}}}",
+                    "final_assistant_message": "${last_assistant_message}",
+                },
+            )
             link_groups = [
                 group
                 for group in settings["hooks"]["PostToolUse"]
@@ -76,21 +85,13 @@ class TestCaptureHookConfig(unittest.TestCase):
             before = baseline["hooks"].get(event, [])
             after = settings["hooks"].get(event, [])
             capture_count = sum(
-                hook.get("type") == "mcp_tool"
-                for group in after
-                for hook in group["hooks"]
+                hook.get("type") == "mcp_tool" for group in after for hook in group["hooks"]
             )
             before_commands = [
-                hook
-                for group in before
-                for hook in group["hooks"]
-                if hook.get("type") == "command"
+                hook for group in before for hook in group["hooks"] if hook.get("type") == "command"
             ]
             after_commands = [
-                hook
-                for group in after
-                for hook in group["hooks"]
-                if hook.get("type") == "command"
+                hook for group in after for hook in group["hooks"] if hook.get("type") == "command"
             ]
             self.assertEqual(after_commands, before_commands)
             self.assertEqual(capture_count, 1 if event in {"PostToolUse", "Stop"} else 0)

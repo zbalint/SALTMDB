@@ -278,6 +278,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         handler.get_entity_detail("touched-only")
         self.assertEqual(captured["data"]["agent_session_id"], "sess-b")
         self.assertEqual(captured["data"]["last_touched_session_id"], "sess-a")
+
     def test_get_entity_detail_returns_bounded_ordered_trace_provenance(self):
         self._insert_entity(
             "trace-entity",
@@ -340,7 +341,6 @@ class TestViewerAgentSessions(unittest.TestCase):
         empty = self._capture(handler)
         handler.get_entity_detail("empty-trace-entity")
         self.assertEqual(empty["data"]["trace_provenance"], [])
-
 
     def test_get_events_agent_session_id_filter(self):
         self._insert_event(
@@ -433,7 +433,9 @@ class TestViewerAgentSessions(unittest.TestCase):
         captured = self._capture(handler)
         handler.get_sessions({})
 
-        session = next(row for row in captured["data"]["sessions"] if row["session_id"] == "trace-only")
+        session = next(
+            row for row in captured["data"]["sessions"] if row["session_id"] == "trace-only"
+        )
         self.assertEqual(session["trace_count"], 1)
         self.assertEqual(session["liveness"], "unknown")
 

@@ -201,7 +201,6 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                 for trace_row in trace_rows
             ]
 
-
             detail = {
                 "id": row[0],
                 "created_at": row[1],

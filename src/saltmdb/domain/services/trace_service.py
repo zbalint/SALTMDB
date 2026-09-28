@@ -161,6 +161,7 @@ def capture_trace_memory_link(
 
     conn, should_close = _open_connection(db_connection, db_path)
     try:
+
         def _write(c):
             trace_row = cast(
                 tuple[str] | None,
@@ -383,7 +384,7 @@ def search_traces(
             SELECT ct.id, ct.harness, ct.status, ct.created_at, ct.completed_at,
                    ct.user_prompt, ct.final_assistant_message
             FROM conversation_traces AS ct
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             ORDER BY ct.created_at DESC, ct.id DESC
             LIMIT ? OFFSET ?
             """,

@@ -82,6 +82,7 @@ def is_trace_capture_enabled() -> bool:
     val = os.environ.get("SALTMDB_TRACE_CAPTURE_ENABLED", "false").strip().lower()
     return val in ("1", "true", "yes", "on")
 
+
 # Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
 DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate event
 DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
