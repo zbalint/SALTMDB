@@ -642,10 +642,31 @@
     await list(state.qualityPage);
   };
 
+  const formatDuration = (seconds) => {
+    const total = Math.floor(Number(seconds));
+    if (!Number.isFinite(total) || total < 0) return '—';
+    const days = Math.floor(total / 86400); const hours = Math.floor(total % 86400 / 3600); const minutes = Math.floor(total % 3600 / 60);
+    return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m ${total % 60}s`;
+  };
+
   const operations = async () => {
-    const data = await api('/api/operations'); const grid = node('div', undefined, 'grid');
-    [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches], ['Database size', formatBytes(data.database.files.db_bytes)], ['Schema version', data.database.schema_version]].forEach(item => grid.append(metric(...item)));
-    view.replaceChildren(section('System Health', 'Point-in-time daemon and database health supplied by the daemon.'), grid);
+    const data = await api('/api/operations'); const fragment = document.createDocumentFragment();
+    const warnings = node('section', undefined, 'card'); warnings.append(section('Warnings', 'Conditions the daemon and database report right now.'));
+    if (data.warnings.length) data.warnings.forEach(warning => warnings.append(node('p', warning.message, 'error')));
+    else warnings.append(node('p', 'No warnings. Everything checked below looks healthy.', 'muted'));
+    const daemon = node('div', undefined, 'grid');
+    [['Daemon ready', data.daemon.ready ? 'Ready' : 'Not ready', data.daemon.ready ? 'ok' : 'warning'], ['Uptime', formatDuration(data.daemon.uptime_s)], ['Daemon version', data.daemon.version || '—'], ['Hello sessions', data.daemon.active_hello_sessions], ['In-flight RPCs', data.daemon.inflight_rpc_dispatches]].forEach(item => daemon.append(metric(...item)));
+    const database = node('div', undefined, 'grid');
+    const files = data.database.files; const sqlite = data.database.sqlite; const snapshot = data.database.latest_snapshot;
+    [['Database size', formatBytes(data.database.files.db_bytes)], ['WAL size', formatBytes(files.wal_bytes)], ['SHM size', formatBytes(files.shm_bytes)], ['Schema version', data.database.schema_version], ['SQLite pages', sqlite.page_count], ['Free pages', sqlite.freelist_count], ['Vector search', data.database.vector.available ? 'Available' : 'Unavailable', data.database.vector.available ? 'ok' : 'warning']].forEach(item => database.append(metric(...item)));
+    const backup = node('section', undefined, 'card'); backup.append(section('Latest snapshot', 'The newest file in the backups directory next to the database.'));
+    if (snapshot) {
+      const facts = node('dl', undefined, 'metadata-grid');
+      [['File', snapshot.name], ['Size', formatBytes(snapshot.bytes)], ['Written', formatTimestamp(snapshot.modified_at)]].forEach(([label, value]) => facts.append(factPair(label, value)));
+      backup.append(facts);
+    } else backup.append(node('p', 'No snapshot has been written yet.', 'muted'));
+    fragment.append(section('System Health', 'Point-in-time daemon and database health supplied by the daemon.'), warnings, section('Daemon'), daemon, section('Database'), database, backup);
+    view.replaceChildren(fragment);
   };
 
   const tags = async () => {
