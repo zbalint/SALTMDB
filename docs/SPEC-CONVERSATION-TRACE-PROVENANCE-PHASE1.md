@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS trace_memory_links (
     id TEXT PRIMARY KEY,
     trace_id TEXT NOT NULL REFERENCES conversation_traces(id) ON DELETE CASCADE,
     entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    content_hash TEXT NOT NULL,             -- anchors the exact revision, incl. in-place updates
+    content_hash TEXT NOT NULL,             -- anchors the exact revision (Amendment 6: collapses a
+                                             -- retried delivery of the same write; see §3.2)
     write_operation TEXT NOT NULL CHECK(write_operation IN
         ('store_memory_new','store_memory_update','revise_memory','supersede_memory','consolidate_memories')),
     created_at TEXT NOT NULL
@@ -215,12 +216,30 @@ def capture_trace_memory_link(
     than `created_at`, and a fresh insert sets both to the same `now` value in that same statement.
 - `INSERT INTO trace_memory_links (...) ON CONFLICT(trace_id, entity_id, content_hash) DO NOTHING`
   — the idempotency key includes `content_hash`, so two `PostToolUse` deliveries for the *same*
-  write are collapsed, but two *different* writes to the same `entity_id` within one trace (the
-  in-place-update-twice-in-one-trace test case, plan §15) produce two distinct rows because their
-  `content_hash` values differ.
+  write are collapsed into one row. **Corrected by Amendment 6** (the plan §15 "in-place-update-
+  twice-in-one-trace" scenario this paragraph originally described as producing two distinct rows
+  is not reachable for `store_memory`, and was removed from §15.1's test plan — see Amendment 6):
+  `content_hash` is computed from `full_content` alone (`write.py:715`,
+  `compute_content_hash(redacted_content)`), and `write.py`'s `_legacy_update_guard` (`write.py:70-`,
+  confirmed by direct read) rejects any `store_memory(entity_id=...)` call that would change
+  `title`/`full_content`/`owner_id`/`scope`/`memory_type`/`context_id`/`tags` on an existing entity
+  with a structured `IMMUTABLE_MEMORY` rejection and zero writes — a deliberate, already-shipped
+  Phase-4 invariant this spec does not touch and must not weaken (`write.py` is out of §0's scope).
+  Consequently a *permitted* `store_memory` update to an existing `entity_id` always leaves
+  `full_content` byte-identical to the prior write, so its `content_hash` is always identical too —
+  a second `capture_trace_memory_link` call for that same `(trace_id, entity_id)` therefore always
+  hits `DO NOTHING` (`linked: False`), correctly collapsing rather than producing two rows, because
+  nothing about the retrievable content actually changed. `revise_memory`/`supersede_memory`/
+  `consolidate_memories` always mint a new `entity_id` (point above), so they never reach this same-
+  `entity_id` case either. The composite key's `content_hash` component remains meaningful for its
+  one genuinely reachable purpose — collapsing a retried delivery of the identical write — not for
+  distinguishing two different writes to the same entity, which cannot happen in this system.
 - Returns `ok({"trace_id": ..., "entity_id": ..., "write_operation": ..., "linked": <bool>})` where
   `linked` is `False` only on the `DO NOTHING` idempotent-duplicate path (still `status: "ok"`, not
-  an error — a duplicate link attempt is not a caller mistake).
+  an error — a duplicate link attempt is not a caller mistake). `write_operation` in this returned
+  envelope reflects the classification result regardless of `linked` — a legitimately-permitted
+  `store_memory` update to an existing `entity_id` still correctly reports `write_operation:
+  "store_memory_update"` even though `linked` comes back `False` for the reason above.
 
 ### 3.3 `capture_trace_complete`
 
@@ -947,13 +966,33 @@ Phase-2-only items: reusing `TestEmbedTextsInBatches`, and anything about `trace
   single row, both calls return the same `trace_id`.
 - Duplicate `capture_trace_memory_link` for the same `(trace_id, entity_id, content_hash)` →
   idempotent, single row (`linked: False` on the second call).
-- Two different `store_memory` writes to the same `entity_id` within one trace → two distinct
-  `trace_memory_links` rows (different `content_hash`), not collapsed into one.
-- `store_memory` new-entity case → `write_operation == 'store_memory_new'`; `store_memory`
-  existing-entity case → `write_operation == 'store_memory_update'` — assert this directly against
-  real `entities.created_at`/`updated_at` values produced by two real `store_memory` calls (a
-  fresh insert, then an update to the same `entity_id`), not against mocked timestamps, since the
-  whole mechanism (§3.2) depends on `write.py`'s actual `ON CONFLICT` column list.
+- **Struck by Amendment 6** (was: "two different `store_memory` writes to the same `entity_id`
+  within one trace → two distinct `trace_memory_links` rows, not collapsed into one"): not
+  reachable by any real call sequence — see §3.2's corrected rationale. `write.py`'s
+  `_legacy_update_guard` (out of §0's scope, not touched) forbids any `store_memory(entity_id=...)`
+  call from changing `full_content` on an existing entity, and `content_hash` is computed from
+  `full_content` alone (`write.py:715`), so a permitted same-entity `store_memory` update can never
+  produce a different `content_hash` than the write it followed. Two *different* memories linked
+  within one trace (distinct `entity_id`s, the ordinary case) still correctly produce distinct rows
+  — that scenario needs no dedicated test beyond the ordinary multi-link coverage this file already
+  has elsewhere; it was never actually in question.
+- `store_memory` new-entity case → `write_operation == 'store_memory_new'`, `linked: True`, one row.
+  `store_memory` existing-entity case → `write_operation == 'store_memory_update'` — assert this
+  directly against real `entities.created_at`/`updated_at` values produced by two real `store_memory`
+  calls (a fresh insert, then a **permitted** update to the same `entity_id`: same `title`/`content`
+  as the first call, only an administrative field changed — e.g. `weight` — so `_legacy_update_guard`
+  passes; **do not** change `title`/`content` on the second call, that is the exact scenario the
+  bullet above establishes is impossible and would reproduce this same `IMMUTABLE_MEMORY` failure).
+  Because `content_hash` is therefore identical between the two calls (Amendment 6, §3.2), the
+  second `capture_trace_memory_link`'s returned envelope must show `write_operation:
+  "store_memory_update"` **and** `linked: False` (the `DO NOTHING` idempotent-collapse path, §3.2) —
+  assert both, and confirm exactly one row (`write_operation == "store_memory_new"`, from the first
+  call) exists in `trace_memory_links` for that `(trace_id, entity_id)` afterward, not two. This
+  replaces OMP's own already-written `test_real_store_insert_and_update_classification`
+  (`tests/test_trace_service.py:138-188`), which asserted the now-corrected, unreachable shape —
+  rewrite its second `store_memory` call and its final assertions per this paragraph; the test's own
+  structure (real `store_memory` calls via `memory_service`, not mocked) was already correct and
+  should be kept.
 - `revise_memory`/`supersede_memory`/`consolidate_memories` → `write_operation` is the literal tool
   name, unconditionally (no created_at/updated_at comparison for these).
 - Abandonment: a `pending` trace whose `agent_session_id` has an `_agent_sessions` row with
@@ -1469,3 +1508,86 @@ resume by: discarding the struck files per the commands above, writing
 `hooks/tests/test_capture_hook_config.py` per the redefined §15.6, updating `hooks/README.md`'s new
 subsection to describe the `mcp_tool` mechanism (not scripts), then continuing per the current
 (amended) spec.
+
+---
+
+## Amendment 6 (OMP `BLOCKED — SPEC ADJUDICATION REQUIRED`, adjudicated)
+
+**Reported contradiction**: §15.1 requires a test with two real `store_memory` writes to the same
+`entity_id`, asserting a different `content_hash` on the second and `write_operation ==
+'store_memory_update'`. `write.py` (out of §0's scope) rejects any `store_memory(entity_id=...)`
+call that changes `title`/`full_content` on an existing entity with a structured `IMMUTABLE_MEMORY`
+error. OMP's focused test reproduced exactly this failure. OMP offered two directions rather than
+picking one: authorize a `write.py` change, or amend §15.1/§3.2 to use a permitted revision path
+instead of a changed-content `store_memory` update.
+
+**Verified directly, not trusted from OMP's framing**:
+- Read `write.py:70-165` (`_legacy_update_guard`) in full: it rejects any change to
+  `title`/`full_content`/`owner_id`/`scope`/`memory_type`/`context_id`/`tags` on an existing
+  `entity_id`, unconditionally, with zero writes — confirmed this is a deliberate, already-shipped
+  invariant (not incidental), cross-checked against 3 independent prior SALTMDB memories describing
+  the "Phase 4 Agent API Redesign" that introduced it specifically to close "a review-found bypass"
+  and enforce frozen-field immutability project-wide (`d0d89276`, `5bd0984a`, `f0c36961` — read by
+  title/preview only, sufficient to confirm this is settled, pre-existing project history, not
+  something to second-guess for a Phase 1 trace-capture feature).
+- Read `write.py:715` directly: `content_hash = compute_content_hash(redacted_content)` — computed
+  from `full_content` alone, confirmed via `compute_content_hash`'s own definition
+  (`utils/text.py:211-218`, a plain SHA-256 of normalized text, single-argument). Since
+  `_legacy_update_guard` forbids `full_content` from changing on any permitted update, `content_hash`
+  is therefore *provably* identical between any two store_memory calls to the same `entity_id` that
+  both pass the guard — not merely likely, but structurally guaranteed by these two pieces of code
+  together.
+- Read OMP's own already-written `tests/test_trace_service.py:138-188`
+  (`test_real_store_insert_and_update_classification`) directly: its second `store_memory` call
+  changes both `title` (`"Trace provenance insert"` → `"Trace provenance update"`) and `content`,
+  exactly the two fields the guard protects — confirming the test as written could never pass
+  regardless of any trace-service code, and its own final assertion
+  (`assertTrue(changed["data"]["linked"])`, expecting two distinct rows) is additionally
+  self-contradictory with the guard's own requirement: a *permitted* update (unchanged content)
+  necessarily produces the *same* `content_hash`, which the `trace_memory_links` composite unique
+  index (`(trace_id, entity_id, content_hash)`) would then correctly collapse via `DO NOTHING`
+  (`linked: False`) — so no realistic revision to the test's own *second store_memory call* could
+  make both of its assertions (byte-identical-enough-to-pass-the-guard, yet different-enough-to-not-
+  collapse) simultaneously true. This is not a scope gap OMP could have engineered around; the two
+  requirements were mutually exclusive from how the scenario was specified.
+- Traced the same unreachable assumption to its origin: `docs/conversation-trace-provenance-plan.md`
+  §15's own TDD matrix ("`store_memory` in-place-update path: same `entity_id` written twice in one
+  trace → two distinct `content_hash`-keyed links, not one collapsed link") states the identical
+  claim this spec's §15.1/§3.2 operationalized — the plan doc itself never verified this against
+  `write.py`'s actual immutability guard before locking it as a requirement. The plan document is
+  left unedited (historical record of the investigation as it stood at that time); this spec is the
+  corrected, operative document going forward.
+
+**Resolution**: rejected authorizing a `write.py` change outright — `write.py` is out of §0's scope
+for a real reason (this feature must capture existing write behavior faithfully, not redefine core
+memory-write semantics), and the guard being bypassed is a deliberate, already-shipped,
+cross-verified data-integrity invariant with no plausible justification for weakening it just to
+make an unrelated trace-capture test pass. Chose OMP's second option: corrected §3.2's rationale,
+§2's schema comment, and §15.1's two affected bullets in place (all above) to describe the actually-
+reachable behavior — a permitted same-`entity_id` `store_memory` update (title/content unchanged,
+an administrative field like `weight` changed instead) correctly classifies as `write_operation:
+"store_memory_update"` in the returned envelope, but correctly collapses to `linked: False` in
+`trace_memory_links` rather than producing a second row, because nothing about the retrievable
+content actually changed. The originally-claimed "two distinct rows for the same entity_id" scenario
+is struck as unreachable by any of the 4 linked tools (`store_memory`: forbidden by the guard;
+`revise_memory`/`supersede_memory`/`consolidate_memories`: always mint a new `entity_id`, so it's
+never "the same entity_id" case at all) — this was never actually a gap in the design, just an
+untested assumption inherited from the plan doc.
+
+**Gate re-run against this amendment**: grepped the spec for every other reference to
+`content_hash`/`in-place update` in a same-entity context — the three sites corrected above (§2, §3.2,
+§15.1) were the only ones; §3.5's `get_trace` response shape and §6's docstrings reference
+`content_hash` only in the general "anchors the entity's current revision" sense, unaffected by this
+correction. Confirmed no other §15 bullet or §17 acceptance criterion depends on the now-struck
+scenario. Confirmed `write.py` remains fully outside this amendment's touched-file set (only the
+spec document changed).
+
+**Worktree state**: OMP's uncommitted diff (unchanged by this adjudication) already contains the
+now-incorrect `test_real_store_insert_and_update_classification` at
+`tests/test_trace_service.py:138-188`, confirmed via direct read this session — this is the one
+concrete edit OMP must make on resuming: change the second `store_memory` call to keep `title`/
+`content` identical to the first and pass `weight=2` (or any other administrative field) instead,
+then replace the final assertions per the corrected §15.1 bullet above (`write_operation:
+"store_memory_update"` + `linked: False` + exactly one row, `write_operation == "store_memory_new"`,
+in `trace_memory_links`). No other file in OMP's existing diff is affected by this amendment. OMP
+should resume from exactly this one test rewrite, then continue per the current (amended) spec.
