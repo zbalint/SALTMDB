@@ -704,9 +704,13 @@
     setBusy(view, true);
     try { status.textContent = 'Refreshing'; await loaders[state.view](); status.textContent = 'Updated just now'; } catch (err) { if (err.name !== 'AbortError') showError(err); } finally { setBusy(view, false); }
   };
+  // A background refresh replaces the view's DOM, which drops keyboard focus (and the dialog
+  // invoker), so it must not run while a dialog is open or focus is inside the view.
+  const pollingPaused = () => [dialog, eventDialog, traceDialog].some(item => item.open)
+    || (view.contains(document.activeElement) && document.activeElement !== view);
   const schedule = () => {
     clearInterval(state.poller); state.poller = setInterval(() => {
-      if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render();
+      if (!document.hidden && !pollingPaused() && ['overview', 'activity', 'operations'].includes(state.view)) render();
     }, 10000);
   };
   document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
@@ -727,7 +731,7 @@
     const invoker = traceDialog._invoker; traceDialog._invoker = null;
     if (invoker?.isConnected) invoker.focus();
   });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
   window.addEventListener('beforeunload', () => { clearInterval(state.poller); state.renderController?.abort(); state.detailController?.abort(); });
   connection('checking', 'Checking connection…'); render(); schedule();
 })();

@@ -58,6 +58,18 @@ class TestViewerFrontendContracts(unittest.TestCase):
                 self.assertNotIn(f"button('Next', '', {pager_call}", self.script)
         self.assertGreaterEqual(self.script.count("guarded("), 12)
 
+    def test_background_polling_pauses_while_reading_or_in_a_dialog(self):
+        self.assertIn("const pollingPaused = () =>", self.script)
+        pause = self.script[self.script.index("const pollingPaused") :]
+        pause = pause[: pause.index("const schedule")]
+        for dialog_name in ("dialog", "eventDialog", "traceDialog"):
+            self.assertIn(dialog_name, pause)
+        self.assertIn(".open", pause)
+        self.assertIn("view.contains(document.activeElement)", pause)
+        schedule = self.script[self.script.index("const schedule") :]
+        self.assertIn("!pollingPaused()", schedule[: schedule.index("document.querySelectorAll")])
+        self.assertIn("!pollingPaused()", self.script[self.script.index("visibilitychange") :])
+
 
 if __name__ == "__main__":
     unittest.main()
