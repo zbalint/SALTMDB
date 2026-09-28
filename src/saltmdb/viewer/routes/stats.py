@@ -7,6 +7,8 @@ plus the shared _collect_stats() helper they both use.
 import json
 import logging
 import os
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from saltmdb.db.vector_schema import try_load_vector_extension
@@ -19,6 +21,22 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+
+
+def _latest_snapshot(db_path: str | None) -> dict | None:
+    """Newest ``backups/saltmdb_snapshot_*.db`` next to the database (the layout backup.py writes)."""
+    if not db_path:
+        return None
+    snapshots = sorted((Path(db_path).parent / "backups").glob("saltmdb_snapshot_*.db"))
+    if not snapshots:
+        return None
+    newest = snapshots[-1]  # names embed a UTC timestamp, so lexical order is chronological
+    info = newest.stat()
+    return {
+        "name": newest.name,
+        "bytes": info.st_size,
+        "modified_at": datetime.fromtimestamp(info.st_mtime, UTC).isoformat(),
+    }
 
 
 class StatsMixin(ViewerHandlerProtocol):
@@ -114,12 +132,26 @@ class StatsMixin(ViewerHandlerProtocol):
                 ("db_bytes", ""),
                 ("wal_bytes", "-wal"),
                 ("shm_bytes", "-shm"),
-                ("backup_bytes", ".backup"),
             ):
                 path = f"{db_path}{suffix}" if db_path else ""
                 files[label] = os.path.getsize(path) if path and os.path.exists(path) else 0
             snapshot = state.viewer_snapshot()
             snapshot["version"] = __version__
+            vector_available = try_load_vector_extension(conn)
+            warnings = []
+            if not snapshot.get("ready", True):
+                warnings.append({"code": "DAEMON_NOT_READY", "message": "The daemon is not ready."})
+            if not vector_available:
+                warnings.append(
+                    {"code": "VECTOR_UNAVAILABLE", "message": "Vector search is unavailable."}
+                )
+            if stats["embeddings_failed"]:
+                warnings.append(
+                    {
+                        "code": "EMBEDDINGS_FAILED",
+                        "message": f"{stats['embeddings_failed']} memories failed embedding.",
+                    }
+                )
             self.send_json(
                 {
                     "api_version": 1,
@@ -131,11 +163,11 @@ class StatsMixin(ViewerHandlerProtocol):
                             "page_count": conn.execute("PRAGMA page_count").fetchone()[0],
                             "freelist_count": conn.execute("PRAGMA freelist_count").fetchone()[0],
                         },
-                        "vector": {"available": try_load_vector_extension(conn)},
+                        "vector": {"available": vector_available},
+                        "latest_snapshot": _latest_snapshot(db_path),
                         "schema_version": conn.execute("PRAGMA user_version").fetchone()[0],
                     },
-                    "maintenance": {"last_outcome": None, "cooldown": None, "last_run_at": None},
-                    "warnings": [],
+                    "warnings": warnings,
                 }
             )
         except Exception as e:
