@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtocol):
     """Zero-dependency HTTP Request Handler for the SALTMDB Dashboard Viewer."""
 
+    # Socket read deadline (StreamRequestHandler.timeout): a client that stalls mid-request is
+    # disconnected instead of holding a server thread forever.
+    timeout = 15
+
     def log_message(self, format, *args):
         pass
 

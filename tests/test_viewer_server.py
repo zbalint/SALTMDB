@@ -1,6 +1,9 @@
+import socket
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
+from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.viewer.server import SALTMDBTCPServer, main
 
 
@@ -25,6 +28,52 @@ class TestSALTMDBTCPServer(unittest.TestCase):
             with patch.object(SALTMDBTCPServer.__bases__[1], "handle_error") as mock_super:
                 server.handle_error(MagicMock(), ("127.0.0.1", 12345))
                 mock_super.assert_called_once()
+
+
+class TestViewerServerSlowClients(unittest.TestCase):
+    """A stalled or excess client must not be able to hold Viewer threads open indefinitely."""
+
+    def _serve(self):
+        server = SALTMDBTCPServer(("127.0.0.1", 0), SALTMDBHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    @staticmethod
+    def _closed_by_server(sock, wait_s):
+        sock.settimeout(wait_s)
+        try:
+            return sock.recv(1) == b""
+        except socket.timeout:
+            return False
+
+    def test_the_default_request_timeout_is_bounded(self):
+        # The stall test below patches the timeout to keep it fast; this pins the real default.
+        self.assertIsNotNone(SALTMDBHandler.timeout)
+        self.assertTrue(0 < SALTMDBHandler.timeout <= 60)
+
+    def test_a_client_that_stalls_mid_request_is_disconnected(self):
+        with patch.object(SALTMDBHandler, "timeout", 0.3):
+            port = self._serve()
+            with socket.create_connection(("127.0.0.1", port)) as sock:
+                sock.sendall(b"GET /api/sta")  # never finishes the request line
+                self.assertTrue(self._closed_by_server(sock, 3))
+
+    def test_connections_beyond_the_cap_are_shed_immediately(self):
+        with (
+            patch.object(SALTMDBHandler, "timeout", 5),
+            patch.object(SALTMDBTCPServer, "max_connections", 1),
+        ):
+            port = self._serve()
+            with socket.create_connection(("127.0.0.1", port)) as holder:
+                holder.sendall(b"GET /api/sta")  # occupies the only slot
+                with socket.create_connection(("127.0.0.1", port)) as excess:
+                    self.assertTrue(self._closed_by_server(excess, 2))
+                # the slot holder was not disturbed by the shed connection
+                self.assertFalse(self._closed_by_server(holder, 0.3))
 
 
 class TestViewerServerMain(unittest.TestCase):

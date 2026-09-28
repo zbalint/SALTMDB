@@ -1,6 +1,7 @@
 import sys
 import socketserver
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,29 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     daemon_state: Any
     viewer_gateway: Any
+    # Bound on concurrent request threads; connections beyond it are closed at once.
+    max_connections = 64
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._connection_slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            logger.debug("Viewer at connection cap; shedding %s", client_address)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
     def handle_error(self, request, client_address):
         exc_type, exc_value, exc_tb = sys.exc_info()
