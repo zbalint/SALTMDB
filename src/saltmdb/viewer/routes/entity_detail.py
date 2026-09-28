@@ -15,6 +15,8 @@ else:
 
 logger = logging.getLogger(__name__)
 
+MAX_LINEAGE_CANDIDATES = 5
+
 
 class EntityDetailMixin(ViewerHandlerProtocol):
     """Provides get_lineage() and get_entity_detail(); mixed into SALTMDBHandler elsewhere."""
@@ -23,19 +25,32 @@ class EntityDetailMixin(ViewerHandlerProtocol):
         conn = None
         try:
             conn = self.get_db_connection()
-            cur = conn.execute(
-                """
-                SELECT id, title, status FROM entities
-                WHERE id = ? OR id LIKE ? OR title = ? OR title LIKE ?
-                ORDER BY
-                    CASE WHEN id = ? THEN 0 WHEN title = ? THEN 1 ELSE 2 END ASC,
-                    CASE status WHEN 'raw' THEN 0 WHEN 'consolidated' THEN 1 WHEN 'archived' THEN 2 ELSE 3 END ASC,
-                    updated_at DESC
-                LIMIT 1
-            """,
-                (entity_id, f"{entity_id}%", entity_id, f"%{entity_id}%", entity_id, entity_id),
-            )
-            row = cur.fetchone()
+            # An exact ID always wins; otherwise the reference may be an ID prefix or an exact
+            # title, and must identify exactly one memory -- never a silent best guess.
+            row = conn.execute(
+                "SELECT id, title, status FROM entities WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if not row:
+                escaped = entity_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                candidates = conn.execute(
+                    """SELECT id, title, status FROM entities
+                       WHERE id LIKE ? ESCAPE '\\' OR title = ?
+                       ORDER BY updated_at DESC, id LIMIT ?""",
+                    (f"{escaped}%", entity_id, MAX_LINEAGE_CANDIDATES + 1),
+                ).fetchall()
+                if len(candidates) > 1:
+                    self.send_json(
+                        {
+                            "error": "Ambiguous entity reference",
+                            "candidates": [
+                                {"id": c[0], "title": c[1], "status": c[2]}
+                                for c in candidates[:MAX_LINEAGE_CANDIDATES]
+                            ],
+                        },
+                        409,
+                    )
+                    return
+                row = candidates[0] if candidates else None
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)
                 return
