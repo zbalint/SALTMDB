@@ -41,6 +41,17 @@ class TestViewerResponseHeaders(unittest.TestCase):
         handler.send_static_asset("/static/viewer.css")
         self.assertEqual(headers["Cache-Control"], "public, max-age=86400")
 
+    def test_retired_locks_route_is_a_static_410_with_no_backing_handler(self):
+        handler, _ = self._handler_recording_headers()
+        captured = {}
+        handler.send_json = lambda data, status=200: captured.update(data=data, status=status)
+        handler.path = "/api/locks"
+        handler.do_GET()
+
+        self.assertEqual(captured["status"], 410)
+        self.assertEqual(captured["data"]["replacement"], "/api/operations")
+        self.assertFalse(hasattr(SALTMDBHandler, "get_locks"))
+
 
 if __name__ == "__main__":
     unittest.main()

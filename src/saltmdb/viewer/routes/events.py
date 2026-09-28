@@ -1,12 +1,9 @@
-"""Event/tag browse endpoints, plus the retired get_locks handler kept for parity.
+"""Event/tag browse endpoints: GET /api/events, GET /api/tags.
 
-GET /api/events, GET /api/tags. get_locks() is dead code (the /api/locks route in
-do_GET now returns a static 410 without calling it) but is moved here verbatim
-rather than deleted, since deleting it is a separate decision from this refactor.
+(/api/locks was retired; do_GET answers it with a static 410 pointing at /api/operations.)
 """
 
 import logging
-import sqlite3
 from typing import TYPE_CHECKING
 
 from saltmdb.viewer.routes._shared import MAX_EVENT_LIMIT, _bounded_query_int
@@ -20,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class EventsMixin(ViewerHandlerProtocol):
-    """Provides get_events(), get_tags(), get_locks(); mixed into SALTMDBHandler elsewhere."""
+    """Provides get_events(), get_tags(); mixed into SALTMDBHandler elsewhere."""
 
     def get_events(self, query):
         conn = None
@@ -126,36 +123,6 @@ class EventsMixin(ViewerHandlerProtocol):
                 {"id": r[0], "name": r[1], "canonical_id": r[2], "usage_count": r[3]} for r in rows
             ]
             self.send_json({"tags": tags})
-        except Exception as e:
-            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
-        finally:
-            if conn:
-                conn.close()
-
-    def get_locks(self):
-        conn = None
-        try:
-            conn = self.get_db_connection()
-            rows = []
-            try:
-                cursor = conn.execute(
-                    "SELECT task_name, locked_at, locked_by_pid, last_run_at FROM _system_locks"
-                )
-                rows = cursor.fetchall()
-            except sqlite3.OperationalError:
-                try:
-                    cursor = conn.execute(
-                        "SELECT task_name, locked_at, locked_by_pid, last_run_at FROM task_locks"
-                    )
-                    rows = cursor.fetchall()
-                except sqlite3.OperationalError:
-                    pass
-            locks = [
-                {"task_name": r[0], "locked_at": r[1], "locked_by_pid": r[2], "last_run_at": r[3]}
-                for r in rows
-            ]
-            self.send_json({"locks": locks})
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
             self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
