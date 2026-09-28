@@ -150,19 +150,34 @@ class StatsMixin(ViewerHandlerProtocol):
         conn = None
         try:
             limit = _bounded_query_int(query, "limit", 50, 1, MAX_ENTITY_LIMIT)
+            page = _bounded_query_int(query, "page", 1, 1, 1_000_000)
             conn = self.get_db_connection()
+            items_where = """status != 'archived'
+                   AND (embedding_status IN ('pending', 'failed') OR quality_status IS NOT NULL)"""
+            items_params: list = []
+            for column in ("embedding_status", "quality_status"):
+                value = query.get(column, [None])[0]
+                if value:
+                    items_where += f" AND {column} = ?"
+                    items_params.append(value)
+            items_total = conn.execute(
+                f"SELECT COUNT(*) FROM entities WHERE {items_where}", items_params
+            ).fetchone()[0]
             rows = conn.execute(
-                """SELECT id, title, status, embedding_status, quality_score, quality_status, quality_flags
-                   FROM entities WHERE status != 'archived'
-                   AND (embedding_status IN ('pending', 'failed') OR quality_status IS NOT NULL)
-                   ORDER BY updated_at DESC LIMIT ?""",
-                (limit,),
+                f"""SELECT id, title, status, embedding_status, quality_score, quality_status, quality_flags
+                   FROM entities WHERE {items_where}
+                   ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?""",
+                [*items_params, limit, (page - 1) * limit],
             ).fetchall()
-            orphan_rows = conn.execute(
-                """SELECT e.id, e.title FROM entities e LEFT JOIN relations r
+            orphan_from = """FROM entities e LEFT JOIN relations r
                    ON r.source_id = e.id OR r.target_id = e.id
-                   WHERE e.status = 'raw' GROUP BY e.id HAVING COUNT(r.id) = 0
-                   ORDER BY e.updated_at DESC LIMIT ?""",
+                   WHERE e.status = 'raw' GROUP BY e.id HAVING COUNT(r.id) = 0"""
+            orphan_raw_total = conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT e.id {orphan_from})"
+            ).fetchone()[0]
+            orphan_rows = conn.execute(
+                f"""SELECT e.id, e.title {orphan_from}
+                   ORDER BY e.updated_at DESC, e.id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
             self.send_json(
@@ -180,6 +195,11 @@ class StatsMixin(ViewerHandlerProtocol):
                         for r in rows
                     ],
                     "orphan_raw": [{"id": r[0], "title": r[1]} for r in orphan_rows],
+                    "page": page,
+                    "limit": limit,
+                    "items_total": items_total,
+                    "total_pages": (items_total + limit - 1) // limit,
+                    "orphan_raw_total": orphan_raw_total,
                 }
             )
         except ValueError as e:

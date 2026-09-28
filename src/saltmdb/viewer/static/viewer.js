@@ -5,7 +5,7 @@
     view: 'overview', renderController: null, detailController: null, poller: null,
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
-    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '',
+    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {},
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -611,11 +611,35 @@
   };
 
   const quality = async () => {
-    const data = await api('/api/quality'); const fragment = document.createDocumentFragment();
-    const attention = node('div', undefined, 'grid'); attention.append(metric('Quality signals', data.items.length, 'warning'), metric('Orphaned raw memories', data.orphan_raw.length, 'raw'));
-    const qualityRows = data.items.map(item => { const row = node('tr'); const lifecycle = node('td'); lifecycle.append(statusBadge(item.status)); const embedding = node('td'); embedding.append(statusBadge(item.embedding_status || 'pending')); const flags = node('td'); flags.append(tagList(item.quality_flags)); row.append(memoryCell(item), lifecycle, embedding, node('td', item.quality_status || 'Not evaluated'), flags); return row; });
-    const orphanRows = data.orphan_raw.map(item => { const row = node('tr'); row.append(memoryCell(item)); return row; });
-    fragment.append(section('Memory Quality', 'Read-only signals to focus maintenance work.'), attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), section('Raw memories without relations'), renderTable(['Memory'], orphanRows)); view.replaceChildren(fragment);
+    const form = node('form', undefined, 'toolbar');
+    const embedding = select('Embedding status', [['', 'Pending or failed'], ['pending', 'Pending'], ['failed', 'Failed'], ['ready', 'Ready']], state.qualityPreset.embedding_status || '');
+    const qualityState = select('Quality status', [['', 'Any quality status'], ['WARN', 'Warn'], ['REJECT', 'Reject'], ['ACCEPT', 'Accept']], state.qualityPreset.quality_status || '');
+    form.append(embedding.wrap, qualityState.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.qualityPreset = {}; state.qualityPage = 1; render(); }));
+    const result = node('div');
+    const list = async (page = 1) => {
+      setBusy(result, true);
+      try {
+        const params = new URLSearchParams(state.qualityPreset); params.set('page', String(page)); params.set('limit', '50');
+        const data = await api(`/api/quality?${params}`); const fragment = document.createDocumentFragment();
+        const attention = node('div', undefined, 'grid'); attention.append(metric('Quality signals', data.items_total, 'warning'), metric('Orphaned raw memories', data.orphan_raw_total, 'raw'));
+        const qualityRows = data.items.map(item => { const row = node('tr'); const lifecycle = node('td'); lifecycle.append(statusBadge(item.status)); const embeddingCell = node('td'); embeddingCell.append(statusBadge(item.embedding_status || 'pending')); const flags = node('td'); flags.append(tagList(item.quality_flags)); row.append(memoryCell(item), lifecycle, embeddingCell, node('td', item.quality_status || 'Not evaluated'), flags); return row; });
+        const orphanRows = data.orphan_raw.map(item => { const row = node('tr'); row.append(memoryCell(item)); return row; });
+        const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Quality pages');
+        const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
+        const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
+        pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.items_total} signals`, 'muted'), next);
+        const orphanNote = data.orphan_raw_total > data.orphan_raw.length ? `Showing ${data.orphan_raw.length} of ${data.orphan_raw_total}.` : '';
+        fragment.append(attention, section('Embedding and quality signals'), renderTable(['Memory', 'Lifecycle', 'Embedding', 'Quality', 'Flags'], qualityRows), pager, section('Raw memories without relations', orphanNote), renderTable(['Memory'], orphanRows));
+        result.replaceChildren(fragment); state.qualityPage = page;
+      } finally { setBusy(result, false); }
+    };
+    form.addEventListener('submit', event => {
+      event.preventDefault(); const params = new URLSearchParams();
+      [['embedding_status', embedding.element.value], ['quality_status', qualityState.element.value]].forEach(([key, value]) => { if (value) params.set(key, value); });
+      state.qualityPreset = Object.fromEntries(params); state.qualityPage = 1; list(1);
+    });
+    view.replaceChildren(section('Memory Quality', 'Read-only signals to focus maintenance work.'), form, result);
+    await list(state.qualityPage);
   };
 
   const operations = async () => {
