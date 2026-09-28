@@ -12,6 +12,8 @@ else:
 
 logger = logging.getLogger(__name__)
 
+SCATTERPLOT_MAX_POINTS = 500
+
 
 def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
     """Randomized power-iteration PCA that avoids heavy LAPACK/BLAS routines.
@@ -69,7 +71,7 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
 class ScatterplotMixin(ViewerHandlerProtocol):
     """Provides get_scatterplot(); mixed into the final SALTMDBHandler elsewhere."""
 
-    def get_scatterplot(self):  # noqa: C901
+    def get_scatterplot(self):  # noqa: C901, PLR0915
         def _checkpoint(msg):
             # A native-level crash (e.g. OpenBLAS DLL abort) kills the process
             # without raising a Python exception, so ordinary error logging
@@ -91,13 +93,18 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                 self.send_json({"points": [], "error": "sqlite_vec extension unavailable"})
                 return
             _checkpoint("vector extension loaded")
-            cursor = conn.execute("""
-                SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
+            ready_from = """
                 FROM entities e
                 JOIN entity_embeddings ee ON e.id = ee.entity_id
-                WHERE e.status IN ('raw', 'consolidated') AND e.embedding_status = 'ready'
-                LIMIT 500
-            """)
+                WHERE e.status IN ('raw', 'consolidated') AND e.embedding_status = 'ready'"""
+            total_ready = conn.execute(f"SELECT COUNT(*) {ready_from}").fetchone()[0]
+            cursor = conn.execute(
+                f"""SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
+                {ready_from}
+                ORDER BY e.updated_at DESC, e.id DESC
+                LIMIT ?""",
+                (SCATTERPLOT_MAX_POINTS,),
+            )
             rows = cursor.fetchall()
             _checkpoint(f"fetched {len(rows)} rows")
             if not rows:
@@ -149,11 +156,17 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                 item["y"] = round(float(coords_2d[idx, 1]), 4)
                 points.append(item)
 
-            self.send_json({"points": points})
+            self.send_json(
+                {
+                    "points": points,
+                    "total_ready": total_ready,
+                    "truncated": total_ready > SCATTERPLOT_MAX_POINTS,
+                }
+            )
             _checkpoint("response sent")
         except Exception as e:
             logger.error("Error in get_scatterplot: %s", e, exc_info=True)
-            self.send_json({"error": str(e)}, 500)
+            self.send_json({"error": "Embedding projection unavailable"}, 500)
         finally:
             if conn:
                 conn.close()

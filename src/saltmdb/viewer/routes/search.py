@@ -52,6 +52,8 @@ class SearchMixin(ViewerHandlerProtocol):
                 )
                 raise RuntimeError(message or "Hybrid search unavailable")
             self.send_json({"query": q, "mode": "broad", "results": results})
+        except ValueError as e:
+            self.send_json({"error": str(e)}, 400)
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": str(e) or "Hybrid search unavailable"}, 503)
+            self.send_json({"error": "Hybrid search unavailable"}, 503)
