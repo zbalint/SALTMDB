@@ -28,6 +28,7 @@ from saltmdb.viewer.routes.scatterplot import ScatterplotMixin
 from saltmdb.viewer.routes.search import SearchMixin
 from saltmdb.viewer.routes.sessions import SessionsMixin
 from saltmdb.viewer.routes.stats import StatsMixin
+from saltmdb.viewer.routes.traces import TracesMixin
 
 __all__ = ["STATIC_ASSETS", "SALTMDBHandler", "memory_service", "relation_service"]
 
@@ -40,6 +41,7 @@ class SALTMDBHandler(
     SearchMixin,
     SessionsMixin,
     ScatterplotMixin,
+    TracesMixin,
     EntityDetailMixin,
     ViewerHandlerBase,
 ):

@@ -123,6 +123,10 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_sessions(query)
         elif path.startswith("/api/sessions/"):
             self.get_session_detail(urllib.parse.unquote(path[len("/api/sessions/") :]))
+        elif path == "/api/traces":
+            self.get_traces(query)
+        elif path.startswith("/api/traces/"):
+            self.get_trace_detail(urllib.parse.unquote(path[len("/api/traces/") :]))
         elif path == "/api/locks":
             self.send_json(
                 {"error": "System Locks was retired", "replacement": "/api/operations"}, 410

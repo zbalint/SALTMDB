@@ -16,6 +16,8 @@
   const detail = document.querySelector('#detail-content');
   const eventDialog = document.querySelector('#event-detail');
   const eventDetail = document.querySelector('#event-detail-content');
+  const traceDialog = document.querySelector('#trace-detail');
+  const traceDetail = document.querySelector('#trace-detail-content');
   const names = {
     overview: 'Overview', explorer: 'Memories', activity: 'Activity', sessions: 'Agent Sessions',
     relationships: 'Memory Map', quality: 'Memory Quality', operations: 'System Health',
@@ -216,7 +218,42 @@
         state.relationRoot = data.id; state.focusRelationshipInput = true;
         state.skipModalFocusRestore = true; state.view = 'relationships'; dialog.close(); render();
       }));
-      detail.append(evidence); state.modalInvoker = invoker; dialog.showModal();
+      detail.append(evidence);
+      const provenance = node('section', undefined, 'evidence');
+      provenance.append(section('Conversation traces', 'The conversation turns that wrote this memory (latest five).'));
+      const traceRows = (data.trace_provenance || []).map(trace => {
+        const row = node('tr'); const statusCell = node('td'); statusCell.append(statusBadge(trace.status));
+        const actions = node('td'); actions.append(button('View trace', '', click => openTraceDetail(trace.trace_id, click.currentTarget)));
+        row.append(node('td', formatTimestamp(trace.created_at)), node('td', trace.harness || '—'), statusCell, actions); return row;
+      });
+      provenance.append(renderTable(['Time', 'Harness', 'Status', 'Action'], traceRows, 'No conversation trace is linked to this memory.'));
+      detail.append(provenance); state.modalInvoker = invoker; dialog.showModal();
+    } catch (err) { if (err.name !== 'AbortError') setNotice(err.message); }
+  };
+
+  const openTraceDetail = async (traceId, invoker = document.activeElement) => {
+    try {
+      const data = await api(`/api/traces/${encodeURIComponent(traceId)}`, null);
+      traceDetail.replaceChildren();
+      const identity = node('div', undefined, 'detail-identity');
+      identity.append(statusBadge(data.status), node('code', data.harness || 'unknown', 'memory-id'));
+      const facts = node('dl', undefined, 'metadata-grid');
+      [['Started', formatTimestamp(data.created_at)], ['Completed', formatTimestamp(data.completed_at, 'Not completed')], ['Owner', data.owner_id || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
+      facts.append(factPairWithCopy('Trace ID', data.trace_id, 'Trace ID'));
+      facts.append(factPairWithCopy('Agent session', data.agent_session_id, 'Session ID'));
+      traceDetail.append(identity, facts);
+      if (data.capture_error) traceDetail.append(node('p', `Capture error: ${data.capture_error}`, 'error'));
+      traceDetail.append(section('User prompt'), node('pre', data.user_prompt || '—', 'trace-text'));
+      traceDetail.append(section('Final assistant message'), node('pre', data.final_assistant_message || '—', 'trace-text'));
+      const written = node('section', undefined, 'evidence'); written.append(section('Memories written in this turn'));
+      const rows = data.linked_memories.map(link => {
+        const row = node('tr'); const cell = node('td');
+        cell.append(button(link.title, 'row-button', () => { traceDialog.close(); openDetail(link.entity_id); }));
+        row.append(cell, node('td', link.write_operation)); return row;
+      });
+      written.append(renderTable(['Memory', 'Operation'], rows, 'No memory writes were linked to this turn.'));
+      traceDetail.append(written);
+      traceDialog._invoker = invoker; traceDialog.showModal();
     } catch (err) { if (err.name !== 'AbortError') setNotice(err.message); }
   };
 
@@ -365,7 +402,7 @@
     idLine.append(button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
     idCell.append(button((item.session_id || '').slice(0, 12), 'row-button', () => openSessionDetail(item.session_id)), idLine);
     const stateCell = node('td'); stateCell.append(statusBadge(item.liveness));
-    row.append(idCell, node('td', item.owner_id || '—'), node('td', item.cwd || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
+    row.append(idCell, node('td', item.owner_id || '—'), node('td', item.cwd || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', String(item.trace_count ?? 0)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
     return row;
   };
 
@@ -385,10 +422,11 @@
     view.replaceChildren(back, section(sessionId, 'Memories created or touched by this session, and its logged events.'), result);
     setBusy(result, true);
     try {
-      const [sessionData, memoriesData, eventsData] = await Promise.all([
+      const [sessionData, memoriesData, eventsData, tracesData] = await Promise.all([
         api(`/api/sessions/${encodeURIComponent(sessionId)}`),
         api(`/api/entities?session_id=${encodeURIComponent(sessionId)}&limit=100`),
         api(`/api/events?agent_session_id=${encodeURIComponent(sessionId)}&limit=100`),
+        api(`/api/traces?agent_session_id=${encodeURIComponent(sessionId)}&limit=50`),
       ]);
       const identity = node('div', undefined, 'detail-identity');
       identity.append(statusBadge(sessionData.liveness));
@@ -404,6 +442,7 @@
         ['Ended reason', sessionData.ended_reason || '—'],
         ['Memories', String(sessionData.memory_count)],
         ['Events', String(sessionData.event_count)],
+        ['Traces', String(sessionData.trace_count ?? 0)],
       ].forEach(([label, value]) => metadataGrid.append(factPair(label, value)));
       metadata.append(metadataGrid);
       const metadataActions = node('div', undefined, 'detail-actions');
@@ -442,7 +481,17 @@
         details.append(summary, renderTable(['Time', 'Agent', 'Event', 'Action'], rows));
         eventsSection.append(details);
       });
-      result.replaceChildren(metadataSection, memorySection, eventsSection);
+      const traceRows = tracesData.traces.map(trace => {
+        const row = node('tr'); const statusCell = node('td'); statusCell.append(statusBadge(trace.status));
+        const actions = node('td'); actions.append(button('View trace', '', click => openTraceDetail(trace.trace_id, click.currentTarget)));
+        row.append(node('td', formatTimestamp(trace.created_at)), statusCell, node('td', trace.user_prompt_snippet || '—'), actions); return row;
+      });
+      const tracesSection = node('div');
+      tracesSection.append(
+        section(`${tracesData.total_count} conversation traces`, tracesData.total_count > tracesData.traces.length ? `Showing the latest ${tracesData.traces.length}.` : 'Newest first.'),
+        renderTable(['Time', 'Status', 'Prompt', 'Action'], traceRows, 'No conversation traces were captured for this session.'),
+      );
+      result.replaceChildren(metadataSection, memorySection, tracesSection, eventsSection);
     } finally { setBusy(result, false); }
   };
 
@@ -471,7 +520,7 @@
         const previous = button('Previous', '', () => list(page - 1)); previous.disabled = page <= 1;
         const next = button('Next', '', () => list(page + 1)); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
-        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
+        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'Traces', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
         state.sessionsPage = page;
       } finally { setBusy(result, false); }
     };
@@ -620,6 +669,11 @@
   });
   eventDialog.addEventListener('close', () => {
     const invoker = eventDialog._invoker; eventDialog._invoker = null;
+    if (invoker?.isConnected) invoker.focus();
+  });
+  document.querySelector('#close-trace-detail').addEventListener('click', () => traceDialog.close());
+  traceDialog.addEventListener('close', () => {
+    const invoker = traceDialog._invoker; traceDialog._invoker = null;
     if (invoker?.isConnected) invoker.focus();
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
