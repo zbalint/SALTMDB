@@ -98,7 +98,7 @@ class TestViewerReworkContracts(unittest.TestCase):
 
     def test_shell_uses_local_sanitizer_assets_without_inline_handlers(self):
         shell = get_frontend_html()
-        self.assertIn("/static/vendor/dompurify-3.4.10.min.js", shell)
+        self.assertIn("/static/vendor/dompurify-3.4.16.min.js", shell)
         self.assertIn("/static/vendor/marked-18.0.7.umd.js", shell)
         self.assertNotIn("onclick=", shell)
         self.assertIn('id="event-detail"', shell)

@@ -16,7 +16,7 @@ STATIC_ASSETS = {
     "/static/viewer.css": "viewer.css",
     "/static/viewer.js": "viewer.js",
     "/static/vendor/marked-18.0.7.umd.js": "vendor/marked-18.0.7.umd.js",
-    "/static/vendor/dompurify-3.4.10.min.js": "vendor/dompurify-3.4.10.min.js",
+    "/static/vendor/dompurify-3.4.16.min.js": "vendor/dompurify-3.4.16.min.js",
 }
 
 _ENTITY_SORTS = {
