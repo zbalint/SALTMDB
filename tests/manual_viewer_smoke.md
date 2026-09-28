@@ -51,3 +51,31 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 3. At 375px wide, verify form controls stack, only table/graph containers scroll horizontally when needed, the page has no horizontal scrollbar, and focus remains visible. Open both detail dialogs: they should use nearly the full viewport with modest gutters, remain at or below 95dvh, scroll internally, retain a visible close control, and preserve focus restoration. Recheck standard, custom, and validity label/value pairing in the memory detail modal.
 4. In a memory detail dialog, confirm Created, Updated, Last accessed, Valid from, and Valid to use readable local date/time text with a timezone label, rather than raw ISO-8601 strings. Missing Valid to must still show **Current**.
 4. Confirm Memory Quality, Tags, Diagnostics, and metadata remain structured views; raw Markdown inspection and **Copy Markdown** still work; no raw JSON dump or speculative refresh banner appears.
+
+## Conversation traces
+
+1. Open **Agent Sessions** and confirm a **Traces** column shows a count per session. Open a session that has traces and confirm a **conversation traces** section lists them newest first with a status badge, a prompt snippet, and a **View trace** button; a session without traces shows the empty-state sentence.
+2. Activate **View trace**. Confirm the dialog shows harness, status, owner, times, copyable trace and session IDs, then the full **User prompt** and **Final assistant message** in scrollable blocks that keep their line breaks. Paste a prompt containing `<script>` or Markdown into a test trace and confirm it is shown as literal text, never rendered.
+3. In the trace dialog, activate a title under **Memories written in this turn**. Confirm the trace dialog closes and that memory's detail opens.
+4. Open a memory detail and confirm a **Conversation traces** section lists up to five traces that wrote it. Activate **View trace** from there; on close, focus must return to that button.
+
+## Filters, paging, and URL state
+
+1. Open **Activity**, filter by event type, agent, session, context, and text, and confirm the total, the rows, and **Page x of y** all follow the filters. Confirm **Previous**/**Next** work and **Reset filters** clears everything.
+2. Open **Memory Quality** and confirm **Quality signals** and **Orphaned raw memories** show real totals (create more than 50 signals or check against a known count). Confirm the embedding-status and quality-status filters and the pager work, and that a truncated orphan list says **Showing N of M**.
+3. Apply a filter on Activity, go to page 2, then reload the browser. Confirm the same view, filters, and page return. Copy the URL into a new tab and confirm the same result.
+4. Open a session's detail, then press the browser Back button: the session list returns. Press Forward: the detail returns. Changing only a filter or page must not add a history entry per change.
+5. Edit the URL hash to `#view=constructor` and confirm the Viewer ignores it and stays usable.
+
+## Memory Map, System Health, and Diagnostics additions
+
+1. In **Memory Map**, change **Depth** to 2 hops, set a **Predicate**, tick **Include archived**, and set an **As of (UTC)** in the past; confirm each changes the neighborhood as expected and the legend explains node colours.
+2. In **System Health**, confirm warnings appear when embeddings have failed (or the text **No warnings** otherwise), and that uptime, version, WAL/SHM size, SQLite pages, free pages, vector availability, and the latest snapshot (or **No snapshot has been written yet.**) are shown.
+3. In **Diagnostics**, load the projection. Tab to a point and press Enter and Space: each must open the memory detail, and Space must not scroll the page. If more than 500 embeddings are ready, confirm the sampling note appears.
+
+## Keyboard, focus, and refresh
+
+1. Open **Activity**, focus a **View details** button, and wait 30 seconds. The table must not be replaced under the focused control. Move focus out of the view and confirm auto-refresh resumes.
+2. With any dialog open, wait 30 seconds on Overview, Activity, or System Health and confirm the view behind it does not re-render; after closing the dialog, focus returns to the control that opened it.
+3. Inspect the navigation: exactly one item has `aria-current="page"`. In a memory detail, **Show raw** toggles to **Show rendered** and its `aria-pressed` state follows.
+4. Stop the daemon's database access (or block a request in DevTools) and submit a filter form or click a pager: an error appears in the notice bar instead of the control silently doing nothing.
