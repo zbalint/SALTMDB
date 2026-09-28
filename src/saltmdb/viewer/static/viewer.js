@@ -146,6 +146,9 @@
       year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
     }).format(timestamp);
   };
+  const timeCell = (value) => {
+    const cell = node('td', formatTimestamp(value)); if (value) cell.title = String(value); return cell;
+  };
   const section = (heading, description) => {
     const header = node('div', undefined, 'section-heading');
     header.append(node('h3', heading));
@@ -205,7 +208,11 @@
       const raw = node('pre', data.full_content || '', 'raw-markdown'); raw.hidden = true;
       actions.append(button('Copy ID', '', () => copyText(data.id, 'Memory ID')));
       actions.append(button('Copy Markdown', '', () => copyText(data.full_content || '', 'Markdown')));
-      actions.append(button('Show raw', '', () => { raw.hidden = !raw.hidden; raw.previousElementSibling.hidden = raw.hidden; }));
+      const rawToggle = button('Show raw', '', () => {
+        raw.hidden = !raw.hidden; raw.previousElementSibling.hidden = raw.hidden;
+        rawToggle.textContent = raw.hidden ? 'Show raw' : 'Show rendered'; rawToggle.setAttribute('aria-pressed', String(!raw.hidden));
+      });
+      rawToggle.setAttribute('aria-pressed', 'false'); actions.append(rawToggle);
       detail.append(actions);
       const markdown = node('div', undefined, 'markdown');
       const parsed = window.marked?.parse(data.full_content || '') || '';
@@ -384,7 +391,7 @@
   const openEventDetail = (event, invoker = document.activeElement) => {
     eventDetail.replaceChildren();
     const facts = node('dl', undefined, 'metadata-grid');
-    [['Event ID', event.id], ['Timestamp', event.timestamp], ['Type', event.type], ['Agent', event.agent_id || '—'], ['Session ID', event.agent_session_id || '—'], ['Context ID', event.context_id || '—'], ['Error code', event.error_code || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
+    [['Event ID', event.id], ['Timestamp', `${formatTimestamp(event.timestamp)} (${event.timestamp})`], ['Type', event.type], ['Agent', event.agent_id || '—'], ['Session ID', event.agent_session_id || '—'], ['Context ID', event.context_id || '—'], ['Error code', event.error_code || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
     eventDetail.append(section('Event evidence', 'This is a read-only record. Events do not imply a linked memory unless a context is supplied.'), facts);
     const content = node('pre', event.content || '—', 'raw-markdown'); eventDetail.append(section('Event content'), content);
     const actions = node('div', undefined, 'detail-actions');
@@ -395,7 +402,7 @@
 
   const activity = async () => {
     const data = await api('/api/events?limit=20'); const rows = data.events.map(event => {
-      const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(node('td', event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
+      const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(timeCell(event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
     }); view.replaceChildren(section('Recent activity', 'Read-only operational evidence. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows));
   };
 
@@ -481,7 +488,7 @@
         const summary = document.createElement('summary'); summary.append(node('span', type, 'predicate-pill'), node('span', ` · ${items.length}`, 'muted'));
         const rows = items.map(event => {
           const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget)));
-          row.append(node('td', event.timestamp), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
+          row.append(timeCell(event.timestamp), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
         });
         details.append(summary, renderTable(['Time', 'Agent', 'Event', 'Action'], rows));
         eventsSection.append(details);
@@ -700,7 +707,10 @@
   const loaders = { overview, explorer, activity, sessions, relationships, quality, operations, tags, diagnostics };
   const render = async () => {
     state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
-    document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('is-active', item.dataset.view === state.view));
+    document.querySelectorAll('.nav-item').forEach(item => {
+      const active = item.dataset.view === state.view; item.classList.toggle('is-active', active);
+      if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
+    });
     setBusy(view, true);
     try { status.textContent = 'Refreshing'; await loaders[state.view](); status.textContent = 'Updated just now'; } catch (err) { if (err.name !== 'AbortError') showError(err); } finally { setBusy(view, false); }
   };

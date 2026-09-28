@@ -40,7 +40,7 @@ def get_frontend_html(db_path: str = None) -> str:
 <button data-view="diagnostics" class="nav-item">Diagnostics</button>
 </nav></div><div id="connection-indicator" class="connection-indicator" role="status" aria-live="polite"><span class="connection-dot" aria-hidden="true"></span><span>Checking connection…</span></div></aside><main id="main"><header><div><p class="eyebrow">Knowledge operations</p><h2 id="view-title">Overview</h2></div>
 <div class="connection"><span id="live-status" role="status">Loading</span><button id="refresh" type="button">Refresh</button></div></header>
-<div id="notice" class="notice" role="status" aria-live="polite" hidden></div><section id="view" aria-live="polite"></section></main></div>
+<div id="notice" class="notice" role="status" aria-live="polite" hidden></div><section id="view"></section></main></div>
 <dialog id="memory-detail" aria-labelledby="detail-title"><article><header><h2 id="detail-title">Memory</h2><button id="close-detail" aria-label="Close memory detail">Close</button></header><div id="detail-content"></div></article></dialog>
 <dialog id="event-detail" aria-labelledby="event-detail-title"><article><header><h2 id="event-detail-title">Activity event</h2><button id="close-event-detail" aria-label="Close activity event detail">Close</button></header><div id="event-detail-content"></div></article></dialog>
 <dialog id="trace-detail" aria-labelledby="trace-detail-title"><article><header><h2 id="trace-detail-title">Conversation trace</h2><button id="close-trace-detail" aria-label="Close conversation trace detail">Close</button></header><div id="trace-detail-content"></div></article></dialog>

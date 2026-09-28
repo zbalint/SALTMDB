@@ -7,6 +7,8 @@ audit found missing. They cannot prove focus, keyboard or layout behavior at run
 import unittest
 from pathlib import Path
 
+from saltmdb.viewer.templates import get_frontend_html
+
 
 def _read_static(name):
     root = Path(__file__).resolve().parents[1] / "src/saltmdb/viewer/static"
@@ -69,6 +71,31 @@ class TestViewerFrontendContracts(unittest.TestCase):
         schedule = self.script[self.script.index("const schedule") :]
         self.assertIn("!pollingPaused()", schedule[: schedule.index("document.querySelectorAll")])
         self.assertIn("!pollingPaused()", self.script[self.script.index("visibilitychange") :])
+
+    def test_navigation_and_raw_toggle_expose_state_to_assistive_tech(self):
+        self.assertIn("setAttribute('aria-current', 'page')", self.script)
+        self.assertIn("removeAttribute('aria-current')", self.script)
+        self.assertIn("setAttribute('aria-pressed'", self.script)
+        self.assertIn("'Show rendered'", self.script)
+        self.assertIn("'Show raw'", self.script)
+
+    def test_content_region_is_not_a_live_region_but_a_status_node_is(self):
+        shell = get_frontend_html()
+        self.assertNotIn('<section id="view" aria-live', shell)
+        self.assertIn('id="live-status" role="status"', shell)
+
+    def test_activity_and_session_timestamps_use_the_shared_formatter(self):
+        self.assertIn("const timeCell = (value) =>", self.script)
+        self.assertIn("cell.title = String(value)", self.script)
+        self.assertIn(
+            "timeCell(event.timestamp)", self._function_body("activity", "openSessionDetail")
+        )
+        self.assertIn(
+            "timeCell(event.timestamp)", self.script[self.script.index("const sessionDetail") :]
+        )
+        self.assertIn(
+            "formatTimestamp(event.timestamp)", self._function_body("openEventDetail", "activity")
+        )
 
 
 if __name__ == "__main__":
