@@ -248,9 +248,7 @@ class TestTraceService(unittest.TestCase):
         repeated = trace_service.capture_trace_complete(
             "agent-session-a", "owner-a", "turn-a", "replacement", db_connection=self.conn
         )
-        fetched = trace_service.get_trace(
-            "owner-a", completed["data"]["trace_id"], db_connection=self.conn
-        )
+        fetched = trace_service.get_trace(completed["data"]["trace_id"], db_connection=self.conn)
 
         self.assertEqual(started["data"]["status"], "pending")
         self.assertEqual(completed["data"]["status"], "completed")
@@ -275,7 +273,7 @@ class TestTraceService(unittest.TestCase):
         result = trace_service.capture_trace_complete(
             "agent-session-a", "owner-a", "incomplete", "replacement", db_connection=self.conn
         )
-        fetched = trace_service.get_trace("owner-a", trace_id, db_connection=self.conn)
+        fetched = trace_service.get_trace(trace_id, db_connection=self.conn)
 
         self.assertEqual(result["data"]["status"], "incomplete")
         self.assertEqual(result["warnings"][0]["code"], "ALREADY_TERMINAL")
@@ -287,7 +285,7 @@ class TestTraceService(unittest.TestCase):
         ended_trace = self._start(turn_id="ended", agent_session_id="ended-session")
         record_session(self.conn, "ended-session", "/tmp", datetime.now(UTC).isoformat(), "owner-a")
         close_session(self.conn, "ended-session", datetime.now(UTC).isoformat())
-        ended_result = trace_service.search_traces("owner-a", db_connection=self.conn)
+        ended_result = trace_service.search_traces(db_connection=self.conn)
         self.assertEqual(
             next(
                 item for item in ended_result["data"]["results"] if item["trace_id"] == ended_trace
@@ -301,7 +299,7 @@ class TestTraceService(unittest.TestCase):
             "UPDATE conversation_traces SET created_at = ?, updated_at = ? WHERE id = ?",
             (old_time, old_time, old_trace),
         )
-        unresolved_result = trace_service.get_trace("owner-a", old_trace, db_connection=self.conn)
+        unresolved_result = trace_service.get_trace(old_trace, db_connection=self.conn)
         self.assertEqual(unresolved_result["data"]["status"], "incomplete")
 
     def test_timeout_fallback_marks_unresolved_session_row_incomplete(self):
@@ -317,7 +315,7 @@ class TestTraceService(unittest.TestCase):
             (old_time, old_time, trace_id),
         )
 
-        result = trace_service.get_trace("owner-a", trace_id, db_connection=self.conn)
+        result = trace_service.get_trace(trace_id, db_connection=self.conn)
 
         self.assertEqual(result["data"]["status"], "incomplete")
 
@@ -339,7 +337,7 @@ class TestTraceService(unittest.TestCase):
         )
 
         result = trace_service.search_traces(
-            "owner-a", query_keywords="not semantic yet", limit=1, db_connection=self.conn
+            query_keywords="not semantic yet", limit=1, db_connection=self.conn
         )
         item = result["data"]["results"][0]
 
@@ -350,20 +348,29 @@ class TestTraceService(unittest.TestCase):
         self.assertNotIn("user_prompt", item)
         self.assertEqual(result["warnings"][0]["code"], "TRACE_SEARCH_NOT_YET_SEMANTIC")
 
-    def test_owner_isolation_applies_to_all_trace_operations(self):
+    def test_reads_are_cross_agent_but_writes_stay_bound_to_the_writing_agent(self):
         from saltmdb.domain.services import trace_service
 
+        # owner_id is attribution, not access control: any caller reads any agent's trace.
         trace_id = self._start()
         self._entity()
-        self.assertEqual(
-            trace_service.get_trace("owner-b", trace_id, db_connection=self.conn)["errors"][0][
-                "code"
-            ],
-            "UNKNOWN_TRACE_ID",
+        fetched = trace_service.get_trace(trace_id, db_connection=self.conn)
+        self.assertEqual(fetched["status"], "ok")
+        self.assertEqual(fetched["data"]["owner_id"], "owner-a")
+        results = trace_service.search_traces(db_connection=self.conn)["data"]["results"]
+        self.assertEqual([r["trace_id"] for r in results], [trace_id])
+        linked = trace_service.capture_trace_memory_link(
+            "agent-session-a",
+            "owner-a",
+            "turn-a",
+            "entity-a",
+            "store_memory",
+            db_connection=self.conn,
         )
-        self.assertEqual(
-            trace_service.search_traces("owner-b", db_connection=self.conn)["data"]["results"], []
-        )
+        self.assertEqual(linked["status"], "ok")
+        provenance = trace_service.entity_trace_provenance(self.conn, "entity-a", limit=5)
+        self.assertEqual([row["trace_id"] for row in provenance], [trace_id])
+        # ...but a different agent still cannot link to or complete this agent's trace.
         self.assertEqual(
             trace_service.capture_trace_memory_link(
                 "agent-session-a",

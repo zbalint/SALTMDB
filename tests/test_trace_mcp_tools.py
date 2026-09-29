@@ -59,9 +59,9 @@ class TestTraceMcpTools(unittest.TestCase):
         self.assertEqual(calls["capture_trace_start"]["owner_id"], "trace_test_agent")
         self.assertEqual(calls["capture_trace_memory_link"]["owner_id"], "trace_test_agent")
         self.assertEqual(calls["capture_trace_complete"]["owner_id"], "trace_test_agent")
-        self.assertEqual(calls["search_traces"]["owner_id"], "trace_test_agent")
+        self.assertNotIn("owner_id", calls["search_traces"])
         self.assertEqual(calls["search_traces"]["agent_session_id"], "filter-session")
-        self.assertEqual(calls["get_trace"]["owner_id"], "trace_test_agent")
+        self.assertNotIn("owner_id", calls["get_trace"])
         for tool_name, kwargs in calls.items():
             if tool_name != "search_traces":
                 self.assertNotIn("agent_session_id", kwargs)
@@ -220,7 +220,7 @@ class TestTraceMcpTools(unittest.TestCase):
             )
 
         kwargs = calls[-1]
-        self.assertEqual(kwargs["owner_id"], "trace_test_agent")
+        self.assertNotIn("owner_id", kwargs)
         self.assertEqual(kwargs["agent_session_id"], "other")
 
 

@@ -159,10 +159,7 @@ def _render_handover(conn, candidates: list[dict], max_chars: int) -> str:
             lines.append("</assistant-message>")
         lines.append("</trace>")
         if user_cut or response_cut:
-            lines.append(
-                f"<hint>Truncated: full text via get_trace(trace_id='{trace_id}'), which only "
-                "returns traces owned by your own owner_id.</hint>"
-            )
+            lines.append(f"<hint>Truncated: full text via get_trace(trace_id='{trace_id}').</hint>")
         lines.append("</session>")
     lines.append("</saltmdb-session-handover>")
     return "\n".join(lines)

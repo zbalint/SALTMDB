@@ -331,15 +331,17 @@ def capture_trace_complete(
             close_connection(conn)
 
 
-def _run_read_sweep(conn, owner_id: str, coordinator, tool_name: str) -> None:
+def _run_read_sweep(conn, coordinator, tool_name: str) -> None:
+    # Not owner-scoped: traces are readable across agents, so a read must not surface another
+    # agent's abandoned pending trace as still "pending".
     if coordinator is not None:
         coordinator.submit(
             f"trace-sweep:{tool_name}",
-            lambda writer_conn: _sweep_abandoned_traces(writer_conn, owner_id=owner_id),
+            lambda writer_conn: _sweep_abandoned_traces(writer_conn),
             priority="foreground",
         )
     else:
-        _sweep_abandoned_traces(conn, owner_id=owner_id)
+        _sweep_abandoned_traces(conn)
 
 
 def _parse_offset(cursor: str | None) -> int:
@@ -352,7 +354,6 @@ def _parse_offset(cursor: str | None) -> int:
 
 
 def search_traces(
-    owner_id: str,
     agent_session_id: str | None = None,
     entity_id: str | None = None,
     query_keywords: str | None = None,
@@ -362,14 +363,14 @@ def search_traces(
     db_path: str | None = None,
     coordinator=None,
 ) -> dict[str, Any]:
-    """Return bounded, owner-scoped trace previews."""
+    """Return bounded trace previews (cross-agent; owner_id is attribution, not a filter)."""
     conn, should_close = _open_connection(db_connection, db_path)
     try:
-        _run_read_sweep(conn, owner_id, coordinator, "search_traces")
+        _run_read_sweep(conn, coordinator, "search_traces")
         page_size = 5 if limit is None else max(0, limit)
         offset = _parse_offset(cursor)
-        where = ["ct.owner_id = ?"]
-        params: list[Any] = [owner_id]
+        where: list[str] = []
+        params: list[Any] = []
         if agent_session_id is not None:
             where.append("ct.agent_session_id = ?")
             params.append(agent_session_id)
@@ -384,7 +385,7 @@ def search_traces(
             SELECT ct.id, ct.harness, ct.status, ct.created_at, ct.completed_at,
                    ct.user_prompt, ct.final_assistant_message
             FROM conversation_traces AS ct
-            WHERE {" AND ".join(where)}
+            WHERE {" AND ".join(where) or "1 = 1"}
             ORDER BY ct.created_at DESC, ct.id DESC
             LIMIT ? OFFSET ?
             """,
@@ -447,16 +448,15 @@ def search_traces(
 
 
 def get_trace(
-    owner_id: str,
     trace_id: str,
     db_connection=None,
     db_path: str | None = None,
     coordinator=None,
 ) -> dict[str, Any]:
-    """Return one complete owner-scoped trace and its link metadata."""
+    """Return one complete trace and its link metadata (cross-agent; owner_id is attribution)."""
     conn, should_close = _open_connection(db_connection, db_path)
     try:
-        _run_read_sweep(conn, owner_id, coordinator, "get_trace")
+        _run_read_sweep(conn, coordinator, "get_trace")
         row = conn.execute(
             """
             SELECT id, agent_session_id, owner_id, harness, harness_session_id,
@@ -464,9 +464,9 @@ def get_trace(
                    final_assistant_message, final_assistant_message_hash,
                    capture_error, created_at, updated_at, completed_at
             FROM conversation_traces
-            WHERE id = ? AND owner_id = ?
+            WHERE id = ?
             """,
-            (trace_id, owner_id),
+            (trace_id,),
         ).fetchone()
         if row is None:
             return rejected([error("UNKNOWN_TRACE_ID", f"No trace matches trace_id '{trace_id}'.")])
@@ -520,20 +520,19 @@ def entity_trace_provenance(
     conn,
     entity_id: str,
     *,
-    owner_id: str | None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """Return bounded metadata for traces linked to one owner-visible entity."""
+    """Return bounded metadata for traces linked to one entity the caller can already see."""
     rows = conn.execute(
         """
         SELECT ct.id, ct.harness, ct.created_at, ct.status
         FROM trace_memory_links AS tml
         JOIN conversation_traces AS ct ON tml.trace_id = ct.id
-        WHERE tml.entity_id = ? AND ct.owner_id = ?
+        WHERE tml.entity_id = ?
         ORDER BY ct.created_at DESC, ct.id DESC
         LIMIT ?
         """,
-        (entity_id, owner_id, limit),
+        (entity_id, limit),
     ).fetchall()
     return [
         {"trace_id": row[0], "harness": row[1], "created_at": row[2], "status": row[3]}

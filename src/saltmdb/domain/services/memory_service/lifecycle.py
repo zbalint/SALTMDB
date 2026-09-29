@@ -841,9 +841,7 @@ def _assemble_memory_record(
     if include_trace_provenance:
         from saltmdb.domain.services import trace_service
 
-        data["trace_provenance"] = trace_service.entity_trace_provenance(
-            conn, resolved_id, owner_id=owner_id, limit=5
-        )
+        data["trace_provenance"] = trace_service.entity_trace_provenance(conn, resolved_id, limit=5)
     if include_content:
         data.update(large_content_descriptor(row[2]))
     else:

@@ -1005,12 +1005,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 SELECT entity_id, COUNT(DISTINCT trace_id)
                 FROM trace_memory_links
                 WHERE entity_id IN ({trace_placeholders})
-                  AND trace_id IN (
-                      SELECT id FROM conversation_traces WHERE owner_id = ?
-                  )
                 GROUP BY entity_id
                 """,
-                [*trace_ids, owner_id],
+                trace_ids,
             ).fetchall()
             for trace_entity_id, count in trace_rows:
                 trace_counts[trace_entity_id] = count

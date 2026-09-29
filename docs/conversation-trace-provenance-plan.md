@@ -272,6 +272,7 @@ project's no-redaction stance (§8). No cleanup job, no config knob for this in 
   explicitly.
 - `agent_session_id` on `conversation_traces` follows the same non-caller-suppliable convention as
   every write tool — no new trust mechanism for Option A (§3).
+- **SUPERSEDED (2026-09-29): trace reads are now cross-agent** -- `owner_id` is attribution, not access control (private scope is an agent's own per-memory choice; traces are auto-captured with no such choice). The bullet below is kept for history only; do not re-add owner filters to trace reads. Writes stay bound to the writing agent.
 - **Owner/scope isolation is non-negotiable here, not optional** — the two most recent commits on
   this codebase before this investigation (`7bd34c3`, `56950d2`) were both fixes for exactly this
   class of bug (cross-owner private-memory disclosure). Every new read path (`search_traces`,
