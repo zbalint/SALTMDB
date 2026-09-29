@@ -12,7 +12,8 @@
               "harness": "codex",
               "harness_session_id": "${session_id}",
               "harness_turn_id": "${turn_id}",
-              "user_prompt": "${prompt}"
+              "user_prompt": "${prompt}",
+              "hook_output": true
             },
             "timeout": 15
           }
@@ -28,7 +29,8 @@
             "server": "saltmdb",
             "tool": "capture_trace_memory_link",
             "input": {
-              "harness_turn_id": "${turn_id}"
+              "harness_turn_id": "${turn_id}",
+              "hook_output": true
             },
             "timeout": 15
           }
@@ -45,7 +47,8 @@
             "tool": "capture_trace_complete",
             "input": {
               "harness_turn_id": "${turn_id}",
-              "final_assistant_message": "${last_assistant_message}"
+              "final_assistant_message": "${last_assistant_message}",
+              "hook_output": true
             },
             "timeout": 15
           }

@@ -99,6 +99,57 @@ class TestTraceMcpTools(unittest.TestCase):
         self.assertEqual([name for name, _ in self.backend.calls], ["search_traces"])
         self.assertEqual(searched["status"], "ok")
 
+    def test_hook_output_returns_an_empty_object_and_still_captures(self):
+        # Codex validates an mcp_tool hook's text result as hook JSON and rejects the SALTMDB
+        # envelope; a hook entry opts in with hook_output=true to get a bare {} instead.
+        with (
+            patch.dict(os.environ, {"SALTMDB_TRACE_CAPTURE_ENABLED": "true"}),
+            patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+        ):
+            results = [
+                tools.capture_trace_start("codex", "s", "turn-1", "prompt", hook_output=True),
+                tools.capture_trace_memory_link("turn-1", hook_output=True),
+                tools.capture_trace_complete("turn-1", "answer", hook_output=True),
+            ]
+        self.assertEqual(results, [{}, {}, {}])
+        self.assertEqual(
+            [name for name, _ in self.backend.calls],
+            ["capture_trace_start", "capture_trace_complete"],
+        )
+        for _, kwargs in self.backend.calls:
+            self.assertNotIn("hook_output", kwargs)
+
+    def test_hook_output_stays_empty_when_capture_is_disabled(self):
+        env = {k: v for k, v in os.environ.items() if k != "SALTMDB_TRACE_CAPTURE_ENABLED"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+        ):
+            results = [
+                tools.capture_trace_start("codex", "s", "turn-1", "prompt", hook_output=True),
+                tools.capture_trace_memory_link("turn-1", hook_output=True),
+                tools.capture_trace_complete("turn-1", "answer", hook_output=True),
+            ]
+        self.assertEqual(results, [{}, {}, {}])
+        self.assertEqual(self.backend.calls, [])
+
+    def test_hook_output_text_over_the_real_mcp_protocol_is_a_bare_empty_object(self):
+        import asyncio
+        import json
+
+        def text_of(arguments: dict[str, object]) -> str:
+            with (
+                patch.dict(os.environ, {"SALTMDB_TRACE_CAPTURE_ENABLED": "true"}),
+                patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+            ):
+                content = asyncio.run(tools.mcp.call_tool("capture_trace_complete", arguments))
+            return "".join(block.text for block in content)  # type: ignore[attr-defined]
+
+        base = {"harness_turn_id": "turn-1", "final_assistant_message": "answer"}
+        self.assertEqual(json.loads(text_of({**base, "hook_output": True})), {})
+        self.assertEqual(json.loads(text_of({**base, "hook_output": "true"})), {})
+        self.assertEqual(json.loads(text_of(base))["status"], "ok")
+
     def test_get_memory_forwards_trace_provenance_opt_in(self):
         with patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend):
             tools.get_memory("entity-1", include_trace_provenance=True)

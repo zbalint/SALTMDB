@@ -35,6 +35,8 @@ class TestCaptureHookConfig(unittest.TestCase):
             ("codex-settings-example.json", "codex", "turn_id"),
         ):
             settings = self._settings(filename)
+            # Codex rejects the SALTMDB envelope as hook output; only its entries opt in to {}.
+            hook_output = {"hook_output": True} if harness == "codex" else {}
             start = self._capture_entry(settings, "UserPromptSubmit", "capture_trace_start")
             link = self._capture_entry(settings, "PostToolUse", "capture_trace_memory_link")
             complete = self._capture_entry(settings, "Stop", "capture_trace_complete")
@@ -46,17 +48,19 @@ class TestCaptureHookConfig(unittest.TestCase):
                     "harness_session_id": "${session_id}",
                     "harness_turn_id": f"${{{turn_field}}}",
                     "user_prompt": "${prompt}",
+                    **hook_output,
                 },
             )
             self.assertEqual(
                 link["input"],
-                {"harness_turn_id": f"${{{turn_field}}}"},
+                {"harness_turn_id": f"${{{turn_field}}}", **hook_output},
             )
             self.assertEqual(
                 complete["input"],
                 {
                     "harness_turn_id": f"${{{turn_field}}}",
                     "final_assistant_message": "${last_assistant_message}",
+                    **hook_output,
                 },
             )
             link_groups = [

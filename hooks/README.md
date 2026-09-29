@@ -87,6 +87,14 @@ always captures) before enabling these registrations.
   that still pass `entity_id`/`just_run_tool_name` keep working; the values are ignored.
 - `Stop` calls `capture_trace_complete` with the current turn identifier and
   `${last_assistant_message}`.
+- The Codex example also passes `"hook_output": true` to all three. Codex validates an
+  `mcp_tool` hook's text result as event hook JSON against a strict schema and rejects SALTMDB's
+  `{status, data, warnings}` envelope (`Hook failed: hook returned invalid ... JSON output` on
+  every turn, though the capture itself succeeded); with the flag the tools return a bare `{}`,
+  which Codex accepts on `UserPromptSubmit`, `PostToolUse` and `Stop` (verified live on Codex CLI
+  0.158.0). Claude Code accepts the envelope, so its example omits the flag. In this mode a
+  capture failure is not reported to the hook. Existing live Codex configs need the flag added
+  and the MCP server restarted onto this version.
 
 Native registration preserves the adapter's trusted `agent_session_id`; do not replace these
 entries with a CLI or standalone Python bridge. After enabling the examples in a live session,

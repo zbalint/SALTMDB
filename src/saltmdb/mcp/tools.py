@@ -1265,12 +1265,20 @@ def _trace_capture_disabled() -> dict | None:
     )
 
 
+def _for_hook(result: dict, hook_output: bool) -> dict:
+    """Codex validates an ``mcp_tool`` hook's text result as event hook JSON (strict schema) and
+    rejects the SALTMDB envelope, so a hook entry that sets ``hook_output`` gets the bare ``{}``
+    every Codex event accepts. Capture failures are not surfaced to the hook in that mode."""
+    return {} if hook_output else result
+
+
 @mcp.tool()
 def capture_trace_start(
     harness: Literal["codex", "claude_code"],
     harness_session_id: str,
     harness_turn_id: str,
     user_prompt: str,
+    hook_output: bool = False,
 ) -> dict:
     """Internal capture tool invoked by SALTMDB's own lifecycle hooks (UserPromptSubmit) -- not
     intended for direct agent use. Upserts a pending conversation-trace row for this turn,
@@ -1280,20 +1288,23 @@ def capture_trace_start(
     own trusted identity, never caller-suppliable.
 
     Returns {"status": "ok", "data": {"id", "status": "pending", "message_appended": bool},
-    "warnings": [...]}.
+    "warnings": [...]}, or a bare {} when ``hook_output`` is true (Codex hook entries set it).
     """
     if (disabled := _trace_capture_disabled()) is not None:
-        return disabled
+        return _for_hook(disabled, hook_output)
     owner_id_ = _effective_owner()
-    return _backend_or_raise().call(
-        "capture_trace_start",
-        {
-            "owner_id": owner_id_,
-            "harness": harness,
-            "harness_session_id": harness_session_id,
-            "harness_turn_id": harness_turn_id,
-            "user_prompt": user_prompt,
-        },
+    return _for_hook(
+        _backend_or_raise().call(
+            "capture_trace_start",
+            {
+                "owner_id": owner_id_,
+                "harness": harness,
+                "harness_session_id": harness_session_id,
+                "harness_turn_id": harness_turn_id,
+                "user_prompt": user_prompt,
+            },
+        ),
+        hook_output,
     )
 
 
@@ -1302,6 +1313,7 @@ def capture_trace_memory_link(
     harness_turn_id: str,
     entity_id: str | None = None,
     just_run_tool_name: str | None = None,
+    hook_output: bool = False,
 ) -> dict:
     """Internal capture tool invoked by SALTMDB's own lifecycle hooks (PostToolUse on the
     memory-write tools) -- not intended for direct agent use. Attaches every memory write this
@@ -1313,10 +1325,11 @@ def capture_trace_memory_link(
 
     Returns {"status": "ok", "data": {"results": [{"entity_id", "write_operation", "linked"} |
     {"entity_id", "error_code"}]}, "warnings": [...]}. Nothing pending is a successful empty
-    result; an unknown turn is reported per entity and is non-fatal for the calling hook.
+    result; an unknown turn is reported per entity and is non-fatal for the calling hook. A bare
+    {} is returned instead when ``hook_output`` is true (Codex hook entries set it).
     """
     if (disabled := _trace_capture_disabled()) is not None:
-        return disabled
+        return _for_hook(disabled, hook_output)
     from saltmdb.utils.envelope import ok
 
     owner_id_ = _effective_owner()
@@ -1350,28 +1363,34 @@ def capture_trace_memory_link(
             errors = outcome.get("errors") if isinstance(outcome, dict) else None
             code = errors[0].get("code") if errors else "UNKNOWN"
             results.append({"entity_id": written_entity_id, "error_code": code})
-    return ok({"results": results})
+    return _for_hook(ok({"results": results}), hook_output)
 
 
 @mcp.tool()
-def capture_trace_complete(harness_turn_id: str, final_assistant_message: str) -> dict:
+def capture_trace_complete(
+    harness_turn_id: str, final_assistant_message: str, hook_output: bool = False
+) -> dict:
     """Internal capture tool invoked by SALTMDB's own lifecycle hooks (Stop) -- not intended for
     direct agent use. Transitions this turn's trace from pending to completed with the full,
     untruncated final assistant message. A no-op (still status: "ok") if the trace is already
     completed/incomplete, or if no pending trace is found for this turn.
 
-    Returns {"status": "ok", "data": {"trace_id", "status"}, "warnings": [...]}.
+    Returns {"status": "ok", "data": {"trace_id", "status"}, "warnings": [...]}, or a bare {}
+    when ``hook_output`` is true (Codex hook entries set it).
     """
     if (disabled := _trace_capture_disabled()) is not None:
-        return disabled
+        return _for_hook(disabled, hook_output)
     owner_id_ = _effective_owner()
-    return _backend_or_raise().call(
-        "capture_trace_complete",
-        {
-            "owner_id": owner_id_,
-            "harness_turn_id": harness_turn_id,
-            "final_assistant_message": final_assistant_message,
-        },
+    return _for_hook(
+        _backend_or_raise().call(
+            "capture_trace_complete",
+            {
+                "owner_id": owner_id_,
+                "harness_turn_id": harness_turn_id,
+                "final_assistant_message": final_assistant_message,
+            },
+        ),
+        hook_output,
     )
 
 
