@@ -54,6 +54,12 @@ uv run python -m saltmdb
 - `SALTMDB_VIEWER_ENABLED`: Set to `false` (or `0`/`off`/`no`) to disable the backend daemon's in-process web viewer thread (default: `true`).
 - `SALTMDB_DISABLE_LIBRARIAN`: Set to any non-empty value to suppress all Librarian maintenance-pass triggers (runs in-daemon as of the Track B backend-daemon rework; useful for debugging or controlled environments).
 - `SALTMDB_TEST_MODE`: Set to any non-empty value in automated test environments to suppress Librarian maintenance-pass triggers without affecting other behavior.
+- `SALTMDB_TRACE_CAPTURE_ENABLED`: Set to `true` (or `1`/`yes`/`on`) in the **MCP server entry's `env`** to enable conversation-trace capture (default: off). The adapter process gates the `capture_trace_*` tools; the shared daemon has no flag. Also register the capture hooks (see [`hooks/README.md`](hooks/README.md)). Traces store prompts and replies verbatim — read [`SECURITY.md`](SECURITY.md) first.
+- `SALTMDB_HANDOVER_MAX_CHARS`: Total character budget for the last-session handover that `saltmdb-cli session-digest` appends to the session-start digest when prior traces exist (default: `40000`; `0` disables the handover; blank, non-integer or negative values fall back to the default). Read by the hook's CLI call, so set it in the hook's environment.
+- `SALTMDB_LOG_LEVEL`: Backend daemon log level (default: `INFO`).
+- `SALTMDB_CONTENT_DUMP_DIR`: Directory where oversized memory content is dumped for `content_file_path` reads (default: `~/.saltmdb/content_dumps`).
+- `SALTMDB_RERANKER_MODEL`: Enables the optional ONNX cross-encoder final-reranker stage of `search_memory` with a supported model name (default: unset, RRF ordering; see [`docs/architecture.md`](docs/architecture.md)).
+- `SALTMDB_DISABLE_COMMUNITY_DETECTION`: Set to any non-empty value to suppress the background Leiden community-detection recompute that backs `retrieve_context`'s global strategy; also suppressed under `SALTMDB_TEST_MODE`.
 
 ### Adapter identity and session lifecycle
 
@@ -218,6 +224,8 @@ The daemon reads `SALTMDB_VIEWER_PORT` (default `8080`) when it starts the viewe
 
 Once a daemon is running with the viewer enabled, open your browser and navigate to:
 👉 **[http://localhost:8080](http://localhost:8080)**
+
+The viewer is read-only and loopback-only. The current view, filters, page and selection are kept in the URL, so a refresh or a copied link restores them. With trace capture enabled (`SALTMDB_TRACE_CAPTURE_ENABLED`), **Agent Sessions** shows a trace count per session and lists that session's conversation traces, and a memory's detail lists the traces that wrote it; **View trace** shows the full prompt, any mid-turn messages and the final reply. After upgrading SALTMDB, hard-refresh any tab you left open — a stale cached `viewer.js` can hide newer views and fields. Details and the manual acceptance checklist: [`docs/architecture.md`](docs/architecture.md) §10 and [`tests/manual_viewer_smoke.md`](tests/manual_viewer_smoke.md).
 
 ---
 

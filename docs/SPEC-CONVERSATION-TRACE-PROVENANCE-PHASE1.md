@@ -2,7 +2,11 @@
 
 ## 0. Status
 
-**LOCKED.**
+**LOCKED.** *(Historical record of the Phase 1 build. Three later changes supersede parts of it — read the code, `docs/architecture.md` §9 and `MIGRATION.md` for current behavior:)*
+
+- **Trace reads are cross-agent** (commit `52abeb7`): `search_traces` / `get_trace` no longer filter by `owner_id`; `owner_id` is attribution, not access control. Every "always filters `WHERE owner_id = ?`" / owner-isolation / cross-owner-denial statement below is superseded (see the plan's §8 SUPERSEDED note).
+- **Mid-turn messages** (`9246dd5`): a second `capture_trace_start` for the same turn with different text is appended to the new `trace_turn_messages` table and returned as `mid_turn_messages` by `get_trace`, instead of being ignored.
+- **Memory links come from the adapter's own record** (`2ca77f2`): `capture_trace_memory_link` takes only the turn id; `entity_id` and `just_run_tool_name` are ignored (accepted so older hook configs keep working). The `${tool_response.data.id}` / `${tool_name}` hook templates in §13 are no longer used.
 
 **Scope — may edit/create:**
 - `src/saltmdb/db/schema.py`

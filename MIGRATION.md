@@ -275,4 +275,25 @@ CREATE TABLE IF NOT EXISTS trace_memory_links (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracelinks_idem
     ON trace_memory_links(trace_id, entity_id, content_hash);
+
+-- Messages the user sent while the agent was mid-turn (attached to that turn's trace).
+CREATE TABLE IF NOT EXISTS trace_turn_messages (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES conversation_traces(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    message_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turnmsgs_idem
+    ON trace_turn_messages(trace_id, message_hash);
 ```
+
+All three tables are created with `IF NOT EXISTS` and are purely additive: no existing table or
+column changes, so an older client that ignores them keeps working. Capture stays off unless the
+MCP server entry sets `SALTMDB_TRACE_CAPTURE_ENABLED=true` (see [`INSTALL.md`](INSTALL.md)).
+Behavior changes after the first Phase 1 build, with no further DDL: trace reads became cross-agent
+(`owner_id` is attribution, not access control), `capture_trace_memory_link` ignores `entity_id` /
+`just_run_tool_name` and links from the adapter's own record, and the session-start digest can
+carry a last-session handover built from traces (`SALTMDB_HANDOVER_MAX_CHARS`). These shipped
+without a package-version bump, so the registry above has no dedicated row for them.

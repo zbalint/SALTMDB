@@ -21,7 +21,9 @@
 * **Automated Session Lifecycle Hooks:** Native integration with Claude Code, Google Antigravity CLI, and GitHub Copilot CLI session hooks — context-digest injection at startup, a pre-action memory search gate, pre-compaction memory sweeps, and a stop-time self-critique gate.
 * **Core-Memory Bootstrap Governance:** A scarce, capacity-capped (`≤5` active, `≤2,500` chars each) bootstrap-delivery mechanism for urgent cross-session hazards, distinct from ordinary searchable memory.
 
-The server exposes **19 MCP tools** over stdio. Per this project's own design principle, SALTMDB is meant to be usable from those tool descriptions alone — read them directly from your MCP client rather than a hand-maintained duplicate here (source of truth: `src/saltmdb/mcp/tools.py`).
+* **Conversation-Trace Provenance (opt-in):** With `SALTMDB_TRACE_CAPTURE_ENABLED=true` and the capture hooks registered, each conversation turn's verbatim user prompt, any messages sent mid-turn, and final assistant message are stored, linked to the memories written in that turn, readable by any agent (`search_traces` / `get_trace`) and browsable in the viewer. The next session's bootstrap can carry a last-session handover built from these traces. Off by default; see [`SECURITY.md`](SECURITY.md) for what this stores.
+
+The server exposes **24 MCP tools** over stdio. Per this project's own design principle, SALTMDB is meant to be usable from those tool descriptions alone — read them directly from your MCP client rather than a hand-maintained duplicate here (source of truth: `src/saltmdb/mcp/tools.py`).
 
 See **[docs/architecture.md](docs/architecture.md)** for the full technical detail behind every feature above, including the database schema, the daemon's process model, and the quality-gate/core-governance rules in full.
 
