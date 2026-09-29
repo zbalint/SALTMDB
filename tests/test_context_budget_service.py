@@ -49,7 +49,7 @@ class TestContextBudgetService(unittest.TestCase):
             store_memory(
                 content=content or f"Context budget fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="context-budget-test",
+                agent_id="context-budget-test",
                 db_connection=self.conn,
             )
         )

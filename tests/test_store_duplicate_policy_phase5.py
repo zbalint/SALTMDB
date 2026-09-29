@@ -42,7 +42,7 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         first = store_memory(
             content=self._content(),
             title="Auth policy A",
-            owner_id="agent",
+            agent_id="agent",
             db_connection=self.conn,
         )
         existing_id = first["data"]["id"]
@@ -50,7 +50,7 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         duplicate = store_memory(
             content=self._content(),
             title="Auth policy copy",
-            owner_id="agent",
+            agent_id="agent",
             db_connection=self.conn,
         )
 
@@ -63,13 +63,13 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         store_memory(
             content=self._content(),
             title="Auth policy A",
-            owner_id="agent",
+            agent_id="agent",
             db_connection=self.conn,
         )
         result = store_memory(
             content=self._content(" Access tokens expire after fifteen minutes."),
             title="Auth policy B",
-            owner_id="agent",
+            agent_id="agent",
             db_connection=self.conn,
         )
 
@@ -94,7 +94,7 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         first = store_memory(
             content=self._content(" Explicit identifier."),
             title="Auth policy explicit",
-            owner_id="agent",
+            agent_id="agent",
             entity_id=requested_id,
             db_connection=self.conn,
         )
@@ -103,7 +103,7 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         duplicate = store_memory(
             content=self._content(" Explicit identifier."),
             title="Auth policy duplicate",
-            owner_id="agent",
+            agent_id="agent",
             entity_id=str(uuid.uuid4()),
             db_connection=self.conn,
         )

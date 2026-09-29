@@ -49,7 +49,7 @@ class RetrievalTextTests(unittest.TestCase):
                 "content", "An authoritative body that remains independent from retrieval text."
             ),
             "title": title,
-            "owner_id": "retrieval-owner",
+            "agent_id": "retrieval-owner",
             "db_connection": self.conn,
             "db_path": self.db_path,
         }
@@ -187,7 +187,7 @@ class RetrievalTextTests(unittest.TestCase):
         _persist_retrieval_embedding_if_current(self.conn, snapshot, [1.0] + [0.0] * 383)
         from saltmdb.domain.services.memory_service import archive_memory
 
-        archive_memory(entity_id=entity_id, owner_id="retrieval-owner", db_connection=self.conn)
+        archive_memory(entity_id=entity_id, agent_id="retrieval-owner", db_connection=self.conn)
         self.assertEqual(
             self.conn.execute(
                 "SELECT COUNT(*) FROM retrieval_fts WHERE id=?", (entity_id,)
@@ -306,7 +306,7 @@ class RetrievalTextTests(unittest.TestCase):
             result = store_memory(
                 content="A sufficiently descriptive SQLite-only body for testing.",
                 title="SQLite Only Retrieval",
-                owner_id="sqlite-owner",
+                agent_id="sqlite-owner",
                 retrieval_text="sqlite-only candidate",
                 db_connection=conn,
                 db_path=path,
@@ -315,7 +315,7 @@ class RetrievalTextTests(unittest.TestCase):
             updated = store_memory(
                 content="A sufficiently descriptive SQLite-only body for testing.",
                 title="SQLite Only Retrieval",
-                owner_id="sqlite-owner",
+                agent_id="sqlite-owner",
                 entity_id=entity_id,
                 retrieval_text="updated candidate",
                 db_connection=conn,
@@ -326,7 +326,7 @@ class RetrievalTextTests(unittest.TestCase):
 
             self.assertIn(
                 "successfully archived",
-                archive_memory(entity_id, owner_id="sqlite-owner", db_connection=conn)["data"][
+                archive_memory(entity_id, agent_id="sqlite-owner", db_connection=conn)["data"][
                     "message"
                 ],
             )

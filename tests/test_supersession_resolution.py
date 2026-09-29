@@ -35,13 +35,13 @@ class TestSupersessionChainResolution(unittest.TestCase):
         status: str = "raw",
         updated_at: str = "2026-01-01T00:00:00+00:00",
         created_at: str = "2026-01-01T00:00:00+00:00",
-        owner_id: str = "test_user",
+        agent_id: str = "test_user",
         is_core: bool = False,
         context_id: str = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash, is_core, context_id)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -49,7 +49,7 @@ class TestSupersessionChainResolution(unittest.TestCase):
                 created_at,
                 updated_at,
                 updated_at,
-                owner_id,
+                agent_id,
                 status,
                 entity_id,
                 f"content for {entity_id}",
@@ -286,27 +286,27 @@ class TestSupersessionChainResolution(unittest.TestCase):
     # -- filter re-application --
 
     def test_filter_reapplication_rejects_head_outside_owner_filter(self):
-        self._insert_entity("old", owner_id="alice")
-        self._insert_entity("new", owner_id="bob")
+        self._insert_entity("old", agent_id="alice")
+        self._insert_entity("new", agent_id="bob")
         self._insert_supersedes("new", "old")
-        # Original query's own where_clauses/params restrict to owner_id='alice' -- "new" (owned
+        # Original query's own where_clauses/params restrict to agent_id='alice' -- "new" (owned
         # by bob) must not be substituted in even though the chain walk itself succeeds.
         result = _resolve_supersession_chains(
             self.conn,
             ["old"],
-            ["e.status != 'archived'", "e.owner_id = ?"],
+            ["e.status != 'archived'", "e.agent_id = ?"],
             ["alice"],
         )
         self.assertEqual(result, {})
 
     def test_filter_reapplication_passes_head_matching_owner_filter(self):
-        self._insert_entity("old", owner_id="alice")
-        self._insert_entity("new", owner_id="alice")
+        self._insert_entity("old", agent_id="alice")
+        self._insert_entity("new", agent_id="alice")
         self._insert_supersedes("new", "old")
         result = _resolve_supersession_chains(
             self.conn,
             ["old"],
-            ["e.status != 'archived'", "e.owner_id = ?"],
+            ["e.status != 'archived'", "e.agent_id = ?"],
             ["alice"],
         )
         self.assertEqual(result, {"old": "new"})
@@ -395,7 +395,7 @@ class TestComputeSupersededIdsBitemporal(unittest.TestCase):
     def _insert_entity(self, entity_id: str) -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?)",

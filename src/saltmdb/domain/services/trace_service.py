@@ -42,7 +42,7 @@ def _sweep_abandoned_traces(
     conn,
     *,
     agent_session_id: str | None = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     timeout_seconds: int = 3600,
 ) -> int:
     """Mark pending traces incomplete after session resolution or a safe timeout."""
@@ -53,9 +53,9 @@ def _sweep_abandoned_traces(
     if agent_session_id is not None:
         scope_clauses.append("ct.agent_session_id = ?")
         scope_params.append(agent_session_id)
-    if owner_id is not None:
-        scope_clauses.append("ct.owner_id = ?")
-        scope_params.append(owner_id)
+    if agent_id is not None:
+        scope_clauses.append("ct.agent_id = ?")
+        scope_params.append(agent_id)
     scope_sql = " AND ".join(scope_clauses)
 
     def _write(c) -> int:
@@ -101,7 +101,7 @@ def _append_turn_message(c, trace_id: str, message: str, message_hash: str, now:
 
 def capture_trace_start(
     agent_session_id: str,
-    owner_id: str,
+    agent_id: str,
     harness: Harness,
     harness_session_id: str,
     harness_turn_id: str,
@@ -129,7 +129,7 @@ def capture_trace_start(
             inserted = c.execute(
                 """
                 INSERT INTO conversation_traces
-                    (id, agent_session_id, owner_id, harness, harness_session_id,
+                    (id, agent_session_id, agent_id, harness, harness_session_id,
                      harness_turn_id, status, user_prompt, user_prompt_hash,
                      created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
@@ -138,7 +138,7 @@ def capture_trace_start(
                 (
                     trace_id,
                     agent_session_id,
-                    owner_id,
+                    agent_id,
                     harness,
                     harness_session_id,
                     harness_turn_id,
@@ -174,7 +174,7 @@ def capture_trace_start(
 
 def capture_trace_memory_link(
     agent_session_id: str,
-    owner_id: str,
+    agent_id: str,
     harness_turn_id: str,
     entity_id: str,
     just_run_tool_name: LinkOperation,
@@ -196,9 +196,9 @@ def capture_trace_memory_link(
                 c.execute(
                     """
                     SELECT id FROM conversation_traces
-                    WHERE agent_session_id = ? AND harness_turn_id = ? AND owner_id = ?
+                    WHERE agent_session_id = ? AND harness_turn_id = ? AND agent_id = ?
                     """,
-                    (agent_session_id, harness_turn_id, owner_id),
+                    (agent_session_id, harness_turn_id, agent_id),
                 ).fetchone(),
             )
             if trace_row is None:
@@ -277,7 +277,7 @@ def capture_trace_memory_link(
 
 def capture_trace_complete(
     agent_session_id: str,
-    owner_id: str,
+    agent_id: str,
     harness_turn_id: str,
     final_assistant_message: str,
     db_connection=None,
@@ -293,9 +293,9 @@ def capture_trace_complete(
             trace_row = c.execute(
                 """
                 SELECT id, status FROM conversation_traces
-                WHERE agent_session_id = ? AND harness_turn_id = ? AND owner_id = ?
+                WHERE agent_session_id = ? AND harness_turn_id = ? AND agent_id = ?
                 """,
-                (agent_session_id, harness_turn_id, owner_id),
+                (agent_session_id, harness_turn_id, agent_id),
             ).fetchone()
             if trace_row is None:
                 return None
@@ -307,7 +307,7 @@ def capture_trace_complete(
                 SET status = 'completed', final_assistant_message = ?,
                     final_assistant_message_hash = ?, completed_at = ?, updated_at = ?
                 WHERE agent_session_id = ? AND harness_turn_id = ?
-                  AND owner_id = ? AND status = 'pending'
+                  AND agent_id = ? AND status = 'pending'
                 """,
                 (
                     final_assistant_message,
@@ -316,15 +316,15 @@ def capture_trace_complete(
                     now,
                     agent_session_id,
                     harness_turn_id,
-                    owner_id,
+                    agent_id,
                 ),
             )
             completed_row = c.execute(
                 """
                 SELECT id, status FROM conversation_traces
-                WHERE agent_session_id = ? AND harness_turn_id = ? AND owner_id = ?
+                WHERE agent_session_id = ? AND harness_turn_id = ? AND agent_id = ?
                 """,
-                (agent_session_id, harness_turn_id, owner_id),
+                (agent_session_id, harness_turn_id, agent_id),
             ).fetchone()
             return completed_row, True
 
@@ -391,7 +391,7 @@ def search_traces(
     db_path: str | None = None,
     coordinator=None,
 ) -> dict[str, Any]:
-    """Return bounded trace previews (cross-agent; owner_id is attribution, not a filter)."""
+    """Return bounded trace previews (cross-agent; agent_id is attribution, not a filter)."""
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         _run_read_sweep(conn, coordinator, "search_traces")
@@ -481,13 +481,13 @@ def get_trace(
     db_path: str | None = None,
     coordinator=None,
 ) -> dict[str, Any]:
-    """Return one complete trace and its link metadata (cross-agent; owner_id is attribution)."""
+    """Return one complete trace and its link metadata (cross-agent; agent_id is attribution)."""
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         _run_read_sweep(conn, coordinator, "get_trace")
         row = conn.execute(
             """
-            SELECT id, agent_session_id, owner_id, harness, harness_session_id,
+            SELECT id, agent_session_id, agent_id, harness, harness_session_id,
                    harness_turn_id, status, user_prompt, user_prompt_hash,
                    final_assistant_message, final_assistant_message_hash,
                    capture_error, created_at, updated_at, completed_at
@@ -518,7 +518,7 @@ def get_trace(
             {
                 "id": row[0],
                 "agent_session_id": row[1],
-                "owner_id": row[2],
+                "agent_id": row[2],
                 "harness": row[3],
                 "harness_session_id": row[4],
                 "harness_turn_id": row[5],

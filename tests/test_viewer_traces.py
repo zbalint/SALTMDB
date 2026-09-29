@@ -50,7 +50,7 @@ class TestViewerTraces(unittest.TestCase):
     ):
         self.conn.execute(
             """INSERT INTO conversation_traces
-               (id, agent_session_id, owner_id, harness, harness_session_id, harness_turn_id,
+               (id, agent_session_id, agent_id, harness, harness_session_id, harness_turn_id,
                 status, user_prompt, user_prompt_hash, final_assistant_message,
                 final_assistant_message_hash, created_at, updated_at, completed_at)
                VALUES (?, ?, 'claude', 'claude_code', 'hs', ?, ?, ?, 'h', ?, 'h', ?, ?, ?)""",

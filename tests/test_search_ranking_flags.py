@@ -35,7 +35,7 @@ class TestPart2RankingHelpers(unittest.TestCase):
     def _insert_entity(self, entity_id: str, memory_type: str = "fact") -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash, memory_type)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?, ?)",
@@ -158,7 +158,7 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
     def _insert_entity(self, entity_id: str, memory_type: str = "fact") -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash, memory_type)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?, ?)",
@@ -289,7 +289,7 @@ class TestUseCrossEncoderSeam(unittest.TestCase):
     def _insert_entity(self, entity_id: str, memory_type: str = "fact") -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash, memory_type)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?, ?)",

@@ -19,13 +19,13 @@ class _CaptureBackend:
 class TestPhase3McpSurface(unittest.TestCase):
     def setUp(self):
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.previous_backend = tools._set_backend_for_test(_CaptureBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self.previous_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
 
     def test_tool_count_and_registration(self):
         # Phase 6 removed dismiss_event (19 -> 18); Phase 7 removed ephemeral_memory and
@@ -128,7 +128,7 @@ class TestPhase3McpSurface(unittest.TestCase):
                         "predicate": "related_to",
                         "valid_at": "2026-01-01T00:00:00+00:00",
                         "override_justification": "justification",
-                        "owner_id": "owner",
+                        "agent_id": "owner",
                     },
                     coordinator,
                 ),
@@ -148,7 +148,7 @@ class TestPhase3McpSurface(unittest.TestCase):
             self.assertEqual(
                 dispatch._dispatch_manage_relation(
                     relations=relations,
-                    owner_id="owner",
+                    agent_id="owner",
                     invalidate=False,
                     coordinator=sentinel,
                 ),
@@ -161,7 +161,7 @@ class TestPhase3McpSurface(unittest.TestCase):
             predicate="related_to",
             valid_at="2026-01-01T00:00:00+00:00",
             override_justification="justification",
-            owner_id="owner",
+            agent_id="owner",
             coordinator=coordinator,
         )
         invalidate.assert_called_once_with(
@@ -171,7 +171,7 @@ class TestPhase3McpSurface(unittest.TestCase):
             invalid_at="2026-02-01T00:00:00+00:00",
             coordinator=sentinel,
         )
-        bulk.assert_called_once_with(relations=relations, owner_id="owner", invalidate=False)
+        bulk.assert_called_once_with(relations=relations, agent_id="owner", invalidate=False)
         self.assertEqual(coordinator.submissions, [("tool:manage_relation", "foreground", True)])
 
 

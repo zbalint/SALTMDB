@@ -23,7 +23,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Shor Factorization Algorithm",
             content="Shor algorithm factorizes integers in polynomial time using QFT",
             tags=["#quantum", "#crypto"],
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_quantum",
             db_path=self.db_path,
         )
@@ -33,7 +33,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Grover Database Search",
             content="Grover search algorithm provides quadratic speedup for unorganized datasets",
             tags=["#quantum", "#search"],
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_quantum",
             db_path=self.db_path,
         )
@@ -52,7 +52,7 @@ class TestE2EHybridSearch(unittest.TestCase):
         # Perform hybrid search with include_related=True
         results = search_memory(
             query_keywords="Shor integer factorization QFT",
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_quantum",
             include_related=True,
             db_path=self.db_path,
@@ -74,7 +74,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Co-Resident Partner A",
             content="First half of a co-resident relation pair used to test related_entities visibility",
             tags=["#coresidenttest"],
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_coresident",
             db_path=self.db_path,
         )
@@ -84,7 +84,7 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Co-Resident Partner B",
             content="Second half of a co-resident relation pair used to test related_entities visibility",
             tags=["#coresidenttest"],
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_coresident",
             db_path=self.db_path,
         )
@@ -100,7 +100,7 @@ class TestE2EHybridSearch(unittest.TestCase):
 
         results = search_memory(
             query_keywords="co-resident relation pair related_entities visibility",
-            owner_id="user1",
+            agent_id="user1",
             context_id="ctx_coresident",
             include_related=True,
             db_path=self.db_path,
@@ -123,7 +123,7 @@ class TestE2EHybridSearch(unittest.TestCase):
         store_memory(
             title="Explain Test",
             content="Content for explain mode test",
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
         explain_res = search_memory(

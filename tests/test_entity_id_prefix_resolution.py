@@ -24,7 +24,7 @@ def _store(conn, title, content=None, **kw):
     res = memory_service.store_memory(
         content=content,
         title=title,
-        owner_id="owner_a",
+        agent_id="owner_a",
         db_connection=conn,
         **kw,
     )

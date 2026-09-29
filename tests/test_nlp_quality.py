@@ -24,7 +24,7 @@ class TestTextQualityGate(unittest.TestCase):
     def test_tc_qual_01_short_length_rejection(self):
         """TC-QUAL-01: Short string ('ok done') -> REJECT"""
         res = memory_service.store_memory(
-            content="ok done", title="Short Fluff", owner_id="test_owner"
+            content="ok done", title="Short Fluff", agent_id="test_owner"
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "SHORT_LENGTH")
@@ -32,7 +32,7 @@ class TestTextQualityGate(unittest.TestCase):
     def test_tc_qual_02_fluff_regex_rejection(self):
         """TC-QUAL-02: Conversational fluff response -> REJECT"""
         res = memory_service.store_memory(
-            content="modified the file.", title="Conversational Ack", owner_id="test_owner"
+            content="modified the file.", title="Conversational Ack", agent_id="test_owner"
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(
@@ -44,7 +44,7 @@ class TestTextQualityGate(unittest.TestCase):
         """TC-QUAL-03: Repetitive string (Entropy < 2.5) -> REJECT"""
         repetitive_content = "test test test test test test test test test test test test test test"
         res = memory_service.store_memory(
-            content=repetitive_content, title="Repetitive Loop", owner_id="test_owner"
+            content=repetitive_content, title="Repetitive Loop", agent_id="test_owner"
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "EXTREME_GENERATION_LOOP")
@@ -97,7 +97,7 @@ class TestTextQualityGate(unittest.TestCase):
         first_store = memory_service.store_memory(
             content=valid_markdown,
             title="Quality Gate Arch",
-            owner_id="agent_alpha",
+            agent_id="agent_alpha",
             db_connection=self.conn,
         )
         self.assertEqual(first_store["status"], "ok")
@@ -105,7 +105,7 @@ class TestTextQualityGate(unittest.TestCase):
         second_store = memory_service.store_memory(
             content=valid_markdown,
             title="Quality Gate Arch Duplicate",
-            owner_id="agent_alpha",
+            agent_id="agent_alpha",
             db_connection=self.conn,
         )
         self.assertEqual(second_store["status"], "rejected")
@@ -127,7 +127,7 @@ class TestTextQualityGate(unittest.TestCase):
         res = memory_service.store_memory(
             content=tech_markdown,
             title="Technical Implementation Plan",
-            owner_id="agent_alpha",
+            agent_id="agent_alpha",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")

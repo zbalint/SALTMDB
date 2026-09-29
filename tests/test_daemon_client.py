@@ -114,7 +114,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
         session._auth_token = None
         session._agent_session_id = None
         session._cwd = None
-        session._owner_id = None
+        session._agent_id = None
         return session
 
     def test_restart_reconnect_does_not_send_definitive_goodbye(self):

@@ -71,8 +71,8 @@ DOMAIN_TRIPLETS = [
             "level, which permits dirty reads entirely."
         ),
         "related_theme": (
-            "A composite B-tree index on (owner_id, created_at) lets the query planner satisfy "
-            "both an equality filter on owner_id and a range/ORDER BY on created_at using a single "
+            "A composite B-tree index on (agent_id, created_at) lets the query planner satisfy "
+            "both an equality filter on agent_id and a range/ORDER BY on created_at using a single "
             "index scan, avoiding a separate sort step. Column order in a composite index matters: "
             "putting the range-filtered column first would force the planner to scan a much wider "
             "slice of the index before applying the equality filter."

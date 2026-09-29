@@ -51,14 +51,14 @@ class TestRetrieveContextService(unittest.TestCase):
         title: str,
         content: str | None = None,
         *,
-        owner_id: str = "retrieve-context-test",
+        agent_id: str = "retrieve-context-test",
         memory_type: Literal["fact", "event", "procedure", "decision", "preference"] = "fact",
     ) -> str:
         return _memory_id(
             store_memory(
                 content=content or f"Retrieve context fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id=owner_id,
+                agent_id=agent_id,
                 memory_type=memory_type,
                 db_connection=self.conn,
             )
@@ -108,12 +108,14 @@ class TestRetrieveContextService(unittest.TestCase):
 
     def _real_primary_hits(self, query: str, limit: int) -> list[dict[str, Any]]:
         result = memory_service.search_memory(
-            owner_id="retrieve-context-test",
+            agent_id="retrieve-context-test",
             query_keywords=query,
             limit=limit,
             mode="strict",
             include_related=False,
             db_connection=self.conn,
+            # semantic_search opens its own connection: point it at this test's DB, not the live one.
+            db_path=self.db_path,
         )
         if not isinstance(result, list):
             self.fail(f"search fixture failed: {result}")

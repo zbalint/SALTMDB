@@ -58,7 +58,7 @@ def record_call(
     param_names: list[str],
     status: str,
     latency_ms: float,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     error_code: str | None = None,
     db_connection=None,
     db_path: str = None,
@@ -77,7 +77,7 @@ def record_call(
             str(uuid.uuid4()),
             datetime.now(UTC).isoformat(),
             tool_name,
-            owner_id,
+            agent_id,
             json.dumps(sorted(param_names or [])),
             status,
             error_code,
@@ -88,7 +88,7 @@ def record_call(
             c.execute(
                 """
                 INSERT INTO tool_call_telemetry
-                    (id, timestamp, tool_name, owner_id, param_names, status, error_code, latency_ms)
+                    (id, timestamp, tool_name, agent_id, param_names, status, error_code, latency_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 row,

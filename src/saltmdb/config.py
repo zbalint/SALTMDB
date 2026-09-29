@@ -1,32 +1,50 @@
+import logging
 import os
 import re
 
 __version__ = "0.1.0-alpha.104"
 
-_OWNER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+logger = logging.getLogger(__name__)
+
+_AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
-def validate_owner_id(owner_id: str) -> str:
+def validate_agent_id(agent_id: str) -> str:
     """Validate and return one deployment-configured adapter identity.
 
-    The MCP adapter has one immutable owner for its entire process lifetime.  Keeping the
-    validation primitive separate from :func:`get_owner_id` lets startup wiring and isolated
+    The MCP adapter has one immutable agent identity for its entire process lifetime.  Keeping the
+    validation primitive separate from :func:`get_agent_id` lets startup wiring and isolated
     tests use the exact same contract without reintroducing a tool-call identity binding path.
     """
-    if not isinstance(owner_id, str):
-        owner_id = ""
-    owner_id = owner_id.strip()
-    if not _OWNER_ID_RE.fullmatch(owner_id):
+    if not isinstance(agent_id, str):
+        agent_id = ""
+    agent_id = agent_id.strip()
+    if not _AGENT_ID_RE.fullmatch(agent_id):
         raise RuntimeError(
-            "SALTMDB_OWNER_ID is required and must match ^[a-z][a-z0-9_-]{0,63}$. "
+            "SALTMDB_AGENT_ID is required and must match ^[a-z][a-z0-9_-]{0,63}$. "
             "Configure it in the MCP server environment before starting SALTMDB."
         )
-    return owner_id
+    return agent_id
 
 
-def get_owner_id() -> str:
-    """Return the required, deployment-configured adapter identity."""
-    return validate_owner_id(os.environ.get("SALTMDB_OWNER_ID", ""))
+def get_agent_id() -> str:
+    """Return the required, deployment-configured adapter identity.
+
+    ``SALTMDB_AGENT_ID`` wins; ``SALTMDB_OWNER_ID`` (its former name) is accepted with a warning.
+    """
+    new_value = os.environ.get("SALTMDB_AGENT_ID", "").strip()
+    # shortcut: SALTMDB_OWNER_ID fallback kept so existing harness configs keep working; remove one release after every config is migrated
+    old_value = os.environ.get("SALTMDB_OWNER_ID", "").strip()
+    if new_value:
+        if old_value and old_value != new_value:
+            logger.warning(
+                "Both SALTMDB_AGENT_ID and SALTMDB_OWNER_ID are set and differ; SALTMDB_AGENT_ID wins."
+            )
+        return validate_agent_id(new_value)
+    if old_value:
+        logger.warning("SALTMDB_OWNER_ID is deprecated; use SALTMDB_AGENT_ID instead.")
+        return validate_agent_id(old_value)
+    return validate_agent_id("")
 
 
 def get_db_path() -> str:

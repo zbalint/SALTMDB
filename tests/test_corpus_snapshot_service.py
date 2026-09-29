@@ -22,7 +22,7 @@ def _insert_entity(
     *,
     status: str = "raw",
     title: str | None = None,
-    owner_id: str = "snapshot-owner",
+    agent_id: str = "snapshot-owner",
     scope: str = "private",
 ) -> None:
     value = title or f"Title {entity_id}"
@@ -31,7 +31,7 @@ def _insert_entity(
         lambda c: c.execute(
             """
             INSERT INTO entities (
-                id, created_at, updated_at, last_accessed_at, owner_id, scope, status,
+                id, created_at, updated_at, last_accessed_at, agent_id, scope, status,
                 title, full_content, content_hash, metadata, context_id, memory_type
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -40,7 +40,7 @@ def _insert_entity(
                 "2026-08-12T00:00:00+00:00",
                 "2026-08-12T00:00:00+00:00",
                 "2026-08-12T00:00:00+00:00",
-                owner_id,
+                agent_id,
                 scope,
                 status,
                 value,
@@ -69,7 +69,7 @@ def snapshot_db(tmp_path: Path):
 
 def test_snapshot_pages_are_keyset_ordered_and_provenance_bound(snapshot_db):
     path, conn = snapshot_db
-    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
+    first = export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=1, db_connection=conn)
 
     assert [entity["id"] for entity in first["entities"]] == ["entity-a"]
     assert first["next_cursor"] == "entity-a"
@@ -83,7 +83,7 @@ def test_snapshot_pages_are_keyset_ordered_and_provenance_bound(snapshot_db):
     assert first["entities"][0]["source_hash"] == "source-entity-a"
 
     second = export_corpus_snapshot_page(
-        owner_id="snapshot-owner",
+        agent_id="snapshot-owner",
         page_size=1,
         cursor=first["next_cursor"],
         snapshot_hash=first["snapshot_hash"],
@@ -99,10 +99,10 @@ def test_snapshot_pages_are_keyset_ordered_and_provenance_bound(snapshot_db):
 def test_snapshot_can_include_archived_entities_without_mixing_modes(snapshot_db):
     _, conn = snapshot_db
     active = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=10, db_connection=conn
+        agent_id="snapshot-owner", page_size=10, db_connection=conn
     )
     all_rows = export_corpus_snapshot_page(
-        owner_id="snapshot-owner", page_size=10, include_archived=True, db_connection=conn
+        agent_id="snapshot-owner", page_size=10, include_archived=True, db_connection=conn
     )
 
     assert [entity["id"] for entity in active["entities"]] == ["entity-a", "entity-b"]
@@ -116,32 +116,32 @@ def test_snapshot_can_include_archived_entities_without_mixing_modes(snapshot_db
 
 def test_snapshot_scopes_private_entities_to_owner_but_includes_shared_entities(snapshot_db):
     _, conn = snapshot_db
-    _insert_entity(conn, "other-private", owner_id="other-owner", scope="private")
-    _insert_entity(conn, "other-shared", owner_id="other-owner", scope="shared")
+    _insert_entity(conn, "other-private", agent_id="other-owner", scope="private")
+    _insert_entity(conn, "other-shared", agent_id="other-owner", scope="shared")
 
-    page = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=20, db_connection=conn)
+    page = export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=20, db_connection=conn)
 
     assert [entity["id"] for entity in page["entities"]] == [
         "entity-a",
         "entity-b",
         "other-shared",
     ]
-    assert page["owner_id"] == "snapshot-owner"
-    assert page["provenance"]["owner_id"] == "snapshot-owner"
+    assert page["agent_id"] == "snapshot-owner"
+    assert page["provenance"]["agent_id"] == "snapshot-owner"
 
 
-def test_snapshot_requires_owner_id(snapshot_db):
+def test_snapshot_requires_agent_id(snapshot_db):
     _, conn = snapshot_db
-    with pytest.raises(CorpusSnapshotError, match="owner_id is mandatory"):
+    with pytest.raises(CorpusSnapshotError, match="agent_id is mandatory"):
         export_corpus_snapshot_page(db_connection=conn)
-    with pytest.raises(CorpusSnapshotError, match="owner_id is mandatory"):
-        export_corpus_snapshot_page(owner_id="", db_connection=conn)
+    with pytest.raises(CorpusSnapshotError, match="agent_id is mandatory"):
+        export_corpus_snapshot_page(agent_id="", db_connection=conn)
 
 
 def test_snapshot_exports_current_supersedes_edges_only_between_visible_entities(snapshot_db):
     _, conn = snapshot_db
-    _insert_entity(conn, "other-private", owner_id="other-owner", scope="private")
-    _insert_entity(conn, "other-shared", owner_id="other-owner", scope="shared")
+    _insert_entity(conn, "other-private", agent_id="other-owner", scope="private")
+    _insert_entity(conn, "other-shared", agent_id="other-owner", scope="shared")
     write_transaction_retrying(
         conn,
         lambda c: c.executemany(
@@ -166,7 +166,7 @@ def test_snapshot_exports_current_supersedes_edges_only_between_visible_entities
         ),
     )
 
-    page = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=20, db_connection=conn)
+    page = export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=20, db_connection=conn)
 
     assert [edge["id"] for edge in page["supersedes_edges"]] == ["rel-visible"]
     assert page["relations"] == page["supersedes_edges"]
@@ -177,12 +177,12 @@ def test_snapshot_exports_current_supersedes_edges_only_between_visible_entities
 
 def test_snapshot_fails_closed_when_corpus_changes_between_pages(snapshot_db):
     _, conn = snapshot_db
-    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
+    first = export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=1, db_connection=conn)
     _insert_entity(conn, "entity-c")
 
     with pytest.raises(SnapshotChangedError, match="changed"):
         export_corpus_snapshot_page(
-            owner_id="snapshot-owner",
+            agent_id="snapshot-owner",
             page_size=1,
             cursor=first["next_cursor"],
             snapshot_hash=first["snapshot_hash"],
@@ -192,7 +192,7 @@ def test_snapshot_fails_closed_when_corpus_changes_between_pages(snapshot_db):
 
 def test_iter_pages_enforces_provenance_between_calls(snapshot_db):
     path, conn = snapshot_db
-    pages = iter_corpus_snapshot_pages(owner_id="snapshot-owner", page_size=1, db_connection=conn)
+    pages = iter_corpus_snapshot_pages(agent_id="snapshot-owner", page_size=1, db_connection=conn)
     first = next(pages)
     external = get_connection(str(path))
     try:
@@ -207,7 +207,7 @@ def test_iter_pages_enforces_provenance_between_calls(snapshot_db):
 
 def test_schema_change_is_detected_between_pages(snapshot_db):
     _, conn = snapshot_db
-    first = export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
+    first = export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=1, db_connection=conn)
     write_transaction_retrying(
         conn,
         lambda c: c.execute("ALTER TABLE entities ADD COLUMN snapshot_test_marker TEXT"),
@@ -215,7 +215,7 @@ def test_schema_change_is_detected_between_pages(snapshot_db):
 
     with pytest.raises(SnapshotChangedError, match="changed"):
         export_corpus_snapshot_page(
-            owner_id="snapshot-owner",
+            agent_id="snapshot-owner",
             page_size=1,
             cursor=first["next_cursor"],
             snapshot_hash=first["snapshot_hash"],
@@ -227,14 +227,14 @@ def test_snapshot_rejects_open_transactions_and_invalid_page_requests(snapshot_d
     _, conn = snapshot_db
     conn.execute("BEGIN")
     with pytest.raises(CorpusSnapshotError, match="open transaction"):
-        export_corpus_snapshot_page(owner_id="snapshot-owner", db_connection=conn)
+        export_corpus_snapshot_page(agent_id="snapshot-owner", db_connection=conn)
     conn.execute("ROLLBACK")
 
     with pytest.raises(CorpusSnapshotError, match="between 1"):
-        export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=0, db_connection=conn)
+        export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=0, db_connection=conn)
     with pytest.raises(CorpusSnapshotError, match="lowercase SHA-256"):
         export_corpus_snapshot_page(
-            owner_id="snapshot-owner", snapshot_hash="not-a-hash", db_connection=conn
+            agent_id="snapshot-owner", snapshot_hash="not-a-hash", db_connection=conn
         )
 
 
@@ -243,7 +243,7 @@ def test_snapshot_read_transaction_has_no_write_statements(snapshot_db):
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
     try:
-        export_corpus_snapshot_page(owner_id="snapshot-owner", page_size=1, db_connection=conn)
+        export_corpus_snapshot_page(agent_id="snapshot-owner", page_size=1, db_connection=conn)
     finally:
         conn.set_trace_callback(None)
 

@@ -102,7 +102,7 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                         "generation_depth": node.get("generation_depth", depth),
                         "title": node.get("title"),
                         "status": node.get("status"),
-                        "owner_id": node.get("owner_id"),
+                        "agent_id": node.get("agent_id"),
                         "updated_at": node.get("updated_at"),
                         "direction": node.get("direction", direction),
                     }
@@ -128,7 +128,7 @@ class EntityDetailMixin(ViewerHandlerProtocol):
             conn = self.get_db_connection()
             cursor = conn.execute(
                 """
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, memory_type, quality_score, quality_status, quality_flags, agent_session_id, last_touched_session_id
+                SELECT id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, project_id, context_id, embedding_status, memory_type, quality_score, quality_status, quality_flags, agent_session_id, last_touched_session_id
                 FROM entities WHERE id = ?
             """,
                 (entity_id,),
@@ -206,7 +206,7 @@ class EntityDetailMixin(ViewerHandlerProtocol):
                 "created_at": row[1],
                 "updated_at": row[2],
                 "last_accessed_at": row[3],
-                "owner_id": row[4],
+                "agent_id": row[4],
                 "scope": row[5],
                 "is_core": bool(row[6]),
                 "weight": row[7],

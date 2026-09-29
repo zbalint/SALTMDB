@@ -142,7 +142,7 @@ class TestGetMemory(unittest.TestCase):
 
     def test_store_memory_effective_block_reports_session_id_and_get_memory_round_trips_it(self):
         # Regression test: store_memory's response already reports back the effective
-        # owner_id/context_id/scope/memory_type a write actually used -- agent_session_id was
+        # agent_id/context_id/scope/memory_type a write actually used -- agent_session_id was
         # stamped on the entities row correctly but never surfaced in that same effective
         # block, so a caller had no way to learn *which* session id to later look for. This
         # confirms both halves: the write response reports it, and get_memory reads the same
@@ -151,7 +151,7 @@ class TestGetMemory(unittest.TestCase):
             title="[Session] Effective-block probe",
             content="Confirms agent_session_id round-trips through store_memory's effective block.",
             tags=["#session-id"],
-            owner_id="agent_qa",
+            agent_id="agent_qa",
             agent_session_id="session-effective-cccc",
             db_connection=self.conn,
         )

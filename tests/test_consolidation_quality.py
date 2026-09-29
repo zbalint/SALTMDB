@@ -27,13 +27,13 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Raw Fact Alpha",
             content="Detailed raw fact content alpha for consolidation testing",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Beta",
             content="Detailed raw fact content beta for consolidation testing",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -41,7 +41,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidation Test",
             content="consolidated these files.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("Error: Consolidation quality check rejected", res)
@@ -57,14 +57,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Memory Arch Spec Note",
             content=parent_content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
         p2 = store_memory(
             title="Memory Arch Spec Support",
             content="A second raw architecture fact used only as a consolidation parent.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -73,7 +73,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Memory Arch Spec",
             content=parent_content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification="test override to isolate parent exclusion from cohesion",
         )
@@ -89,20 +89,20 @@ class TestConsolidationQualityGate(unittest.TestCase):
         store_memory(
             title="Unrelated Module",
             content=existing_markdown,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
 
         p1 = store_memory(
             title="Raw Fact Gamma",
             content="Detailed raw fact content gamma for consolidation testing",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Gamma Support",
             content="Supporting raw fact content gamma for consolidation testing.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -111,7 +111,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Attempt",
             content=existing_markdown,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("REJECT_EXACT_DUPLICATE", res)
@@ -121,13 +121,13 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Raw Fact Delta",
             content="Detailed raw fact content delta for consolidation testing",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Delta Support",
             content="Supporting raw fact content delta for consolidation testing.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -146,7 +146,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Overview",
             content=consolidated_md,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)

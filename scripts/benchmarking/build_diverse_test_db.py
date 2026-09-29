@@ -436,9 +436,9 @@ def write_checkpoint(checkpoint_path: Path, state: CheckpointState) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def check_embedding_completion(conn: sqlite3.Connection, owner_id: str) -> dict:
+def check_embedding_completion(conn: sqlite3.Connection, agent_id: str) -> dict:
     """Both checks must be fully clean for corpus_embedding_complete=True:
-      - entities.embedding_status counts for owner_id -- any pending/NULL/failed row fails.
+      - entities.embedding_status counts for agent_id -- any pending/NULL/failed row fails.
       - entity_chunk_embeddings freshness (content_hash-matched, not a status column) -- any
         non-archived entity missing a fresh chunk row fails.
     Never reports ready when it isn't.
@@ -457,8 +457,8 @@ def check_embedding_completion(conn: sqlite3.Connection, owner_id: str) -> dict:
 
     status_rows = conn.execute(
         "SELECT embedding_status, COUNT(*) FROM entities "
-        "WHERE owner_id = ? AND status != 'archived' GROUP BY embedding_status",
-        (owner_id,),
+        "WHERE agent_id = ? AND status != 'archived' GROUP BY embedding_status",
+        (agent_id,),
     ).fetchall()
     status_counts: dict[str, int] = {}
     for status, count in status_rows:
@@ -466,15 +466,15 @@ def check_embedding_completion(conn: sqlite3.Connection, owner_id: str) -> dict:
     entity_level_ready = set(status_counts.keys()) <= {"ready"} and status_counts
 
     total_active = conn.execute(
-        "SELECT COUNT(*) FROM entities WHERE owner_id = ? AND status != 'archived'", (owner_id,)
+        "SELECT COUNT(*) FROM entities WHERE agent_id = ? AND status != 'archived'", (agent_id,)
     ).fetchone()[0]
     fresh_chunk_entities = conn.execute(
         """
         SELECT COUNT(DISTINCT e.id) FROM entities e
         JOIN entity_chunk_embeddings c ON c.entity_id = e.id AND c.content_hash IS e.content_hash
-        WHERE e.owner_id = ? AND e.status != 'archived'
+        WHERE e.agent_id = ? AND e.status != 'archived'
         """,
-        (owner_id,),
+        (agent_id,),
     ).fetchone()[0]
     chunk_stale_count = total_active - fresh_chunk_entities
     chunk_level_ready = total_active > 0 and chunk_stale_count == 0
@@ -493,7 +493,7 @@ def check_embedding_completion(conn: sqlite3.Connection, owner_id: str) -> dict:
 # Main ingestion loop
 # --------------------------------------------------------------------------------------------
 
-OWNER_ID = "benchmark_corpus"
+AGENT_ID = "benchmark_corpus"
 
 
 def run_ingestion(  # noqa: C901, PLR0912, PLR0915
@@ -553,7 +553,7 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
                     tags = ["benchmark-corpus", dataset.replace("_", "-")]
                     result = memory_service.store_memory(
                         content=doc.body,
-                        owner_id=OWNER_ID,
+                        agent_id=AGENT_ID,
                         scope="shared",
                         title=title,
                         tags=tags,
@@ -605,7 +605,7 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
             max_workers=2, thread_name_prefix="saltmdb-embed"
         )
 
-        embedding_check = check_embedding_completion(conn, OWNER_ID)
+        embedding_check = check_embedding_completion(conn, AGENT_ID)
 
         run_scoped_count = conn.execute(
             "SELECT COUNT(*) FROM events e WHERE e.type = 'supersession_candidate' "
@@ -616,13 +616,13 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
             """
             SELECT COUNT(*) FROM events e
             JOIN entities en ON json_extract(e.content, '$.new_entity_id') = en.id
-            WHERE e.type = 'supersession_candidate' AND en.owner_id = ?
+            WHERE e.type = 'supersession_candidate' AND en.agent_id = ?
             """,
-            (OWNER_ID,),
+            (AGENT_ID,),
         ).fetchone()[0]
 
         archived_count = conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE owner_id = ? AND status = 'archived'", (OWNER_ID,)
+            "SELECT COUNT(*) FROM entities WHERE agent_id = ? AND status = 'archived'", (AGENT_ID,)
         ).fetchone()[0]
         total_entity_count = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
 

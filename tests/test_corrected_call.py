@@ -5,10 +5,10 @@ from _test_helpers import assert_corrected_call_complete
 
 
 def _example_tool(
-    title: str, content: str, tags: list, owner_id: str = None, scope: str = "shared"
+    title: str, content: str, tags: list, agent_id: str = None, scope: str = "shared"
 ):
     """Stand-in for a Phase-2-shaped @mcp.tool() function: required title/content/tags, optional
-    owner_id/scope. Never called -- only its signature is introspected."""
+    agent_id/scope. Never called -- only its signature is introspected."""
     raise NotImplementedError
 
 
@@ -27,9 +27,9 @@ class TestBuildCorrectedCall(unittest.TestCase):
         self.assertNotIn("bogus_alias", corrected)
 
     def test_none_values_omitted(self):
-        submitted = {"title": "T", "content": "c", "tags": ["#x"], "owner_id": None}
+        submitted = {"title": "T", "content": "c", "tags": ["#x"], "agent_id": None}
         corrected = build_corrected_call(_example_tool, submitted, {})
-        self.assertNotIn("owner_id", corrected)
+        self.assertNotIn("agent_id", corrected)
 
     def test_required_field_supplied_only_by_fix(self):
         submitted = {"content": "c", "tags": ["#x"]}

@@ -251,7 +251,7 @@ def _dispatch_store_memory(**kw):
     return memory_service.store_memory(
         content=kw.get("content"),
         tags=kw.get("tags"),
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         scope=scope,
         weight=weight,
         is_core=kw.get("is_core"),
@@ -301,7 +301,7 @@ def _dispatch_search_memory(**kw):
     except _DispatchValidationError as exc:
         return exc.payload
     return memory_service.search_memory(
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         query_keywords=kw.get("query_keywords"),
         tags_filter=kw.get("tags_filter"),
         metadata_filter=kw.get("metadata_filter"),
@@ -342,10 +342,10 @@ def _dispatch_get_memory(**kw):
     if include_trace_provenance:
         return memory_service.get_memory(
             entity_id=entity_id,
-            owner_id=kw.get("owner_id"),
+            agent_id=kw.get("agent_id"),
             include_trace_provenance=True,
         )
-    return memory_service.get_memory(entity_id=entity_id, owner_id=kw.get("owner_id"))
+    return memory_service.get_memory(entity_id=entity_id, agent_id=kw.get("agent_id"))
 
 
 def _dispatch_inspect_memory(**kw):
@@ -353,7 +353,7 @@ def _dispatch_inspect_memory(**kw):
         entity_id = _required_str(kw, "entity_id")
     except _DispatchValidationError as exc:
         return exc.payload
-    return memory_service.inspect_memory(entity_id=entity_id, owner_id=kw.get("owner_id"))
+    return memory_service.inspect_memory(entity_id=entity_id, agent_id=kw.get("agent_id"))
 
 
 def _dispatch_archive_memory(**kw):
@@ -373,9 +373,9 @@ def _dispatch_archive_memory(**kw):
 
     elif mode == "single":
         return memory_service.archive_memory(
-            entity_id=kw.get("entity_id"), owner_id=kw.get("owner_id")
+            entity_id=kw.get("entity_id"), agent_id=kw.get("agent_id")
         )
-    return memory_service.archive_memory(entity_id=None, owner_id=kw.get("owner_id"))
+    return memory_service.archive_memory(entity_id=None, agent_id=kw.get("agent_id"))
 
 
 def _dispatch_manage_relation(**kw):
@@ -386,7 +386,7 @@ def _dispatch_manage_relation(**kw):
             return exc.payload
         return relation_service.bulk_store_relations(
             relations=relations,
-            owner_id=kw.get("owner_id"),
+            agent_id=kw.get("agent_id"),
             invalidate=bool(kw.get("invalidate")),
         )
     if kw.get("invalidate"):
@@ -403,7 +403,7 @@ def _dispatch_manage_relation(**kw):
         predicate=kw.get("predicate"),
         valid_at=kw.get("valid_at"),
         override_justification=kw.get("override_justification"),
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         coordinator=kw.get("coordinator"),
     )
 
@@ -431,7 +431,7 @@ def _dispatch_replacement(**kw):
         content=kw["content"],
         tags=tags,
         reason=kw["reason"],
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         context_id=kw.get("context_id"),
         scope=kw.get("scope"),
         memory_type=kw.get("memory_type"),
@@ -464,7 +464,7 @@ def _dispatch_consolidate_memories(**kw):
             return exc.payload
         return bulk(
             consolidations=consolidations,
-            owner_id=kw.get("owner_id"),
+            agent_id=kw.get("agent_id"),
             context_id=kw.get("context_id"),
             agent_session_id=kw.get("agent_session_id"),
         )
@@ -485,7 +485,7 @@ def _dispatch_consolidate_memories(**kw):
         tags=kw.get("tags"),
         scope=scope,
         weight=weight,
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         context_id=kw.get("context_id"),
         agent_session_id=kw.get("agent_session_id"),
         override_justification=kw.get("override_justification"),
@@ -510,7 +510,7 @@ def _dispatch_review_core_memory(**kw):
         entity_id = _required_str(kw, "entity_id")
         outcome = _required_str(kw, "outcome")
         review_rationale = _required_str(kw, "review_rationale")
-        owner_id = _required_str(kw, "owner_id")
+        agent_id = _required_str(kw, "agent_id")
     except _DispatchValidationError as exc:
         return exc.payload
     from saltmdb.config import get_db_path
@@ -522,7 +522,7 @@ def _dispatch_review_core_memory(**kw):
         entity_id=entity_id,
         outcome=outcome,
         review_rationale=review_rationale,
-        owner_id=owner_id,
+        agent_id=agent_id,
         core_review_after=kw.get("core_review_after"),
     )
 
@@ -535,7 +535,7 @@ def _dispatch_update_memory_metadata(**kw):
     return memory_service.update_memory_metadata(
         entity_id=entity_id,
         metadata=kw.get("metadata"),
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
         agent_session_id=kw.get("agent_session_id"),
     )
 
@@ -569,7 +569,7 @@ def _dispatch_get_lineage(**kw):
         entity_id=entity_id,
         direction=direction,
         max_depth=max_depth,
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
     )
 
 
@@ -582,7 +582,7 @@ def _dispatch_get_related_memories(**kw):
             "entity_id": entity_id,
             "max_depth": max_depth,
             "direction": direction,
-            "owner_id": kw.get("owner_id"),
+            "agent_id": kw.get("agent_id"),
         }
         include_inspect = False
         if "include_inspect" in kw:
@@ -598,7 +598,7 @@ def _dispatch_get_related_memories(**kw):
         max_depth=max_depth,
         direction=direction,
         include_inspect=include_inspect,
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
     )
 
 
@@ -640,7 +640,7 @@ def _dispatch_retrieve_context(**kw):
             query=query,
             budget_tokens=budget_tokens,
             strategy="global",
-            owner_id=kw.get("owner_id"),
+            agent_id=kw.get("agent_id"),
         )
     entity_ids = kw.get("entity_ids")
     entity_ids_invalid = (
@@ -661,7 +661,7 @@ def _dispatch_retrieve_context(**kw):
         entity_ids=entity_ids,
         budget_tokens=budget_tokens,
         strategy="local",
-        owner_id=kw.get("owner_id"),
+        agent_id=kw.get("agent_id"),
     )
 
 
@@ -750,7 +750,10 @@ def dispatch_tool(tool: str, kwargs: dict, coordinator):
     finally:
         status, error_code = telemetry_service.classify_result(result, raised)
         latency_ms = timer.elapsed_ms()
-        owner_id = kwargs.get("owner_id") if isinstance(kwargs, dict) else None
+        # get_events' agent_id is a read filter, not the caller -- record no caller for it.
+        agent_id = (
+            kwargs.get("agent_id") if isinstance(kwargs, dict) and tool != "get_events" else None
+        )
         param_names = list(kwargs.keys()) if isinstance(kwargs, dict) else []
         try:
             coordinator.submit(
@@ -760,7 +763,7 @@ def dispatch_tool(tool: str, kwargs: dict, coordinator):
                     param_names,
                     status,
                     latency_ms,
-                    owner_id=owner_id,
+                    agent_id=agent_id,
                     error_code=error_code,
                     db_connection=conn,
                 ),

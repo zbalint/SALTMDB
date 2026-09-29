@@ -23,7 +23,7 @@ class TestEmbeddingTrigger(unittest.TestCase):
         res = store_memory(
             title="Async Embedding Test Memory",
             content="Content for testing async background embedding generation worker pool",
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
         entity_id = res["data"]["id"]

@@ -29,7 +29,7 @@ FEED_PREVIEW_CHARS = 200
 _FEED_SQL = """
     SELECT kind, id, ts, sid, actor, title, preview, status FROM (
         SELECT 'memory' AS kind, id, created_at AS ts, agent_session_id AS sid,
-               owner_id AS actor, title, substr(full_content, 1, ?) AS preview, status,
+               agent_id AS actor, title, substr(full_content, 1, ?) AS preview, status,
                last_touched_session_id AS touched_sid
         FROM entities WHERE status != 'archived'
         UNION ALL
@@ -37,7 +37,7 @@ _FEED_SQL = """
                substr(content, 1, ?), error_code, NULL
         FROM events
         UNION ALL
-        SELECT 'trace', id, updated_at, agent_session_id, owner_id, harness,
+        SELECT 'trace', id, updated_at, agent_session_id, agent_id, harness,
                substr(user_prompt, 1, ?), status, NULL
         FROM conversation_traces
     )

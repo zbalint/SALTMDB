@@ -58,7 +58,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             core_reason="Test fixture core reason for consolidation-governance regression coverage.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
@@ -71,7 +71,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -87,7 +87,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Fact Parent",
             content="An ordinary non-core fact used alongside the core rule.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -95,7 +95,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Consolidated Core+Plain",
             content="Synthesized content merging the core rule with the plain fact.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification="pre-existing test fixture, not exercising the cohesion gate",
         )
@@ -114,13 +114,13 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         p1 = store_memory(
             title="Plain Fact One",
             content="An ordinary non-core fact, part one.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
         p2 = store_memory(
             title="Plain Fact Two",
             content="An ordinary non-core fact, part two.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -128,7 +128,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Plain",
             content="Synthesized content merging two plain, non-core facts.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
@@ -143,7 +143,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Explicit Core Partner",
             content="An ordinary partner for the explicit core lifecycle test.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -151,7 +151,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation Missing Fields",
             content="Synthesized content that tries to stay core without a reason/exit condition.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             db_connection=self.conn,
             override_justification="test override to isolate explicit core lifecycle validation",
@@ -162,7 +162,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation With Fields",
             content="Synthesized content that stays core with a complete lifecycle declaration.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             core_reason="Test fixture core reason for the explicit-is_core consolidation test.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
@@ -181,7 +181,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Demotion Partner",
             content="An ordinary partner for the explicit core demotion test.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )["data"]["id"]
 
@@ -189,7 +189,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Deliberately Demoted Consolidation",
             content="Synthesized content where the caller explicitly demotes core status.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=False,
             db_connection=self.conn,
             override_justification="test override to isolate explicit core demotion validation",
@@ -270,7 +270,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             core_reason="Test fixture core reason for consolidation-overdue regression coverage.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
@@ -283,7 +283,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -314,7 +314,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[parent_id],
             title="Single Parent Core Consolidation While Overdue",
             content="Synthesized single-parent content that tries to become core while overdue.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             db_connection=self.conn,
             **self._core_reason_kwargs(),
@@ -341,7 +341,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Multi Parent Core Consolidation While Overdue",
             content="Synthesized multi-parent content that tries to become core while overdue.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             override_justification="pre-existing test fixture, not exercising the cohesion gate",
             db_connection=self.conn,
@@ -389,7 +389,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Demote Overdue Parent Via Consolidation",
             content="Synthesized content where the overdue parent becomes a plain memory.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=False,
             db_connection=self.conn,
             override_justification="test override to isolate overdue demotion behavior",
@@ -417,7 +417,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Sole Overdue Parent Rejected",
             content="Synthesized content that must not be allowed to replace the sole overdue parent.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             db_connection=self.conn,
             **self._core_reason_kwargs(),
@@ -455,7 +455,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             entity_id=overdue_id,
             outcome="retain",
             review_rationale="Reviewed during regression test to clear the overdue state before retry.",
-            owner_id="agent_c",
+            agent_id="agent_c",
         )
         self.assertEqual(review_msg["status"], "ok", review_msg)
         self.assertIn("retained as core", review_msg["data"]["message"])
@@ -464,7 +464,7 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Reviewed Parent",
             content="Synthesized content replacing the now-reviewed, no-longer-overdue parent.",
-            owner_id="agent_c",
+            agent_id="agent_c",
             is_core=True,
             db_connection=self.conn,
             **self._core_reason_kwargs(),
@@ -507,7 +507,7 @@ class TestConsolidationToctou(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -545,7 +545,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Content Change",
                 content="Synthesized content for the two-parent content-race test.",
-                owner_id="agent_c",
+                agent_id="agent_c",
                 db_connection=self.conn,
                 override_justification="test override to isolate content TOCTOU revalidation",
             )
@@ -577,7 +577,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Archival",
                 content="Synthesized content for the two-parent archival-race test.",
-                owner_id="agent_c",
+                agent_id="agent_c",
                 db_connection=self.conn,
                 override_justification="test override to isolate archival TOCTOU revalidation",
             )
@@ -618,7 +618,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Promotion",
                 content="Synthesized content for the two-parent promotion-race test.",
-                owner_id="agent_c",
+                agent_id="agent_c",
                 db_connection=self.conn,
                 override_justification="test override to isolate promotion TOCTOU revalidation",
             )

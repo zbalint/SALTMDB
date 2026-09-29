@@ -35,7 +35,7 @@ class TestSessionDigestService(unittest.TestCase):
         entity_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
-            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id,
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id,
             scope, status, title, memory_type, full_content, valid_from, agent_session_id,
             last_touched_session_id) VALUES (?, ?, ?, ?, 'tester', 'shared', ?, ?, ?,
             'body content', ?, ?, ?)""",
@@ -123,27 +123,27 @@ class TestSessionDigestService(unittest.TestCase):
         self.assertIn("Active Memory", digest)
         self.assertNotIn("Archived Memory", digest)
 
-    def test_entities_from_different_owner_ids_both_appear(self):
-        """Digest includes entities from multiple owner_ids (no owner_id filter)."""
+    def test_entities_from_different_agent_ids_both_appear(self):
+        """Digest includes entities from multiple agent_ids (no agent_id filter)."""
         cwd = "/test/project"
         session_id = "multi-owner-session"
         started_at = "2024-01-01T10:00:00+00:00"
         agent_sessions.record_session(self.conn, session_id, cwd, started_at)
 
         # Create entities from different owners in the same session
-        # (manually insert with different owner_id)
+        # (manually insert with different agent_id)
         entity_id_1 = str(uuid.uuid4())
         entity_id_2 = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
 
         self.conn.execute(
-            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id,
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id,
             scope, status, title, memory_type, full_content, valid_from, agent_session_id)
             VALUES (?, ?, ?, ?, ?, 'shared', 'raw', ?, 'fact', 'body', ?, ?)""",
             (entity_id_1, now, now, now, "owner1", "Alice's Memory", now, session_id),
         )
         self.conn.execute(
-            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id,
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id,
             scope, status, title, memory_type, full_content, valid_from, agent_session_id)
             VALUES (?, ?, ?, ?, ?, 'shared', 'raw', ?, 'fact', 'body', ?, ?)""",
             (entity_id_2, now, now, now, "owner2", "Bob's Memory", now, session_id),
@@ -277,7 +277,7 @@ class TestSessionHandover(unittest.TestCase):
     def _trace(self, session_id, turn, prompt, response, created_at, status="completed"):
         self.conn.execute(
             """INSERT INTO conversation_traces
-               (id, agent_session_id, owner_id, harness, harness_session_id, harness_turn_id,
+               (id, agent_session_id, agent_id, harness, harness_session_id, harness_turn_id,
                 status, user_prompt, user_prompt_hash, final_assistant_message,
                 final_assistant_message_hash, created_at, updated_at)
                VALUES (?, ?, 'claude', 'claude_code', 'h', ?, ?, ?, 'x', ?, 'y', ?, ?)""",

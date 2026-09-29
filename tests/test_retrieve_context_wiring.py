@@ -28,7 +28,7 @@ class TestRetrieveContextWiring(unittest.TestCase):
         self.previous_db_path = os.environ.get("SALTMDB_DB_PATH")
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("wiring-owner")
+        SESSION_IDENTITY.configure_agent_id("wiring-owner")
         self.previous_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
@@ -53,7 +53,7 @@ class TestRetrieveContextWiring(unittest.TestCase):
         ) as assemble:
             dispatch._dispatch_retrieve_context(entity_ids=["e1"])
         assemble.assert_called_once_with(
-            entity_ids=["e1"], budget_tokens=None, strategy="local", owner_id=None
+            entity_ids=["e1"], budget_tokens=None, strategy="local", agent_id=None
         )
 
     def test_dispatch_requires_nonempty_entity_ids_list(self):
@@ -78,23 +78,23 @@ class TestRetrieveContextWiring(unittest.TestCase):
             entity_ids=["e1", "e2"],
             budget_tokens=None,
             strategy="local",
-            owner_id=None,
+            agent_id=None,
         )
 
-    def test_public_schema_exposes_query_controls_without_owner_id(self):
+    def test_public_schema_exposes_query_controls_without_agent_id(self):
         self.assertEqual(
             list(inspect.signature(tools.retrieve_context).parameters),
             ["entity_ids", "query", "budget_tokens", "strategy"],
         )
-        self.assertNotIn("owner_id", inspect.signature(tools.retrieve_context).parameters)
+        self.assertNotIn("agent_id", inspect.signature(tools.retrieve_context).parameters)
         registered = tools.mcp._tool_manager._tools["retrieve_context"]
-        self.assertNotIn("owner_id", registered.parameters.get("properties", {}))
+        self.assertNotIn("agent_id", registered.parameters.get("properties", {}))
 
     def test_public_tool_reaches_real_dispatch_and_returns_envelope(self):
         result = store_memory(
             content="Wiring end-to-end memory fixture body",
             title="Wiring end-to-end memory",
-            owner_id="wiring-owner",
+            agent_id="wiring-owner",
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")

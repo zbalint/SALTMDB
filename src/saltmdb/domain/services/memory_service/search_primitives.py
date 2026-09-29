@@ -115,7 +115,7 @@ def _run_fts_search(
     sql = f"""
         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                bm25(entities_fts, {bm25_weights}) as rank_score,
-               e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id, e.memory_type,
+               e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata, e.context_id, e.memory_type,
                0 as rel_count,
                {snippet_sql} as fts_snippet
         FROM entities_fts fts

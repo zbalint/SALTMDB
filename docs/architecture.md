@@ -53,9 +53,9 @@ The SQLite database operates in **Write-Ahead Logging (WAL)** mode (`PRAGMA jour
 The schema includes the following tables:
 
 * **`events`**: An immutable, append-only ledger tracking agent operations (`decision`, `issue`, `fix`, `attempt`, `consolidation_gate_override`, `relation_gate_override`). `type` is free text, not `CHECK`-constrained — `supersession_candidate`/`consolidation_request`/`domain_suggestion` are legacy values from the retired Librarian scanners and may still appear on old rows, but nothing generates them anymore. Columns: `id`, `timestamp`, `agent_id`, `type`, `content`, `error_code`, `agent_session_id`, `context_id`.
-* **`entities`**: The long-term knowledge base. Key columns: `id` (UUID), `title`, `full_content` (markdown), `status` (`raw`/`consolidated`/`archived`), `embedding_status` (`pending`/`ready`/`failed`/`archived`), `memory_type` (`fact`/`event`/`procedure`/`decision`/`preference`), `is_core`, `weight`, `scope` (`private`/`shared`), `owner_id`, `context_id`, `agent_session_id`, `last_touched_session_id`, `content_hash` (SHA-256), `quality_score`, `quality_status`, `quality_flags`, `valid_from`/`valid_to` (SCD Type 2 windows).
-* **`_agent_sessions`**: Durable adapter-session provenance: `session_id`, `cwd`, `started_at`, configured `owner_id`, receipt-time `last_activity_at`, and nullable `ended_at`. Registration and explicit normal close are foreground writes through the daemon's single writer; each MCP tool receipt queues a best-effort background activity update through that same writer. Raw connection loss intentionally leaves `ended_at` null because an adapter may reconnect with the same session ID. Rows are retained indefinitely.
-* **`conversation_traces`**: One row per captured conversation turn (opt-in, see §9): `id`, `agent_session_id` (bound from the adapter's own identity), `owner_id` (attribution), `harness` (`codex`/`claude_code`), `harness_session_id`, `harness_turn_id`, `status` (`pending`/`completed`/`incomplete`), `user_prompt`, `final_assistant_message`, their SHA-256 hashes, `capture_error`, and timestamps. Unique on `(agent_session_id, harness_turn_id)`.
+* **`entities`**: The long-term knowledge base. Key columns: `id` (UUID), `title`, `full_content` (markdown), `status` (`raw`/`consolidated`/`archived`), `embedding_status` (`pending`/`ready`/`failed`/`archived`), `memory_type` (`fact`/`event`/`procedure`/`decision`/`preference`), `is_core`, `weight`, `scope` (`private`/`shared`), `agent_id`, `context_id`, `agent_session_id`, `last_touched_session_id`, `content_hash` (SHA-256), `quality_score`, `quality_status`, `quality_flags`, `valid_from`/`valid_to` (SCD Type 2 windows). `scope='private'` is a visibility convenience for an agent's own scratch or test notes, not access control.
+* **`_agent_sessions`**: Durable adapter-session provenance: `session_id`, `cwd`, `started_at`, configured `agent_id`, receipt-time `last_activity_at`, and nullable `ended_at`. Registration and explicit normal close are foreground writes through the daemon's single writer; each MCP tool receipt queues a best-effort background activity update through that same writer. Raw connection loss intentionally leaves `ended_at` null because an adapter may reconnect with the same session ID. Rows are retained indefinitely.
+* **`conversation_traces`**: One row per captured conversation turn (opt-in, see §9): `id`, `agent_session_id` (bound from the adapter's own identity), `agent_id` (attribution), `harness` (`codex`/`claude_code`), `harness_session_id`, `harness_turn_id`, `status` (`pending`/`completed`/`incomplete`), `user_prompt`, `final_assistant_message`, their SHA-256 hashes, `capture_error`, and timestamps. Unique on `(agent_session_id, harness_turn_id)`.
 * **`trace_turn_messages`**: Messages the user sent while the agent was mid-turn, attached to that turn's trace: `trace_id`, `seq` (order), `message`, `message_hash`. Idempotent on `(trace_id, message_hash)` so a hook retry cannot duplicate a message.
 * **`trace_memory_links`**: Which memory writes a turn produced: `trace_id`, `entity_id`, `content_hash`, `write_operation` (`store_memory_new`/`store_memory_update`/`revise_memory`/`supersede_memory`/`consolidate_memories`). Idempotent on `(trace_id, entity_id, content_hash)`.
 * **`tags`**: A folksonomy table allowing tags, categorizations, and canonical redirects. Seeded with `episodic`, `semantic`, `procedural`.
@@ -131,7 +131,7 @@ goodbye for a session that never opened.
 For a successful hello, the daemon mints a random 256-bit session capability. It is returned only
 in the internal hello response, kept in adapter memory, and attached to internal tool-call RPCs
 next to `caller_agent_session_id`. It never appears in public MCP schemas or responses, and public
-MCP calls continue to expose no `owner_id`. Metadata-free one-shot CLI calls remain valid. Missing
+MCP calls continue to expose no `agent_id`. Metadata-free one-shot CLI calls remain valid. Missing
 or malformed ID/capability pairs are rejected as `MALFORMED_REQUEST`; inactive, mismatched, or
 closing sessions receive `CALLER_SESSION_INVALID`.
 
@@ -139,7 +139,7 @@ Reconnect is transactional. The adapter serializes opening, discovery refresh, s
 snapshots, and close; a failed refresh blocks the current call rather than sending stale
 authentication or metadata, while leaving the logical session retryable. Re-registering an ended
 session reopens its row, preserving the earliest `started_at`, first known `cwd`, and first known
-`owner_id`, advancing `last_activity_at` monotonically, and clearing `ended_at`.
+`agent_id`, advancing `last_activity_at` monotonically, and clearing `ended_at`.
 
 Goodbye first marks the session closing, rejects late calls, waits for leases held by already
 accepted calls (including calls that raise), persists `ended_at`, acknowledges, and then unregisters
@@ -151,7 +151,7 @@ Bulk ownership is intentionally split between trusted internals and public surfa
 batches use the configured adapter owner as their default; trusted in-process callers may override
 an item, but public MCP wrappers strip per-item owners. Bulk consolidation keeps its configured
 batch-owner behavior, with per-item overrides retained only for internal compatibility. The
-`saltmdb-cli orphans` scan is scoped by `SALTMDB_OWNER_ID`; `saltmdb-cli corpus-health` is a
+`saltmdb-cli orphans` scan is scoped by `SALTMDB_AGENT_ID`; `saltmdb-cli corpus-health` is a
 cross-owner administrative report.
 
 ### 7. Automated Session Lifecycle Hooks
@@ -180,7 +180,7 @@ Traces record *which conversation turn produced which memory*: the verbatim user
 * **Opt-in, gated at the adapter.** `SALTMDB_TRACE_CAPTURE_ENABLED` (default off) is read by the MCP adapter process, which gates the `capture_trace_*` tools; the shared daemon has no flag and always captures what it is sent. The tools are internal capture endpoints called by lifecycle hooks, not for direct agent use.
 * **Capture flow.** `UserPromptSubmit` → `capture_trace_start` upserts a `pending` trace for `(agent_session_id, harness_turn_id)`; a second call for the same turn with different text is a mid-turn user message and is appended to `trace_turn_messages` (Claude Code and Codex both re-fire the hook with the same turn id). Claude Code delivers a finished background task as its own user-role turn, so its prompt is `<task-notification>` XML; capture rewrites that to `[background task <status>] <description>` (plus `(exit N)` for a non-zero exit code; an unrecognised shape is kept whole, and traces captured before this stay raw XML). After each memory write, `capture_trace_memory_link` attaches every write the adapter has performed and not yet attached — the adapter supplies which entities and which operation from its own observed results, because a hook cannot reliably read a harness's tool response; `content_hash` and new-vs-update are re-read server-side. `Stop` → `capture_trace_complete` moves the trace to `completed` with the full, untruncated final message.
 * **Lifecycle.** A `pending` trace becomes `incomplete` once its adapter session has ended or after a one-hour timeout, so an interrupted turn is visibly unfinished rather than stuck.
-* **Reads are cross-agent.** `search_traces` (bounded previews, filterable by session or linked memory; `query_keywords` is accepted but inert until trace embeddings ship) and `get_trace` (full text, `mid_turn_messages`, linked writes) return any agent's traces, like shared memories. `owner_id` is attribution, not access control; private scope is an agent's own per-memory choice and does not apply to auto-captured traces. Content is flagged `content_is_untrusted_historical_data` and must never be treated as instructions.
+* **Reads are cross-agent.** `search_traces` (bounded previews, filterable by session or linked memory; `query_keywords` is accepted but inert until trace embeddings ship) and `get_trace` (full text, `mid_turn_messages`, linked writes) return any agent's traces, like shared memories. `agent_id` is attribution, not access control; private scope is an agent's own per-memory choice and does not apply to auto-captured traces. Content is flagged `content_is_untrusted_historical_data` and must never be treated as instructions.
 * **Consumers.** The session-start handover (§7) and the viewer: **Agent Sessions** shows a trace count per session and lists that session's traces, and a memory's detail lists up to five traces that wrote it; **View trace** opens the full turn including mid-turn messages. Traces are reachable in the viewer through these two paths, not from a standalone list.
 * **Privacy.** Traces store prompts and replies verbatim and are not quality-gated; see [`SECURITY.md`](../SECURITY.md).
 
@@ -232,6 +232,6 @@ Three independent hard limits, enforced inside every write transaction that can 
 
 **Consolidation never inherits core status.** If any resolved `consolidate_memories` parent is currently an active core and `is_core` is omitted, the call is rejected — pass `is_core=True` (with lifecycle fields) explicitly to keep the result core, or `is_core=False` to let it become ordinary.
 
-**Review.** `review_core_memory(entity_id, outcome, review_rationale, core_review_after)` is a direct, synchronous operation (never a queue/event): `retain` extends the review date, `demote` returns the memory to ordinary searchable status, `archive` retires it. The configured `SALTMDB_OWNER_ID` identifies the *reviewing* agent, not an ownership check.
+**Review.** `review_core_memory(entity_id, outcome, review_rationale, core_review_after)` is a direct, synchronous operation (never a queue/event): `retain` extends the review date, `demote` returns the memory to ordinary searchable status, `archive` retires it. The configured `SALTMDB_AGENT_ID` identifies the *reviewing* agent, not an ownership check.
 
 **Bootstrap fails closed.** The `saltmdb-cli bootstrap-digest` hook (global, core-only — no project-keyword search, no arbitrary core-count limit) renders every active core in canonical order (overdue first, then earliest upcoming review, then creation time). If any active core is malformed or the set exceeds a limit, bootstrap emits one bounded `<core-bootstrap-error>` report (violations + compact inventory + a rebalancing instruction) instead of a partial, truncated, or oversized digest.

@@ -24,7 +24,7 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         res1 = store_memory(
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation embedding",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         self.assertEqual(res1["status"], "ok")
@@ -33,7 +33,7 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         res2 = store_memory(
             title="Parent Fact B",
             content="Detailed description of Fact B for testing consolidation embedding",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         self.assertEqual(res2["status"], "ok")
@@ -59,7 +59,7 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
             title="Consolidated Overview",
             content="Merged summary of A and B",
             tags=["#summary"],
-            owner_id="agent1",
+            agent_id="agent1",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", c_res)

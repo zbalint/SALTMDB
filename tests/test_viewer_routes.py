@@ -295,7 +295,7 @@ class TestViewerAgentSessions(unittest.TestCase):
             self.conn.execute(
                 """
                 INSERT INTO conversation_traces
-                    (id, agent_session_id, owner_id, harness, harness_session_id,
+                    (id, agent_session_id, agent_id, harness, harness_session_id,
                      harness_turn_id, status, user_prompt, user_prompt_hash,
                      created_at, updated_at)
                 VALUES (?, ?, ?, 'claude_code', ?, ?, 'completed', ?, ?, ?, ?)
@@ -388,7 +388,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.assertEqual(by_id["sess-a"]["event_count"], 1)
         self.assertEqual(by_id["sess-old"]["memory_count"], 1)
         self.assertEqual(by_id["sess-old"]["event_count"], 1)
-        self.assertIsNone(by_id["sess-old"]["owner_id"])
+        self.assertIsNone(by_id["sess-old"]["agent_id"])
         self.assertIsNone(by_id["sess-old"]["ended_at"])
         self.assertEqual(by_id["sess-old"]["liveness"], "unknown")
 
@@ -402,7 +402,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO _agent_sessions
-                (session_id, cwd, owner_id, started_at, last_activity_at, ended_at)
+                (session_id, cwd, agent_id, started_at, last_activity_at, ended_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             ("trace-only", "/project", "owner-a", "2026-09-01T10:00:00+00:00", None, None),
@@ -410,7 +410,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO conversation_traces
-                (id, agent_session_id, owner_id, harness, harness_session_id,
+                (id, agent_session_id, agent_id, harness, harness_session_id,
                  harness_turn_id, status, user_prompt, user_prompt_hash,
                  created_at, updated_at)
             VALUES (?, ?, ?, 'codex', ?, ?, 'pending', ?, ?, ?, ?)
@@ -470,7 +470,7 @@ class TestViewerAgentSessions(unittest.TestCase):
 
     def test_get_sessions_exposes_persisted_lifecycle_metadata(self):
         self.conn.execute(
-            "INSERT INTO _agent_sessions (session_id, cwd, started_at, owner_id, last_activity_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO _agent_sessions (session_id, cwd, started_at, agent_id, last_activity_at, ended_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "lifecycle-session",
                 "/project",
@@ -486,7 +486,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         row = next(
             s for s in captured["data"]["sessions"] if s["session_id"] == "lifecycle-session"
         )
-        self.assertEqual(row["owner_id"], "codex")
+        self.assertEqual(row["agent_id"], "codex")
         self.assertEqual(row["last_activity_at"], "2026-08-25T09:00:00+00:00")
         self.assertEqual(row["liveness"], "unknown")
 
@@ -640,10 +640,10 @@ class TestViewerAgentSessions(unittest.TestCase):
         handler.get_sessions({"state": ["bogus"]})
         self.assertEqual(captured["status"], 400)
 
-    def test_get_sessions_owner_id_substring_filter(self):
+    def test_get_sessions_agent_id_substring_filter(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "claude-session",
@@ -656,7 +656,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "antigravity-session",
@@ -671,7 +671,7 @@ class TestViewerAgentSessions(unittest.TestCase):
 
         handler = self._handler()
         captured = self._capture(handler)
-        handler.get_sessions({"owner_id": ["clau"]})
+        handler.get_sessions({"agent_id": ["clau"]})
         self.assertEqual(
             [s["session_id"] for s in captured["data"]["sessions"]], ["claude-session"]
         )
@@ -679,7 +679,7 @@ class TestViewerAgentSessions(unittest.TestCase):
     def test_get_sessions_cwd_substring_filter(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "project-a-session",
@@ -692,7 +692,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "project-b-session",
@@ -715,7 +715,7 @@ class TestViewerAgentSessions(unittest.TestCase):
     def test_get_sessions_date_range_filter(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "early-session",
@@ -728,7 +728,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "late-session",
@@ -761,7 +761,7 @@ class TestViewerAgentSessions(unittest.TestCase):
     def test_get_sessions_sort_started_asc_and_desc(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "earliest-session",
@@ -774,7 +774,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 "latest-session",
@@ -833,13 +833,13 @@ class TestViewerAgentSessions(unittest.TestCase):
         handler.get_session_detail("legacy-sess")
         self.assertEqual(captured["status"], 200)
         self.assertIsNone(captured["data"]["cwd"])
-        self.assertIsNone(captured["data"]["owner_id"])
+        self.assertIsNone(captured["data"]["agent_id"])
         self.assertEqual(captured["data"]["memory_count"], 1)
 
     def test_get_session_detail_full_lifecycle_row(self):
         self.conn.execute(
             "INSERT INTO _agent_sessions "
-            "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason) "
+            "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at, ended_reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 "full-session",
@@ -867,7 +867,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO conversation_traces
-                (id, agent_session_id, owner_id, harness, harness_session_id,
+                (id, agent_session_id, agent_id, harness, harness_session_id,
                  harness_turn_id, status, user_prompt, user_prompt_hash,
                  created_at, updated_at)
             VALUES (?, ?, ?, 'claude_code', ?, ?, 'completed', ?, ?, ?, ?)
@@ -891,7 +891,7 @@ class TestViewerAgentSessions(unittest.TestCase):
         data = captured["data"]
         self.assertEqual(captured["status"], 200)
         self.assertEqual(data["session_id"], "full-session")
-        self.assertEqual(data["owner_id"], "owner-full")
+        self.assertEqual(data["agent_id"], "owner-full")
         self.assertEqual(data["cwd"], "/project/full")
         self.assertEqual(data["liveness"], "ended")
         self.assertEqual(data["started_at"], "2026-08-25T08:00:00+00:00")
@@ -959,11 +959,11 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
     def _memory_id(result):
         return result["data"]["id"]
 
-    def _mk(self, title, owner_id="viewer_tester"):
+    def _mk(self, title, agent_id="viewer_tester"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=self.conn,
         )
         return self._memory_id(res)
@@ -980,7 +980,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             parent_ids=[a, b],
             title=cons_title,
             content=content,
-            owner_id="viewer_tester",
+            agent_id="viewer_tester",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res)
@@ -1034,7 +1034,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
                 node["generation_depth"],
                 "the frontend's loadLineage() reads n.depth -- it must equal generation_depth",
             )
-            self.assertIn("owner_id", node)
+            self.assertIn("agent_id", node)
             self.assertIn("title", node)
             self.assertIn("status", node)
 
@@ -1074,7 +1074,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             store_memory(
                 content="Core architectural fact memory content",
                 title="Core Architecture Fact",
-                owner_id="viewer_tester",
+                agent_id="viewer_tester",
                 is_core=True,
                 core_reason="Test fixture core reason for the viewer is_core filter regression test.",
                 core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
@@ -1086,7 +1086,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             store_memory(
                 content="Non-core ephemeral detail content",
                 title="Non Core Detail",
-                owner_id="viewer_tester",
+                agent_id="viewer_tester",
                 is_core=False,
                 db_connection=self.conn,
             )
@@ -1149,7 +1149,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             result = store_memory(
                 content=f"Unique content for {title}",
                 title=title,
-                owner_id="viewer_tester",
+                agent_id="viewer_tester",
                 is_core=is_core,
                 memory_type=memory_type,
                 db_connection=self.conn,
@@ -1200,7 +1200,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         store_memory(
             content="Unique keyword quantum ground state core memory",
             title="Quantum Ground State",
-            owner_id="viewer_tester",
+            agent_id="viewer_tester",
             is_core=True,
             core_reason="Test fixture core reason for the viewer search is_core filter regression test.",
             core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
@@ -1250,7 +1250,7 @@ class TestViewerScatterplot(unittest.TestCase):
     def _insert_ready_entity(self, entity_id, title):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "title, full_content, status, embedding_status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'raw', 'ready')",
             (entity_id, now, now, now, "viewer_tester", title, f"Content for {title}"),

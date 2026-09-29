@@ -61,7 +61,7 @@ class TestAdapterSignalShutdown(unittest.TestCase):
 
     def _start_adapter(self, env: dict) -> subprocess.Popen:
         adapter_env = dict(env)
-        adapter_env["SALTMDB_OWNER_ID"] = "test_owner"
+        adapter_env["SALTMDB_AGENT_ID"] = "test_owner"
         return subprocess.Popen(
             [sys.executable, "-m", "saltmdb"],
             env=adapter_env,
@@ -80,7 +80,7 @@ class TestAdapterSignalShutdown(unittest.TestCase):
                 try:
                     conn = sqlite3.connect(self.db_path)
                     cursor = conn.execute(
-                        "SELECT ended_at FROM _agent_sessions WHERE owner_id = 'test_owner' ORDER BY started_at DESC LIMIT 1"
+                        "SELECT ended_at FROM _agent_sessions WHERE agent_id = 'test_owner' ORDER BY started_at DESC LIMIT 1"
                     )
                     row = cursor.fetchone()
                     conn.close()
@@ -147,7 +147,7 @@ class TestAdapterSignalShutdown(unittest.TestCase):
 
             conn = sqlite3.connect(self.db_path)
             cursor = conn.execute(
-                "SELECT ended_at FROM _agent_sessions WHERE owner_id = 'test_owner' ORDER BY started_at DESC LIMIT 1"
+                "SELECT ended_at FROM _agent_sessions WHERE agent_id = 'test_owner' ORDER BY started_at DESC LIMIT 1"
             )
             row_after = cursor.fetchone()
             conn.close()

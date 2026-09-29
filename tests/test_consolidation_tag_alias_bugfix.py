@@ -42,7 +42,7 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             content="Root cause of the nightly job crash was an unhandled null pointer in the retry handler.",
             title="Nightly Job Crash Root Cause Bugfix",
             tags=["#bugfix"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res1["status"], "ok")
@@ -55,7 +55,7 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             content="Applied a targeted patch to the retry handler to null-check the response before dereferencing.",
             title="Retry Handler Null Check Fix",
             tags=["#fix"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res2["status"], "ok")
@@ -97,7 +97,7 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
                 "dereferencing the response object."
             ),
             tags=["#fix", "#anewconsolidationtag"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
             # Real cosine similarity between these two parents sits at ~0.73, above the 0.60
             # placeholder threshold but with a margin that shouldn't be relied on once the real

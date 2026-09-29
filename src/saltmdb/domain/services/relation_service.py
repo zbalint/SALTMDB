@@ -157,7 +157,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     predicate: str = None,
     valid_at: str | None = None,
     override_justification: str | None = None,
-    owner_id: str = None,
+    agent_id: str = None,
     db_connection=None,
     db_path: str = None,
     coordinator=None,
@@ -186,7 +186,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
     -- either violation rejects the call as REJECT_LOW_RELATION_SIMILARITY /
     REJECT_CONTRADICTORY_PREDICATE unless override_justification (>= COHESION_OVERRIDE_MIN_LENGTH
     chars) is supplied, in which case the relation is stored and a relation_gate_override event
-    is logged atomically (agent_id = owner_id or "system"). An already-active identical edge is
+    is logged atomically (agent_id = agent_id or "system"). An already-active identical edge is
     always a no-op, checked BEFORE the gate -- re-submitting it never requires an override.
     """
     if not source_id or not target_id or not predicate:
@@ -325,7 +325,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                 and normalized_requested != canonical_predicate
                 else ""
             )
-            owner_val = owner_id or "system"
+            agent_val = agent_id or "system"
 
             # D1 (Phase 5 R2 fix #4): an existing active identical edge is a legitimate no-op --
             # short-circuit BEFORE any gate check runs, so re-submitting an already-active edge
@@ -473,7 +473,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
                 # relation itself, so any log_event failure rolls back the whole transaction
                 # (same fail-fast-atomicity reasoning as commit_consolidation's override audit).
                 audit_result = log_event(
-                    agent_id=owner_val,
+                    agent_id=agent_val,
                     type="relation_gate_override",
                     content=json.dumps(
                         {
@@ -703,7 +703,7 @@ def _dependency_cte_sql(
     root_id: str,
     point_in_time: str,
     max_depth: int,
-    owner_id: str | None,
+    agent_id: str | None,
 ) -> tuple[str, list[str | int]]:
     """Builds the recursive-CTE query for one traversal direction. Parametrized purely by
     string substitution of which endpoint anchors/recurses/guards -- for direction="outbound"
@@ -726,18 +726,18 @@ def _dependency_cte_sql(
         newly_reached = "r.source_id"
     visibility = (
         "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
-        "AND (e.owner_id = ? OR e.scope = 'shared')) "
+        "AND (e.agent_id = ? OR e.scope = 'shared')) "
         "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
-        "AND (e.owner_id = ? OR e.scope = 'shared'))"
-        if owner_id is not None
+        "AND (e.agent_id = ? OR e.scope = 'shared'))"
+        if agent_id is not None
         else ""
     )
     params: list[str | int] = [root_id, *([point_in_time] * 4)]
-    if owner_id is not None:
-        params.extend([owner_id, owner_id])
+    if agent_id is not None:
+        params.extend([agent_id, agent_id])
     params.extend([max_depth, *([point_in_time] * 4)])
-    if owner_id is not None:
-        params.extend([owner_id, owner_id])
+    if agent_id is not None:
+        params.extend([agent_id, agent_id])
     return (
         f"""
     WITH RECURSIVE dependency_tree(id, source_id, target_id, predicate, depth, path) AS (
@@ -777,7 +777,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
     db_connection=None,
     db_path: str = None,
     include_inspect: bool = False,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Recursively traces relational paths using SQL CTEs.
 
@@ -807,7 +807,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
         should_close = True
 
     root_id, _root_candidates, _root_truncated = resolve_entity_ref(
-        conn, root_entity_id, owner_id=owner_id
+        conn, root_entity_id, agent_id=agent_id
     )
     if not root_id:
         if should_close:
@@ -819,10 +819,10 @@ def analyze_dependencies(  # noqa: C901, PLR0912
     try:
         root_row = conn.execute(
             "SELECT id, title, status FROM entities WHERE id = ?"
-            + (" AND (owner_id = ? OR scope = 'shared')" if owner_id is not None else ""),
-            (root_id, owner_id) if owner_id is not None else (root_id,),
+            + (" AND (agent_id = ? OR scope = 'shared')" if agent_id is not None else ""),
+            (root_id, agent_id) if agent_id is not None else (root_id,),
         ).fetchone()
-        if not root_row and owner_id is not None:
+        if not root_row and agent_id is not None:
             return {"error": f"Could not resolve entity '{root_entity_id}'"}
         root_info = (
             {"id": root_row[0], "title": root_row[1], "status": root_row[2]}
@@ -835,7 +835,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
         )
         tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]] = []
         for d in directions_to_run:
-            sql, params = _dependency_cte_sql(d, root_id, pit, max_depth, owner_id)
+            sql, params = _dependency_cte_sql(d, root_id, pit, max_depth, agent_id)
             tagged_rows.extend((d, row) for row in conn.execute(sql, params).fetchall())
         # Global shallowest-first ordering across both directions' independently-ordered result
         # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
@@ -856,7 +856,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
                 include_lineage=False,
                 touch=False,
                 max_depth=max_depth,
-                owner_id=owner_id,
+                agent_id=agent_id,
             )
             if root_inspect is not None:
                 nodes[0].update(root_inspect)
@@ -893,7 +893,7 @@ def analyze_dependencies(  # noqa: C901, PLR0912
                         include_lineage=False,
                         touch=False,
                         max_depth=max_depth,
-                        owner_id=owner_id,
+                        agent_id=agent_id,
                     )
                     if inspected is not None:
                         node.update(inspected)
@@ -943,7 +943,7 @@ _LINEAGE_PREDICATES = ("revises", "supersedes", "consolidated_from")
 def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
     """Return the stable, non-content fields shared by graph responses."""
     row = conn.execute(
-        "SELECT id, title, status, owner_id, updated_at FROM entities WHERE id = ?",
+        "SELECT id, title, status, agent_id, updated_at FROM entities WHERE id = ?",
         (entity_id,),
     ).fetchone()
     if row is None:
@@ -951,7 +951,7 @@ def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
             "id": entity_id,
             "title": "Unknown",
             "status": "unknown",
-            "owner_id": None,
+            "agent_id": None,
             "updated_at": None,
             "depth": depth,
             "generation_depth": depth,
@@ -960,7 +960,7 @@ def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
         "id": row[0],
         "title": row[1],
         "status": row[2],
-        "owner_id": row[3],
+        "agent_id": row[3],
         "updated_at": row[4],
         # Keep both names: depth is the graph contract, while generation_depth is
         # consumed by the existing viewer until its Phase 3 adapter is updated.
@@ -976,7 +976,7 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     point_in_time: str = None,
     db_connection=None,
     db_path: str = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Traverse lifecycle lineage in either direction.
 
@@ -1003,7 +1003,7 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
         should_close = True
 
     target_id, _target_candidates, _target_truncated = resolve_entity_ref(
-        conn, entity_id, owner_id=owner_id
+        conn, entity_id, agent_id=agent_id
     )
     if not target_id:
         if should_close:
@@ -1036,10 +1036,10 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
         """
         visibility = (
             "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
-            "AND (e.owner_id = ? OR e.scope = 'shared')) "
+            "AND (e.agent_id = ? OR e.scope = 'shared')) "
             "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
-            "AND (e.owner_id = ? OR e.scope = 'shared'))"
-            if owner_id is not None
+            "AND (e.agent_id = ? OR e.scope = 'shared'))"
+            if agent_id is not None
             else ""
         )
         if direction == "ancestors":
@@ -1076,11 +1076,11 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # Root is repeated in the path seed. Each validity predicate receives pit in
         # SQL order; keep the parameter construction explicit to avoid binding drift.
         params: list[Any] = [target_id, target_id, *_LINEAGE_PREDICATES, pit, pit, pit, pit]
-        if owner_id is not None:
-            params.extend([owner_id, owner_id])
+        if agent_id is not None:
+            params.extend([agent_id, agent_id])
         params.extend([max_depth, *_LINEAGE_PREDICATES, pit, pit, pit, pit])
-        if owner_id is not None:
-            params.extend([owner_id, owner_id])
+        if agent_id is not None:
+            params.extend([agent_id, agent_id])
         rows = conn.execute(query, params).fetchall()
 
         edges: list[dict[str, Any]] = []
@@ -1144,7 +1144,7 @@ def get_lineage(
     point_in_time: str = None,
     db_connection=None,
     db_path: str = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Envelope-shaped wrapper around :func:`_get_lineage_raw`.
 
@@ -1160,7 +1160,7 @@ def get_lineage(
         point_in_time=point_in_time,
         db_connection=db_connection,
         db_path=db_path,
-        owner_id=owner_id,
+        agent_id=agent_id,
     )
     if "error" in result:
         return rejected([envelope_error(error_codes.VALIDATION_ERROR, result["error"])])
@@ -1194,7 +1194,7 @@ def analyze_lineage(
                 "id": node["id"],
                 "title": node["title"],
                 "status": node["status"],
-                "owner_id": node["owner_id"],
+                "agent_id": node["agent_id"],
                 "updated_at": node["updated_at"],
                 "generation_depth": node["depth"],
             }
@@ -1215,7 +1215,7 @@ def get_related_memories(
     db_connection=None,
     db_path: str = None,
     include_inspect: bool = False,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Named graph API for semantic neighbours, backed by ``analyze_dependencies``.
 
@@ -1231,7 +1231,7 @@ def get_related_memories(
         point_in_time=point_in_time,
         direction=direction,
         include_inspect=include_inspect,
-        owner_id=owner_id,
+        agent_id=agent_id,
         db_connection=db_connection,
         db_path=db_path,
     )
@@ -1366,7 +1366,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
     is_core: bool = None,
-    owner_id: str = None,
+    agent_id: str = None,
     context_id: str = None,
     agent_session_id: str = None,
     override_justification: str | None = None,
@@ -1535,7 +1535,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     redacted_content = redact_secrets(content)
     clean_title = redact_secrets(title)
-    owner_val = owner_id or "system"
+    agent_val = agent_id or "system"
 
     # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
     quality_res = evaluate_memory_quality(redacted_content, clean_title)
@@ -1558,10 +1558,10 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
         placeholders_p = ",".join("?" for _ in resolved_parents)
         query_sql = f"""
             SELECT id FROM entities
-            WHERE content_hash = ? AND owner_id = ? AND status != 'archived'
+            WHERE content_hash = ? AND agent_id = ? AND status != 'archived'
               AND id NOT IN ({placeholders_p})
         """
-        cursor = conn.execute(query_sql, [content_hash, owner_val] + resolved_parents)
+        cursor = conn.execute(query_sql, [content_hash, agent_val] + resolved_parents)
         row = cursor.fetchone()
         if row:
             if should_close:
@@ -1580,7 +1580,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
         dup_check = check_duplicate_memories(
             title=clean_title,
             content=redacted_content,
-            owner_id=owner_val,
+            agent_id=agent_val,
             exclude_ids=resolved_parents,
             db_connection=conn,
         )
@@ -1680,7 +1680,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         "core_exit_condition": core_state["core_exit_condition"],
                         "core_review_after": core_state["core_review_after"],
                         "full_content": redacted_content,
-                        "owner_id": owner_val,
+                        "agent_id": agent_val,
                     },
                 )
                 if rejection is not None:
@@ -1695,7 +1695,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # transaction, which is what actually makes this audit atomic with the merge itself.
             if override_applied:
                 audit_result = log_event(
-                    agent_id=owner_val,
+                    agent_id=agent_val,
                     type="consolidation_gate_override",
                     content=json.dumps(
                         {
@@ -1721,7 +1721,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
             metadata_str = json.dumps(metadata) if metadata else None
             conn.execute(
                 """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
             """,
                 (
@@ -1729,7 +1729,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     now,
                     now,
                     now,
-                    owner_val,
+                    agent_val,
                     scope,
                     is_core_val,
                     weight,
@@ -1759,7 +1759,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 core_governance_service.reconcile_detail_relations(
                     conn,
                     core_id=consolidated_id,
-                    owner_id=owner_val,
+                    agent_id=agent_val,
                     new_detail_ids=core_state["core_detail_memory_ids"],
                     previous_detail_ids=[],
                 )
@@ -1779,7 +1779,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
             if tags:
                 for tag_name in tags:
-                    tag_id = resolve_or_create_tag(conn, tag_name, agent_id=owner_val)
+                    tag_id = resolve_or_create_tag(conn, tag_name, agent_id=agent_val)
                     if not tag_id:
                         continue
                     conn.execute(
@@ -1788,7 +1788,7 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
 
             if is_core_val:
-                core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=owner_val)
+                core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=agent_val)
                 if core_tag_id:
                     conn.execute(
                         "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
@@ -1906,7 +1906,7 @@ def commit_consolidation(*args, **kwargs) -> str:
 
 def bulk_commit_consolidation(  # noqa: PLR0915
     consolidations: list,
-    owner_id: str = None,
+    agent_id: str = None,
     context_id: str = None,
     agent_session_id: str = None,
     db_connection=None,
@@ -1920,10 +1920,10 @@ def bulk_commit_consolidation(  # noqa: PLR0915
     success/error list would misrepresent the outcome -- so on failure this returns a
     single top-level error result instead of claiming any individual items succeeded.
 
-    `owner_id`/`context_id` are batch-wide defaults, applied to any item that doesn't set its
-    own -- an item's own `owner_id`/`context_id` always wins when present, same override
+    `agent_id`/`context_id` are batch-wide defaults, applied to any item that doesn't set its
+    own -- an item's own `agent_id`/`context_id` always wins when present, same override
     relationship `override_justification` already has to the batch. This mirrors
-    `bulk_store_relations`'s per-item `owner_id` support (a batch can legitimately mix
+    `bulk_store_relations`'s per-item `agent_id` support (a batch can legitimately mix
     ownership) while still letting the common single-owner batch set it once instead of
     repeating it on every item.
 
@@ -1987,7 +1987,7 @@ def bulk_commit_consolidation(  # noqa: PLR0915
                 core_exit_condition = item.get("core_exit_condition")
                 core_review_after = item.get("core_review_after")
                 detail_memory_ids = item.get("detail_memory_ids")
-                item_owner_id = item.get("owner_id", owner_id)
+                item_agent_id = item.get("agent_id", agent_id)
                 item_context_id = item.get("context_id", context_id)
 
                 item_centroids = {pid: centroids[pid] for pid in p_ids if pid in centroids}
@@ -2004,7 +2004,7 @@ def bulk_commit_consolidation(  # noqa: PLR0915
                     scope=scope,
                     weight=w,
                     is_core=is_core,
-                    owner_id=item_owner_id,
+                    agent_id=item_agent_id,
                     context_id=item_context_id,
                     agent_session_id=agent_session_id,
                     override_justification=override_justification,
@@ -2055,13 +2055,13 @@ def bulk_store_relations(
     relations: list,
     db_connection=None,
     db_path: str = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     invalidate: bool = False,
 ) -> list | dict:
     """Executes multiple relation insertions or invalidations atomically -- all-or-nothing.
 
-    ``owner_id`` is the default attribution for the batch.  Trusted in-process callers may
-    provide an ``owner_id`` on an individual item to intentionally mix ownership; the MCP
+    ``agent_id`` is the default attribution for the batch.  Trusted in-process callers may
+    provide an ``agent_id`` on an individual item to intentionally mix ownership; the MCP
     adapter strips those per-item fields before dispatch, so public callers cannot override the
     configured adapter identity.
 
@@ -2108,7 +2108,7 @@ def bulk_store_relations(
                 # wrappers remove this field before crossing the adapter boundary; retaining
                 # the item-level override here supports trusted in-process callers.
                 override_justification = r.get("override_justification")
-                item_owner_id = r.get("owner_id", owner_id)
+                item_agent_id = r.get("agent_id", agent_id)
                 item_invalidate = bool(r.get("invalidate", invalidate))
                 invalid_at = r.get("invalid_at")
                 if item_invalidate:
@@ -2145,7 +2145,7 @@ def bulk_store_relations(
                     predicate=pred,
                     valid_at=valid_at,
                     override_justification=override_justification,
-                    owner_id=item_owner_id,
+                    agent_id=item_agent_id,
                     db_connection=conn,
                     _in_transaction=True,
                 )

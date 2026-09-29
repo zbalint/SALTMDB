@@ -300,7 +300,7 @@ def reconcile_detail_relations(
     conn,
     *,
     core_id: str,
-    owner_id: str | None,
+    agent_id: str | None,
     new_detail_ids: list[str],
     previous_detail_ids: list[str],
 ) -> None:
@@ -314,7 +314,7 @@ def reconcile_detail_relations(
             source_id=detail_id,
             target_id=core_id,
             predicate="elaborates_on",
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=conn,
             _in_transaction=True,
             _allow_core_elaborates_on=True,
@@ -419,7 +419,7 @@ def build_inventory(rows: list[dict]) -> list[dict]:
                 "id": row["id"],
                 "title": row.get("title"),
                 "memory_type": row.get("memory_type") or "fact",
-                "owner_id": row.get("owner_id"),
+                "agent_id": row.get("agent_id"),
                 "core_review_after": row.get("core_review_after"),
                 "review_due": due,
                 "rendered_chars": rendered_chars,
@@ -491,7 +491,7 @@ def render_bootstrap_error(rows: list[dict], violations: list[str]) -> str:
         title = _escape_yaml_line(str(item["title"]))
         line = (
             f"  - id={item['id']} title={title!r} type={item['memory_type']} "
-            f"owner={item['owner_id']} review_after={item['core_review_after']} "
+            f"agent_id={item['agent_id']} review_after={item['core_review_after']} "
             f"due={item['review_due']} rendered_chars={item['rendered_chars']}"
         )
         if used + len(line) + 1 > budget:
@@ -521,7 +521,7 @@ def load_active_cores(conn) -> list[dict]:
     rows = conn.execute(
         """
         SELECT id, title, memory_type, core_reason, core_exit_condition, core_review_after,
-               full_content, owner_id, created_at, scope, core_detail_memory_ids
+               full_content, agent_id, created_at, scope, core_detail_memory_ids
         FROM entities
         WHERE is_core = 1 AND status != 'archived'
         """
@@ -535,7 +535,7 @@ def load_active_cores(conn) -> list[dict]:
             "core_exit_condition": r[4],
             "core_review_after": r[5],
             "full_content": r[6],
-            "owner_id": r[7],
+            "agent_id": r[7],
             "created_at": r[8],
             "scope": r[9],
             # Raw JSON string as persisted (or None) -- kept unparsed here, same shape the DB
@@ -1034,10 +1034,10 @@ def review_core_memory(  # noqa: C901
     entity_id: str,
     outcome: str,
     review_rationale: str,
-    owner_id: str,
+    agent_id: str,
     core_review_after: str | None = None,
 ) -> dict:
-    """Direct, synchronous operation -- not a request/queue/event (plan rule 59). `owner_id`
+    """Direct, synchronous operation -- not a request/queue/event (plan rule 59). `agent_id`
     identifies the REVIEWING agent; it need not match the entity's own owner and never transfers
     ownership (plan rule: reviewer identity, not an ownership permission)."""
     from saltmdb.db.connection import write_transaction_retrying
@@ -1053,9 +1053,9 @@ def review_core_memory(  # noqa: C901
                 )
             ]
         )
-    if not owner_id:
+    if not agent_id:
         return envelope.rejected(
-            [envelope.error(error_codes.VALIDATION_ERROR, "owner_id is mandatory.", "owner_id")]
+            [envelope.error(error_codes.VALIDATION_ERROR, "agent_id is mandatory.", "agent_id")]
         )
     if outcome in ("demote", "archive") and core_review_after is not None:
         return envelope.rejected(
@@ -1134,7 +1134,7 @@ def review_core_memory(  # noqa: C901
             c.execute(
                 "UPDATE entities SET core_review_after = ?, core_last_reviewed_at = ?, "
                 "core_last_reviewed_by = ?, core_review_rationale = ?, updated_at = ? WHERE id = ?",
-                (next_review, now, owner_id, rationale, now, resolved_id),
+                (next_review, now, agent_id, rationale, now, resolved_id),
             )
             result_holder["result"] = envelope.ok(
                 {
@@ -1161,7 +1161,7 @@ def review_core_memory(  # noqa: C901
                 "UPDATE entities SET is_core = 0, core_review_after = NULL, "
                 "core_last_reviewed_at = ?, core_last_reviewed_by = ?, core_review_rationale = ?, "
                 "updated_at = ? WHERE id = ?",
-                (now, owner_id, rationale, now, resolved_id),
+                (now, agent_id, rationale, now, resolved_id),
             )
             if core_tag_row:
                 c.execute(
@@ -1207,7 +1207,7 @@ def review_core_memory(  # noqa: C901
         c.execute(
             "UPDATE entities SET core_last_reviewed_at = ?, core_last_reviewed_by = ?, "
             "core_review_rationale = ? WHERE id = ?",
-            (now, owner_id, rationale, resolved_id),
+            (now, agent_id, rationale, resolved_id),
         )
         result_holder["result"] = envelope.ok(
             {"id": resolved_id, "message": f"Memory '{resolved_id}' was reviewed and archived."}

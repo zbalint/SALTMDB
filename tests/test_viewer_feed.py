@@ -41,7 +41,7 @@ class TestViewerFeed(unittest.TestCase):
 
     def _memory(self, entity_id, created_at, session=None, touched=None, status="raw"):
         self.conn.execute(
-            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, title,
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, title,
                full_content, status, agent_session_id, last_touched_session_id)
                VALUES (?, ?, ?, ?, 'claude', ?, ?, ?, ?, ?)""",
             (
@@ -69,7 +69,7 @@ class TestViewerFeed(unittest.TestCase):
     def _trace(self, trace_id, updated_at, session="s", status="completed", created_at=None):
         self.conn.execute(
             """INSERT INTO conversation_traces
-               (id, agent_session_id, owner_id, harness, harness_session_id, harness_turn_id,
+               (id, agent_session_id, agent_id, harness, harness_session_id, harness_turn_id,
                 status, user_prompt, user_prompt_hash, created_at, updated_at)
                VALUES (?, ?, 'claude', 'claude_code', 'hs', ?, ?, ?, 'h', ?, ?)""",
             (

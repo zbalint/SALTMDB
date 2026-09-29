@@ -47,7 +47,7 @@ This skill defines the "Codify" stage of SALTMDB's closed self-correction loop. 
 
 ### 5. Review Gate (Store Proposal)
 - Store findings via `store_memory(memory_type="fact", ...)`; the hook's MCP server environment
-  must configure `SALTMDB_OWNER_ID=agent_hook_skillreview`.
+  must configure `SALTMDB_AGENT_ID=agent_hook_skillreview`.
 - Title format: `[SALTMDB Skill-Review Sweep] <ISO date> -- N pattern(s) found, M diff(s) proposed` (or `0 patterns found` if nothing qualified).
 - Include mined event counts, date range, causal diagnoses, proposed text diffs, and confidence level (paired vs unpaired).
 - Even if no patterns qualify, store a short "no new findings" memory so future runs know where the last review window ended.

@@ -49,7 +49,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             "# Missing closing fence"
         )
         res = memory_service.store_memory(
-            content=unclosed_markdown, title="Unclosed Fence Test", owner_id="test_agent"
+            content=unclosed_markdown, title="Unclosed Fence Test", agent_id="test_agent"
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
@@ -62,7 +62,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             "| Row 1 Col 1 |\n"  # Insufficient pipe separators
         )
         res = memory_service.store_memory(
-            content=malformed_table, title="Broken Table Test", owner_id="test_agent"
+            content=malformed_table, title="Broken Table Test", agent_id="test_agent"
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
@@ -84,7 +84,7 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         res = memory_service.store_memory(
             content=structured_md,
             title="High MSDI Test",
-            owner_id="test_agent",
+            agent_id="test_agent",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")

@@ -19,7 +19,7 @@ def connection(tmp_path):
 def add_entity(conn, entity_id, title, body, status="consolidated"):
     conn.execute(
         "INSERT INTO entities(id, title, full_content, status, weight, is_core, created_at, "
-        "updated_at, last_accessed_at, owner_id, scope, metadata, memory_type) "
+        "updated_at, last_accessed_at, agent_id, scope, metadata, memory_type) "
         "VALUES (?, ?, ?, ?, 1, 0, datetime('now'), datetime('now'), datetime('now'), "
         "'test', 'shared', '{}', 'fact')",
         (entity_id, title, body, status),

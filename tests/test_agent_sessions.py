@@ -49,7 +49,7 @@ class TestAgentSessions(unittest.TestCase):
         close_session(self.conn, "session-life", "2024-01-01T12:00:00+00:00")
         close_session(self.conn, "session-life", "2024-01-01T13:00:00+00:00")
         row = self.conn.execute(
-            "SELECT owner_id, last_activity_at, ended_at, ended_reason "
+            "SELECT agent_id, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("session-life",),
         ).fetchone()
@@ -75,7 +75,7 @@ class TestAgentSessions(unittest.TestCase):
             "antigravity",
         )
         row = self.conn.execute(
-            "SELECT COUNT(*), owner_id, started_at, last_activity_at, ended_at, ended_reason "
+            "SELECT COUNT(*), agent_id, started_at, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("session-reconnect",),
         ).fetchone()
@@ -92,7 +92,7 @@ class TestAgentSessions(unittest.TestCase):
             self.conn, "session-monotonic", "/other", "2024-01-01T11:00:00+00:00", "other"
         )
         row = self.conn.execute(
-            "SELECT cwd, owner_id, started_at, last_activity_at, ended_at "
+            "SELECT cwd, agent_id, started_at, last_activity_at, ended_at "
             "FROM _agent_sessions WHERE session_id = ?",
             ("session-monotonic",),
         ).fetchone()
@@ -121,7 +121,7 @@ class TestAgentSessions(unittest.TestCase):
             row[1] for row in migrated.execute("PRAGMA table_info(_agent_sessions)").fetchall()
         }
         self.assertTrue(
-            {"owner_id", "last_activity_at", "ended_at", "ended_reason"}.issubset(columns)
+            {"agent_id", "last_activity_at", "ended_at", "ended_reason"}.issubset(columns)
         )
         cwd_column = next(
             row
@@ -130,7 +130,7 @@ class TestAgentSessions(unittest.TestCase):
         )
         self.assertEqual(cwd_column[3], 0, "cwd must be nullable for incomplete registrations")
         row = migrated.execute(
-            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason "
+            "SELECT cwd, started_at, agent_id, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("legacy-session",),
         ).fetchone()
@@ -164,7 +164,7 @@ class TestAgentSessions(unittest.TestCase):
         cwd_column = next(row for row in columns if row[1] == "cwd")
         self.assertEqual(cwd_column[3], 0)
         row = reopened.execute(
-            "SELECT cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason "
+            "SELECT cwd, started_at, agent_id, last_activity_at, ended_at, ended_reason "
             "FROM _agent_sessions WHERE session_id = ?",
             ("legacy-no-cwd",),
         ).fetchone()

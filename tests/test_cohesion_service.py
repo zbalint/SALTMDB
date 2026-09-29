@@ -56,7 +56,7 @@ class TestCohesionService(unittest.TestCase):
     ) -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', ?, ?, ?, ?)",
             (
@@ -76,7 +76,7 @@ class TestCohesionService(unittest.TestCase):
         by default -- mirrors tests/test_topic_rerank.py's helper of the same name."""
         self.conn.execute(
             "INSERT OR IGNORE INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?)",

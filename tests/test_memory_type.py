@@ -32,7 +32,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             res = store_memory(
                 content=f"Content for memory_type round trip test of type {mt}",
                 title=f"Memory Type Round Trip {mt}",
-                owner_id="tester",
+                agent_id="tester",
                 memory_type=mt,
                 db_connection=self.conn,
             )
@@ -46,7 +46,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         res = store_memory(
             content="Content for invalid memory_type test",
             title="Invalid Memory Type Entity",
-            owner_id="tester",
+            agent_id="tester",
             memory_type="bogus_type",
             db_connection=self.conn,
         )
@@ -57,7 +57,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         res = store_memory(
             content="Content for default memory_type test on a brand-new entity",
             title="Default Memory Type Entity",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -68,7 +68,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         res = store_memory(
             content="Content for memory_type preservation test on update path",
             title="Memory Type Preservation Entity",
-            owner_id="tester",
+            agent_id="tester",
             memory_type="decision",
             db_connection=self.conn,
         )
@@ -80,7 +80,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             entity_id=entity_id,
             content="Content for memory_type preservation test on update path",
             title="Memory Type Preservation Entity",
-            owner_id="tester",
+            agent_id="tester",
             memory_type=None,
             db_connection=self.conn,
         )
@@ -95,7 +95,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
         res = store_memory(
             content="Content for explicit memory_type change test on update path",
             title="Memory Type Change Entity",
-            owner_id="tester",
+            agent_id="tester",
             memory_type="fact",
             db_connection=self.conn,
         )
@@ -107,7 +107,7 @@ class TestMemoryTypeStoreMemory(unittest.TestCase):
             entity_id=entity_id,
             content="Content for explicit memory_type change test on update path",
             title="Memory Type Change Entity",
-            owner_id="tester",
+            agent_id="tester",
             memory_type="event",
             db_connection=self.conn,
         )
@@ -140,7 +140,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         res = store_memory(
             content=f"Seed content for search/scan memory_type tests: {title}",
             title=title,
-            owner_id="tester",
+            agent_id="tester",
             memory_type=memory_type,
             is_core=is_core,
             tags=tags,
@@ -156,7 +156,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         self._store("Event Seed Entity Gamma", "event")
 
         results = search_memory(
-            owner_id="tester",
+            agent_id="tester",
             memory_type_filter="procedure",
             db_connection=self.conn,
         )
@@ -172,7 +172,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         self._store("Core Fact Seed", "fact", is_core=True)
 
         results = search_memory(
-            owner_id="tester",
+            agent_id="tester",
             memory_type_filter="procedure",
             is_core=True,
             db_connection=self.conn,
@@ -187,7 +187,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         entity_id = self._store("Field Integrity Seed Entity", "decision", is_core=True)
 
         results = search_memory(
-            owner_id="tester",
+            agent_id="tester",
             memory_type_filter="decision",
             db_connection=self.conn,
         )
@@ -204,7 +204,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
         self._store("Bulk Seed Two", "event")
         self._store("Bulk Seed Three", "preference")
 
-        results = search_memory(owner_id="tester", db_connection=self.conn)
+        results = search_memory(agent_id="tester", db_connection=self.conn)
         self.assertTrue(len(results) >= 3)
         for r in results:
             self.assertIn("memory_type", r)
@@ -215,7 +215,7 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
     def test_scan_memories_includes_correct_memory_type(self):
         entity_id = self._store("Scan Memory Type Entity", "preference")
 
-        rows = scan_memories(owner_id="tester", db_connection=self.conn)
+        rows = scan_memories(agent_id="tester", db_connection=self.conn)
         matching = [r for r in rows if r["id"] == entity_id]
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["memory_type"], "preference")
@@ -235,7 +235,7 @@ class TestMemoryTypeBackwardCompatAndSchema(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             """
-            INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope,
+            INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope,
                                    is_core, weight, status, parent_ids, title, full_content, context_id)
             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 'raw', ?, ?, ?, ?)
         """,
@@ -271,12 +271,12 @@ class TestMemoryTypeBackwardCompatAndSchema(unittest.TestCase):
         entity_id = str(uuid.uuid4())
         self._insert_raw_entity_without_memory_type(entity_id, title="Legacy Row For Search Scan")
 
-        results = search_memory(owner_id="tester", db_connection=self.conn)
+        results = search_memory(agent_id="tester", db_connection=self.conn)
         matching = [r for r in results if r["id"] == entity_id]
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["memory_type"], "fact")
 
-        rows = scan_memories(owner_id="tester", db_connection=self.conn)
+        rows = scan_memories(agent_id="tester", db_connection=self.conn)
         matching_scan = [r for r in rows if r["id"] == entity_id]
         self.assertEqual(len(matching_scan), 1)
         self.assertEqual(matching_scan[0]["memory_type"], "fact")

@@ -99,7 +99,7 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                 WHERE e.status IN ('raw', 'consolidated') AND e.embedding_status = 'ready'"""
             total_ready = conn.execute(f"SELECT COUNT(*) {ready_from}").fetchone()[0]
             cursor = conn.execute(
-                f"""SELECT e.id, e.title, e.status, e.owner_id, e.is_core, ee.embedding
+                f"""SELECT e.id, e.title, e.status, e.agent_id, e.is_core, ee.embedding
                 {ready_from}
                 ORDER BY e.updated_at DESC, e.id DESC
                 LIMIT ?""",
@@ -128,7 +128,7 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                                 "id": r["id"],
                                 "title": r["title"] or r["id"][:8],
                                 "status": r["status"],
-                                "owner_id": r["owner_id"] or "system",
+                                "agent_id": r["agent_id"] or "system",
                                 "is_core": bool(r["is_core"]),
                             }
                         )

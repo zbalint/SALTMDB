@@ -34,7 +34,7 @@ def build_lexical_snapshot_receipt(db_path: Path, *, corpus_root_hash: str) -> d
             "entity_count": 0,
             "relation_count": 0,
             "sentinel_timestamp": "2026-08-24T00:00:00+00:00",
-            "owner_id": "synthetic-test",
+            "agent_id": "synthetic-test",
             "db_sha256_informational": hashlib.sha256(db_path.read_bytes()).hexdigest(),
         },
     )

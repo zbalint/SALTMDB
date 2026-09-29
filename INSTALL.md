@@ -45,9 +45,13 @@ uv run python -m saltmdb
 ### Environment Variables
 
 - `SALTMDB_DB_PATH`: Custom path to the SQLite database file (default: `~/.saltmdb/saltmdb.db`).
-- `SALTMDB_OWNER_ID`: **Required for the MCP adapter.** Stable lowercase agent identity such as
+- `SALTMDB_AGENT_ID`: **Required for the MCP adapter.** Stable lowercase agent identity such as
   `codex`, `claude`, or `agent_qa`; must match `^[a-z][a-z0-9_-]{0,63}$`. Put it in each MCP
   server entry's `env` object. It is not an MCP tool argument.
+
+  **Migrating from `SALTMDB_OWNER_ID`:** the old name still works and logs a deprecation warning.
+  If both are set, `SALTMDB_AGENT_ID` wins (a second warning names both variables when they differ).
+  Rename it in each MCP server entry at your convenience; the fallback will be removed in a later release.
 - `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search -- note that with it disabled, `search_memory` calls that pass `query_keywords` return an error (`[{"error": "..."}]`) rather than falling back to FTS-only results; filter/tag-only browsing without `query_keywords` still works.
 - `SALTMDB_VIEWER_PORT`: Custom port for the database dashboard viewer (default: `8080`), read when the backend daemon starts the in-process viewer thread (see §5 — the `saltmdb-viewer` CLI no longer takes a `--port` flag).
 - `SALTMDB_VIEWER_HOST`: **Currently not consumed.** As of the Track B backend-daemon rework, the daemon binds the viewer directly to `127.0.0.1` (`src/saltmdb/daemon/server.py`) regardless of this variable — a known gap introduced by that change, not yet wired through. Loopback-only is the safe default in the meantime; there is no supported way to expose the viewer on the local network right now.
@@ -63,8 +67,8 @@ uv run python -m saltmdb
 
 ### Adapter identity and session lifecycle
 
-`SALTMDB_OWNER_ID` is configured once in each MCP server entry; agents must not pass
-`owner_id` as a tool argument. Each adapter process mints one immutable `agent_session_id` and
+`SALTMDB_AGENT_ID` is configured once in each MCP server entry; agents must not pass
+`agent_id` as a tool argument. Each adapter process mints one immutable `agent_session_id` and
 registers its working directory and configured owner with the daemon. Hello is acknowledged only
 after that registration succeeds as a synchronous foreground write through the daemon's
 centralized writer. Shutdown during registration returns `DAEMON_SHUTTING_DOWN`; an exhausted
@@ -95,7 +99,7 @@ historical rows.
 Bulk relation calls use the configured owner as their batch default. Per-item owner overrides are
 for trusted in-process callers only; the public MCP wrapper strips them. Bulk consolidation keeps
 the configured batch owner, with per-item overrides retained only as an internal compatibility
-affordance. `saltmdb-cli orphans` is scoped to `SALTMDB_OWNER_ID`, while `saltmdb-cli corpus-health`
+affordance. `saltmdb-cli orphans` is scoped to `SALTMDB_AGENT_ID`, while `saltmdb-cli corpus-health`
 is a whole-corpus administrative report.
 
 > **Mechanical Text Quality Gate & Duplicate Handling:** All writes (`store_memory`) and merges (`consolidate_memories`) undergo sub-millisecond multi-stage pre-embedding quality evaluation (idempotent auto-formatting, prose extraction, Shannon character entropy bounds \[2.5, 5.3\], Word 3-gram/5-gram sequence repetition, Type-Token Ratio, Coleman-Liau readability bounds \[2.0, 26.0\], and MSDI structural density scoring) and Stage A SHA-256 exact hash deduplication before ONNX embedding execution. The gate aggregates every finding into one response instead of failing on the first: only malformed/empty/placeholder content, unmistakable extreme generation loops, and missing required structure at length are hard rejections — entropy/repetition/TTR/readability findings are advisory warnings that never block the write. Duplicate handling runs on every brand-new `store_memory` write: an exact content-hash match is a hard rejection naming the existing entity; FTS-prefiltered candidates are judged primarily by the bundled MiniLM-L6 cross-encoder, and a candidate above the provisional logit threshold always stores and returns `duplicate_candidates` inline, directing the caller to `supersede_memory`/`consolidate_memories`/`manage_relation`. Cosine/lexical comparison is only a genuine model-failure fallback; there is no separate review-token resubmission step. This replaced the two-phase `REVIEW_REQUIRED`/`review_token` disposition gate entirely — see `store_memory`'s own MCP tool description for the full current flow.
@@ -146,7 +150,7 @@ MCP server configuration directory: `~/.gemini/antigravity-cli/mcp/saltmdb/` (or
     "saltmdb": {
       "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
       "args": ["-m", "saltmdb"],
-      "env": {"SALTMDB_OWNER_ID": "antigravity"}
+      "env": {"SALTMDB_AGENT_ID": "antigravity"}
     }
   }
 }
@@ -162,7 +166,7 @@ Use double backslashes (`\\`) on Windows.
     "saltmdb": {
       "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
       "args": ["C:\\path\\to\\SALTMDB\\saltmdb_server.py"],
-      "env": {"SALTMDB_OWNER_ID": "antigravity"}
+      "env": {"SALTMDB_AGENT_ID": "antigravity"}
     }
   }
 }
@@ -184,7 +188,7 @@ Add the following to the `mcpServers` block (replace paths with your own from St
     "saltmdb": {
       "command": "C:\\Users\\YOU\\AppData\\Local\\Python\\python.exe",
       "args": ["-m", "saltmdb"],
-      "env": {"SALTMDB_OWNER_ID": "claude"}
+      "env": {"SALTMDB_AGENT_ID": "claude"}
     }
   }
 }
@@ -197,7 +201,7 @@ Add the following to the `mcpServers` block (replace paths with your own from St
     "saltmdb": {
       "command": "/home/you/.venv/bin/python",
       "args": ["-m", "saltmdb"],
-      "env": {"SALTMDB_OWNER_ID": "claude"}
+      "env": {"SALTMDB_AGENT_ID": "claude"}
     }
   }
 }

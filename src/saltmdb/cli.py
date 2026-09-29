@@ -65,7 +65,7 @@ def cmd_export_corpus_snapshot(args):
     document scripts/benchmarking/freeze_live_corpus.py already expects (has_more=False,
     next_cursor=None, entity_count == len(entities)).
     """
-    from saltmdb.config import get_db_path, get_owner_id
+    from saltmdb.config import get_db_path, get_agent_id
     from saltmdb.domain.services.corpus_snapshot_service import (
         CorpusSnapshotError,
         SnapshotChangedError,
@@ -76,7 +76,7 @@ def cmd_export_corpus_snapshot(args):
     try:
         pages = list(
             iter_corpus_snapshot_pages(
-                owner_id=get_owner_id(),
+                agent_id=get_agent_id(),
                 page_size=args.page_size,
                 include_archived=args.include_archived,
                 db_path=db_path,
@@ -120,11 +120,11 @@ def cmd_orphans(args):
     No entity_id, owner-wide maintenance scan -- flagged reversible under the plan's §1.2 (an
     unlinked memory is still fully searchable; the corpus does not degrade if this never runs).
     """
-    from saltmdb.config import get_db_path, get_owner_id
+    from saltmdb.config import get_db_path, get_agent_id
     from saltmdb.domain.services.memory_service import detect_orphaned_memories
 
     db_path = args.db_path or get_db_path()
-    result = detect_orphaned_memories(owner_id=get_owner_id(), db_path=db_path)
+    result = detect_orphaned_memories(agent_id=get_agent_id(), db_path=db_path)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 1 if "error" in result else 0
 

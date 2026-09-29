@@ -55,13 +55,13 @@ def snapshot():
                 "invalid_at": None,
             }
         ],
-        "provenance": {"owner_id": "test-owner"},
+        "provenance": {"agent_id": "test-owner"},
     }
 
 
 def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     export, manifest, _projection = derive(snapshot())
-    export["snapshot_provenance"] = {"owner_id": "test-owner"}
+    export["snapshot_provenance"] = {"agent_id": "test-owner"}
     export_path = tmp_path / "corpus_export.json"
     manifest_path = tmp_path / "corpus_representation_manifest.json"
     export_path.write_text(json.dumps(export))
@@ -77,7 +77,7 @@ def test_build_snapshot_db_inserts_expected_entity_and_relation_counts(tmp_path)
     assert receipt["entity_count"] == 2
     assert receipt["relation_count"] == 1
     assert receipt["kind"] == "LexicalSnapshotReceipt"
-    assert receipt["owner_id"] == "test-owner"
+    assert receipt["agent_id"] == "test-owner"
     manifest = json.loads(manifest_path.read_text())
     assert receipt["corpus_root_hash"] == manifest["corpus_root_hash"]
     assert db_path.exists()

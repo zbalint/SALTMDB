@@ -30,7 +30,7 @@ class TestViewerScatterplotSampling(unittest.TestCase):
         for index in range(4):
             stamp = f"2026-09-2{index}T00:00:00+00:00"
             self.conn.execute(
-                "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+                "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
                 "title, full_content, status, embedding_status) "
                 "VALUES (?, ?, ?, ?, 'tester', ?, 'body', 'raw', 'ready')",
                 (f"e{index}", stamp, stamp, stamp, f"Entity {index}"),

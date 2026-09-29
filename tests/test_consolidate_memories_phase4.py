@@ -28,7 +28,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Detailed, durable description of {title} used in consolidation tests.",
-            owner_id="agent_db",
+            agent_id="agent_db",
             db_path=self.db_path,
         )
         self.assertEqual(result["status"], "ok")
@@ -77,7 +77,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
                 parent_ids=[parent_a, parent_b],
                 title="Canonical summary",
                 content="A coherent canonical summary of both parent memories.",
-                owner_id="agent_db",
+                agent_id="agent_db",
                 db_connection=self.conn,
             )
 

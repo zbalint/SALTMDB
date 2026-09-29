@@ -38,7 +38,7 @@ _ENTITY_COLUMNS = (
     "metadata",
     "created_at",
     "updated_at",
-    "owner_id",
+    "agent_id",
     "scope",
     "is_core",
     "weight",
@@ -65,7 +65,7 @@ class SnapshotProvenance:
     snapshot_hash: str
     entity_count: int
     include_archived: bool
-    owner_id: str
+    agent_id: str
     relation_root_hash: str
     relation_count: int
 
@@ -77,7 +77,7 @@ class SnapshotProvenance:
             "snapshot_hash": self.snapshot_hash,
             "entity_count": self.entity_count,
             "include_archived": self.include_archived,
-            "owner_id": self.owner_id,
+            "agent_id": self.agent_id,
             "relation_root_hash": self.relation_root_hash,
             "relation_count": self.relation_count,
         }
@@ -156,13 +156,13 @@ def _require_entity_columns(conn: sqlite3.Connection) -> None:
 
 def _visible_predicate(*, include_archived: bool) -> str:
     lifecycle = "" if include_archived else " AND status != 'archived'"
-    return "(owner_id = ? OR scope = 'shared')" + lifecycle
+    return "(agent_id = ? OR scope = 'shared')" + lifecycle
 
 
 def _entity_rows(
     conn: sqlite3.Connection,
     *,
-    owner_id: str,
+    agent_id: str,
     include_archived: bool,
     after_id: str | None = None,
     limit: int | None = None,
@@ -170,7 +170,7 @@ def _entity_rows(
     predicates: list[str] = []
     params: list[object] = []
     predicates.append(_visible_predicate(include_archived=include_archived))
-    params.append(owner_id)
+    params.append(agent_id)
     if after_id is not None:
         predicates.append("id > ?")
         params.append(after_id)
@@ -185,7 +185,7 @@ def _entity_rows(
 def _supersedes_edges(
     conn: sqlite3.Connection,
     *,
-    owner_id: str,
+    agent_id: str,
     include_archived: bool,
     as_of: str,
 ) -> tuple[list[dict[str, object]], str]:
@@ -210,7 +210,7 @@ def _supersedes_edges(
            AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
          ORDER BY r.source_id, r.target_id, r.id
         """,
-        (owner_id, as_of, as_of, as_of, as_of),
+        (agent_id, as_of, as_of, as_of, as_of),
     ).fetchall()
     edges = [
         {
@@ -228,7 +228,7 @@ def _supersedes_edges(
     ]
     return edges, _sha256_json(
         {
-            "owner_id": owner_id,
+            "agent_id": agent_id,
             "include_archived": include_archived,
             "edges": edges,
         }
@@ -249,7 +249,7 @@ def _entity_payload(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, object]:
         source_metadata,
         created_at,
         updated_at,
-        owner_id,
+        agent_id,
         scope,
         is_core,
         weight,
@@ -265,7 +265,7 @@ def _entity_payload(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, object]:
         "source_metadata": source_metadata,
         "created_at": created_at,
         "updated_at": updated_at,
-        "owner_id": owner_id,
+        "agent_id": agent_id,
         "scope": scope,
         "is_core": bool(is_core),
         "weight": weight,
@@ -277,13 +277,13 @@ def _entity_payload(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, object]:
 def _corpus_fingerprint(
     conn: sqlite3.Connection,
     *,
-    owner_id: str,
+    agent_id: str,
     include_archived: bool,
 ) -> tuple[str, int]:
     digest = hashlib.sha256()
     digest.update(
         json.dumps(
-            {"owner_id": owner_id, "include_archived": include_archived},
+            {"agent_id": agent_id, "include_archived": include_archived},
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -297,7 +297,7 @@ def _corpus_fingerprint(
         + " WHERE "
         + _visible_predicate(include_archived=include_archived)
         + " ORDER BY id",
-        (owner_id,),
+        (agent_id,),
     )
     while True:
         rows = cursor.fetchmany(_HASH_CHUNK_ROWS)
@@ -319,16 +319,16 @@ def _corpus_fingerprint(
 def _provenance(
     conn: sqlite3.Connection,
     *,
-    owner_id: str,
+    agent_id: str,
     include_archived: bool,
     as_of: str,
 ) -> SnapshotProvenance:
     schema_hash = _schema_hash(conn)
     corpus_hash, entity_count = _corpus_fingerprint(
-        conn, owner_id=owner_id, include_archived=include_archived
+        conn, agent_id=agent_id, include_archived=include_archived
     )
     supersedes_edges, relation_root_hash = _supersedes_edges(
-        conn, owner_id=owner_id, include_archived=include_archived, as_of=as_of
+        conn, agent_id=agent_id, include_archived=include_archived, as_of=as_of
     )
     # This is a logical database hash rather than a raw file hash.  It is stable across SQLite
     # WAL checkpoints and captures exactly the schema plus authoritative entity source rows that
@@ -338,14 +338,14 @@ def _provenance(
             "schema_hash": schema_hash,
             "corpus_hash": corpus_hash,
             "entity_count": entity_count,
-            "owner_id": owner_id,
+            "agent_id": agent_id,
             "relation_root_hash": relation_root_hash,
         }
     )
     snapshot_hash = _sha256_json(
         {
             "database_hash": database_hash,
-            "owner_id": owner_id,
+            "agent_id": agent_id,
             "relation_root_hash": relation_root_hash,
             "include_archived": include_archived,
         }
@@ -357,7 +357,7 @@ def _provenance(
         snapshot_hash=snapshot_hash,
         entity_count=entity_count,
         include_archived=include_archived,
-        owner_id=owner_id,
+        agent_id=agent_id,
         relation_root_hash=relation_root_hash,
         relation_count=len(supersedes_edges),
     )
@@ -415,7 +415,7 @@ def _page_result(
         "snapshot_hash": provenance.snapshot_hash,
         "entity_count": provenance.entity_count,
         "include_archived": include_archived,
-        "owner_id": provenance.owner_id,
+        "agent_id": provenance.agent_id,
         "supersedes_edges": supersedes_edges,
         "relations": supersedes_edges,
         "relation_root_hash": provenance.relation_root_hash,
@@ -426,7 +426,7 @@ def _page_result(
 
 def export_corpus_snapshot_page(
     *,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
     snapshot_hash: str | None = None,
@@ -444,14 +444,14 @@ def export_corpus_snapshot_page(
     page_size, cursor, snapshot_hash, include_archived = _validate_page_request(
         page_size, cursor, snapshot_hash, include_archived
     )
-    if not isinstance(owner_id, str) or not owner_id:
-        raise CorpusSnapshotError("owner_id is mandatory for corpus snapshot export")
+    if not isinstance(agent_id, str) or not agent_id:
+        raise CorpusSnapshotError("agent_id is mandatory for corpus snapshot export")
     with managed_connection(db_connection=db_connection, db_path=db_path) as conn:
         with _read_transaction(conn):
             _require_entity_columns(conn)
             as_of = datetime.now(UTC).isoformat()
             provenance = _provenance(
-                conn, owner_id=owner_id, include_archived=include_archived, as_of=as_of
+                conn, agent_id=agent_id, include_archived=include_archived, as_of=as_of
             )
             if snapshot_hash is not None and snapshot_hash != provenance.snapshot_hash:
                 raise SnapshotChangedError(
@@ -459,14 +459,14 @@ def export_corpus_snapshot_page(
                 )
             rows = _entity_rows(
                 conn,
-                owner_id=owner_id,
+                agent_id=agent_id,
                 include_archived=include_archived,
                 after_id=cursor,
                 limit=page_size + 1,
             )
             supersedes_edges, relation_root_hash = _supersedes_edges(
                 conn,
-                owner_id=owner_id,
+                agent_id=agent_id,
                 include_archived=include_archived,
                 as_of=as_of,
             )
@@ -485,7 +485,7 @@ def export_corpus_snapshot_page(
 
 def iter_corpus_snapshot_pages(
     *,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     page_size: int | None = None,
     include_archived: bool = False,
     db_connection: sqlite3.Connection | None = None,
@@ -495,19 +495,19 @@ def iter_corpus_snapshot_pages(
     page_size, _, _, include_archived = _validate_page_request(
         page_size, None, None, include_archived
     )
-    if not isinstance(owner_id, str) or not owner_id:
-        raise CorpusSnapshotError("owner_id is mandatory for corpus snapshot export")
+    if not isinstance(agent_id, str) or not agent_id:
+        raise CorpusSnapshotError("agent_id is mandatory for corpus snapshot export")
     cursor: str | None = None
     with managed_connection(db_connection=db_connection, db_path=db_path) as conn:
         with _read_transaction(conn):
             _require_entity_columns(conn)
             as_of = datetime.now(UTC).isoformat()
             provenance = _provenance(
-                conn, owner_id=owner_id, include_archived=include_archived, as_of=as_of
+                conn, agent_id=agent_id, include_archived=include_archived, as_of=as_of
             )
             supersedes_edges, relation_root_hash = _supersedes_edges(
                 conn,
-                owner_id=owner_id,
+                agent_id=agent_id,
                 include_archived=include_archived,
                 as_of=as_of,
             )
@@ -518,7 +518,7 @@ def iter_corpus_snapshot_pages(
             while True:
                 rows = _entity_rows(
                     conn,
-                    owner_id=owner_id,
+                    agent_id=agent_id,
                     include_archived=include_archived,
                     after_id=cursor,
                     limit=page_size + 1,

@@ -14,7 +14,7 @@ from saltmdb.daemon.dispatch import (
 class TestDispatchRequestDefaults(unittest.TestCase):
     @patch("saltmdb.daemon.dispatch.memory_service.store_memory", return_value="stored")
     def test_store_omitted_options_match_service_defaults(self, store):
-        _dispatch_store_memory(content="valid content", owner_id="owner", title="A title")
+        _dispatch_store_memory(content="valid content", agent_id="owner", title="A title")
         call = store.call_args.kwargs
         self.assertEqual(call["scope"], "shared")
         self.assertEqual(call["weight"], 1)
@@ -22,7 +22,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
 
     @patch("saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[])
     def test_search_omitted_options_match_service_defaults(self, search):
-        _dispatch_search_memory(owner_id="owner", query_keywords="query")
+        _dispatch_search_memory(agent_id="owner", query_keywords="query")
         call = search.call_args.kwargs
         self.assertFalse(call["explain_mode"])
         self.assertEqual(call["limit"], 5)
@@ -43,15 +43,15 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     @patch("saltmdb.daemon.dispatch.memory_service.get_memory", return_value="content")
     def test_get_memory_uses_explicit_id_fetch(self, fetch):
         self.assertEqual(
-            _dispatch_get_memory(entity_id="entity-id", owner_id="test_agent"), "content"
+            _dispatch_get_memory(entity_id="entity-id", agent_id="test_agent"), "content"
         )
-        fetch.assert_called_once_with(entity_id="entity-id", owner_id="test_agent")
+        fetch.assert_called_once_with(entity_id="entity-id", agent_id="test_agent")
 
     @patch("saltmdb.daemon.dispatch.relation_service.get_lineage", return_value={"nodes": []})
     def test_get_lineage_defaults_to_ancestor_traversal(self, lineage):
-        _dispatch_get_lineage(entity_id="entity-id", owner_id="test_agent")
+        _dispatch_get_lineage(entity_id="entity-id", agent_id="test_agent")
         lineage.assert_called_once_with(
-            entity_id="entity-id", direction="ancestors", max_depth=5, owner_id="test_agent"
+            entity_id="entity-id", direction="ancestors", max_depth=5, agent_id="test_agent"
         )
 
     @patch(
@@ -61,7 +61,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     def test_get_related_memories_delegates_dependency_traversal(self, related):
         _dispatch_get_related_memories(entity_id="entity-id", max_depth=3)
         related.assert_called_once_with(
-            entity_id="entity-id", max_depth=3, direction="both", owner_id=None
+            entity_id="entity-id", max_depth=3, direction="both", agent_id=None
         )
 
     @patch(
@@ -71,7 +71,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
     def test_get_related_memories_forwards_explicit_direction(self, related):
         _dispatch_get_related_memories(entity_id="entity-id", max_depth=3, direction="outbound")
         related.assert_called_once_with(
-            entity_id="entity-id", max_depth=3, direction="outbound", owner_id=None
+            entity_id="entity-id", max_depth=3, direction="outbound", agent_id=None
         )
 
 

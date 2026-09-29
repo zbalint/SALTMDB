@@ -76,7 +76,7 @@ class TestRerankCandidatesByTopic(unittest.TestCase):
         the test's own manual INSERT/UPDATE of entity_chunk_embeddings for the same entity_id."""
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', ?, ?, ?, ?)",
             (entity_id, status, entity_id, f"content for {entity_id}", content_hash),
@@ -95,7 +95,7 @@ class TestRerankCandidatesByTopic(unittest.TestCase):
         `_insert_entity` first with a deliberately different hash or status."""
         self.conn.execute(
             "INSERT OR IGNORE INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), 'test_user', 'raw',"
             " ?, ?, ?)",
@@ -258,7 +258,7 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="test_user",
+            agent_id="test_user",
             db_path=self.db_path,
         )
         return _extract_id(res)
@@ -456,7 +456,7 @@ class TestRrfGapGateSmoke(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            owner_id="test_user",
+            agent_id="test_user",
             db_path=self.db_path,
         )
         return _extract_id(res)

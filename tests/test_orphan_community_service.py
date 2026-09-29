@@ -73,7 +73,7 @@ class TestOrphanCommunityService(unittest.TestCase):
             store_memory(
                 content=content or f"Orphan-community fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="orphan-community-test",
+                agent_id="orphan-community-test",
                 db_connection=self.conn,
             )
         )

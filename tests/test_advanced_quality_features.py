@@ -31,7 +31,7 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res = memory_service.store_memory(
             content=tech_log_payload,
             title="Technical Log Report",
-            owner_id="test_agent",
+            agent_id="test_agent",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -51,7 +51,7 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res1 = memory_service.store_memory(
             content=original_content,
             title="SALTMDB Core Architecture Spec",
-            owner_id="test_agent",
+            agent_id="test_agent",
             weight=5.0,
             db_connection=self.conn,
         )
@@ -63,7 +63,7 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res2 = memory_service.store_memory(
             content=updated_content,
             title="SALTMDB Core Architecture Spec Revision",
-            owner_id="test_agent",
+            agent_id="test_agent",
             db_connection=self.conn,
         )
         self.assertEqual(res2["status"], "ok")

@@ -89,7 +89,7 @@ class TestCommunityRetrievalService(unittest.TestCase):
             store_memory(
                 content=f"Global retrieval fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="community-retrieval-test",
+                agent_id="community-retrieval-test",
                 db_connection=self.conn,
             )
         )

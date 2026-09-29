@@ -26,7 +26,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         # Track B (scratch/plans/track_b_daemon_detailed.md §8): tools.py's tool functions call
         # through a backend indirection now; inject the in-process DirectDispatchBackend so these
         # tests keep exercising tools.py's argument-normalization layer against this temp DB with
@@ -36,7 +36,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -59,17 +59,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             tools.search_memory(query_keywords="first call identity probe")
         message = str(ctx.exception)
-        self.assertIn("SALTMDB_OWNER_ID", message)
+        self.assertIn("SALTMDB_AGENT_ID", message)
         self.assertIn("restart", message)
 
-    def test_owner_id_is_absent_from_every_public_schema(self):
+    def test_agent_id_is_absent_from_every_public_schema(self):
         import inspect
 
-        for registered in tools.mcp._tool_manager._tools.values():
-            self.assertNotIn("owner_id", registered.parameters.get("properties", {}))
-            self.assertNotIn("owner_id", inspect.signature(registered.fn).parameters)
+        for name, registered in tools.mcp._tool_manager._tools.items():
+            if name == "get_events":
+                continue  # its agent_id is a caller-chosen read filter, not an identity claim
+            self.assertNotIn("agent_id", registered.parameters.get("properties", {}))
+            self.assertNotIn("agent_id", inspect.signature(registered.fn).parameters)
 
-    def test_owner_id_is_not_accepted_by_public_python_wrappers(self):
+    def test_agent_id_is_not_accepted_by_public_python_wrappers(self):
         """The Python wrapper surface must match the generated MCP schema exactly."""
         owner_tools = (
             tools.log_event,
@@ -87,9 +89,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         for tool in owner_tools:
             with self.assertRaises(TypeError, msg=tool.__name__):
-                tool(owner_id="attacker")
+                tool(agent_id="attacker")
 
-    def test_bulk_item_owner_overrides_are_removed_before_dispatch(self):
+    def test_bulk_item_agent_id_overrides_are_removed_before_dispatch(self):
         """A stale per-item owner is never allowed to cross the adapter boundary."""
         capture = _CaptureBackend()
         previous = tools._set_backend_for_test(capture)
@@ -100,7 +102,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
                         "source_id": "source",
                         "target_id": "target",
                         "predicate": "part_of",
-                        "owner_id": "attacker",
+                        "agent_id": "attacker",
                     }
                 ]
             )
@@ -110,7 +112,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
                         "parent_ids": ["parent-a", "parent-b"],
                         "title": "Merged",
                         "content": "Merged content",
-                        "owner_id": "attacker",
+                        "agent_id": "attacker",
                     }
                 ]
             )
@@ -119,10 +121,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         relation_kwargs = capture.calls[0][1]
         consolidation_kwargs = capture.calls[1][1]
-        self.assertEqual(relation_kwargs["owner_id"], "test_agent")
-        self.assertNotIn("owner_id", relation_kwargs["relations"][0])
-        self.assertEqual(consolidation_kwargs["owner_id"], "test_agent")
-        self.assertNotIn("owner_id", consolidation_kwargs["consolidations"][0])
+        self.assertEqual(relation_kwargs["agent_id"], "test_agent")
+        self.assertNotIn("agent_id", relation_kwargs["relations"][0])
+        self.assertEqual(consolidation_kwargs["agent_id"], "test_agent")
+        self.assertNotIn("agent_id", consolidation_kwargs["consolidations"][0])
 
     def test_daemon_dispatch_forwards_batch_owner_to_relation_service(self):
         """The daemon must retain the adapter-injected owner for bulk relation attribution."""
@@ -133,10 +135,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         with patch.object(
             dispatch.relation_service, "bulk_store_relations", return_value=[]
         ) as bulk_store:
-            dispatch._dispatch_manage_relation(relations=relations, owner_id="test_agent")
+            dispatch._dispatch_manage_relation(relations=relations, agent_id="test_agent")
 
         bulk_store.assert_called_once_with(
-            relations=relations, owner_id="test_agent", invalidate=False
+            relations=relations, agent_id="test_agent", invalidate=False
         )
 
     def test_registered_mcp_schemas_have_no_kwargs_catchall(self):
@@ -940,7 +942,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'raw', ?, ?, ?)",
             (entity_id, now, now, now, title, f"content body for {title}", content_hash),
@@ -1071,7 +1073,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
                     "title": "Bulk Owner Override Item CD",
                     "content": bulk_content + "\n- Owner-override item",
                     # A stale per-item owner must be ignored by the adapter boundary.
-                    "owner_id": "agent_override",
+                    "agent_id": "agent_override",
                     "context_id": "ctx_override",
                 },
             ],
@@ -1081,11 +1083,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(bulk_results[1]["status"], "success", bulk_results)
 
         row_ab = self.conn.execute(
-            "SELECT owner_id, context_id FROM entities WHERE id = ?",
+            "SELECT agent_id, context_id FROM entities WHERE id = ?",
             (bulk_results[0]["entity_id"],),
         ).fetchone()
         row_cd = self.conn.execute(
-            "SELECT owner_id, context_id FROM entities WHERE id = ?",
+            "SELECT agent_id, context_id FROM entities WHERE id = ?",
             (bulk_results[1]["entity_id"],),
         ).fetchone()
         self.assertEqual(row_ab, ("test_agent", "ctx_batch_default"))
@@ -1185,7 +1187,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
     async def _call_as(self, owner, tool_name, arguments):
         # Reset models a separate configured MCP adapter process for each owner.
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner(owner)
+        SESSION_IDENTITY.configure_agent_id(owner)
         result = await tools.mcp.call_tool(tool_name, arguments)
         content = result[0] if isinstance(result[0], list) else result
         return json.loads(content[0].text)
@@ -1729,13 +1731,13 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("agent_two")
+        SESSION_IDENTITY.configure_agent_id("agent_two")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1780,13 +1782,13 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -1874,7 +1876,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         # specific known session_id must be seeded via a direct insert like this.
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.conn.execute(
-            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id,
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id,
             scope, status, title, memory_type, full_content, valid_from, agent_session_id)
             VALUES (?, ?, ?, ?, 'tester', 'shared', 'raw', ?, 'fact', 'body', ?, ?)""",
             ("prior-session-memory-id", now, now, now, "Prior Session Memory", now, session_id),
@@ -1903,13 +1905,13 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -2075,13 +2077,13 @@ class TestStrictIsCoreAtAdapterBoundary(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -2120,13 +2122,13 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -2321,13 +2323,13 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]
@@ -2346,7 +2348,7 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         # Owner identity is startup configuration (immutable for the adapter process) -- reset
         # between calls attributed to a different agent, exactly like starting a new MCP process.
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("agent_two")
+        SESSION_IDENTITY.configure_agent_id("agent_two")
         tools.log_event(event_type="issue", content="agent two event")
 
         events = tools.get_events(agent_id="test_agent")
@@ -2403,7 +2405,6 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         for bad_kwargs in (
             {"mode": "events"},
             {"status_filter": "pending"},
-            {"owner_id": "someone"},
         ):
             with self.assertRaises(TypeError, msg=bad_kwargs):
                 tools.get_events(**bad_kwargs)
@@ -2462,13 +2463,13 @@ class TestLogEventEndToEnd(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]

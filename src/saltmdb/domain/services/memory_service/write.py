@@ -74,7 +74,7 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
     title: str,
     content: str,
     tags: list | None,
-    owner_id: str,
+    agent_id: str,
     scope: str,
     memory_type: str | None,
     context_id: str | None,
@@ -93,7 +93,7 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
         return None, None
     row = conn.execute(
         """
-        SELECT title, full_content, owner_id, context_id, scope, memory_type,
+        SELECT title, full_content, agent_id, context_id, scope, memory_type,
                metadata, created_at, content_hash, parent_ids, valid_from
         FROM entities WHERE id = ?
         """,
@@ -107,7 +107,7 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
             (
                 "title",
                 "full_content",
-                "owner_id",
+                "agent_id",
                 "context_id",
                 "scope",
                 "memory_type",
@@ -125,8 +125,8 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
         changes.append("title")
     if content != current["full_content"]:
         changes.append("full_content")
-    if owner_id != current["owner_id"]:
-        changes.append("owner_id")
+    if agent_id != current["agent_id"]:
+        changes.append("agent_id")
     # ``store_memory`` historically defaulted scope to ``shared``.  Treat that default as an
     # omitted value when the existing version is private; otherwise an administrative update that
     # never mentioned scope would be misclassified as a disclosure attempt.
@@ -171,7 +171,7 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
 
 
 def _resolve_existing_entity_id(
-    conn, entity_id: str | None, title: str, owner_id: str, scope: str, content_hash: str
+    conn, entity_id: str | None, title: str, agent_id: str, scope: str, content_hash: str
 ) -> tuple[str | None, dict | None]:
     """Resolves what entity id a `store_memory` call will target, before persistence.
 
@@ -199,9 +199,9 @@ def _resolve_existing_entity_id(
         row = conn.execute(
             """
             SELECT id FROM entities
-            WHERE content_hash = ? AND (owner_id = ? OR scope = 'shared') AND status != 'archived'
+            WHERE content_hash = ? AND (agent_id = ? OR scope = 'shared') AND status != 'archived'
         """,
-            (content_hash, owner_id),
+            (content_hash, agent_id),
         ).fetchone()
         if row:
             existing_id = row[0]
@@ -221,9 +221,9 @@ def _resolve_existing_entity_id(
         row = conn.execute(
             """
             SELECT id FROM entities
-            WHERE title = ? AND owner_id = ? AND scope = ? AND status != 'archived'
+            WHERE title = ? AND agent_id = ? AND scope = ? AND status != 'archived'
         """,
-            (title, owner_id, scope),
+            (title, agent_id, scope),
         ).fetchone()
         if row:
             return row[0], None
@@ -242,7 +242,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     entity_id = proposed.get("resolved_entity_id") or str(uuid.uuid4())
     title = proposed["title"]
     redacted_content = proposed["content"]
-    owner_id = proposed["owner_id"]
+    agent_id = proposed["agent_id"]
     scope = proposed["scope"]
     weight = proposed.get("weight") or 1
     is_core = proposed.get("is_core")
@@ -308,7 +308,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             "core_exit_condition": core_state["core_exit_condition"],
             "core_review_after": core_state["core_review_after"],
             "full_content": redacted_content,
-            "owner_id": owner_id,
+            "agent_id": agent_id,
         }
 
         if target_will_be_active:
@@ -335,7 +335,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     is_core_val = 1 if core_state["is_core"] else 0
 
     cursor = conn.execute(
-        "SELECT created_at, owner_id, valid_from, title, full_content, content_hash, metadata "
+        "SELECT created_at, agent_id, valid_from, title, full_content, content_hash, metadata "
         "FROM entities WHERE id = ?",
         (entity_id,),
     )
@@ -367,8 +367,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             hist_id = f"{entity_id}_h_{str(uuid.uuid4())[:8]}"
             conn.execute(
                 """
-                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
-                 SELECT ?, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, agent_session_id, last_touched_session_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
+                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, embedding_status, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids)
+                 SELECT ?, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, 'archived', parent_ids, title, full_content, ?, ?, metadata, context_id, agent_session_id, last_touched_session_id, 'archived', content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_last_reviewed_at, core_last_reviewed_by, core_review_rationale, core_detail_memory_ids
                  FROM entities WHERE id = ?
              """,
                 (hist_id, valid_from if valid_from else created_at, now, entity_id),
@@ -429,13 +429,13 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
 
     conn.execute(
         """
-        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+        INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             updated_at = excluded.updated_at,
             last_touched_session_id = excluded.last_touched_session_id,
             last_accessed_at = excluded.last_accessed_at,
-            owner_id = COALESCE(excluded.owner_id, entities.owner_id),
+            agent_id = COALESCE(excluded.agent_id, entities.agent_id),
             scope = excluded.scope,
             is_core = excluded.is_core,
             weight = excluded.weight,
@@ -464,7 +464,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             now,
             now,
             now,
-            owner_id,
+            agent_id,
             scope,
             is_core_val,
             weight,
@@ -494,7 +494,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     core_governance_service.reconcile_detail_relations(
         conn,
         core_id=entity_id,
-        owner_id=owner_id,
+        agent_id=agent_id,
         new_detail_ids=core_state["core_detail_memory_ids"],
         previous_detail_ids=core_state["previous_detail_memory_ids"],
     )
@@ -515,7 +515,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
             if norm_input in tag_lookup:
                 tag_id = tag_lookup[norm_input]
             else:
-                tag_id = tag_ops.resolve_or_create_tag(conn, tag_name, agent_id=owner_id)
+                tag_id = tag_ops.resolve_or_create_tag(conn, tag_name, agent_id=agent_id)
                 if tag_id:
                     tag_lookup[norm_input] = tag_id
 
@@ -535,7 +535,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
         "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
     ).fetchone()
     resolved_is_core = bool(resolved_row[0]) if resolved_row else False
-    core_tag_id = tag_ops.resolve_or_create_tag(conn, "#core", agent_id=owner_id)
+    core_tag_id = tag_ops.resolve_or_create_tag(conn, "#core", agent_id=agent_id)
     if core_tag_id:
         if resolved_is_core:
             conn.execute(
@@ -573,7 +573,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
 def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     content: str = None,
     tags: list = None,
-    owner_id: str = None,
+    agent_id: str = None,
     scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
     is_core: bool = None,
@@ -615,8 +615,8 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     never silently ignored. `detail_memory_ids=None` preserves the current declaration, `[]`
     clears it, a replacement list atomically reconciles the declared `elaborates_on` relations.
     """
-    if not owner_id:
-        return "Error: owner_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
+    if not agent_id:
+        return "Error: agent_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
 
     if not content or not content.strip():
         return "Error: content is mandatory and cannot be empty."
@@ -718,7 +718,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         quality_flags_str = json.dumps(quality_res["quality_flags"])
 
         resolved_entity_id, hash_collision_error = _resolve_existing_entity_id(
-            conn, entity_id, title, owner_id, scope, content_hash
+            conn, entity_id, title, agent_id, scope, content_hash
         )
         if hash_collision_error:
             return hash_collision_error
@@ -729,7 +729,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             title=title,
             content=redacted_content,
             tags=tags,
-            owner_id=owner_id,
+            agent_id=agent_id,
             scope=scope,
             memory_type=memory_type,
             context_id=context_id,
@@ -742,7 +742,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             # update.  Preserve omitted/default frozen inputs before entering _store_raw_entity.
             title = frozen_current["title"]
             redacted_content = frozen_current["full_content"]
-            owner_id = frozen_current["owner_id"]
+            agent_id = frozen_current["agent_id"]
             scope = frozen_current["scope"]
             context_id = frozen_current["context_id"]
             memory_type = frozen_current["memory_type"]
@@ -758,7 +758,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "content": redacted_content,
             "title": title,
             "tags": tags,
-            "owner_id": owner_id,
+            "agent_id": agent_id,
             "scope": scope,
             "memory_type": memory_type,
             "context_id": context_id,
@@ -811,7 +811,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 "core_exit_condition": core_state_preview["core_exit_condition"],
                 "core_review_after": core_state_preview["core_review_after"],
                 "full_content": redacted_content,
-                "owner_id": owner_id,
+                "agent_id": agent_id,
             }
             if preview_target_will_be_active:
                 core_governance_service.enforce_overdue_boundary(
@@ -855,7 +855,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             duplicate_result = check_duplicate_memories(
                 title=title,
                 content=redacted_content,
-                owner_id=owner_id,
+                agent_id=agent_id,
                 tags=tags,
                 context_id=context_id,
                 exclude_ids=[entity_id_out],
@@ -913,7 +913,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             },
             warnings=response_warnings,
             effective={
-                "owner_id": owner_id,
+                "agent_id": agent_id,
                 "context_id": context_id,
                 "scope": scope,
                 "memory_type": effective_memory_type_preview,

@@ -23,7 +23,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         res = store_memory(
             title="Test Unique Memory",
             content="Some unique content to test archived embedding status",
-            owner_id="test_user",
+            agent_id="test_user",
             db_path=self.db_path,
         )
         self.assertEqual(res["status"], "ok")
@@ -48,7 +48,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         self.assertEqual(row[0], "raw")
 
         # Archive memory
-        archive_memory(entity_id=entity_id, owner_id="test_user", db_path=self.db_path)
+        archive_memory(entity_id=entity_id, agent_id="test_user", db_path=self.db_path)
 
         row = self.conn.execute(
             "SELECT status, embedding_status FROM entities WHERE id = ?", (entity_id,)
@@ -72,7 +72,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         res = store_memory(
             title="Original Memory Entry",
             content="Original content text block",
-            owner_id="test_user",
+            agent_id="test_user",
             db_path=self.db_path,
         )
         self.assertEqual(res["status"], "ok")
@@ -97,7 +97,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
             tags=["#updated"],
             reason="Correct the representation.",
             entity_id=entity_id,
-            owner_id="test_user",
+            agent_id="test_user",
             db_path=self.db_path,
         )
         self.assertEqual(result["status"], "ok")

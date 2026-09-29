@@ -119,7 +119,7 @@ class TestViewerSessions(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO _agent_sessions
-                (session_id, cwd, owner_id, started_at, last_activity_at, ended_at)
+                (session_id, cwd, agent_id, started_at, last_activity_at, ended_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             ("trace-session", "/project", "owner-a", "2026-09-01T10:00:00+00:00", None, None),
@@ -127,7 +127,7 @@ class TestViewerSessions(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO conversation_traces
-                (id, agent_session_id, owner_id, harness, harness_session_id,
+                (id, agent_session_id, agent_id, harness, harness_session_id,
                  harness_turn_id, status, user_prompt, user_prompt_hash,
                  created_at, updated_at)
             VALUES (?, ?, ?, 'codex', ?, ?, 'pending', ?, ?, ?, ?)

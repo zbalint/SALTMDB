@@ -470,7 +470,7 @@ def _resolve_supersession_chains(  # noqa: C901
       inaccessible/archived intermediate node anywhere in the chain: abstain on that candidate
       entirely (see module docstring above for what "abstain" means to the caller).
     - The resolved head is re-checked against the ORIGINAL query's own where_clauses/params
-      (owner_id/scope, context_id, is_core, memory_type_filter, tags_filter) before being
+      (agent_id/scope, context_id, is_core, memory_type_filter, tags_filter) before being
       returned -- analyze_lineage/analyze_dependencies are unfiltered admin tools, search_memory is
       not, and a resolved head is not necessarily visible to this particular caller.
     """

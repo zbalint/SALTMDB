@@ -186,7 +186,7 @@
       const metadataEntries = [
         ['Lifecycle', data.status || '—'], ['Memory type', data.memory_type || 'fact'],
         ['Embedding', data.embedding_status || 'pending'], ['Quality', data.quality_status || 'Not evaluated'],
-        ['Owner', data.owner_id || 'system'], ['Scope', data.scope || '—'], ['Weight', data.weight ?? '—'],
+        ['Agent', data.agent_id || 'system'], ['Scope', data.scope || '—'], ['Weight', data.weight ?? '—'],
         ['Core memory', data.is_core ? 'Yes (#core)' : 'No'], ['Created', formatTimestamp(data.created_at)],
         ['Updated', formatTimestamp(data.updated_at)], ['Last accessed', formatTimestamp(data.last_accessed_at)],
         ['Context ID', data.context_id || data.project_id || '—'],
@@ -250,7 +250,7 @@
       const identity = node('div', undefined, 'detail-identity');
       identity.append(statusBadge(data.status), node('code', data.harness || 'unknown', 'memory-id'));
       const facts = node('dl', undefined, 'metadata-grid');
-      [['Started', formatTimestamp(data.created_at)], ['Completed', formatTimestamp(data.completed_at, 'Not completed')], ['Owner', data.owner_id || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
+      [['Started', formatTimestamp(data.created_at)], ['Completed', formatTimestamp(data.completed_at, 'Not completed')], ['Agent', data.agent_id || '—']].forEach(([label, value]) => facts.append(factPair(label, value)));
       facts.append(factPairWithCopy('Trace ID', data.trace_id, 'Trace ID'));
       facts.append(factPairWithCopy('Agent session', data.agent_session_id, 'Session ID'));
       traceDetail.append(identity, facts);
@@ -330,9 +330,9 @@
           const rows = data.results.map(item => {
             const row = node('tr'); const score = Number.isFinite(item.score) ? item.score.toFixed(4) : '—';
             const typeCell = node('td'); typeCell.append(statusBadge(item.memory_type || 'fact'));
-            row.append(memoryCell(item), node('td', score), typeCell, node('td', item.owner_id || '—')); return row;
+            row.append(memoryCell(item), node('td', score), typeCell, node('td', item.agent_id || '—')); return row;
           });
-          result.replaceChildren(section(`${data.results.length} ranked matches`, 'Broad hybrid retrieval combines the established lexical and semantic backend signals.'), renderTable(['Memory', 'Score', 'Type', 'Owner'], rows, 'No matching active memories.'));
+          result.replaceChildren(section(`${data.results.length} ranked matches`, 'Broad hybrid retrieval combines the established lexical and semantic backend signals.'), renderTable(['Memory', 'Score', 'Type', 'Agent'], rows, 'No matching active memories.'));
         } finally { setBusy(result, false); }
       }));
       view.replaceChildren(section('Explore memories', 'Hybrid Search returns ranked backend retrieval results. Browse / audit list remains the pageable metadata workspace.'), form, result);
@@ -443,7 +443,7 @@
     idLine.append(button('Copy ID', 'copy-id', () => copyText(item.session_id, 'Session ID')));
     idCell.append(button((item.session_id || '').slice(0, 12), 'row-button', () => openSessionDetail(item.session_id)), idLine);
     const stateCell = node('td'); stateCell.append(statusBadge(item.liveness));
-    row.append(idCell, node('td', item.owner_id || '—'), node('td', item.cwd || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', String(item.trace_count ?? 0)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
+    row.append(idCell, node('td', item.agent_id || '—'), node('td', item.cwd || '—'), stateCell, node('td', String(item.memory_count)), node('td', String(item.event_count)), node('td', String(item.trace_count ?? 0)), node('td', formatTimestamp(item.first_seen)), node('td', formatTimestamp(item.last_seen)));
     return row;
   };
 
@@ -475,7 +475,7 @@
       metadata.append(section('Session metadata'));
       const metadataGrid = node('dl', undefined, 'metadata-grid');
       [
-        ['Owner', sessionData.owner_id || '—'],
+        ['Agent', sessionData.agent_id || '—'],
         ['CWD', sessionData.cwd || '—'],
         ['Started', formatTimestamp(sessionData.started_at)],
         ['Last activity', formatTimestamp(sessionData.last_activity_at)],
@@ -541,14 +541,14 @@
     const form = node('form', undefined, 'toolbar');
     const prefixField = inputField('Session ID prefix', 'Filter by session ID prefix', state.sessionsPreset.id_prefix || '');
     const stateField = select('State', [['', 'All states'], ['active', 'Active'], ['lost', 'Lost'], ['ended', 'Ended'], ['unknown', 'Unknown']], state.sessionsPreset.state || '');
-    const ownerField = inputField('Owner', 'Owner id (partial match)', state.sessionsPreset.owner_id || '');
+    const agentField = inputField('Agent', 'Agent id (partial match)', state.sessionsPreset.agent_id || '');
     const cwdField = inputField('CWD', 'Working directory (partial match)', state.sessionsPreset.cwd || '');
     const dateField = select('Date field', [['started_at', 'Started'], ['last_activity_at', 'Last activity'], ['ended_at', 'Ended']], state.sessionsPreset.date_field || 'last_activity_at');
     const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_from || ''); dateFrom.element.type = 'date';
     const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_to || ''); dateTo.element.type = 'date';
     const sortField = select('Sort', [['recent', 'Most recent activity'], ['oldest', 'Oldest activity'], ['started_desc', 'Started: newest'], ['started_asc', 'Started: oldest']], state.sessionsPreset.sort || 'recent');
     const resetFilter = button('Reset filter', '', () => { state.sessionsPreset = {}; state.sessionsPage = 1; render(); });
-    form.append(prefixField.wrap, stateField.wrap, ownerField.wrap, cwdField.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, sortField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
+    form.append(prefixField.wrap, stateField.wrap, agentField.wrap, cwdField.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, sortField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
     const result = node('div');
     const list = async (page = 1) => {
       setBusy(result, true);
@@ -561,7 +561,7 @@
         const previous = button('Previous', '', guarded(() => list(page - 1))); previous.disabled = page <= 1;
         const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} sessions`, 'muted'), next);
-        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Owner', 'CWD', 'State', 'Memories', 'Events', 'Traces', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
+        result.replaceChildren(section(`${data.total_count} agent sessions`, 'Memories/events logged before 2026-08-24 have no recorded session id and will not appear here.'), renderTable(['Session', 'Agent', 'CWD', 'State', 'Memories', 'Events', 'Traces', 'First seen', 'Last seen'], rows, 'No agent sessions recorded yet.'), pager);
         state.sessionsPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
@@ -571,7 +571,7 @@
       [
         ['id_prefix', prefixField.element.value.trim()],
         ['state', stateField.element.value],
-        ['owner_id', ownerField.element.value.trim()],
+        ['agent_id', agentField.element.value.trim()],
         ['cwd', cwdField.element.value.trim()],
         ['date_field', dateField.element.value],
         ['date_from', dateFrom.element.value],

@@ -550,8 +550,8 @@ class TestIngestedEntityShape(unittest.TestCase):
 
         rows = self.conn.execute(
             "SELECT id, metadata, json_extract(metadata, '$.source_dataset') FROM entities "
-            "WHERE owner_id = ?",
-            (bdt.OWNER_ID,),
+            "WHERE agent_id = ?",
+            (bdt.AGENT_ID,),
         ).fetchall()
         self.assertEqual(len(rows), 2)
 
@@ -608,7 +608,7 @@ class TestCompletionBarrier(unittest.TestCase):
         res = memory_service.store_memory(
             content=content,
             title=title,
-            owner_id=bdt.OWNER_ID,
+            agent_id=bdt.AGENT_ID,
             db_connection=self.conn,
             db_path=self.db_path,
         )
@@ -635,7 +635,7 @@ class TestCompletionBarrier(unittest.TestCase):
     def test_clean_corpus_reports_complete(self):
         eid = self._store("Completion Barrier Clean Entity", _PROSE[0])
         self.assertTrue(self._poll_ready(eid), "embedding never became ready in time")
-        result = bdt.check_embedding_completion(self.conn, bdt.OWNER_ID)
+        result = bdt.check_embedding_completion(self.conn, bdt.AGENT_ID)
         self.assertTrue(result["corpus_embedding_complete"])
 
     def test_failed_embedding_status_fails_barrier(self):
@@ -643,7 +643,7 @@ class TestCompletionBarrier(unittest.TestCase):
         self.assertTrue(self._poll_ready(eid))
         self.conn.execute("UPDATE entities SET embedding_status = 'failed' WHERE id = ?", (eid,))
         self.conn.commit()
-        result = bdt.check_embedding_completion(self.conn, bdt.OWNER_ID)
+        result = bdt.check_embedding_completion(self.conn, bdt.AGENT_ID)
         self.assertFalse(result["corpus_embedding_complete"])
         self.assertFalse(result["entity_level_ready"])
 
@@ -656,7 +656,7 @@ class TestCompletionBarrier(unittest.TestCase):
             "UPDATE entities SET content_hash = 'stale-hash-xyz' WHERE id = ?", (eid,)
         )
         self.conn.commit()
-        result = bdt.check_embedding_completion(self.conn, bdt.OWNER_ID)
+        result = bdt.check_embedding_completion(self.conn, bdt.AGENT_ID)
         self.assertFalse(result["corpus_embedding_complete"])
         self.assertFalse(result["chunk_level_ready"])
         self.assertGreaterEqual(result["chunk_stale_entities"], 1)

@@ -1,6 +1,6 @@
 import sys
 import logging
-from saltmdb.config import get_db_path, get_owner_id
+from saltmdb.config import get_db_path, get_agent_id
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -59,7 +59,7 @@ def main():  # noqa: C901, PLR0915 -- the win32/POSIX signal-handling branch pus
         from saltmdb.mcp.identity import SESSION_IDENTITY
 
         # Identity is deployment configuration, not agent-controlled tool input.
-        SESSION_IDENTITY.configure_owner(get_owner_id())
+        SESSION_IDENTITY.configure_agent_id(get_agent_id())
         db_path = get_db_path()
         # Migration invisibility (§14): every existing MCP client registration continues to spawn
         # this exact same command; only what it does internally has changed -- a thin adapter

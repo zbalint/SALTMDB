@@ -23,7 +23,7 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
             title=title,
             content=f"A complete and sufficiently descriptive lifecycle memory body for {title}.",
             tags=tags or ["#original"],
-            owner_id="lifecycle-tests",
+            agent_id="lifecycle-tests",
             context_id="lifecycle-context",
             memory_type="decision",
             db_connection=self.conn,
@@ -43,7 +43,7 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
     def test_revise_preserves_frozen_predecessor_and_creates_new_id(self):
         old_id = self._store()
         frozen_columns = (
-            "title, full_content, owner_id, context_id, scope, memory_type, created_at, "
+            "title, full_content, agent_id, context_id, scope, memory_type, created_at, "
             "content_hash, metadata, parent_ids, valid_from"
         )
         before = self.conn.execute(
@@ -80,7 +80,7 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
             (new_id, old_id, "revises"),
         )
         self.assertEqual(
-            result["data"]["inherited_fields"], ["owner_id", "context_id", "scope", "memory_type"]
+            result["data"]["inherited_fields"], ["agent_id", "context_id", "scope", "memory_type"]
         )
 
     def test_supersede_does_not_repoint_semantic_relation(self):

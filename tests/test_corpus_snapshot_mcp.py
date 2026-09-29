@@ -1,7 +1,7 @@
 """CLI boundary tests for the read-only corpus snapshot export (agent API redesign plan §5.12,
 Phase 7 item 29: export_corpus_snapshot moved off MCP entirely -- no tool, no dispatch entry,
 no protocol classification. saltmdb.cli.cmd_export_corpus_snapshot is the sole surface now;
-identity comes from the same SALTMDB_OWNER_ID environment setting as the MCP adapter."""
+identity comes from the same SALTMDB_AGENT_ID environment setting as the MCP adapter."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _parse(argv):
 
 @pytest.fixture(autouse=True)
 def _owner_env(monkeypatch):
-    monkeypatch.setenv("SALTMDB_OWNER_ID", "snapshot-owner")
+    monkeypatch.setenv("SALTMDB_AGENT_ID", "snapshot-owner")
 
 
 def _page(entities, *, entity_count, has_more, next_cursor):
@@ -32,7 +32,7 @@ def _page(entities, *, entity_count, has_more, next_cursor):
         "has_more": has_more,
         "next_cursor": next_cursor,
         "snapshot_hash": "a" * 64,
-        "owner_id": "snapshot-owner",
+        "agent_id": "snapshot-owner",
     }
 
 
@@ -47,9 +47,9 @@ def test_export_corpus_snapshot_is_not_in_dispatch_table_or_protocol():
     assert not hasattr(dispatch, "_dispatch_export_corpus_snapshot")
 
 
-def test_cli_export_has_no_owner_id_argument():
+def test_cli_export_has_no_agent_id_argument():
     args = _parse(["export-corpus-snapshot"])
-    assert not hasattr(args, "owner_id")
+    assert not hasattr(args, "agent_id")
     with pytest.raises(SystemExit):
         _parse(["export-corpus-snapshot", "--owner-id", "someone"])
 
@@ -67,7 +67,7 @@ def test_cli_export_merges_pages_into_one_complete_document(capsys):
         rc = cli.cmd_export_corpus_snapshot(args)
     assert rc == 0
     call_kwargs = fn.call_args.kwargs
-    assert call_kwargs["owner_id"] == "snapshot-owner"
+    assert call_kwargs["agent_id"] == "snapshot-owner"
     assert call_kwargs["page_size"] == 2
     assert call_kwargs["include_archived"] is False
     out = json.loads(capsys.readouterr().out)

@@ -29,7 +29,7 @@ class TestCoreTagSync(unittest.TestCase):
         res = store_memory(
             content=f"Seed content for core-tag-sync tests: {title}",
             title=title,
-            owner_id="tester",
+            agent_id="tester",
             is_core=is_core,
             tags=tags,
             entity_id=entity_id,
@@ -77,7 +77,7 @@ class TestCoreTagSync(unittest.TestCase):
             title="Core Sync Override Entity",
             tags=["#core", "#foo"],
             entity_id=entity_id,
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         self.assertEqual(rejected["status"], "rejected")

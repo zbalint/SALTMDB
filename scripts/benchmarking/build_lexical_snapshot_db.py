@@ -94,8 +94,8 @@ from saltmdb.utils.text import compute_content_hash  # noqa: E402
 # "Sentinel timestamp" section for why a fixed constant is used instead of wall-clock time.
 SENTINEL_TIMESTAMP = "2026-08-12T00:00:00+00:00"
 
-# Used only when corpus_export.json's snapshot_provenance carries no owner_id.
-SENTINEL_OWNER_ID = "unknown-snapshot-owner"
+# Used only when corpus_export.json's snapshot_provenance carries no agent_id.
+SENTINEL_AGENT_ID = "unknown-snapshot-owner"
 
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -116,7 +116,7 @@ def _insert_entities(
     conn: Any,
     export_entities: list[Mapping[str, Any]],
     entities: Mapping[str, Mapping[str, str]],
-    owner_id: str,
+    agent_id: str,
 ) -> int:
     count = 0
     for row in export_entities:
@@ -130,7 +130,7 @@ def _insert_entities(
         content_hash = compute_content_hash(full_content)
         conn.execute(
             "INSERT INTO entities "
-            "(id, created_at, updated_at, last_accessed_at, owner_id, scope, status, "
+            "(id, created_at, updated_at, last_accessed_at, agent_id, scope, status, "
             " title, full_content, content_hash) "
             "VALUES (?, ?, ?, ?, ?, 'shared', 'raw', ?, ?, ?)",
             (
@@ -138,7 +138,7 @@ def _insert_entities(
                 SENTINEL_TIMESTAMP,
                 SENTINEL_TIMESTAMP,
                 SENTINEL_TIMESTAMP,
-                owner_id,
+                agent_id,
                 title,
                 full_content,
                 content_hash,
@@ -196,7 +196,8 @@ def build_snapshot_db(export_path: Path, manifest_path: Path, db_path: Path) -> 
         raise LexicalSnapshotDbError("corpus export entities must be a non-empty list")
     supersedes_edges = export.get("supersedes_edges") or []
     provenance = export.get("snapshot_provenance") or {}
-    owner_id = provenance.get("owner_id") or SENTINEL_OWNER_ID
+    # Historical frozen exports still carry the old owner_id key.
+    agent_id = provenance.get("agent_id") or provenance.get("owner_id") or SENTINEL_AGENT_ID
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = init_db(str(db_path))
@@ -204,7 +205,7 @@ def build_snapshot_db(export_path: Path, manifest_path: Path, db_path: Path) -> 
         counts: dict[str, int] = {}
 
         def _write(c: Any) -> None:
-            counts["entities"] = _insert_entities(c, export_entities, entities, owner_id)
+            counts["entities"] = _insert_entities(c, export_entities, entities, agent_id)
             counts["relations"] = _insert_relations(c, supersedes_edges)
 
         write_transaction_retrying(conn, _write)
@@ -217,7 +218,7 @@ def build_snapshot_db(export_path: Path, manifest_path: Path, db_path: Path) -> 
         "entity_count": counts["entities"],
         "relation_count": counts["relations"],
         "sentinel_timestamp": SENTINEL_TIMESTAMP,
-        "owner_id": owner_id,
+        "agent_id": agent_id,
         "db_sha256_informational": _sha256_file(db_path),
     }
     return sign_artifact("LexicalSnapshotReceipt", receipt_payload)

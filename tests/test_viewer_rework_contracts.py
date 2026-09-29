@@ -151,7 +151,7 @@ class TestViewerReworkContracts(unittest.TestCase):
         store_memory(
             content="Viewer rework contract test memory with sufficient useful content.",
             title="Viewer Contract Memory",
-            owner_id="viewer_test",
+            agent_id="viewer_test",
             db_connection=self.conn,
         )
         state = _DaemonState(self.db_path, "test", True)
@@ -236,7 +236,7 @@ class TestViewerReworkContracts(unittest.TestCase):
         ):
             self.conn.execute(
                 """INSERT INTO conversation_traces
-                   (id, agent_session_id, owner_id, harness, harness_session_id, harness_turn_id,
+                   (id, agent_session_id, agent_id, harness, harness_session_id, harness_turn_id,
                     status, user_prompt, user_prompt_hash, created_at, updated_at)
                    VALUES (?, 's', 'claude', 'claude_code', 'hs', ?, 'pending', 'p', 'h', ?, ?)""",
                 (trace_id, trace_id, created.isoformat(), created.isoformat()),

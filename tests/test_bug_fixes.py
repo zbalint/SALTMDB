@@ -68,7 +68,7 @@ class TestBugFixes(unittest.TestCase):
         store_memory(
             "Memory A content text for testing multi-tag matching.",
             tags=["#tagAlpha", "#tagBeta"],
-            owner_id="agent1",
+            agent_id="agent1",
             scope="shared",
             title="Memory A",
             db_path=self.db_path,
@@ -76,7 +76,7 @@ class TestBugFixes(unittest.TestCase):
         store_memory(
             "Memory B content text for testing single-tag matching.",
             tags=["#tagAlpha"],
-            owner_id="agent1",
+            agent_id="agent1",
             scope="shared",
             title="Memory B",
             db_path=self.db_path,
@@ -85,7 +85,7 @@ class TestBugFixes(unittest.TestCase):
         res_or = search_memory(
             tags_filter=["#tagAlpha", "#tagBeta"],
             tag_operator="OR",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         self.assertEqual(len(res_or), 2)
@@ -93,7 +93,7 @@ class TestBugFixes(unittest.TestCase):
         res_and = search_memory(
             tags_filter=["#tagAlpha", "#tagBeta"],
             tag_operator="AND",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         self.assertEqual(len(res_and), 1)
@@ -103,13 +103,13 @@ class TestBugFixes(unittest.TestCase):
         """P2-2 Fix Verification: Ensure shared memory exact hash deduplication catches cross-agent duplicates."""
         shared_text = "# Global Architecture Policy\n\nAll services must communicate exclusively via gRPC interfaces."
         res1 = store_memory(
-            shared_text, owner_id="AgentA", scope="shared", title="Policy", db_path=self.db_path
+            shared_text, agent_id="AgentA", scope="shared", title="Policy", db_path=self.db_path
         )
         self.assertEqual(res1["status"], "ok")
 
         res2 = store_memory(
             shared_text,
-            owner_id="AgentB",
+            agent_id="AgentB",
             scope="shared",
             title="Policy Copy",
             db_path=self.db_path,
@@ -124,7 +124,7 @@ class TestBugFixes(unittest.TestCase):
         )
         res = store_memory(
             mem_text,
-            owner_id="AgentA",
+            agent_id="AgentA",
             scope="shared",
             is_core=True,
             title="Core Guideline",
@@ -147,7 +147,7 @@ class TestBugFixes(unittest.TestCase):
         res_update = store_memory(
             updated_text,
             entity_id=entity_id,
-            owner_id="AgentA",
+            agent_id="AgentA",
             scope="shared",
             title="Core Guideline",
             db_path=self.db_path,

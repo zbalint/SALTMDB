@@ -29,7 +29,7 @@ class EmbedStallMonitorTestCase(unittest.TestCase):
         )
         self.conn.execute(
             "INSERT INTO entities "
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title, "
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title, "
             "full_content, content_hash, memory_type, embedding_status) "
             "VALUES (?, ?, ?, ?, 'test_user', 'raw', ?, ?, ?, 'fact', 'pending')",
             (

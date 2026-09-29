@@ -142,6 +142,29 @@ def _add_column_if_missing(conn, table: str, column_def: str) -> None:
             raise
 
 
+_AGENT_ID_TABLES = ("entities", "_agent_sessions", "conversation_traces", "tool_call_telemetry")
+
+
+def _migrate_owner_id_to_agent_id(conn) -> None:
+    """Rename the pre-rename ``owner_id`` column to ``agent_id`` (idempotent, column-gated).
+
+    Runs before any statement that mentions ``agent_id``. Gated on column existence, not on
+    ``PRAGMA user_version``, so a retried ``_write`` is safe. The two old-named indexes are dropped
+    because ``RENAME COLUMN`` keeps index names and the ``agent_id`` names are created afresh.
+    """
+    for table in _AGENT_ID_TABLES:  # constants, never user input
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "owner_id" not in columns:
+            continue
+        if "agent_id" in columns:
+            raise RuntimeError(
+                f"{table} has both owner_id and agent_id; refusing to guess which to keep"
+            )
+        conn.execute(f"ALTER TABLE {table} RENAME COLUMN owner_id TO agent_id")
+    conn.execute("DROP INDEX IF EXISTS idx_entities_owner_scope")
+    conn.execute("DROP INDEX IF EXISTS idx_traces_owner_status")
+
+
 def _ensure_agent_sessions_table(conn) -> None:
     """Create the lifecycle ledger and migrate the original non-null cwd constraint.
 
@@ -158,7 +181,7 @@ def _ensure_agent_sessions_table(conn) -> None:
                 session_id TEXT PRIMARY KEY,
                 cwd TEXT,
                 started_at DATETIME NOT NULL,
-                owner_id TEXT,
+                agent_id TEXT,
                 last_activity_at DATETIME,
                 ended_at DATETIME,
                 ended_reason TEXT
@@ -186,7 +209,7 @@ def _ensure_agent_sessions_table(conn) -> None:
             session_id TEXT PRIMARY KEY,
             cwd TEXT,
             started_at DATETIME NOT NULL,
-            owner_id TEXT,
+            agent_id TEXT,
             last_activity_at DATETIME,
             ended_at DATETIME,
             ended_reason TEXT
@@ -199,7 +222,7 @@ def _ensure_agent_sessions_table(conn) -> None:
             "session_id",
             "cwd",
             "started_at",
-            "owner_id",
+            "agent_id",
             "last_activity_at",
             "ended_at",
             "ended_reason",
@@ -207,7 +230,7 @@ def _ensure_agent_sessions_table(conn) -> None:
     ]
     conn.execute(
         "INSERT INTO _agent_sessions "
-        "(session_id, cwd, started_at, owner_id, last_activity_at, ended_at, ended_reason) "
+        "(session_id, cwd, started_at, agent_id, last_activity_at, ended_at, ended_reason) "
         "SELECT " + ", ".join(select_expr) + " FROM _agent_sessions_legacy"
     )
     conn.execute("DROP TABLE _agent_sessions_legacy")
@@ -381,6 +404,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
     # contention that motivated the busy_timeout bump (commit 548d170), since concurrent init_db()
     # calls are exactly where BEGIN IMMEDIATE + retry pays off most.
     def _write(c):  # noqa: C901, PLR0912, PLR0915
+        _migrate_owner_id_to_agent_id(conn)
         # 1. Events Table (Short-Term append-only ledger)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
@@ -400,7 +424,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
             last_accessed_at DATETIME NOT NULL,
-            owner_id TEXT,
+            agent_id TEXT,
             scope TEXT CHECK(scope IN ('private', 'shared')) DEFAULT 'shared',
             is_core BOOLEAN DEFAULT 0,
             weight INTEGER DEFAULT 1,
@@ -618,7 +642,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         CREATE TABLE IF NOT EXISTS conversation_traces (
             id TEXT PRIMARY KEY,
             agent_session_id TEXT NOT NULL,
-            owner_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
             harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code')),
             harness_session_id TEXT NOT NULL,
             harness_turn_id TEXT NOT NULL,
@@ -638,8 +662,8 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "ON conversation_traces(agent_session_id, harness_turn_id)"
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_traces_owner_status "
-            "ON conversation_traces(owner_id, status)"
+            "CREATE INDEX IF NOT EXISTS idx_traces_agent_status "
+            "ON conversation_traces(agent_id, status)"
         )
 
         conn.execute("""
@@ -863,7 +887,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             id TEXT PRIMARY KEY,
             timestamp DATETIME NOT NULL,
             tool_name TEXT NOT NULL,
-            owner_id TEXT,
+            agent_id TEXT,
             param_names TEXT NOT NULL, -- JSON array of parameter names present in the call, never values
             status TEXT NOT NULL,
             error_code TEXT,
@@ -968,7 +992,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         _ensure_agent_sessions_table(conn)
         # Additive migration for databases created before lifecycle metadata existed.
         for column in (
-            "owner_id TEXT",
+            "agent_id TEXT",
             "last_activity_at DATETIME",
             "ended_at DATETIME",
             "ended_reason TEXT",
@@ -1115,7 +1139,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         for index_sql in [
             "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_entities_active_title ON entities(title) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_owner_scope ON entities(owner_id, scope)",
+            "CREATE INDEX IF NOT EXISTS idx_entities_agent_scope ON entities(agent_id, scope)",
             "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
             "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
@@ -1124,7 +1148,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             # (overdue first, earliest upcoming review) over exactly the active-core set.
             "CREATE INDEX IF NOT EXISTS idx_entities_core_review "
             "ON entities(core_review_after, created_at) WHERE is_core = 1 AND status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(owner_id, content_hash) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(agent_id, content_hash) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_agent_session ON entities(agent_session_id, created_at DESC) WHERE status != 'archived'",

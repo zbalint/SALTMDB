@@ -28,24 +28,24 @@ class TestMetadataFilterInjection(unittest.TestCase):
         self.conn = init_db(self.db_path)
 
         # Two entities: one owned by "victim" with a secret-ish metadata key/value the
-        # attacker (owner_id="attacker") should never be able to see via metadata_filter.
-        self._insert_entity("victim-entity", owner_id="victim", metadata={"safe": "no-match"})
-        self._insert_entity("attacker-entity", owner_id="attacker", metadata={"safe": "yes"})
+        # attacker (agent_id="attacker") should never be able to see via metadata_filter.
+        self._insert_entity("victim-entity", agent_id="victim", metadata={"safe": "no-match"})
+        self._insert_entity("attacker-entity", agent_id="attacker", metadata={"safe": "yes"})
 
     def tearDown(self):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _insert_entity(self, entity_id: str, owner_id: str, metadata: dict) -> None:
+    def _insert_entity(self, entity_id: str, agent_id: str, metadata: dict) -> None:
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash, memory_type, metadata, scope)"
             " VALUES (?, datetime('now'), datetime('now'), datetime('now'), ?, 'raw',"
             " ?, ?, ?, 'fact', ?, 'private')",
             (
                 entity_id,
-                owner_id,
+                agent_id,
                 entity_id,
                 f"content for {entity_id}",
                 entity_id,
@@ -66,7 +66,7 @@ class TestMetadataFilterInjection(unittest.TestCase):
         """
         malicious_key = "safe') OR 1=1 OR json_extract(e.metadata, '$.safe"
         results = search_memory(
-            owner_id="attacker",
+            agent_id="attacker",
             metadata_filter={malicious_key: "no-match"},
             db_path=self.db_path,
             include_related=False,
@@ -80,7 +80,7 @@ class TestMetadataFilterInjection(unittest.TestCase):
         empty list, the victim's row must not be in it."""
         malicious_key = "safe') OR 1=1 OR json_extract(e.metadata, '$.safe"
         results = search_memory(
-            owner_id="attacker",
+            agent_id="attacker",
             metadata_filter={malicious_key: "no-match"},
             db_path=self.db_path,
             include_related=False,
@@ -91,7 +91,7 @@ class TestMetadataFilterInjection(unittest.TestCase):
     def test_legitimate_metadata_filter_still_works(self):
         """Well-formed keys/values continue to filter correctly (no functional regression)."""
         results = search_memory(
-            owner_id="attacker",
+            agent_id="attacker",
             metadata_filter={"safe": "yes"},
             db_path=self.db_path,
             include_related=False,

@@ -68,14 +68,14 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             params = {
                 "agent_session_id": "session-1",
                 "cwd": "/workspace/project",
-                "owner_id": "agent_qa",
+                "agent_id": "agent_qa",
             }
             response = state.handle_request(
                 protocol.build_request("hello", params, token="tok"), session_id=7
             )
             self.assertTrue(response["ok"])
             row = conn.execute(
-                "SELECT owner_id, started_at, last_activity_at, ended_at "
+                "SELECT agent_id, started_at, last_activity_at, ended_at "
                 "FROM _agent_sessions WHERE session_id = 'session-1'"
             ).fetchone()
             self.assertEqual(row[0], "agent_qa")
@@ -159,7 +159,7 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             response = state.handle_request(
                 protocol.build_request(
                     "hello",
-                    {"agent_session_id": "session-no-cwd", "owner_id": "codex"},
+                    {"agent_session_id": "session-no-cwd", "agent_id": "codex"},
                     token="tok",
                 ),
                 session_id=6,
@@ -183,7 +183,7 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             hello_response = state.handle_request(
                 protocol.build_request(
                     "hello",
-                    {"agent_session_id": "session-2", "cwd": "/workspace", "owner_id": "codex"},
+                    {"agent_session_id": "session-2", "cwd": "/workspace", "agent_id": "codex"},
                     token="tok",
                 ),
                 session_id=8,
@@ -371,7 +371,7 @@ class TestDaemonStateConcurrency(unittest.TestCase):
             conn = init_db(os.path.join(tmp, "sessions.db"))
             state = self._state(foreground=True)
             state.coordinator = _ImmediateCoordinator(conn)
-            hello = {"agent_session_id": "session-3", "cwd": "/workspace", "owner_id": "codex"}
+            hello = {"agent_session_id": "session-3", "cwd": "/workspace", "agent_id": "codex"}
             state.handle_request(protocol.build_request("hello", hello, token="tok"), session_id=9)
             state.unregister_session(9)
             self.assertIsNone(

@@ -17,7 +17,7 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "test.db")
         SESSION_IDENTITY.reset()
-        self._owner_env = patch.dict(os.environ, {"SALTMDB_OWNER_ID": "test_agent"}, clear=False)
+        self._owner_env = patch.dict(os.environ, {"SALTMDB_AGENT_ID": "test_agent"}, clear=False)
         self._owner_env.start()
 
     def tearDown(self):
@@ -32,7 +32,7 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, {}, clear=True),
             patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session) as mock_cls,
         ):
-            with self.assertRaisesRegex(RuntimeError, "SALTMDB_OWNER_ID"):
+            with self.assertRaisesRegex(RuntimeError, "SALTMDB_AGENT_ID"):
                 async with server_lifespan(MagicMock()):
                     self.fail("lifespan should not be entered without configured owner identity")
         mock_cls.assert_not_called()
@@ -48,7 +48,7 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
                     self.db_path,
                     session_id=SESSION_IDENTITY.agent_session_id,
                     cwd=SESSION_IDENTITY.cwd,
-                    owner_id="test_agent",
+                    agent_id="test_agent",
                 )
                 mock_session.open.assert_called_once()
                 mock_session.close.assert_not_called()

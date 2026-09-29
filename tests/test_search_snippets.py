@@ -52,14 +52,14 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         res = store_memory(
             title="Buried Token Memory",
             content=content,
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
         self.assertEqual(res["status"], "ok")
         self.assertIn("id", res["data"])
 
         results = search_memory(
-            query_keywords="RARETOKENXYZ", owner_id="user1", db_path=self.db_path
+            query_keywords="RARETOKENXYZ", agent_id="user1", db_path=self.db_path
         )
         self.assertTrue(len(results) > 0)
         top = results[0]
@@ -79,7 +79,7 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         res = store_memory(
             title="Unrelated Content Memory",
             content=content,
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
         entity_id = res["data"]["id"]
@@ -89,7 +89,7 @@ class TestQueryCenteredSnippets(unittest.TestCase):
             return_value=[(entity_id, 0.05)],
         ):
             results = search_memory(
-                query_keywords="gadgetwidget", owner_id="user1", db_path=self.db_path
+                query_keywords="gadgetwidget", agent_id="user1", db_path=self.db_path
             )
 
         self.assertTrue(len(results) > 0)
@@ -103,11 +103,11 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         store_memory(
             title="Listing Only Memory",
             content=content,
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
 
-        results = search_memory(owner_id="user1", db_path=self.db_path)
+        results = search_memory(agent_id="user1", db_path=self.db_path)
         self.assertTrue(len(results) > 0)
         heuristic_snippet = extract_title_and_snippet(content)[1]
         match = next(r for r in results if r["title"] == "Listing Only Memory")

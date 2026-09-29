@@ -95,7 +95,7 @@ class TracesMixin(ViewerHandlerProtocol):
             conn = self.get_db_connection()
             row = conn.execute(
                 """
-                SELECT id, agent_session_id, owner_id, harness, status, user_prompt,
+                SELECT id, agent_session_id, agent_id, harness, status, user_prompt,
                        final_assistant_message, capture_error, created_at, completed_at
                 FROM conversation_traces WHERE id = ?
                 """,
@@ -123,7 +123,7 @@ class TracesMixin(ViewerHandlerProtocol):
                 {
                     "trace_id": row[0],
                     "agent_session_id": row[1],
-                    "owner_id": row[2],
+                    "agent_id": row[2],
                     "harness": row[3],
                     "status": row[4],
                     "user_prompt": row[5],

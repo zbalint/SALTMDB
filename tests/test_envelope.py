@@ -21,11 +21,11 @@ class TestEnvelope(unittest.TestCase):
             {"id": "abc"},
             warnings=[w],
             corrected_call={"title": "T"},
-            effective={"owner_id": "claude", "scope": "shared"},
+            effective={"agent_id": "claude", "scope": "shared"},
         )
         self.assertEqual(env["warnings"], [w])
         self.assertEqual(env["corrected_call"], {"title": "T"})
-        self.assertEqual(env["effective"]["owner_id"], "claude")
+        self.assertEqual(env["effective"]["agent_id"], "claude")
 
     def test_rejected_requires_at_least_one_error(self):
         with self.assertRaises(ValueError):

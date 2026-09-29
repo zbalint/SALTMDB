@@ -140,7 +140,7 @@ def _merge_lifecycle_rows(
         entry.update(
             {
                 "cwd": row["cwd"],
-                "owner_id": row["owner_id"],
+                "agent_id": row["agent_id"],
                 "started_at": row["started_at"],
                 "last_activity_at": row["last_activity_at"],
                 "ended_at": row["ended_at"],
@@ -193,7 +193,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
     ).fetchall()
 
     lifecycle_rows = conn.execute(
-        "SELECT session_id, cwd, owner_id, started_at, last_activity_at, ended_at, ended_reason "
+        "SELECT session_id, cwd, agent_id, started_at, last_activity_at, ended_at, ended_reason "
         "FROM _agent_sessions"
     ).fetchall()
 
@@ -204,7 +204,7 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
     _merge_lifecycle_rows(sessions, lifecycle_rows, active_session_ids, liveness_known)
     for entry in sessions.values():
         entry.setdefault("cwd", None)
-        entry.setdefault("owner_id", None)
+        entry.setdefault("agent_id", None)
         entry.setdefault("started_at", None)
         entry.setdefault("last_activity_at", None)
         entry.setdefault("ended_at", None)
@@ -225,7 +225,7 @@ class SessionsMixin(ViewerHandlerProtocol):
             offset = (page - 1) * limit
             id_prefix = query.get("id_prefix", [None])[0]
             state = query.get("state", [None])[0]
-            owner_id = query.get("owner_id", [None])[0]
+            agent_id = query.get("agent_id", [None])[0]
             cwd = query.get("cwd", [None])[0]
             date_field = query.get("date_field", [None])[0]
             date_from = query.get("date_from", [None])[0]
@@ -250,9 +250,9 @@ class SessionsMixin(ViewerHandlerProtocol):
                 all_sessions = [s for s in all_sessions if s["session_id"].startswith(id_prefix)]
             if state:
                 all_sessions = [s for s in all_sessions if s["liveness"] == state]
-            if owner_id:
+            if agent_id:
                 all_sessions = [
-                    s for s in all_sessions if s["owner_id"] and owner_id in s["owner_id"]
+                    s for s in all_sessions if s["agent_id"] and agent_id in s["agent_id"]
                 ]
             if cwd:
                 all_sessions = [s for s in all_sessions if s["cwd"] and cwd in s["cwd"]]
@@ -281,7 +281,7 @@ class SessionsMixin(ViewerHandlerProtocol):
                     "total_pages": total_pages,
                     "sort": sort,
                     "state": state,
-                    "owner_id": owner_id,
+                    "agent_id": agent_id,
                     "cwd": cwd,
                     "date_field": date_field,
                     "date_from": date_from,
@@ -309,7 +309,7 @@ class SessionsMixin(ViewerHandlerProtocol):
         try:
             conn = self.get_db_connection()
             lifecycle_row = conn.execute(
-                "SELECT cwd, owner_id, started_at, last_activity_at, ended_at, ended_reason "
+                "SELECT cwd, agent_id, started_at, last_activity_at, ended_at, ended_reason "
                 "FROM _agent_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
@@ -346,11 +346,11 @@ class SessionsMixin(ViewerHandlerProtocol):
             active_session_ids, liveness_known = _daemon_liveness(self.server)
             if lifecycle_row is None:
                 row_for_liveness = {"ended_at": None, "ended_reason": None}
-                cwd = owner_id = started_at = last_activity_at = ended_at = ended_reason = None
+                cwd = agent_id = started_at = last_activity_at = ended_at = ended_reason = None
             else:
                 row_for_liveness = lifecycle_row
                 cwd = lifecycle_row["cwd"]
-                owner_id = lifecycle_row["owner_id"]
+                agent_id = lifecycle_row["agent_id"]
                 started_at = lifecycle_row["started_at"]
                 last_activity_at = lifecycle_row["last_activity_at"]
                 ended_at = lifecycle_row["ended_at"]
@@ -363,7 +363,7 @@ class SessionsMixin(ViewerHandlerProtocol):
             self.send_json(
                 {
                     "session_id": session_id,
-                    "owner_id": owner_id,
+                    "agent_id": agent_id,
                     "cwd": cwd,
                     "liveness": liveness,
                     "started_at": started_at,

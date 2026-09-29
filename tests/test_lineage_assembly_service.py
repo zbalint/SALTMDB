@@ -43,7 +43,7 @@ class TestLineageAssemblyService(unittest.TestCase):
             store_memory(
                 content=f"Lineage fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="lineage-test",
+                agent_id="lineage-test",
                 db_connection=self.conn,
             )
         )

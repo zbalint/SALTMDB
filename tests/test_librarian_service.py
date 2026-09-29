@@ -22,7 +22,7 @@ class TestLibrarianService(unittest.TestCase):
         res1 = store_memory(
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         id1 = res1["data"]["id"]
@@ -30,7 +30,7 @@ class TestLibrarianService(unittest.TestCase):
         res2 = store_memory(
             title="Parent Fact B",
             content="Detailed description of Fact B for testing consolidation",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         id2 = res2["data"]["id"]
@@ -40,7 +40,7 @@ class TestLibrarianService(unittest.TestCase):
             title="Consolidated Overview",
             content="Merged summary of A and B",
             tags=["#summary"],
-            owner_id="agent1",
+            agent_id="agent1",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", c_res)
@@ -65,7 +65,7 @@ class TestLibrarianService(unittest.TestCase):
         res1 = store_memory(
             title="Bulk Atomicity Parent A",
             content="Detailed description of a parent fact used for the bulk atomicity regression test",
-            owner_id="agent1",
+            agent_id="agent1",
             db_path=self.db_path,
         )
         id1 = res1["data"]["id"]

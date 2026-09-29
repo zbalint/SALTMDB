@@ -65,7 +65,7 @@ def _lineage_nodes(result, direction: str) -> list[dict]:
 
 
 def _memory_lineage(
-    entity_id: str, conn, max_depth: int = 10, owner_id: str | None = None
+    entity_id: str, conn, max_depth: int = 10, agent_id: str | None = None
 ) -> dict[str, list[dict]]:
     """Read both lifecycle directions without ever substituting a successor.
 
@@ -100,23 +100,23 @@ def _memory_lineage(
             for node in _lineage_nodes(ancestors, "ancestors")
             if isinstance(node.get("id"), str)
             and node["id"] != entity_id
-            and _can_read_entity(conn, node["id"], owner_id)
+            and _can_read_entity(conn, node["id"], agent_id)
         ],
         "descendants": [
             node
             for node in _lineage_nodes(descendants, "descendants")
             if isinstance(node.get("id"), str)
             and node["id"] != entity_id
-            and _can_read_entity(conn, node["id"], owner_id)
+            and _can_read_entity(conn, node["id"], agent_id)
         ],
     }
 
 
-def _can_read_entity(conn, entity_id: str, owner_id: str | None) -> bool:
-    return owner_id is None or bool(
+def _can_read_entity(conn, entity_id: str, agent_id: str | None) -> bool:
+    return agent_id is None or bool(
         conn.execute(
-            "SELECT 1 FROM entities WHERE id = ? AND (owner_id = ? OR scope = 'shared')",
-            (entity_id, owner_id),
+            "SELECT 1 FROM entities WHERE id = ? AND (agent_id = ? OR scope = 'shared')",
+            (entity_id, agent_id),
         ).fetchone()
     )
 
@@ -252,7 +252,7 @@ def _replacement_snapshot(conn, predecessor_id: str) -> tuple[list[str], dict[st
     return columns, dict(zip(columns, row))
 
 
-def _insert_replacement_tags(conn, entity_id: str, tags: list, owner_id: str | None) -> None:
+def _insert_replacement_tags(conn, entity_id: str, tags: list, agent_id: str | None) -> None:
     """Resolve explicit new tags in the same transaction as the new entity."""
     from . import tags as tag_ops
 
@@ -263,7 +263,7 @@ def _insert_replacement_tags(conn, entity_id: str, tags: list, owner_id: str | N
         if key in seen:
             continue
         seen.add(key)
-        tag_id = tag_ops.resolve_or_create_tag(conn, normalized, agent_id=owner_id)
+        tag_id = tag_ops.resolve_or_create_tag(conn, normalized, agent_id=agent_id)
         if tag_id:
             conn.execute(
                 "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
@@ -279,7 +279,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     tags: list | None = None,
     content: str | None = None,
     reason: str | None = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     context_id: str | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
@@ -406,7 +406,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 f"Memory quality check rejected (Score: {quality.get('quality_score', 0):.2f}). "
                 f"Reason: {quality.get('reason', 'quality requirements were not met')}",
             )
-        inherited_owner = before.get("owner_id") if owner_id is None else owner_id
+        inherited_agent_id = before.get("agent_id") if agent_id is None else agent_id
         inherited_context = before.get("context_id") if context_id is None else context_id
         inherited_scope = before.get("scope") if scope is None else scope
         inherited_type = before.get("memory_type") or "fact" if memory_type is None else memory_type
@@ -419,7 +419,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             field: value
             for field, value, supplied in (
                 ("tags", inherited_tags, tags is not None),
-                ("owner_id", inherited_owner, owner_id is not None),
+                ("agent_id", inherited_agent_id, agent_id is not None),
                 ("context_id", inherited_context, context_id is not None),
                 ("scope", inherited_scope, scope is not None),
                 ("memory_type", inherited_type, memory_type is not None),
@@ -435,7 +435,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 field: value
                 for field, value, supplied in (
                     ("tags", list(effective_tags), tags is not None),
-                    ("owner_id", inherited_owner, owner_id is not None),
+                    ("agent_id", inherited_agent_id, agent_id is not None),
                     ("context_id", inherited_context, context_id is not None),
                     ("scope", inherited_scope, scope is not None),
                     ("memory_type", inherited_type, memory_type is not None),
@@ -483,7 +483,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
             for frozen in (
                 "title",
                 "full_content",
-                "owner_id",
+                "agent_id",
                 "context_id",
                 "scope",
                 "memory_type",
@@ -510,7 +510,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     "created_at": now,
                     "updated_at": now,
                     "last_accessed_at": now,
-                    "owner_id": inherited_owner,
+                    "agent_id": inherited_agent_id,
                     "context_id": inherited_context,
                     "scope": inherited_scope,
                     "memory_type": inherited_type,
@@ -535,7 +535,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 f"INSERT INTO entities ({', '.join(insert_columns)}) VALUES ({placeholders})",
                 [replacement[column] for column in insert_columns],
             )
-            _insert_replacement_tags(c, new_id, effective_tags, inherited_owner)
+            _insert_replacement_tags(c, new_id, effective_tags, inherited_agent_id)
 
             archived_at = now
             c.execute(
@@ -666,7 +666,7 @@ def revise_memory(
     tags: list = None,
     content: str = None,
     reason: str = None,
-    owner_id: str = None,
+    agent_id: str = None,
     context_id: str = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
@@ -688,7 +688,7 @@ def revise_memory(
         tags=tags,
         content=content,
         reason=reason,
-        owner_id=owner_id,
+        agent_id=agent_id,
         context_id=context_id,
         scope=scope,
         memory_type=memory_type,
@@ -707,7 +707,7 @@ def supersede_memory(
     tags: list = None,
     content: str = None,
     reason: str = None,
-    owner_id: str = None,
+    agent_id: str = None,
     context_id: str = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
@@ -728,7 +728,7 @@ def supersede_memory(
         tags=tags,
         content=content,
         reason=reason,
-        owner_id=owner_id,
+        agent_id=agent_id,
         context_id=context_id,
         scope=scope,
         memory_type=memory_type,
@@ -749,7 +749,7 @@ def _assemble_memory_record(
     include_lineage: bool,
     touch: bool = True,
     max_depth: int = 10,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     include_trace_provenance: bool = False,
 ) -> dict | None:
     """Shared field-assembly for get_memory / inspect_memory / get_related_memories's
@@ -778,7 +778,7 @@ def _assemble_memory_record(
     row = conn.execute(
         """
         SELECT id, title, full_content, status, created_at, updated_at,
-               last_accessed_at, owner_id, scope, is_core, parent_ids,
+               last_accessed_at, agent_id, scope, is_core, parent_ids,
                valid_from, valid_to, metadata, context_id, memory_type,
                quality_score, quality_status, quality_flags,
                agent_session_id, last_touched_session_id
@@ -818,13 +818,13 @@ def _assemble_memory_record(
         "created_at": row[4],
         "updated_at": row[5],
         "last_accessed_at": accessed_at,
-        "owner_id": row[7],
+        "agent_id": row[7],
         "scope": row[8],
         "is_core": bool(row[9]),
         "parent_ids": [
             parent_id
             for parent_id in (json.loads(row[10]) if row[10] else [])
-            if _can_read_entity(conn, parent_id, owner_id)
+            if _can_read_entity(conn, parent_id, agent_id)
         ],
         "valid_from": row[11],
         "valid_to": row[12],
@@ -850,7 +850,7 @@ def _assemble_memory_record(
         _, snippet = extract_title_and_snippet(row[2])
         data["snippet"] = snippet
     if include_lineage:
-        data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth, owner_id=owner_id)
+        data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth, agent_id=agent_id)
     return data
 
 
@@ -860,7 +860,7 @@ def get_memory(
     db_path: str = None,
     *,
     max_depth: int = 10,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
     include_trace_provenance: bool = False,
 ) -> dict:
     """Return one explicitly addressed memory, including archived history.
@@ -882,7 +882,7 @@ def get_memory(
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -893,7 +893,7 @@ def get_memory(
             if truncated:
                 item["candidates_truncated"] = True
             return rejected([item])
-        if not resolved_id or not _can_read_entity(conn, resolved_id, owner_id):
+        if not resolved_id or not _can_read_entity(conn, resolved_id, agent_id):
             return rejected(
                 [
                     envelope_error(
@@ -912,7 +912,7 @@ def get_memory(
             include_lineage=True,
             touch=True,
             max_depth=max_depth,
-            owner_id=owner_id,
+            agent_id=agent_id,
             include_trace_provenance=include_trace_provenance,
         )
         if data is None:
@@ -940,7 +940,7 @@ def inspect_memory(
     db_path: str = None,
     *,
     max_depth: int = 10,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Lighter-weight sibling to get_memory: identical field set minus `content` (replaced by a
     `snippet`). Lineage IS included here (matching get_memory's own already-accepted cost for a
@@ -960,7 +960,7 @@ def inspect_memory(
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -971,7 +971,7 @@ def inspect_memory(
             if truncated:
                 item["candidates_truncated"] = True
             return rejected([item])
-        if not resolved_id or not _can_read_entity(conn, resolved_id, owner_id):
+        if not resolved_id or not _can_read_entity(conn, resolved_id, agent_id):
             return rejected(
                 [
                     envelope_error(
@@ -990,7 +990,7 @@ def inspect_memory(
             include_lineage=True,
             touch=True,
             max_depth=max_depth,
-            owner_id=owner_id,
+            agent_id=agent_id,
         )
         if data is None:
             return rejected(
@@ -1017,7 +1017,7 @@ def update_memory_metadata(  # noqa: C901
     agent_session_id: str | None = None,
     db_connection=None,
     db_path: str = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Shallow-merges `metadata` into an existing memory's metadata dict without touching
     title/content/tags/content_hash/parent_ids -- coexists with (does not deprecate)
@@ -1052,7 +1052,7 @@ def update_memory_metadata(  # noqa: C901
         should_close = True
 
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, owner_id=owner_id)
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
         if candidates:
             item = envelope_error(
                 "AMBIGUOUS_ID_PREFIX",
@@ -1064,9 +1064,9 @@ def update_memory_metadata(  # noqa: C901
                 item["candidates_truncated"] = True
             return rejected([item])
         if not resolved_id or (
-            owner_id is not None
+            agent_id is not None
             and not conn.execute(
-                "SELECT 1 FROM entities WHERE id = ? AND owner_id = ?", (resolved_id, owner_id)
+                "SELECT 1 FROM entities WHERE id = ? AND agent_id = ?", (resolved_id, agent_id)
             ).fetchone()
         ):
             return rejected(
@@ -1152,7 +1152,7 @@ def fetch_memory_chunk(  # noqa: C901, PLR0911
     def _load_and_touch(id_val):
         cursor = conn.execute(
             """
-            SELECT id, title, full_content, status, created_at, updated_at, owner_id, scope, metadata
+            SELECT id, title, full_content, status, created_at, updated_at, agent_id, scope, metadata
             FROM entities WHERE id = ?
         """,
             (id_val,),
@@ -1225,8 +1225,8 @@ def _archive_entity_unchecked(conn, resolved_id: str) -> None:
 
     Extracted out of archive_memory's `_do_archive` closure (memory-core rework, core-governance
     plan resolved gap #3) so review_core_memory's `archive` outcome can reuse the exact same
-    archival mechanics through an ownership-NEUTRAL path -- a reviewing agent's owner_id need not
-    match the entity's own owner_id, which archive_memory's public ownership-mismatch guard would
+    archival mechanics through an ownership-NEUTRAL path -- a reviewing agent's agent_id need not
+    match the entity's own agent_id, which archive_memory's public ownership-mismatch guard would
     otherwise incorrectly reject. archive_memory itself keeps that guard for its own callers
     (unchanged below); only this internal body is shared.
     """
@@ -1260,7 +1260,7 @@ def _archive_entity_unchecked(conn, resolved_id: str) -> None:
 
 def archive_memory(  # noqa: PLR0911
     entity_id: str = None,
-    owner_id: str = None,
+    agent_id: str = None,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
@@ -1304,7 +1304,7 @@ def archive_memory(  # noqa: PLR0911
             )
 
         cursor = conn.execute(
-            "SELECT owner_id, scope, status FROM entities WHERE id = ?", (resolved_id,)
+            "SELECT agent_id, scope, status FROM entities WHERE id = ?", (resolved_id,)
         )
         row = cursor.fetchone()
         if not row:
@@ -1318,7 +1318,7 @@ def archive_memory(  # noqa: PLR0911
                 ]
             )
 
-        existing_owner, scope, status = row
+        existing_agent_id, scope, status = row
         if status == "archived":
             return envelope_ok(
                 {"id": resolved_id, "message": f"Memory '{resolved_id}' is already archived."},
@@ -1326,13 +1326,13 @@ def archive_memory(  # noqa: PLR0911
                     envelope_warning(error_codes.ALREADY_DONE, "Memory was already archived.")
                 ],
             )
-        if owner_id and existing_owner and existing_owner != owner_id:
+        if agent_id and existing_agent_id and existing_agent_id != agent_id:
             return rejected(
                 [
                     envelope_error(
                         error_codes.CONFLICT,
                         f"Memory '{resolved_id}' owner mismatch.",
-                        "owner_id",
+                        "agent_id",
                     )
                 ]
             )
@@ -1357,7 +1357,7 @@ def archive_memory(  # noqa: PLR0911
             close_connection(conn)
 
 
-def detect_orphaned_memories(owner_id: str = None, db_connection=None, db_path: str = None) -> dict:
+def detect_orphaned_memories(agent_id: str = None, db_connection=None, db_path: str = None) -> dict:
     """Identifies active memories with zero relationship links."""
     should_close = False
     conn = db_connection
@@ -1368,22 +1368,22 @@ def detect_orphaned_memories(owner_id: str = None, db_connection=None, db_path: 
 
     try:
         query = """
-        SELECT e.id, e.title, e.owner_id
+        SELECT e.id, e.title, e.agent_id
         FROM entities e
         LEFT JOIN relations r ON (e.id = r.source_id OR e.id = r.target_id) AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
         WHERE e.status = 'raw' AND r.id IS NULL
         """
         params = []
-        if owner_id:
-            query += " AND e.owner_id = ?"
-            params.append(owner_id)
+        if agent_id:
+            query += " AND e.agent_id = ?"
+            params.append(agent_id)
 
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
 
         orphans = []
         for r in rows:
-            orphans.append({"id": r[0], "title": r[1], "owner_id": r[2]})
+            orphans.append({"id": r[0], "title": r[1], "agent_id": r[2]})
 
         return {
             "total_orphans": len(orphans),

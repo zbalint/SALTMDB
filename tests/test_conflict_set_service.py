@@ -43,7 +43,7 @@ class TestConflictSetService(unittest.TestCase):
             store_memory(
                 content=f"Conflict-set fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="conflict-set-test",
+                agent_id="conflict-set-test",
                 db_connection=self.conn,
             )
         )

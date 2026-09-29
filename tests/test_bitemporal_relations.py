@@ -24,13 +24,13 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         m1 = store_memory(
             title="[SALTMDB] Entity Alpha",
             content="# Entity Alpha\n\nContent for alpha entity.",
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         m2 = store_memory(
             title="[SALTMDB] Entity Beta",
             content="# Entity Beta\n\nContent for beta entity.",
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(m1["status"], "ok")
@@ -446,7 +446,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Episodic Memory Test",
             content="# Episodic Memory\n\nContent for episodic memory test.",
             tags=["episodic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -470,7 +470,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             content="# Hybrid Memory\n\nContent with memory_type and canonical tag.",
             memory_type="event",
             tags=["episodic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "ok")
@@ -492,7 +492,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity With Tags",
             content="# New Entity\n\nSome body text for new entity with tags.",
             tags=["semantic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res1["status"], "ok")
@@ -503,7 +503,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity Without Tags",
             content="# New Entity\n\nSome body text for new entity without tags.",
             tags=[],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res2["status"], "ok")
@@ -516,7 +516,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity With Tags Updated",
             content="# New Entity Updated\n\nUpdated body text for new entity with tags.",
             tags=["semantic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res3["status"], "rejected")
@@ -529,7 +529,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Quantum Encryption Standard Protocol",
             content="# Quantum Encryption\n\nQuantum key distribution uses polarized photons to establish secure shared keys.",
             tags=["semantic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         entity_id_1 = res1["data"]["id"]
@@ -540,7 +540,7 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Quantum Key Distribution Protocol Variant",
             content="# Quantum Encryption Variant\n\nQuantum key distribution utilizes polarized photons to establish safe shared keys.",
             tags=["semantic"],
-            owner_id="user1",
+            agent_id="user1",
             db_connection=self.conn,
         )
         self.assertEqual(res2["status"], "ok")

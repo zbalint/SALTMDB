@@ -85,7 +85,7 @@ class TestCommunityDetectionService(unittest.TestCase):
                 "durable test content for a graph entity."
             ),
             title=f"Community fixture {label}",
-            owner_id="community-test",
+            agent_id="community-test",
             db_connection=self.conn,
         )
         return _memory_id(result)

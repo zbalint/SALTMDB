@@ -38,7 +38,7 @@ class TestContextExpansionService(unittest.TestCase):
             store_memory(
                 content=f"Context expansion fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                owner_id="context-expansion-test",
+                agent_id="context-expansion-test",
                 db_connection=self.conn,
             )
         )

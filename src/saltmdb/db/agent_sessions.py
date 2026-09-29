@@ -13,7 +13,7 @@ def record_session(
     session_id: str,
     cwd: str | None,
     started_at: str,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Register idempotently, enriching a legacy row without inventing old values.
 
@@ -23,11 +23,11 @@ def record_session(
     conn.execute(
         """
         INSERT INTO _agent_sessions
-            (session_id, cwd, started_at, owner_id, last_activity_at)
+            (session_id, cwd, started_at, agent_id, last_activity_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
             cwd = COALESCE(_agent_sessions.cwd, excluded.cwd),
-            owner_id = COALESCE(_agent_sessions.owner_id, excluded.owner_id),
+            agent_id = COALESCE(_agent_sessions.agent_id, excluded.agent_id),
             last_activity_at = CASE
                 WHEN _agent_sessions.last_activity_at IS NULL
                   OR _agent_sessions.last_activity_at < excluded.last_activity_at
@@ -37,7 +37,7 @@ def record_session(
             ended_at = NULL,
             ended_reason = NULL
         """,
-        (session_id, cwd, started_at, owner_id, started_at),
+        (session_id, cwd, started_at, agent_id, started_at),
     )
 
 
@@ -135,7 +135,7 @@ def get_recent_sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int =
     """
     cursor = conn.execute(
         """
-        SELECT session_id, started_at, owner_id, ended_at, ended_reason FROM _agent_sessions
+        SELECT session_id, started_at, agent_id, ended_at, ended_reason FROM _agent_sessions
         WHERE cwd = ?
         ORDER BY started_at DESC
         LIMIT ?
@@ -146,7 +146,7 @@ def get_recent_sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int =
         {
             "session_id": row[0],
             "started_at": row[1],
-            "owner_id": row[2],
+            "agent_id": row[2],
             "ended_at": row[3],
             "ended_reason": row[4],
         }

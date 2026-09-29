@@ -53,7 +53,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             content="SALTMDB is a local-first MCP memory database enabling cross-agent shared memory across Claude, Antigravity, and Copilot CLI",
             title="SALTMDB Cross-Agent Design Purpose",
-            owner_id="agent_a",
+            agent_id="agent_a",
             scope="shared",
             db_connection=self.conn,
         )
@@ -61,7 +61,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         dup_check = memory_service.check_duplicate_memories(
             title="SALTMDB Cross-Agent Purpose Restated",
             content="SALTMDB is a local-first MCP memory database that enables cross-agent shared memory across Claude, Antigravity, and Copilot CLI",
-            owner_id="agent_b",
+            agent_id="agent_b",
             db_connection=self.conn,
         )
 
@@ -76,7 +76,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             content="agent_a private scratch note about a local debugging session that nobody else should see",
             title="agent_a Private Debug Note",
-            owner_id="agent_a",
+            agent_id="agent_a",
             scope="private",
             db_connection=self.conn,
         )
@@ -84,7 +84,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         dup_check = memory_service.check_duplicate_memories(
             title="agent_a Private Debug Note",
             content="agent_a private scratch note about a local debugging session that nobody else should see",
-            owner_id="agent_b",
+            agent_id="agent_b",
             db_connection=self.conn,
         )
 
@@ -111,7 +111,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=t,
                     content=c,
-                    owner_id=owner,
+                    agent_id=owner,
                     entity_id=eid,
                     db_connection=self.conn,
                 )
@@ -125,7 +125,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
             dup_check = memory_service.check_duplicate_memories(
                 title="SALTMDB Vector Memory Architecture Query",
                 content="Detailed technical text for query regarding SALTMDB deduplication service",
-                owner_id=owner,
+                agent_id=owner,
                 db_connection=self.conn,
             )
 
@@ -147,7 +147,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_a,
             content=c_a,
-            owner_id=owner,
+            agent_id=owner,
             entity_id=eid_a,
             db_connection=self.conn,
         )
@@ -160,7 +160,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_b,
             content=c_b,
-            owner_id=owner,
+            agent_id=owner,
             entity_id=eid_b,
             db_connection=self.conn,
         )
@@ -174,7 +174,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_c,
             content=c_c,
-            owner_id=owner,
+            agent_id=owner,
             entity_id=eid_c,
             db_connection=self.conn,
         )
@@ -182,7 +182,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         dup_check = memory_service.check_duplicate_memories(
             title=query_title,
             content=query_content,
-            owner_id=owner,
+            agent_id=owner,
             db_connection=self.conn,
         )
 
@@ -220,7 +220,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
             memory_service.store_memory(
                 title=f"Standard System Memory Item {i:02d}",
                 content=f"Detailed content for standard system memory entity index {i:02d}",
-                owner_id=owner,
+                agent_id=owner,
                 db_connection=self.conn,
             )
 
@@ -242,7 +242,7 @@ class TestCrossOwnerDedup(unittest.TestCase):
         dup_check = memory_service.check_duplicate_memories(
             title="ZzzUnmatchedQueryTermXyz",
             content="ZzzUnmatchedQueryTermXyz",
-            owner_id=owner,
+            agent_id=owner,
             db_connection=proxy_conn,
         )
 

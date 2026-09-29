@@ -20,7 +20,7 @@ def render_last_session_digest(conn, cwd: str) -> str:
 
     The digest lists memories created BY that session (agent_session_id match) or touched by
     it (last_touched_session_id match), deliberately including both. It does NOT filter by
-    owner_id -- a prior session may have worked with multiple owners, and all their memories
+    agent_id -- a prior session may have worked with multiple owners, and all their memories
     are still relevant context.
 
     Walks backward through recent sessions for this cwd (newest first) until it finds one
@@ -112,7 +112,7 @@ def _render_session(
     trace_id, status, prompt, response, created_at = trace
     state = _session_state(session)
     lines = [
-        f'<session id="{session["session_id"]}" owner="{session["owner_id"] or ""}" '
+        f'<session id="{session["session_id"]}" agent_id="{session["agent_id"] or ""}" '
         f'state="{state}" started_at="{session["started_at"]}">'
     ]
     if state == "running":

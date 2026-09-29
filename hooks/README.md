@@ -46,10 +46,10 @@ Every `saltmdb-*.py` script below has an identical body regardless of which harn
 
 ## Adapter identity and session lifecycle
 
-Configure `SALTMDB_OWNER_ID` in every MCP server entry before enabling these hooks. The value is
+Configure `SALTMDB_AGENT_ID` in every MCP server entry before enabling these hooks. The value is
 the stable lowercase identity of the agent or worker role (for example `claude`, `codex`, or
 `agent_docs`) and must match `^[a-z][a-z0-9_-]{0,63}$`. It is an adapter environment setting, not
-an MCP tool argument; hook prompts and tool calls must not supply `owner_id` themselves. Hook
+an MCP tool argument; hook prompts and tool calls must not supply `agent_id` themselves. Hook
 subprocesses that invoke `saltmdb-cli` must inherit the same environment so daemon-side writes
 carry the intended owner.
 

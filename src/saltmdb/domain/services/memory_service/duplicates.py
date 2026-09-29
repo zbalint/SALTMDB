@@ -29,7 +29,7 @@ from ._shared import logger
 def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
     title: str = None,
     content: str = None,
-    owner_id: str = None,
+    agent_id: str = None,
     tags: list = None,
     context_id: str = None,
     exclude_ids: list = None,
@@ -60,10 +60,10 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                 fts_where_clauses.append(f"e.id NOT IN ({placeholders})")
                 params.extend(clean_excludes)
 
-        if owner_id:
-            where.append("(owner_id = ? OR owner_id IS NULL OR scope = 'shared')")
-            fts_where_clauses.append("(e.owner_id = ? OR e.owner_id IS NULL OR e.scope = 'shared')")
-            params.append(owner_id)
+        if agent_id:
+            where.append("(agent_id = ? OR agent_id IS NULL OR scope = 'shared')")
+            fts_where_clauses.append("(e.agent_id = ? OR e.agent_id IS NULL OR e.scope = 'shared')")
+            params.append(agent_id)
 
         if context_id:
             where.append("(context_id IS NULL OR context_id = ?)")
@@ -82,7 +82,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
             try:
                 fts_where = " AND ".join(fts_where_clauses) if fts_where_clauses else "1=1"
                 fts_rows = conn.execute(
-                    f"SELECT e.id, e.title, e.full_content, e.owner_id, e.scope FROM entities_fts fts "
+                    f"SELECT e.id, e.title, e.full_content, e.agent_id, e.scope FROM entities_fts fts "
                     f"JOIN entities e ON fts.id = e.id "
                     f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
                     [search_terms] + params,
@@ -96,7 +96,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
         # Fallback to full scan only if FTS returned nothing
         if not fts_candidates:
             cursor = conn.execute(
-                f"SELECT id, title, full_content, owner_id, scope FROM entities "
+                f"SELECT id, title, full_content, agent_id, scope FROM entities "
                 f"WHERE {' AND '.join(where) if where else '1=1'} LIMIT 30",
                 params,
             )
@@ -118,7 +118,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
             ):
                 raise ValueError("cross-encoder returned malformed scores")
 
-            for (eid, etitle, _, eowner, escope), score in zip(
+            for (eid, etitle, _, eagent_id, escope), score in zip(
                 fts_candidates[:DEDUP_CROSS_ENCODER_MAX_CANDIDATES], ce_scores
             ):
                 if score >= DEDUP_CROSS_ENCODER_THRESHOLD:
@@ -126,7 +126,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                         {
                             "id": eid,
                             "title": etitle,
-                            "owner_id": eowner,
+                            "agent_id": eagent_id,
                             "scope": escope,
                             "similarity_score": round(score, 3),
                         }
@@ -158,7 +158,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                     [row[0] for row in fts_candidates], query_vector, effective_db_path
                 )
 
-            for eid, etitle, econtent, eowner, escope in fts_candidates:
+            for eid, etitle, econtent, eagent_id, escope in fts_candidates:
                 existing_text = f"{etitle} {econtent}"
                 if eid in semantic_sims:
                     sim = semantic_sims[eid]
@@ -190,7 +190,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
                         {
                             "id": eid,
                             "title": etitle,
-                            "owner_id": eowner,
+                            "agent_id": eagent_id,
                             "scope": escope,
                             "similarity_score": round(sim, 3),
                         }
@@ -207,7 +207,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
 
 
 def scan_memories(
-    owner_id: str = None,
+    agent_id: str = None,
     status_filter: str = None,
     limit: int = 20,
     offset: int = 0,
@@ -232,9 +232,9 @@ def scan_memories(
     try:
         where = []
         params = []
-        if owner_id:
-            where.append("(owner_id = ? OR scope = 'shared')")
-            params.append(owner_id)
+        if agent_id:
+            where.append("(agent_id = ? OR scope = 'shared')")
+            params.append(agent_id)
 
         if status_filter:
             if status_filter == "active":
@@ -246,7 +246,7 @@ def scan_memories(
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         cursor_obj = conn.execute(
             f"""
-            SELECT id, title, owner_id, status, weight, is_core, updated_at, memory_type
+            SELECT id, title, agent_id, status, weight, is_core, updated_at, memory_type
             FROM entities
             {where_sql}
             ORDER BY updated_at DESC
@@ -260,7 +260,7 @@ def scan_memories(
             {
                 "id": r[0],
                 "title": r[1],
-                "owner_id": r[2],
+                "agent_id": r[2],
                 "status": r[3],
                 "weight": r[4],
                 "is_core": bool(r[5]),
@@ -304,9 +304,9 @@ def bulk_archive_memory(archive_requests: list, db_connection=None, db_path: str
             results.clear()
             for req in archive_requests:
                 eid = req if isinstance(req, str) else req.get("entity_id")
-                owner = req.get("owner_id") if isinstance(req, dict) else None
+                owner = req.get("agent_id") if isinstance(req, dict) else None
                 res = lifecycle.archive_memory(
-                    entity_id=eid, owner_id=owner, db_connection=conn, _in_transaction=True
+                    entity_id=eid, agent_id=owner, db_connection=conn, _in_transaction=True
                 )
                 if is_rejected(res):
                     raise RuntimeError(

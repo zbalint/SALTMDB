@@ -46,7 +46,7 @@ class _MigrationFixture(unittest.TestCase):
         entity_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "scope, status, title, full_content, valid_from) VALUES "
             "(?, ?, ?, ?, 'tester', 'shared', ?, ?, 'body body body body', ?)",
             (entity_id, now, now, now, status, title, now),
@@ -246,7 +246,7 @@ class TestScdHistoryRevisesBackfill(_MigrationFixture):
         hist_id = f"{base}_h_{str(uuid.uuid4())[:8]}"
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "scope, status, title, full_content, valid_from) VALUES "
             "(?, ?, ?, ?, 'tester', 'shared', 'archived', 'Old Version', 'old body', ?)",
             (hist_id, now, now, now, now),
@@ -266,7 +266,7 @@ class TestScdHistoryRevisesBackfill(_MigrationFixture):
         orphaned_hist_id = f"{uuid.uuid4()}_h_{str(uuid.uuid4())[:8]}"
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "scope, status, title, full_content, valid_from) VALUES "
             "(?, ?, ?, ?, 'tester', 'shared', 'archived', 'Orphan History', 'old body', ?)",
             (orphaned_hist_id, now, now, now, now),
@@ -286,7 +286,7 @@ class TestScdHistoryRevisesBackfill(_MigrationFixture):
         hist_id = f"{base}_h_{str(uuid.uuid4())[:8]}"
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "scope, status, title, full_content, valid_from) VALUES "
             "(?, ?, ?, ?, 'tester', 'shared', 'archived', 'Old Version', 'old body', ?)",
             (hist_id, now, now, now, now),

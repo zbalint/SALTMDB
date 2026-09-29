@@ -74,7 +74,7 @@ class _DbFixture(unittest.TestCase):
         content_hash = content_hash or f"hash-{entity_id}"
         content = content or f"leading content for {entity_id}"
         self.conn.execute(
-            "INSERT INTO entities (id,created_at,updated_at,last_accessed_at,owner_id,scope,status,title,full_content,content_hash) "
+            "INSERT INTO entities (id,created_at,updated_at,last_accessed_at,agent_id,scope,status,title,full_content,content_hash) "
             "VALUES (?,datetime('now'),datetime('now'),datetime('now'),?,'private',?,?,?,?)",
             (entity_id, owner, status, entity_id, content, content_hash),
         )
@@ -145,7 +145,7 @@ class TestChunkCandidateRuntime(_DbFixture):
         with patch.object(embedding_service, "embed_text", return_value=_axis(0)):
             rows, diagnostics = chunk_candidate_search(
                 "query",
-                ["e.status != 'archived'", "e.owner_id = ?"],
+                ["e.status != 'archived'", "e.agent_id = ?"],
                 ["alice"],
                 candidate_window=4,
                 oversampling_multiplier=4,

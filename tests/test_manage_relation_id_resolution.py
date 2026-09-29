@@ -15,7 +15,7 @@ def _store(conn, title, content=None, **kw):
     res = memory_service.store_memory(
         content=content,
         title=title,
-        owner_id="owner_a",
+        agent_id="owner_a",
         db_connection=conn,
         **kw,
     )
@@ -77,7 +77,7 @@ class TestManageRelationIdResolution(unittest.TestCase):
         # Craft a second, otherwise-unrelated UUID that starts with the same 8 hex chars.
         id_b = shared_prefix + str(uuid_mod.uuid4())[8:]
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "title, full_content, status) VALUES (?, datetime('now'), datetime('now'), "
             "datetime('now'), 'owner_a', 'Ambiguous B', 'body text here', 'raw')",
             (id_b,),

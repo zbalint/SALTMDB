@@ -139,7 +139,7 @@ class TestBuildParser(unittest.TestCase):
     def test_export_corpus_snapshot_subcommand_has_no_owner_argument(self):
         parser = build_parser()
         args = parser.parse_args(["export-corpus-snapshot"])
-        self.assertFalse(hasattr(args, "owner_id"))
+        self.assertFalse(hasattr(args, "agent_id"))
 
     def test_export_corpus_snapshot_subcommand_defaults(self):
         parser = build_parser()
@@ -151,7 +151,7 @@ class TestBuildParser(unittest.TestCase):
     def test_orphans_subcommand_has_no_owner_argument(self):
         parser = build_parser()
         args = parser.parse_args(["orphans"])
-        self.assertFalse(hasattr(args, "owner_id"))
+        self.assertFalse(hasattr(args, "agent_id"))
 
     def test_corpus_health_subcommand_defaults(self):
         parser = build_parser()
@@ -174,7 +174,7 @@ class TestOrphansCli(unittest.TestCase):
     def test_passes_configured_owner_and_prints_json(self):
         fake_result = {"total_orphans": 1, "orphaned_memories": [{"id": "e1"}]}
         with (
-            patch.dict(os.environ, {"SALTMDB_OWNER_ID": "alice"}),
+            patch.dict(os.environ, {"SALTMDB_AGENT_ID": "alice"}),
             patch(
                 "saltmdb.domain.services.memory_service.detect_orphaned_memories",
                 return_value=fake_result,
@@ -185,11 +185,11 @@ class TestOrphansCli(unittest.TestCase):
                 rc = cmd_orphans(_OrphansArgs(db_path="/tmp/whatever.db"))
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(buf.getvalue()), fake_result)
-        mock_detect.assert_called_once_with(owner_id="alice", db_path="/tmp/whatever.db")
+        mock_detect.assert_called_once_with(agent_id="alice", db_path="/tmp/whatever.db")
 
     def test_error_result_returns_nonzero_exit(self):
         with (
-            patch.dict(os.environ, {"SALTMDB_OWNER_ID": "alice"}),
+            patch.dict(os.environ, {"SALTMDB_AGENT_ID": "alice"}),
             patch(
                 "saltmdb.domain.services.memory_service.detect_orphaned_memories",
                 return_value={"error": "boom"},
@@ -259,7 +259,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         metadata_str = json.dumps(metadata) if metadata else None
         self.conn.execute(
-            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, owner_id, "
+            "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, "
             "scope, is_core, status, title, full_content, valid_from, core_reason, "
             "core_exit_condition, core_review_after, metadata) VALUES "
             "(?, ?, ?, ?, 'tester', 'shared', ?, ?, ?, 'body content here', ?, ?, ?, ?, ?)",

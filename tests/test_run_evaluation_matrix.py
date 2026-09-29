@@ -92,7 +92,7 @@ class TestRunMatrixForQueries(unittest.TestCase):
             content="The distributed cache invalidation protocol propagates updates "
             "asynchronously across all replica nodes in the cluster.",
             title="Distributed Cache Invalidation Protocol",
-            owner_id="test",
+            agent_id="test",
             db_connection=self.conn,
             db_path=self.db_path,
         )
@@ -104,7 +104,7 @@ class TestRunMatrixForQueries(unittest.TestCase):
             content="A raft consensus leader election algorithm prevents split-brain scenarios "
             "during a network partition in a distributed system.",
             title="Raft Consensus Leader Election",
-            owner_id="test",
+            agent_id="test",
             db_connection=self.conn,
             db_path=self.db_path,
         )

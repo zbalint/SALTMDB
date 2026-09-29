@@ -56,13 +56,13 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self._prev_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         if "SALTMDB_DB_PATH" in os.environ:
             del os.environ["SALTMDB_DB_PATH"]

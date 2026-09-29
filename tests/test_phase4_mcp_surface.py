@@ -24,14 +24,14 @@ class _CaptureBackend:
 class TestPhase4McpSurface(unittest.TestCase):
     def setUp(self):
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.backend = _CaptureBackend()
         self.previous_backend = tools._set_backend_for_test(self.backend)
 
     def tearDown(self):
         tools._set_backend_for_test(self.previous_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
 
     def test_lifecycle_tools_are_typed_and_old_name_is_not_public(self):
         # Phase 4 adds two lifecycle intents and renames consolidation one-for-one.
@@ -150,7 +150,7 @@ class TestPhase4McpSurface(unittest.TestCase):
             content="content",
             tags=["#api"],
             reason="representation repair",
-            owner_id=None,
+            agent_id=None,
             context_id=None,
             scope=None,
             memory_type=None,

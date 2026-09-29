@@ -489,14 +489,14 @@ class SessionConnection:
         db_path: str,
         session_id: str | None = None,
         cwd: str | None = None,
-        owner_id: str | None = None,
+        agent_id: str | None = None,
     ):
         self.db_path = discovery.resolve_canonical_db_path(db_path)
         self._sock: socket.socket | None = None
         self._auth_token: str | None = None
         self._agent_session_id = session_id
         self._cwd = cwd
-        self._owner_id = owner_id
+        self._agent_id = agent_id
         self._session_capability: str | None = None
         self._state_lock = threading.RLock()
 
@@ -531,8 +531,8 @@ class SessionConnection:
                         hello_params["agent_session_id"] = self._agent_session_id
                     if self._cwd is not None:
                         hello_params["cwd"] = self._cwd
-                    if self._owner_id is not None:
-                        hello_params["owner_id"] = self._owner_id
+                    if self._agent_id is not None:
+                        hello_params["agent_id"] = self._agent_id
                     protocol.send_frame(
                         sock,
                         protocol.build_request("hello", hello_params, token=info["auth_token"]),

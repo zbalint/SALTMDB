@@ -58,11 +58,11 @@ class TestRecordCall(unittest.TestCase):
             ["title", "content", "tags"],
             "ok",
             12.5,
-            owner_id="claude",
+            agent_id="claude",
             db_connection=self.conn,
         )
         row = self.conn.execute(
-            "SELECT tool_name, owner_id, param_names, status, error_code, latency_ms "
+            "SELECT tool_name, agent_id, param_names, status, error_code, latency_ms "
             "FROM tool_call_telemetry"
         ).fetchone()
         self.assertEqual(row[0], "store_memory")

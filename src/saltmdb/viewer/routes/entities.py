@@ -29,7 +29,7 @@ class EntitiesMixin(ViewerHandlerProtocol):
             limit = _bounded_query_int(query, "limit", 50, 1, MAX_ENTITY_LIMIT)
             offset = (page - 1) * limit
 
-            owner_id_filter = query.get("owner_id", [None])[0]
+            agent_id_filter = query.get("agent_id", [None])[0]
             status_filter = query.get("status", [None])[0]
             context_id_filter = query.get("context_id", [None])[0]
             is_core_filter = query.get("is_core", [None])[0]
@@ -58,9 +58,9 @@ class EntitiesMixin(ViewerHandlerProtocol):
 
             where_clauses = []
             params = []
-            if owner_id_filter:
-                where_clauses.append("owner_id = ?")
-                params.append(owner_id_filter)
+            if agent_id_filter:
+                where_clauses.append("agent_id = ?")
+                params.append(agent_id_filter)
             if status_filter:
                 where_clauses.append("status = ?")
                 params.append(status_filter)
@@ -118,7 +118,7 @@ class EntitiesMixin(ViewerHandlerProtocol):
             conn = self.get_db_connection()
             cursor = conn.execute(
                 f"""
-                SELECT id, created_at, updated_at, last_accessed_at, owner_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status, memory_type, quality_score, quality_status, agent_session_id, last_touched_session_id
+                SELECT id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, context_id, embedding_status, memory_type, quality_score, quality_status, agent_session_id, last_touched_session_id
                 FROM entities
                 {where_sql}
                 ORDER BY {order_field} {order_direction}, id ASC
@@ -157,7 +157,7 @@ class EntitiesMixin(ViewerHandlerProtocol):
                         "created_at": r[1],
                         "updated_at": r[2],
                         "last_accessed_at": r[3],
-                        "owner_id": r[4],
+                        "agent_id": r[4],
                         "scope": r[5],
                         "is_core": bool(r[6]),
                         "weight": r[7],

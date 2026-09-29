@@ -197,7 +197,7 @@ class TestRendering(unittest.TestCase):
             "core_exit_condition": EXIT,
             "core_review_after": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
             "full_content": "Content body.",
-            "owner_id": "tester",
+            "agent_id": "tester",
         }
         row.update(overrides)
         return row
@@ -262,7 +262,7 @@ class TestBoundedBootstrapErrorReport(unittest.TestCase):
             "core_exit_condition": None,
             "core_review_after": None,
             "full_content": "x" * 50,
-            "owner_id": f"owner_{i}",
+            "agent_id": f"owner_{i}",
         }
 
     def test_hundreds_of_corrupt_rows_stay_under_cap_and_well_formed(self):
@@ -299,7 +299,7 @@ class TestBoundedBootstrapErrorReport(unittest.TestCase):
         rows = [self._corrupt_row(i) for i in range(50)]
         for r in rows:
             r["title"] = "Q" * 5000
-            r["owner_id"] = "R" * 5000
+            r["agent_id"] = "R" * 5000
         violations = [f"{r['id']}: core_reason missing or out of bounds" for r in rows]
         report = cgs.render_bootstrap_error(rows, violations)
         self.assertLessEqual(len(report), CORE_BOOTSTRAP_ERROR_MAX_CHARS)
@@ -332,7 +332,7 @@ class TestFindInvariantViolations(unittest.TestCase):
             "core_exit_condition": EXIT,
             "core_review_after": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
             "full_content": "Valid content.",
-            "owner_id": "tester",
+            "agent_id": "tester",
             "created_at": datetime.now(UTC).isoformat(),
             "scope": "shared",
         }
@@ -397,7 +397,7 @@ class CoreGovernanceDbTestBase(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
-            owner_id=kwargs.pop("owner_id", "tester"),
+            agent_id=kwargs.pop("agent_id", "tester"),
             is_core=True,
             core_reason=kwargs.pop("core_reason", REASON),
             core_exit_condition=kwargs.pop("core_exit_condition", EXIT),
@@ -410,7 +410,7 @@ class CoreGovernanceDbTestBase(unittest.TestCase):
         return store_memory(
             title=title,
             content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
-            owner_id=kwargs.pop("owner_id", "tester"),
+            agent_id=kwargs.pop("agent_id", "tester"),
             db_connection=self.conn,
             **kwargs,
         )
@@ -421,7 +421,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Missing Reason Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_exit_condition=EXIT,
             db_connection=self.conn,
@@ -433,7 +433,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Missing Exit Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_reason=REASON,
             db_connection=self.conn,
@@ -464,7 +464,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Not Actually Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            owner_id="tester",
+            agent_id="tester",
             core_reason=REASON,
             db_connection=self.conn,
         )
@@ -483,7 +483,7 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             title="Preserve On Update",
             content="Distinct fixture content body for Preserve On Update, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -561,7 +561,7 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
             entity_id="99999999-9999-9999-9999-999999999999",
             title="Bypass Via Explicit ID",
             content="Distinct content body for the bypass attempt.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_reason=REASON,
             core_exit_condition=EXIT,
@@ -674,7 +674,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core Retaining Detail Reference",
             content=f"See Retained Reference Detail ({detail_id}): {detail_content}",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -702,7 +702,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core Dropping Detail Reference",
             content="Entirely rewritten body that never mentions the old detail at all.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -738,7 +738,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core With Detail That Turns Private",
             content=f"See Detail Later Made Private ({detail_id}): {detail_content}",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -756,7 +756,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             source_id=detail_id,
             target_id=core_id,
             predicate="elaborates_on",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         self.assertEqual(res["status"], "rejected", res)
@@ -791,7 +791,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Reason Short",
             content="Distinct fixture content body for Malformed Preserved Reason Short, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -816,7 +816,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Reason Long",
             content="Distinct fixture content body for Malformed Preserved Reason Long, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -832,7 +832,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Exit Condition",
             content="Distinct fixture content body for Malformed Preserved Exit Condition, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -852,7 +852,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Review After",
             content="Distinct fixture content body for Malformed Preserved Review After, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -880,7 +880,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Overdue Valid Review After Preserved",
             content="A reasonably long content body that will be shortened below.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -899,7 +899,7 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Corrected Reason Non Expanding Repair",
             content="Distinct fixture content body for Corrected Reason Non Expanding Repair, not a near-duplicate.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_reason="A freshly supplied, valid core reason that repairs the corrupted value.",
             db_connection=self.conn,
@@ -959,7 +959,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
                 "character run, so it clears the quality gate and exercises the overdue-boundary "
                 "check on its own enlargement, not some unrelated rejection reason."
             ),
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -978,7 +978,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Overdue Self Shrink Target",
             content="A reasonably long content body that will be shortened below.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1001,7 +1001,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Non Expanding Edit Target",
             content="A reasonably long content body here that will be shortened.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1022,7 +1022,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="A Much Longer Replacement Title That Expands The Rendered Digest Slightly",
             content="A reasonably long content body that stays exactly this size.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1041,7 +1041,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Reason Growth Target",
             content="A reasonably long content body that stays fixed.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_reason="A" * (CORE_REASON_MIN_CHARS + 40),
             db_connection=self.conn,
@@ -1061,7 +1061,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Exit Growth Target",
             content="A reasonably long content body that stays fixed.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_exit_condition="B" * (CORE_EXIT_MIN_CHARS + 40),
             db_connection=self.conn,
@@ -1084,7 +1084,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Equal Rendered Target",
             content="A reasonably long content body that stays fixed.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             core_reason="Z" * CORE_REASON_MIN_CHARS,
             db_connection=self.conn,
@@ -1108,7 +1108,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="A Noticeably Longer Title",
             content="Much shorter but still quality-legal replacement body.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1135,7 +1135,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
                 "Core Is Overdue"
             ),
             content="A reasonably long content body that stays exactly this size.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1153,7 +1153,7 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Overdue Shrink Target",
             content="A reasonably long content body here.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1260,7 +1260,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title=title + "X",  # grows the rendered title by exactly 1 character
             content=content,
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1306,7 +1306,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Non Expanding Type Preserve Target",
             content="A reasonably long content body that stays exactly this size.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1336,7 +1336,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             title="Explicit Type Change Target",
             content="A reasonably long content body that stays exactly this size.",
             memory_type="preference",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1353,7 +1353,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             title="Explicit Type Change Target",
             content="A shorter but still legal replacement body.",
             memory_type="preference",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1436,7 +1436,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title=target_title,
             content=update_content,
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1465,7 +1465,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Digest Consistency Target",
             content="A reasonably long content body that stays exactly this size.",
-            owner_id="tester",
+            agent_id="tester",
             is_core=True,
             db_connection=self.conn,
         )
@@ -1684,7 +1684,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="retain",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn("retained as core", result["data"]["message"])
@@ -1705,7 +1705,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="retain",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
             core_review_after=past,
         )
         self.assertEqual(result["status"], "rejected", result)
@@ -1718,7 +1718,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="retain",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "rejected", result)
 
@@ -1731,7 +1731,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="demote",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn("demoted", result["data"]["message"])
@@ -1758,14 +1758,14 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="demote",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         second = cgs.review_core_memory(
             self.conn,
             entity_id=entity_id,
             outcome="demote",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(second["status"], "ok")
         self.assertIn("no-op", second["data"]["message"])
@@ -1781,7 +1781,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn("archived", result["data"]["message"])
@@ -1791,10 +1791,10 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         self.assertNotIn("Error", content)
 
     def test_reviewer_identity_independent_of_entity_owner(self):
-        res = self._store_core("Owner Mismatch Core", owner_id="original_owner")
+        res = self._store_core("Owner Mismatch Core", agent_id="original_owner")
         entity_id = res["data"]["id"]
 
-        # archive_memory's public ownership guard would reject a mismatched owner_id; the
+        # archive_memory's public ownership guard would reject a mismatched agent_id; the
         # review path must NOT inherit that restriction (reviewer identity, not an ownership
         # permission).
         result = cgs.review_core_memory(
@@ -1802,7 +1802,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale=self.RATIONALE,
-            owner_id="a_completely_different_reviewer",
+            agent_id="a_completely_different_reviewer",
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn("archived", result["data"]["message"])
@@ -1810,7 +1810,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
     def test_archive_rejects_ordinary_active_non_core_memory(self):
         # Resolved review finding #3: review_core_memory(outcome='archive') must not become a
         # second, ownership-neutral general-purpose archive API for every ordinary memory.
-        res = self._store_normal("Ordinary Active Memory", owner_id="alice")
+        res = self._store_normal("Ordinary Active Memory", agent_id="alice")
         entity_id = res["data"]["id"]
 
         result = cgs.review_core_memory(
@@ -1818,7 +1818,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale=self.RATIONALE,
-            owner_id="bob",
+            agent_id="bob",
         )
         self.assertEqual(result["status"], "rejected", result)
         self.assertIn("core memory", result["errors"][0]["message"])
@@ -1839,7 +1839,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "ok")
         self.assertIn("no-op", result["data"]["message"])
@@ -1856,7 +1856,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="archive",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         # Must not masquerade as a reviewed core's no-op -- a never-core memory gets the
         # rejection, not the archived-former-core no-op message.
@@ -1866,10 +1866,10 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
     def test_archive_via_review_does_not_weaken_public_archive_memory_guard(self):
         from saltmdb.domain.services.memory_service import archive_memory
 
-        res = self._store_normal("Public Guard Untouched Entity", owner_id="original_owner")
+        res = self._store_normal("Public Guard Untouched Entity", agent_id="original_owner")
         entity_id = res["data"]["id"]
         result = archive_memory(
-            entity_id=entity_id, owner_id="someone_else", db_connection=self.conn
+            entity_id=entity_id, agent_id="someone_else", db_connection=self.conn
         )
         self.assertEqual(result["status"], "rejected")
         self.assertIn("owner mismatch", result["errors"][0]["message"])
@@ -1883,7 +1883,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="demote",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
             core_review_after=future,
         )
         self.assertEqual(result["status"], "rejected", result)
@@ -1896,7 +1896,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             outcome="bogus",
             review_rationale=self.RATIONALE,
-            owner_id="reviewer_agent",
+            agent_id="reviewer_agent",
         )
         self.assertEqual(result["status"], "rejected", result)
 

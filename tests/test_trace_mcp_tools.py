@@ -38,13 +38,13 @@ class TestTraceMcpTools(unittest.TestCase):
     @override
     def setUp(self):
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("trace_test_agent")
+        SESSION_IDENTITY.configure_agent_id("trace_test_agent")
         self.backend = _CaptureBackend()
 
     @override
     def tearDown(self):
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
 
     def test_capture_signatures_do_not_expose_agent_session_id(self):
         for name in (
@@ -68,14 +68,14 @@ class TestTraceMcpTools(unittest.TestCase):
             tools.get_trace("trace-1")
 
         calls = dict(self.backend.calls)
-        self.assertEqual(calls["capture_trace_start"]["owner_id"], "trace_test_agent")
-        self.assertEqual(calls["capture_trace_memory_link"]["owner_id"], "trace_test_agent")
+        self.assertEqual(calls["capture_trace_start"]["agent_id"], "trace_test_agent")
+        self.assertEqual(calls["capture_trace_memory_link"]["agent_id"], "trace_test_agent")
         self.assertEqual(calls["capture_trace_memory_link"]["entity_id"], "entity-1")
         self.assertEqual(calls["capture_trace_memory_link"]["just_run_tool_name"], "store_memory")
-        self.assertEqual(calls["capture_trace_complete"]["owner_id"], "trace_test_agent")
-        self.assertNotIn("owner_id", calls["search_traces"])
+        self.assertEqual(calls["capture_trace_complete"]["agent_id"], "trace_test_agent")
+        self.assertNotIn("agent_id", calls["search_traces"])
         self.assertEqual(calls["search_traces"]["agent_session_id"], "filter-session")
-        self.assertNotIn("owner_id", calls["get_trace"])
+        self.assertNotIn("agent_id", calls["get_trace"])
         for tool_name, kwargs in calls.items():
             if tool_name != "search_traces":
                 self.assertNotIn("agent_session_id", kwargs)
@@ -175,9 +175,9 @@ class TestTraceMcpTools(unittest.TestCase):
                 "capture_trace_memory_link",
                 "capture_trace_complete",
             ):
-                _ = rpc_call(tool_name, {"owner_id": "caller-supplied", "value": "ignored"})
+                _ = rpc_call(tool_name, {"agent_id": "caller-supplied", "value": "ignored"})
                 kwargs = calls[-1]
-                self.assertEqual(kwargs["owner_id"], "trace_test_agent")
+                self.assertEqual(kwargs["agent_id"], "trace_test_agent")
                 self.assertEqual(kwargs["agent_session_id"], SESSION_IDENTITY.agent_session_id)
 
     def test_bound_adapter_identity_reaches_trace_database_row(self):
@@ -218,7 +218,7 @@ class TestTraceMcpTools(unittest.TestCase):
                 _ = conn.execute(
                     """
                     INSERT INTO entities
-                        (id, created_at, updated_at, last_accessed_at, owner_id, scope,
+                        (id, created_at, updated_at, last_accessed_at, agent_id, scope,
                          title, full_content, content_hash)
                     VALUES (?, ?, ?, ?, ?, 'shared', ?, ?, ?)
                     """,
@@ -249,7 +249,7 @@ class TestTraceMcpTools(unittest.TestCase):
             row = cast(
                 tuple[str, str, str],
                 conn.execute(
-                    """SELECT agent_session_id, owner_id, status
+                    """SELECT agent_session_id, agent_id, status
                     FROM conversation_traces WHERE harness_turn_id = ?""",
                     ("turn-db",),
                 ).fetchone(),
@@ -283,11 +283,11 @@ class TestTraceMcpTools(unittest.TestCase):
 
         with patch("saltmdb.mcp.tools.daemon_client.call", side_effect=daemon_call):
             _ = rpc_call(
-                "search_traces", {"owner_id": "caller-supplied", "agent_session_id": "other"}
+                "search_traces", {"agent_id": "caller-supplied", "agent_session_id": "other"}
             )
 
         kwargs = calls[-1]
-        self.assertNotIn("owner_id", kwargs)
+        self.assertNotIn("agent_id", kwargs)
         self.assertEqual(kwargs["agent_session_id"], "other")
 
 
@@ -300,14 +300,14 @@ class TestTraceWriteLinking(unittest.TestCase):
 
     def setUp(self):
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("trace_test_agent")
+        SESSION_IDENTITY.configure_agent_id("trace_test_agent")
         tools._drain_pending_trace_writes()
         self.backend = _CaptureBackend()
 
     def tearDown(self):
         tools._drain_pending_trace_writes()
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
 
     def _record(self, tool_name, data, status="ok", capture="true"):
         with (

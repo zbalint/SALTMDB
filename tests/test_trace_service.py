@@ -19,12 +19,12 @@ class TestTraceService(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _start(self, turn_id="turn-a", owner_id="owner-a", agent_session_id="agent-session-a"):
+    def _start(self, turn_id="turn-a", agent_id="owner-a", agent_session_id="agent-session-a"):
         from saltmdb.domain.services import trace_service
 
         result = trace_service.capture_trace_start(
             agent_session_id=agent_session_id,
-            owner_id=owner_id,
+            agent_id=agent_id,
             harness="claude_code",
             harness_session_id="claude-session-a",
             harness_turn_id=turn_id,
@@ -39,7 +39,7 @@ class TestTraceService(unittest.TestCase):
         self.conn.execute(
             """
             INSERT INTO entities
-                (id, created_at, updated_at, last_accessed_at, owner_id, scope,
+                (id, created_at, updated_at, last_accessed_at, agent_id, scope,
                  title, full_content, content_hash)
             VALUES (?, ?, ?, ?, ?, 'shared', ?, ?, ?)
             """,
@@ -61,7 +61,7 @@ class TestTraceService(unittest.TestCase):
 
         first = trace_service.capture_trace_start(
             agent_session_id="agent-session-a",
-            owner_id="owner-a",
+            agent_id="owner-a",
             harness="claude_code",
             harness_session_id="claude-session-a",
             harness_turn_id="prompt-a",
@@ -70,7 +70,7 @@ class TestTraceService(unittest.TestCase):
         )
         second = trace_service.capture_trace_start(
             agent_session_id="agent-session-a",
-            owner_id="owner-a",
+            agent_id="owner-a",
             harness="claude_code",
             harness_session_id="claude-session-a",
             harness_turn_id="prompt-a",
@@ -162,7 +162,7 @@ class TestTraceService(unittest.TestCase):
                 "before it verifies insert and update operation classification."
             ),
             title="Trace provenance insert",
-            owner_id="owner-a",
+            agent_id="owner-a",
             db_connection=self.conn,
         )
         self.assertEqual(first["status"], "ok")
@@ -183,7 +183,7 @@ class TestTraceService(unittest.TestCase):
                 "before it verifies insert and update operation classification."
             ),
             title="Trace provenance insert",
-            owner_id="owner-a",
+            agent_id="owner-a",
             entity_id=entity_id,
             weight=2,
             db_connection=self.conn,
@@ -353,7 +353,7 @@ class TestTraceService(unittest.TestCase):
 
         return trace_service.capture_trace_start(
             agent_session_id="agent-session-a",
-            owner_id="owner-a",
+            agent_id="owner-a",
             harness="claude_code",
             harness_session_id="claude-session-a",
             harness_turn_id=turn_id,
@@ -421,7 +421,7 @@ class TestTraceService(unittest.TestCase):
 
         result = trace_service.capture_trace_start(
             agent_session_id="agent-session-a",
-            owner_id="owner-a",
+            agent_id="owner-a",
             harness=harness,
             harness_session_id="claude-session-a",
             harness_turn_id=turn_id,
@@ -480,12 +480,12 @@ class TestTraceService(unittest.TestCase):
     def test_reads_are_cross_agent_but_writes_stay_bound_to_the_writing_agent(self):
         from saltmdb.domain.services import trace_service
 
-        # owner_id is attribution, not access control: any caller reads any agent's trace.
+        # agent_id is attribution, not access control: any caller reads any agent's trace.
         trace_id = self._start()
         self._entity()
         fetched = trace_service.get_trace(trace_id, db_connection=self.conn)
         self.assertEqual(fetched["status"], "ok")
-        self.assertEqual(fetched["data"]["owner_id"], "owner-a")
+        self.assertEqual(fetched["data"]["agent_id"], "owner-a")
         results = trace_service.search_traces(db_connection=self.conn)["data"]["results"]
         self.assertEqual([r["trace_id"] for r in results], [trace_id])
         linked = trace_service.capture_trace_memory_link(

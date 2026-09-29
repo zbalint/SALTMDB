@@ -47,7 +47,7 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
     *,
     db_connection: sqlite3.Connection | None = None,
     db_path: str | None = None,
-    owner_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Seed and rank leaf communities and their members for global retrieval.
 
@@ -90,14 +90,14 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
             )
             return _empty_result()
         centroid_rows = fetch_leaf_community_centroids(conn)
-        if owner_id is not None:
+        if agent_id is not None:
             visible_communities = {
                 row[0]
                 for row in conn.execute(
                     "SELECT DISTINCT cm.community_id FROM community_membership cm "
                     "JOIN entities e ON e.id = cm.entity_id "
-                    "WHERE e.owner_id = ? OR e.scope = 'shared'",
-                    (owner_id,),
+                    "WHERE e.agent_id = ? OR e.scope = 'shared'",
+                    (agent_id,),
                 )
             }
             centroid_rows = [row for row in centroid_rows if row[0] in visible_communities]
@@ -152,8 +152,8 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
                 "SELECT cm.entity_id, cm.community_id FROM community_membership cm "
                 "JOIN entities e ON e.id = cm.entity_id "
                 f"WHERE cm.community_id IN ({placeholders})"
-                + (" AND (e.owner_id = ? OR e.scope = 'shared')" if owner_id is not None else ""),
-                [*seeded_ids, owner_id] if owner_id is not None else seeded_ids,
+                + (" AND (e.agent_id = ? OR e.scope = 'shared')" if agent_id is not None else ""),
+                [*seeded_ids, agent_id] if agent_id is not None else seeded_ids,
             ).fetchall(),
         )
         members_by_community: dict[str, list[str]] = {

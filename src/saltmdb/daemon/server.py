@@ -336,12 +336,19 @@ class _DaemonState:
         finally:
             self._release_inflight()
 
-    def _handle_session_method(
+    def _handle_session_method(  # noqa: PLR0911
         self, method: str, request_id: str | None, session_id: int | None, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Handle session-lifecycle (hello/goodbye/ping) and status methods.
         These never acquire the inflight counter -- they are exempt from the shutdown gate."""
         if method == "hello" and session_id is not None:
+            if "owner_id" in params:
+                return protocol.build_error_response(
+                    request_id,
+                    protocol.MALFORMED_REQUEST,
+                    "hello parameter 'owner_id' was renamed 'agent_id'; "
+                    "restart the MCP adapter on the current SALTMDB version",
+                )
             logger.info(
                 "hello received: session_id=%d agent_session_id=%s cwd=%s (pid=%d)",
                 session_id,
@@ -388,7 +395,7 @@ class _DaemonState:
                             params["agent_session_id"],
                             cwd,
                             datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                            params.get("owner_id"),
+                            params.get("agent_id"),
                         ),
                         priority="foreground",
                     )
@@ -528,6 +535,13 @@ class _DaemonState:
         if not isinstance(kwargs, dict):
             return protocol.build_error_response(
                 request_id, protocol.MALFORMED_REQUEST, "tool kwargs must be an object"
+            )
+        if "owner_id" in kwargs:
+            return protocol.build_error_response(
+                request_id,
+                protocol.MALFORMED_REQUEST,
+                "tool kwarg 'owner_id' was renamed 'agent_id'; "
+                "restart the MCP adapter on the current SALTMDB version",
             )
         caller_record, validation_error = self._validate_caller_session(
             request_id, params, transport_session_id

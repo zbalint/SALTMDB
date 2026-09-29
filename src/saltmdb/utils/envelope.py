@@ -11,7 +11,7 @@ Shape (§4.2):
       "warnings": [...],          # never blocking, present (possibly empty) on "ok"
       "errors": [...],            # present only when status == "rejected"
       "corrected_call": {...},    # present only for mechanically derivable fixes
-      "effective": {...},         # present only when supplied (owner_id/context_id/scope actually used)
+      "effective": {...},         # present only when supplied (agent_id/context_id/scope actually used)
     }
 
 Zero-side-effect guarantee (§4.2): callers constructing a "rejected" envelope must not have

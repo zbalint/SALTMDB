@@ -15,13 +15,13 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.conn = init_db(self.db_path)
         os.environ["SALTMDB_DB_PATH"] = self.db_path
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.previous_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
 
     def tearDown(self):
         tools._set_backend_for_test(self.previous_backend)
         SESSION_IDENTITY.reset()
-        SESSION_IDENTITY.configure_owner("test_agent")
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.conn.close()
         os.environ.pop("SALTMDB_DB_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -92,7 +92,7 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertEqual(result["data"]["submitted_tags"], ["#documents"])
         self.assertIn("#document", result["data"]["effective_tags"])
         self.assertTrue(any(item["code"] == "TAG_NEAR_MISS" for item in result["warnings"]))
-        self.assertEqual(result["effective"]["owner_id"], "test_agent")
+        self.assertEqual(result["effective"]["agent_id"], "test_agent")
 
     def test_store_memory_rejects_adjacent_separator_tag_before_any_write(self):
         result = tools.store_memory(

@@ -106,7 +106,7 @@ class TestRelationsUniqueIndexSchema(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id="idx_tester",
+            agent_id="idx_tester",
             db_connection=self.conn,
         )
         return _memory_id(res)
@@ -338,19 +338,19 @@ class TestStoreRelationDedup(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for relation dedup tests",
             title="Relation Dedup Source",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for relation dedup tests",
             title="Relation Dedup Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res3 = store_memory(
             content="Second target entity content for relation repoint tests",
             title="Relation Dedup Repoint Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         self.id1 = _memory_id(res1)
@@ -377,7 +377,7 @@ class TestStoreRelationDedup(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'tester', ?, ?, ?, ?)",
             (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
@@ -808,13 +808,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for degenerate predicate test",
             title="Degenerate Predicate Source",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for degenerate predicate test",
             title="Degenerate Predicate Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         id1 = _memory_id(res1)
@@ -840,13 +840,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for alias surfacing test",
             title="Alias Surfacing Source",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for alias surfacing test",
             title="Alias Surfacing Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         id1 = _memory_id(res1)
@@ -873,13 +873,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Source",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         id1 = _memory_id(res1)
@@ -903,13 +903,13 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Source",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         res2 = store_memory(
             content="Target entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Target",
-            owner_id="tester",
+            agent_id="tester",
             db_connection=self.conn,
         )
         id1 = _memory_id(res1)
@@ -1061,11 +1061,11 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _mk(self, title, owner_id="agent_c"):
+    def _mk(self, title, agent_id="agent_c"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=self.conn,
         )
         return _memory_id(res)
@@ -1103,7 +1103,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1],
             title="C Basic Repoint",
             content=_cons_content("basic-repoint"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res)
@@ -1127,7 +1127,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1, p2],
             title="C Dedup",
             content=_cons_content("dedup"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1179,7 +1179,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1, p2],
             title="C Self Loop",
             content=_cons_content("self-loop"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1206,7 +1206,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[a, b],
             title="C1 MultiGen",
             content=_cons_content("multigen-c1"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res1)
@@ -1227,7 +1227,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[c1, d],
             title="C2 MultiGen",
             content=_cons_content("multigen-c2"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("INACTIVE_PARENT", res2)
@@ -1265,7 +1265,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[a, b],
             title="C PredScope",
             content=_cons_content("predscope"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1344,11 +1344,11 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _mk(self, title, owner_id="agent_c"):
+    def _mk(self, title, agent_id="agent_c"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=self.conn,
         )
         return _memory_id(res)
@@ -1361,7 +1361,7 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             parent_ids=[a, b],
             title="Lineage C1",
             content=_cons_content("lineage-c1"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         c1 = _memory_id(res1)
@@ -1445,7 +1445,7 @@ class TestPhase3LineageGraph(unittest.TestCase):
         result = store_memory(
             content=f"Graph lineage content for {title}",
             title=title,
-            owner_id="phase3_graph",
+            agent_id="phase3_graph",
             db_connection=self.conn,
         )
         return _memory_id(result)
@@ -1559,11 +1559,11 @@ class TestRelationPointInTime(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _mk(self, title, owner_id="agent_c"):
+    def _mk(self, title, agent_id="agent_c"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=self.conn,
         )
         return _memory_id(res)
@@ -1786,7 +1786,7 @@ class TestRelationPointInTime(unittest.TestCase):
             parent_ids=[p1, p2],
             title="PIT Cons C",
             content=_cons_content("pit-deps-cons"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         c_id = _memory_id(res)
@@ -1829,7 +1829,7 @@ class TestRelationPointInTime(unittest.TestCase):
             parent_ids=[a, b],
             title="PIT Lineage C1",
             content=_cons_content("pit-lineage-c1"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         c1 = _memory_id(res)
@@ -1912,11 +1912,11 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _mk(self, title, owner_id="orphan_tester"):
+    def _mk(self, title, agent_id="orphan_tester"):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            owner_id=owner_id,
+            agent_id=agent_id,
             db_connection=self.conn,
         )
         return _memory_id(res)
@@ -1929,7 +1929,7 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
             "UPDATE relations SET valid_to = ? WHERE source_id = ? AND target_id = ?",
             ("2020-01-01T00:00:00+00:00", e1, e2),
         )
-        result = detect_orphaned_memories(owner_id="orphan_tester", db_connection=self.conn)
+        result = detect_orphaned_memories(agent_id="orphan_tester", db_connection=self.conn)
         orphan_ids = {o["id"] for o in result["orphaned_memories"]}
         self.assertIn(
             e1, orphan_ids, "an entity whose only relation is expired must be flagged as an orphan"
@@ -1942,7 +1942,7 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
         e3 = self._mk("Orphan E3")
         e4 = self._mk("Orphan E4")
         store_relation(source_id=e3, target_id=e4, predicate="depends_on", db_connection=self.conn)
-        result = detect_orphaned_memories(owner_id="orphan_tester", db_connection=self.conn)
+        result = detect_orphaned_memories(agent_id="orphan_tester", db_connection=self.conn)
         orphan_ids = {o["id"] for o in result["orphaned_memories"]}
         self.assertNotIn(
             e3, orphan_ids, "an entity with an active relation must NOT be flagged as an orphan"
@@ -1953,7 +1953,7 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
 
     def test_total_orphans_matches_orphaned_memories_length(self):
         self._mk("Orphan E5")
-        result = detect_orphaned_memories(owner_id="orphan_tester", db_connection=self.conn)
+        result = detect_orphaned_memories(agent_id="orphan_tester", db_connection=self.conn)
         self.assertEqual(result["total_orphans"], len(result["orphaned_memories"]))
 
 
@@ -1983,7 +1983,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', ?, ?, ?, ?)",
             (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
@@ -2005,7 +2005,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Incohesive",
             content=_cons_content("incohesive"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
@@ -2017,7 +2017,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Unresolvable Pair B', '', ?)",
             (b, now, now, now, "empty-hash"),
@@ -2028,7 +2028,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Unresolvable",
             content=_cons_content("unresolvable"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
@@ -2044,7 +2044,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Override",
             content=_cons_content("override"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification=(
                 "deliberately merging unrelated axis-0/axis-1 test fixtures for override coverage"
@@ -2073,7 +2073,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Short Override",
             content=_cons_content("short-override"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification="too short",
         )
@@ -2086,7 +2086,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a],
             title="C Solo",
             content=_cons_content("solo"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res, res)
@@ -2104,7 +2104,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Solo Unresolvable', '', ?)",
             (a, now, now, now, "empty-hash-solo"),
@@ -2116,7 +2116,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a],
             title="C Solo Unresolvable",
             content=_cons_content("solo-unresolvable"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res, res)
@@ -2138,7 +2138,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Active Unscorable', '', ?)",
             (b, now, now, now, "empty-hash-active"),
@@ -2149,7 +2149,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Active Unscorable Override",
             content=_cons_content("active-unscorable-override"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification=(
                 "merging despite one parent having no scorable content, override intentional"
@@ -2177,7 +2177,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'archived', 'Archived Unscorable', '', ?)",
             (b, now, now, now, "empty-hash-archived"),
@@ -2188,7 +2188,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Archived Unscorable Override",
             content=_cons_content("archived-unscorable-override"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
             override_justification=(
                 "attempting to merge despite one parent already being archived, should fail"
@@ -2217,7 +2217,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
                 parent_ids=[a, b],
                 title="C Audit Fail",
                 content=_cons_content("audit-fail"),
-                owner_id="agent_c",
+                agent_id="agent_c",
                 db_connection=self.conn,
                 override_justification=(
                     "deliberately merging unrelated fixtures to exercise the audit-failure "
@@ -2258,7 +2258,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
                 parent_ids=[a, b],
                 title="C Reval Race",
                 content=_cons_content("reval-race"),
-                owner_id="agent_c",
+                agent_id="agent_c",
                 db_connection=self.conn,
             )
         self.assertTrue(res.startswith("Error"), res)
@@ -2288,7 +2288,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[c, d],
             title="C Reval No Race",
             content=_cons_content("reval-no-race"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res2, res2)
@@ -2304,7 +2304,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[consolidated_id, fresh_raw],
             title="C Refresh Consolidated",
             content=_cons_content("refresh-consolidated"),
-            owner_id="agent_c",
+            agent_id="agent_c",
             db_connection=self.conn,
         )
         self.assertIn("INACTIVE_PARENT", res, res)
@@ -2492,7 +2492,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'archived', ?, ?, ?)",
             (entity_id, now, now, now, "Archived Entity", "some archived content", "archived-hash"),
@@ -2529,7 +2529,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', ?, ?, ?, ?)",
             (entity_id, now, now, now, status, title, f"content body for {title}", content_hash),
@@ -2572,7 +2572,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             source_id=a,
             target_id=b,
             predicate="elaborates_on",
-            owner_id="agent_override",
+            agent_id="agent_override",
             override_justification="deliberately linking orthogonal test fixtures for coverage",
             db_connection=self.conn,
         )
@@ -2694,7 +2694,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             "INSERT INTO entities"
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title,"
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title,"
             " full_content, content_hash)"
             " VALUES (?, ?, ?, ?, 'agent_c', 'raw', 'Unresolved B', '', ?)",
             (b, now, now, now, "empty-hash"),
@@ -2766,7 +2766,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
         after = _entities_snapshot()
         self.assertEqual(before, after)
 
-    def test_store_relation_override_audit_event_uses_supplied_owner_id(self):
+    def test_store_relation_override_audit_event_uses_supplied_agent_id(self):
         a, _ = self._mk_vector_entity("Owner Supplied A", _axis_vector(0))
         b, _ = self._mk_vector_entity("Owner Supplied B", _axis_vector(1))
 
@@ -2774,8 +2774,8 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             source_id=a,
             target_id=b,
             predicate="elaborates_on",
-            owner_id="agent_custom_owner",
-            override_justification="checking supplied owner_id propagates to the audit event",
+            agent_id="agent_custom_owner",
+            override_justification="checking supplied agent_id propagates to the audit event",
             db_connection=self.conn,
         )
 
@@ -2798,7 +2798,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
                     "override_justification": "bulk relation owner attribution regression coverage",
                 }
             ],
-            owner_id="agent_batch_owner",
+            agent_id="agent_batch_owner",
             db_connection=self.conn,
         )
 
@@ -2816,7 +2816,7 @@ class TestStoreRelationGovernanceGate(unittest.TestCase):
             source_id=a,
             target_id=b,
             predicate="elaborates_on",
-            override_justification="checking omitted owner_id defaults the audit event to system",
+            override_justification="checking omitted agent_id defaults the audit event to system",
             db_connection=self.conn,
         )
 
@@ -2927,7 +2927,7 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 "durable content for a real relation write."
             ),
             title=f"Community hook fixture {label}",
-            owner_id="community-hook-test",
+            agent_id="community-hook-test",
             db_connection=self.conn,
         )
         return _memory_id(result)

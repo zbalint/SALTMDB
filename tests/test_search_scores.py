@@ -33,7 +33,7 @@ class TestSearchScores(unittest.TestCase):
         ):
             self.conn.execute(
                 "INSERT INTO entities "
-                "(id, created_at, updated_at, last_accessed_at, owner_id, status, title, "
+                "(id, created_at, updated_at, last_accessed_at, agent_id, status, title, "
                 "full_content, content_hash, memory_type) "
                 "VALUES (?, ?, ?, ?, 'test_user', 'raw', ?, ?, ?, 'fact')",
                 (
@@ -55,7 +55,7 @@ class TestSearchScores(unittest.TestCase):
         timestamp = "2024-01-03T00:00:00+00:00"
         self.conn.execute(
             "INSERT INTO entities "
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title, "
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title, "
             "full_content, content_hash, memory_type) "
             "VALUES (?, ?, ?, ?, 'test_user', 'raw', ?, ?, ?, 'fact')",
             (
@@ -89,18 +89,18 @@ class TestSearchScores(unittest.TestCase):
         store_memory(
             title="Authentication Module",
             content="Handles OAuth2 and JWT token authentication",
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
         store_memory(
             title="Database Backup Service",
             content="Performs hourly PostgreSQL and SQLite snapshot backups",
-            owner_id="user1",
+            agent_id="user1",
             db_path=self.db_path,
         )
 
         results = search_memory(
-            query_keywords="authentication OAuth2", owner_id="user1", db_path=self.db_path
+            query_keywords="authentication OAuth2", agent_id="user1", db_path=self.db_path
         )
         self.assertTrue(len(results) > 0)
         self.assertGreater(results[0]["score"], 0.0)
@@ -149,7 +149,7 @@ class TestSearchScores(unittest.TestCase):
         timestamp = "2024-02-01T00:00:00+00:00"
         self.conn.execute(
             "INSERT INTO entities "
-            "(id, created_at, updated_at, last_accessed_at, owner_id, status, title, "
+            "(id, created_at, updated_at, last_accessed_at, agent_id, status, title, "
             "full_content, content_hash, memory_type) "
             "VALUES (?, ?, ?, ?, 'test_user', ?, ?, ?, ?, 'fact')",
             (

@@ -35,7 +35,7 @@ _METADATA_FILTER_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def search_memory(  # noqa: C901, PLR0912, PLR0915
-    owner_id: str = None,
+    agent_id: str = None,
     query_keywords: str = None,
     tags_filter: list = None,
     metadata_filter: dict = None,
@@ -202,9 +202,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         where_clauses = ["e.status != 'archived'"]
         params: list[Any] = []  # mixed str/int SQL bind values (e.g. is_core -> 0/1)
 
-        if owner_id:
-            where_clauses.append("(e.owner_id = ? OR e.scope = 'shared')")
-            params.append(owner_id)
+        if agent_id:
+            where_clauses.append("(e.agent_id = ? OR e.scope = 'shared')")
+            params.append(agent_id)
 
         if context_id:
             where_clauses.append(
@@ -359,7 +359,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     """
                     SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                            0.0 as rank_score,
-                           e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata,
+                           e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata,
                            e.context_id, e.memory_type, 0 as rel_count, NULL as fts_snippet
                     FROM entities e
                     WHERE e.id = ?
@@ -826,7 +826,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                     fetch_sql = f"""
                         SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                                0.0 as rank_score,
-                               e.created_at, e.updated_at, e.owner_id, e.scope,
+                               e.created_at, e.updated_at, e.agent_id, e.scope,
                                e.metadata, e.context_id, e.memory_type, 0 as rel_count,
                                NULL as fts_snippet
                         FROM entities e
@@ -865,7 +865,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             sql = f"""
                 SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
                        0.0 as rank_score,
-                       e.created_at, e.updated_at, e.owner_id, e.scope, e.metadata, e.context_id,
+                       e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata, e.context_id,
                        e.memory_type, 0 as rel_count, NULL as fts_snippet
                 FROM entities e
                 WHERE {" AND ".join(where_clauses)}
