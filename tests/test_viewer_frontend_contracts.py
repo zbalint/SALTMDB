@@ -41,6 +41,18 @@ class TestViewerFrontendContracts(unittest.TestCase):
             with self.subTest(expected):
                 self.assertIn(expected, body)
 
+    def test_activity_view_is_fully_renamed_to_events(self):
+        for stale in ("activityPreset", "activityPage", "activity:", "'activity'", "Activity"):
+            with self.subTest(stale):
+                self.assertNotIn(stale, self.script)
+        self.assertIn("events: 'Events'", self.script)
+
+    def test_overview_shows_trace_counts_from_stats(self):
+        body = self._function_body("overview", "loaders")
+        for expected in ("data.traces_last_24h", "data.total_traces"):
+            with self.subTest(expected):
+                self.assertIn(expected, body)
+
     def test_scatterplot_points_are_keyboard_operable_and_report_sampling(self):
         body = self._function_body("diagnostics", "loaders")
         self.assertIn("addEventListener('keydown'", body)
@@ -84,21 +96,21 @@ class TestViewerFrontendContracts(unittest.TestCase):
         self.assertNotIn('<section id="view" aria-live', shell)
         self.assertIn('id="live-status" role="status"', shell)
 
-    def test_activity_and_session_timestamps_use_the_shared_formatter(self):
+    def test_events_and_session_timestamps_use_the_shared_formatter(self):
         self.assertIn("const timeCell = (value) =>", self.script)
         self.assertIn("cell.title = String(value)", self.script)
         self.assertIn(
-            "timeCell(event.timestamp)", self._function_body("activity", "openSessionDetail")
+            "timeCell(event.timestamp)", self._function_body("events", "openSessionDetail")
         )
         self.assertIn(
             "timeCell(event.timestamp)", self.script[self.script.index("const sessionDetail") :]
         )
         self.assertIn(
-            "formatTimestamp(event.timestamp)", self._function_body("openEventDetail", "activity")
+            "formatTimestamp(event.timestamp)", self._function_body("openEventDetail", "events")
         )
 
-    def test_activity_view_has_filters_and_paging(self):
-        body = self._function_body("activity", "openSessionDetail")
+    def test_events_view_has_filters_and_paging(self):
+        body = self._function_body("events", "openSessionDetail")
         for expected in (
             "inputField('Event type'",
             "inputField('Agent'",
@@ -106,15 +118,15 @@ class TestViewerFrontendContracts(unittest.TestCase):
             "inputField('Context ID'",
             "inputField('Text'",
             "/api/events?${",
-            "setAttribute('aria-label', 'Activity pages')",
-            "state.activityPreset",
-            "state.activityPage",
+            "setAttribute('aria-label', 'Event pages')",
+            "state.eventsPreset",
+            "state.eventsPage",
             "guarded(",
         ):
             with self.subTest(expected):
                 self.assertIn(expected, body)
         self.assertNotIn("/api/events?limit=20", body)
-        self.assertIn("activityPage: 1, activityPreset: {}", self.script)
+        self.assertIn("eventsPage: 1, eventsPreset: {}", self.script)
 
     def test_memory_map_exposes_the_bounded_neighborhood_controls(self):
         body = self._function_body("relationships", "quality")
@@ -154,7 +166,7 @@ class TestViewerFrontendContracts(unittest.TestCase):
         ]
         for token in (
             "explorerPreset",
-            "activityPreset",
+            "eventsPreset",
             "sessionsPreset",
             "qualityPreset",
             "sessionDetailId",

@@ -105,7 +105,7 @@ class TestViewerReworkContracts(unittest.TestCase):
         expected_navigation = (
             ("overview", "nav-item is-active", "Overview"),
             ("explorer", "nav-item", "Memories"),
-            ("activity", "nav-item", "Activity"),
+            ("events", "nav-item", "Events"),
             ("sessions", "nav-item", "Agent Sessions"),
             ("relationships", "nav-item", "Memory Map"),
             ("quality", "nav-item", "Memory Quality"),
@@ -117,6 +117,8 @@ class TestViewerReworkContracts(unittest.TestCase):
             self.assertIn(
                 f'<button data-view="{view}" class="{class_name}">{label}</button>', shell
             )
+        self.assertNotIn('data-view="activity"', shell)
+        self.assertNotIn("Activity", shell)
         for obsolete_label in ("Memory Explorer", "Relationships", "Operations"):
             self.assertNotIn(f'class="nav-item">{obsolete_label}</button>', shell)
 
@@ -224,6 +226,28 @@ class TestViewerReworkContracts(unittest.TestCase):
         unavailable_handler.get_stats()
         self.assertFalse(unavailable["data"]["agent_session_liveness_available"])
         self.assertIsNone(unavailable["data"]["active_agent_sessions"])
+
+    def test_stats_counts_conversation_traces_total_and_last_24h(self):
+        now = datetime.now(UTC)
+        for trace_id, created in (
+            ("recent-trace", now),
+            ("old-trace", now - timedelta(hours=25)),
+        ):
+            self.conn.execute(
+                """INSERT INTO conversation_traces
+                   (id, agent_session_id, owner_id, harness, harness_session_id, harness_turn_id,
+                    status, user_prompt, user_prompt_hash, created_at, updated_at)
+                   VALUES (?, 's', 'claude', 'claude_code', 'hs', ?, 'pending', 'p', 'h', ?, ?)""",
+                (trace_id, trace_id, created.isoformat(), created.isoformat()),
+            )
+        self.conn.commit()
+
+        handler = self._handler()
+        captured = self._capture(handler)
+        handler.get_stats()
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["data"]["total_traces"], 2)
+        self.assertEqual(captured["data"]["traces_last_24h"], 1)
 
     def test_explorer_filters_status_and_memory_type(self):
         now = datetime.now(UTC).isoformat()

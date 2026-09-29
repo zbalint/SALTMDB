@@ -5,7 +5,7 @@
     view: 'overview', renderController: null, detailController: null, poller: null,
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
-    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, activityPage: 1, activityPreset: {}, relationOptions: {},
+    sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, eventsPage: 1, eventsPreset: {}, relationOptions: {},
   };
   const view = document.querySelector('#view');
   const title = document.querySelector('#view-title');
@@ -19,7 +19,7 @@
   const traceDialog = document.querySelector('#trace-detail');
   const traceDetail = document.querySelector('#trace-detail-content');
   const names = {
-    overview: 'Overview', explorer: 'Memories', activity: 'Activity', sessions: 'Agent Sessions',
+    overview: 'Overview', explorer: 'Memories', events: 'Events', sessions: 'Agent Sessions',
     relationships: 'Memory Map', quality: 'Memory Quality', operations: 'System Health',
     tags: 'Tags', diagnostics: 'Diagnostics',
   };
@@ -281,8 +281,9 @@
         ['Active memories', data.active_entities], ['Unconsolidated memories', data.raw_count, 'raw'],
         ['Consolidated', data.consolidated_count, 'consolidated'], ['Archived', data.archived_count, 'archived'],
       ]),
-      metricGroup('Activity & connections', 'Recent operational activity and graph reach.', [
-        ['Events (last 24 hours)', data.events_last_24h], ['Active agent sessions', data.active_agent_sessions, 'ok'],
+      metricGroup('Events & connections', 'Recent operational activity and graph reach.', [
+        ['Events (last 24 hours)', data.events_last_24h], ['Traces (last 24 hours)', data.traces_last_24h],
+        ['All traces', data.total_traces], ['Active agent sessions', data.active_agent_sessions, 'ok'],
         ['All agent sessions', data.total_agent_sessions], ['Stored relations', data.total_relations],
       ]),
       metricGroup('Health & storage', 'Signals that may need maintenance attention.', [
@@ -401,37 +402,37 @@
     eventDetail.append(actions); eventDialog._invoker = invoker; eventDialog.showModal();
   };
 
-  const activity = async () => {
+  const events = async () => {
     const form = node('form', undefined, 'toolbar');
-    const typeField = inputField('Event type', 'e.g. decision, issue', state.activityPreset.type || '');
-    const agentField = inputField('Agent', 'Agent id', state.activityPreset.agent_id || '');
-    const sessionField = inputField('Session ID', 'Agent session ID', state.activityPreset.agent_session_id || '');
-    const contextField = inputField('Context ID', 'Context or thread ID', state.activityPreset.context_id || '');
-    const textField = inputField('Text', 'Text within the event content', state.activityPreset.q || '');
-    form.append(typeField.wrap, agentField.wrap, sessionField.wrap, contextField.wrap, textField.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.activityPreset = {}; state.activityPage = 1; render(); }));
+    const typeField = inputField('Event type', 'e.g. decision, issue', state.eventsPreset.type || '');
+    const agentField = inputField('Agent', 'Agent id', state.eventsPreset.agent_id || '');
+    const sessionField = inputField('Session ID', 'Agent session ID', state.eventsPreset.agent_session_id || '');
+    const contextField = inputField('Context ID', 'Context or thread ID', state.eventsPreset.context_id || '');
+    const textField = inputField('Text', 'Text within the event content', state.eventsPreset.q || '');
+    form.append(typeField.wrap, agentField.wrap, sessionField.wrap, contextField.wrap, textField.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.eventsPreset = {}; state.eventsPage = 1; render(); }));
     const result = node('div');
     const list = async (page = 1) => {
       setBusy(result, true);
       try {
-        const params = new URLSearchParams(state.activityPreset); params.set('page', String(page)); params.set('limit', '20');
+        const params = new URLSearchParams(state.eventsPreset); params.set('page', String(page)); params.set('limit', '20');
         const data = await api(`/api/events?${params}`); const rows = data.events.map(event => {
           const row = node('tr'); const actions = node('td'); actions.append(button('View details', '', click => openEventDetail(event, click.currentTarget))); row.append(timeCell(event.timestamp), node('td', event.type), node('td', event.agent_id || '—'), node('td', event.content), actions); return row;
         });
-        const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Activity pages');
+        const pager = node('nav', undefined, 'pagination'); pager.setAttribute('aria-label', 'Event pages');
         const previous = button('Previous', '', guarded(() => list(page - 1))); previous.disabled = page <= 1;
         const next = button('Next', '', guarded(() => list(page + 1))); next.disabled = page >= data.total_pages;
         pager.append(previous, node('span', `Page ${data.page} of ${data.total_pages || 1} · ${data.total_count} events`, 'muted'), next);
         result.replaceChildren(section(`${data.total_count} events`, 'Read-only operational evidence, newest first. Open an event to inspect its full fields or browse its context when available.'), renderTable(['Time', 'Type', 'Agent', 'Event', 'Action'], rows, 'No events match these filters.'), pager);
-        state.activityPage = page; syncLocation();
+        state.eventsPage = page; syncLocation();
       } finally { setBusy(result, false); }
     };
     form.addEventListener('submit', guarded(async event => {
       event.preventDefault(); const params = new URLSearchParams();
       [['type', typeField.element.value.trim()], ['agent_id', agentField.element.value.trim()], ['agent_session_id', sessionField.element.value.trim()], ['context_id', contextField.element.value.trim()], ['q', textField.element.value.trim()]].forEach(([key, value]) => { if (value) params.set(key, value); });
-      state.activityPreset = Object.fromEntries(params); state.activityPage = 1; await list(1);
+      state.eventsPreset = Object.fromEntries(params); state.eventsPage = 1; await list(1);
     }));
-    view.replaceChildren(section('Recent activity', 'Filter the append-only event ledger by type, agent, session, context or text.'), form, result);
-    await list(state.activityPage);
+    view.replaceChildren(section('Recent events', 'Filter the append-only event ledger by type, agent, session, context or text.'), form, result);
+    await list(state.eventsPage);
   };
 
   const openSessionDetail = (sessionId) => { state.sessionDetailId = sessionId; render(); };
@@ -753,8 +754,8 @@
 
   // Shareable/restorable view state: the hash carries the view, its filters, page, and the
   // selected session or map root, so refresh and back/forward return to the same place.
-  const presetKeys = { explorer: 'explorerPreset', activity: 'activityPreset', sessions: 'sessionsPreset', quality: 'qualityPreset' };
-  const pageKeys = { explorer: 'explorerPage', activity: 'activityPage', sessions: 'sessionsPage', quality: 'qualityPage' };
+  const presetKeys = { explorer: 'explorerPreset', events: 'eventsPreset', sessions: 'sessionsPreset', quality: 'qualityPreset' };
+  const pageKeys = { explorer: 'explorerPage', events: 'eventsPage', sessions: 'sessionsPage', quality: 'qualityPage' };
   const encodeViewState = () => {
     const params = new URLSearchParams({ view: state.view });
     Object.entries(state[presetKeys[state.view]] || {}).forEach(([key, value]) => params.set(`f.${key}`, value));
@@ -788,7 +789,7 @@
     state.navKey = navKey;
   };
 
-  const loaders = { overview, explorer, activity, sessions, relationships, quality, operations, tags, diagnostics };
+  const loaders = { overview, explorer, events, sessions, relationships, quality, operations, tags, diagnostics };
   const render = async () => {
     state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -804,7 +805,7 @@
     || (view.contains(document.activeElement) && document.activeElement !== view);
   const schedule = () => {
     clearInterval(state.poller); state.poller = setInterval(() => {
-      if (!document.hidden && !pollingPaused() && ['overview', 'activity', 'operations'].includes(state.view)) render();
+      if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render();
     }, 10000);
   };
   document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
@@ -825,7 +826,7 @@
     const invoker = traceDialog._invoker; traceDialog._invoker = null;
     if (invoker?.isConnected) invoker.focus();
   });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'activity', 'operations'].includes(state.view)) render(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render(); });
   window.addEventListener('beforeunload', () => { clearInterval(state.poller); state.renderController?.abort(); state.detailController?.abort(); });
   window.addEventListener('popstate', () => { if (applyViewState(location.hash)) render(); });
   connection('checking', 'Checking connection…'); applyViewState(location.hash); render(); schedule();

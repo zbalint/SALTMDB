@@ -66,6 +66,13 @@ class StatsMixin(ViewerHandlerProtocol):
             "SELECT COUNT(*) FROM events WHERE datetime(timestamp) >= datetime('now', '-24 hours')"
         )
         stats["events_last_24h"] = cur.fetchone()[0]
+        cur = conn.execute("SELECT COUNT(*) FROM conversation_traces")
+        stats["total_traces"] = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM conversation_traces "
+            "WHERE datetime(created_at) >= datetime('now', '-24 hours')"
+        )
+        stats["traces_last_24h"] = cur.fetchone()[0]
         cur = conn.execute("SELECT COUNT(*) FROM relations")
         stats["total_relations"] = cur.fetchone()[0]
         cur = conn.execute(

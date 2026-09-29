@@ -31,7 +31,7 @@ def get_frontend_html(db_path: str = None) -> str:
 <aside class="sidebar"><div><h1>SALTMDB</h1><p class="sidebar-kicker">Memory workspace</p><nav aria-label="Viewer">
 <button data-view="overview" class="nav-item is-active">Overview</button>
 <button data-view="explorer" class="nav-item">Memories</button>
-<button data-view="activity" class="nav-item">Activity</button>
+<button data-view="events" class="nav-item">Events</button>
 <button data-view="sessions" class="nav-item">Agent Sessions</button>
 <button data-view="relationships" class="nav-item">Memory Map</button>
 <button data-view="quality" class="nav-item">Memory Quality</button>
@@ -42,6 +42,6 @@ def get_frontend_html(db_path: str = None) -> str:
 <div class="connection"><span id="live-status" role="status">Loading</span><button id="refresh" type="button">Refresh</button></div></header>
 <div id="notice" class="notice" role="status" aria-live="polite" hidden></div><section id="view"></section></main></div>
 <dialog id="memory-detail" aria-labelledby="detail-title"><article><header><h2 id="detail-title">Memory</h2><button id="close-detail" aria-label="Close memory detail">Close</button></header><div id="detail-content"></div></article></dialog>
-<dialog id="event-detail" aria-labelledby="event-detail-title"><article><header><h2 id="event-detail-title">Activity event</h2><button id="close-event-detail" aria-label="Close activity event detail">Close</button></header><div id="event-detail-content"></div></article></dialog>
+<dialog id="event-detail" aria-labelledby="event-detail-title"><article><header><h2 id="event-detail-title">Event details</h2><button id="close-event-detail" aria-label="Close event details">Close</button></header><div id="event-detail-content"></div></article></dialog>
 <dialog id="trace-detail" aria-labelledby="trace-detail-title"><article><header><h2 id="trace-detail-title">Conversation trace</h2><button id="close-trace-detail" aria-label="Close conversation trace detail">Close</button></header><div id="trace-detail-content"></div></article></dialog>
 <script src="/static/vendor/marked-18.0.7.umd.js"></script><script src="/static/vendor/dompurify-3.4.16.min.js"></script><script src="/static/viewer.js?v={js_version}"></script></body></html>"""

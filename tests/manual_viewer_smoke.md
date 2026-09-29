@@ -14,9 +14,13 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 8. With the same form values, press Enter in a text field. Confirm the same filter request and page-1 result occur.
 9. Move focus through a memory title and its **Copy ID** control. Titles must be left aligned, span the available memory column, and both controls must show visible focus. Click **Copy ID** and confirm the live copy feedback.
 
-## Activity
+## Overview
 
-1. Open **Activity** and activate **View details** on an event. Confirm timestamp, type, agent, event/session/context IDs, error code, and content appear in a read-only dialog, and focus returns to the button on close.
+1. Open **Overview** and confirm the *Events & connections* group shows **Traces (last 24 hours)** and **All traces** next to the event and session counts, and that the numbers match the Agent Sessions trace totals.
+
+## Events
+
+1. Open **Events** and activate **View details** on an event. Confirm timestamp, type, agent, event/session/context IDs, error code, and content appear in a read-only dialog, and focus returns to the button on close.
 2. For an event with a context ID, activate **Browse this context**. Confirm Memories opens in Browse mode with that context filter and page 1 selected. For an event without context, confirm no misleading memory-navigation control is offered.
 
 ## System Health
@@ -61,9 +65,9 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 ## Filters, paging, and URL state
 
-1. Open **Activity**, filter by event type, agent, session, context, and text, and confirm the total, the rows, and **Page x of y** all follow the filters. Confirm **Previous**/**Next** work and **Reset filters** clears everything.
+1. Open **Events**, filter by event type, agent, session, context, and text, and confirm the total, the rows, and **Page x of y** all follow the filters. Confirm **Previous**/**Next** work and **Reset filters** clears everything.
 2. Open **Memory Quality** and confirm **Quality signals** and **Orphaned raw memories** show real totals (create more than 50 signals or check against a known count). Confirm the embedding-status and quality-status filters and the pager work, and that a truncated orphan list says **Showing N of M**.
-3. Apply a filter on Activity, go to page 2, then reload the browser. Confirm the same view, filters, and page return. Copy the URL into a new tab and confirm the same result.
+3. Apply a filter on Events, go to page 2, then reload the browser. Confirm the same view, filters, and page return. Copy the URL into a new tab and confirm the same result.
 4. Open a session's detail, then press the browser Back button: the session list returns. Press Forward: the detail returns. Changing only a filter or page must not add a history entry per change.
 5. Edit the URL hash to `#view=constructor` and confirm the Viewer ignores it and stays usable.
 
@@ -75,7 +79,7 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 ## Keyboard, focus, and refresh
 
-1. Open **Activity**, focus a **View details** button, and wait 30 seconds. The table must not be replaced under the focused control. Move focus out of the view and confirm auto-refresh resumes.
-2. With any dialog open, wait 30 seconds on Overview, Activity, or System Health and confirm the view behind it does not re-render; after closing the dialog, focus returns to the control that opened it.
+1. Open **Events**, focus a **View details** button, and wait 30 seconds. The table must not be replaced under the focused control. Move focus out of the view and confirm auto-refresh resumes.
+2. With any dialog open, wait 30 seconds on Overview, Events, or System Health and confirm the view behind it does not re-render; after closing the dialog, focus returns to the control that opened it.
 3. Inspect the navigation: exactly one item has `aria-current="page"`. In a memory detail, **Show raw** toggles to **Show rendered** and its `aria-pressed` state follows.
 4. Stop the daemon's database access (or block a request in DevTools) and submit a filter form or click a pager: an error appears in the notice bar instead of the control silently doing nothing.
