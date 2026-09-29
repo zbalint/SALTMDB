@@ -2,10 +2,10 @@
 """SALTMDB Session Wrap-Up Reminder Hook Script
 Lifecycle event: SessionEnd (Claude Code) -- true session close, not every Stop/turn end.
 
-Session wrap-up (checking for anything durable left only in the ephemeral event ledger) is
-otherwise a manual discipline with no dedicated doc. This is pure automation, no judgment call: a
-fixed reminder to check get_events(order="oldest_first") for anything durable that only exists in
-the ephemeral event ledger before the session closes for good.
+AGENT_GUIDE.md Phase C ("Session Wrap-up: Commit & Link") is a manual checklist today. This is
+pure automation, no judgment call: a fixed reminder to check get_events(order="oldest_first") for
+anything durable that only exists in the ephemeral event ledger before the session closes for
+good.
 
 Best-effort by design: not all harnesses distinguish a true session close from an ordinary
 turn-level Stop, and a hook firing at session close may have nothing left to act on (the session
@@ -22,7 +22,7 @@ from _saltmdb_hook_common import emit  # noqa: E402
 
 REASON = (
     "SALTMDB session wrap-up reminder: before this session closes, check "
-    "get_events(context_id=<your thread handle>) or get_events(agent_id=<configured SALTMDB_OWNER_ID>, "
+    "get_events(context_id=<your thread handle>) or get_events(agent_id=<your owner_id>, "
     'order="oldest_first") for anything durable (a decision, a fix, a rule) that was logged as '
     "an event this session but never promoted to store_memory. The event ledger is not itself "
     "long-term memory."

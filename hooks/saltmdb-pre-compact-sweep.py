@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """SALTMDB Pre-Compact Sweep Hook Script
-Lifecycle event: PreCompact (Claude-Code-only today -- confirmed absent from Antigravity's and
-Copilot's own lifecycle event sets).
+Lifecycle event: PreCompact (Claude Code and Codex; absent from Antigravity).
 
 Makes the sweep a real, standalone script instead of only existing as an inline "type": "agent"
 prompt block in claude-settings-example.json. Claude Code's native "agent"-type PreCompact hook
@@ -26,7 +25,7 @@ SWEEP_PROMPT = (
     "architectural rules, or user preferences established in this session but NOT yet persisted "
     "to SALTMDB. For each item found, first call mcp__saltmdb__search_memory to confirm it is "
     "not already recorded, and if genuinely new, call mcp__saltmdb__store_memory "
-    "to persist it, and mcp__saltmdb__log_event for any "
+    '(owner_id="agent_hook_precompact") to persist it, and mcp__saltmdb__log_event for any '
     "issue/fix worth a short-term event log entry. Do not report back conversationally -- this "
     "is a background sweep."
 )
@@ -35,11 +34,12 @@ TIMEOUT_SECS = int(os.environ.get("SALTMDB_PRECOMPACT_TIMEOUT", "60"))
 
 
 def main() -> None:
-    if shutil.which("claude"):
-        if run_quiet(["claude", "-p", SWEEP_PROMPT], TIMEOUT_SECS):
-            return
-    if shutil.which("codex"):
-        if run_quiet(["codex", "exec", SWEEP_PROMPT], TIMEOUT_SECS):
+    preferred = os.environ.get("SALTMDB_HOOK_PREFERRED_AGENT")
+    commands = (["codex", "exec"], ["claude", "-p"])
+    if preferred == "claude":
+        commands = tuple(reversed(commands))
+    for command in commands:
+        if shutil.which(command[0]) and run_quiet([*command, SWEEP_PROMPT], TIMEOUT_SECS):
             return
     # No headless CLI-based agent available on PATH -- nothing this script can do without one
     # (storing memories requires an agent's own MCP tool context, not raw SQL). Fail silent/open.

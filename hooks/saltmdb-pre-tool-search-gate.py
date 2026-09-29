@@ -27,7 +27,9 @@ from _saltmdb_hook_common import (  # noqa: E402
     READ_ONLY_TOOL_PREFIXES,
     emit,
     get_field,
+    get_session_id,
     get_tool_name,
+    is_antigravity_payload,
     prune_stale_state,
     read_stdin_json,
     read_transcript_full,
@@ -37,7 +39,10 @@ from _saltmdb_hook_common import (  # noqa: E402
 SEARCH_MEMORY_PATTERN = re.compile(r'"(name|tool|toolName)"\s*:\s*"[^"]*search_memory"')
 
 
-def emit_allow() -> None:
+def emit_allow(data: dict) -> None:
+    if is_antigravity_payload(data):
+        emit({"decision": "allow"})
+        sys.exit(0)
     emit(
         {
             "permissionDecision": "allow",
@@ -47,7 +52,10 @@ def emit_allow() -> None:
     sys.exit(0)
 
 
-def emit_deny(reason: str) -> None:
+def emit_deny(data: dict, reason: str) -> None:
+    if is_antigravity_payload(data):
+        emit({"decision": "deny", "reason": reason})
+        sys.exit(0)
     emit(
         {
             "decision": "block",
@@ -68,10 +76,10 @@ def main() -> None:
     data = read_stdin_json()
     tool_name = get_tool_name(data)
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
-    session_id = get_field(data, "session_id", "sessionId") or "unknown"
+    session_id = get_session_id(data) or "unknown"
 
     if tool_name and READ_ONLY_TOOL_PREFIXES.match(tool_name):
-        emit_allow()
+        emit_allow(data)
 
     prune_stale_state("search-memory-called-*.flag")
 
@@ -82,7 +90,7 @@ def main() -> None:
     # allowing every edit/PowerShell call on Copilot regardless of search_memory history. This
     # flag has no such dependency.
     if search_memory_called_flag_path(session_id).is_file():
-        emit_allow()
+        emit_allow(data)
 
     # Unbounded, not a tail window: this check is "was search_memory called ANYWHERE this
     # session", not "recently" -- a tail window let this gate re-trigger deep into a long
@@ -95,13 +103,14 @@ def main() -> None:
         sys.exit(0)
 
     if SEARCH_MEMORY_PATTERN.search(segment):
-        emit_allow()
+        emit_allow(data)
 
     emit_deny(
+        data,
         "SALTMDB Rule 1 (Think Before You Leap): call search_memory for the relevant "
         "component/task before editing files or running commands. This gate fires once per "
         "session -- after your first search_memory call, further edits/commands this session go "
-        "through unblocked."
+        "through unblocked.",
     )
 
 

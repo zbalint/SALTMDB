@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _saltmdb_hook_common import (  # noqa: E402
     emit,
     get_field,
+    get_session_id,
     get_tool_name,
     read_stdin_json,
     retrieval_outcome_flag_path,
@@ -164,7 +165,7 @@ def main() -> None:
     data = read_stdin_json()
     tool_name = get_tool_name(data)
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
-    session_id = get_field(data, "session_id", "sessionId") or "unknown"
+    session_id = get_session_id(data) or "unknown"
     resp_text = response_text(data)
 
     if tool_name.endswith("store_memory"):

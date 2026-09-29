@@ -29,6 +29,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     clear_state,
     emit,
     get_field,
+    get_session_id,
     get_tool_name,
     read_stdin_json,
     retrieval_outcome_flag_path,
@@ -51,7 +52,7 @@ def main() -> None:
     input_text = json.dumps(tool_input)
     event_match = EVENT_TYPE_PATTERN.search(input_text)
     if event_match and event_match.group(1) == "retrieval_outcome":
-        session_id = get_field(data, "session_id", "sessionId") or "unknown"
+        session_id = get_session_id(data) or "unknown"
         clear_state(retrieval_outcome_flag_path(session_id))
         return
 

@@ -59,6 +59,16 @@ def get_field(data: dict, *aliases: str) -> str:
     return ""
 
 
+def is_antigravity_payload(data: dict) -> bool:
+    """Identifies Antigravity's documented camelCase lifecycle payload."""
+    return bool(data.get("conversationId"))
+
+
+def get_session_id(data: dict) -> str:
+    """Returns the session identity across Claude, Codex, and Antigravity payloads."""
+    return get_field(data, "session_id", "sessionId", "conversation_id", "conversationId")
+
+
 def get_tool_name(data: dict) -> str:
     """Tool name for the current call, tolerant of both a flat top-level field
     (tool_name/toolName/tool/name -- Claude Code, Antigravity) and Copilot CLI's nested shape.
@@ -70,6 +80,11 @@ def get_tool_name(data: dict) -> str:
     flat = get_field(data, "tool_name", "toolName", "tool", "name")
     if flat:
         return flat
+    tool_call = data.get("toolCall")
+    if isinstance(tool_call, dict):
+        nested = get_field(tool_call, "name", "toolName", "tool_name")
+        if nested:
+            return nested
     tool_calls = data.get("toolCalls") or data.get("tool_calls")
     if isinstance(tool_calls, list) and tool_calls and isinstance(tool_calls[0], dict):
         return get_field(tool_calls[0], "name", "toolName", "tool_name")
@@ -156,6 +171,8 @@ def stop_block_payload(data: dict, reason: str) -> dict:
     also valid under Codex's strict schema. Other harnesses keep the redundant compatibility
     fields used by the existing Claude Code/Copilot registrations.
     """
+    if is_antigravity_payload(data):
+        return {"decision": "continue", "reason": reason}
     if data.get("turn_id") and data.get("model"):
         return {"decision": "block", "reason": reason}
     return {

@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _saltmdb_hook_common import (  # noqa: E402
     clear_state,
     emit,
-    get_field,
+    get_session_id,
     prune_stale_state,
     read_count,
     read_stdin_json,
@@ -48,7 +48,7 @@ PROMPT_SENTINEL = "saltmdb-retrieval-outcome-prompt"
 
 def main() -> None:
     data = read_stdin_json()
-    session_id = get_field(data, "session_id", "sessionId") or "unknown"
+    session_id = get_session_id(data) or "unknown"
 
     prune_stale_state("retrieval-outcome-pending-*.flag")
     flag_file = retrieval_outcome_flag_path(session_id)

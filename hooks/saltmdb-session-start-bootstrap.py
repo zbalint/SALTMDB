@@ -7,12 +7,10 @@ overdue for review (SALTMDB rollout task 8: overdue cores otherwise only surface
 the first time an agent happens to touch store_memory/manage_relation/consolidate_memories while
 one is overdue -- this surfaces it proactively instead).
 
-Agent-agnostic by construction: this script only ever emits plain text to stdout, which every
-harness treats as injected context (no JSON decision schema involved), so no per-harness
-branching is needed here. Python instead of bash for this whole hook family: SALTMDB itself
-already requires Python (this is exactly the same dependency assumption the CLI call below
-makes), and the stdlib json module handles the corpus-health parsing far more robustly than a
-jq-or-regex-fallback would.
+Claude Code and Codex accept injected context as plain stdout. Antigravity's documented
+PreInvocation contract instead requires an ``injectSteps`` JSON response, so the same computed
+digest is serialized to that native shape when its camelCase payload is present. Python instead
+of bash for this whole hook family keeps the parsing dependency-free and robust.
 """
 
 import json
@@ -56,41 +54,61 @@ def run_cli(*args: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def main() -> None:
+def bootstrap_text() -> str:
+    sections: list[str] = []
     digest = run_cli("bootstrap-digest")
     if digest:
-        sys.stdout.write(digest)
+        sections.append(digest.strip())
 
     session_digest = run_cli("session-digest")
     if session_digest:
-        sys.stdout.write(session_digest)
-        print()
+        sections.append(session_digest.strip())
 
     health_raw = run_cli("corpus-health")
     if not health_raw:
-        return
+        return "\n\n".join(section for section in sections if section)
     try:
         health = json.loads(health_raw)
     except json.JSONDecodeError:
-        return
+        return "\n\n".join(section for section in sections if section)
 
     overdue = health.get("overdue_core_reviews", {})
     count = overdue.get("count", 0)
     if not count:
-        return
+        return "\n\n".join(section for section in sections if section)
 
     titles = [e.get("title", "") for e in overdue.get("entries", [])[:5] if e.get("title")]
-    print()
-    print("<saltmdb-overdue-core-notice>")
-    print(f"{count} active core memory review(s) are overdue (core_review_after elapsed).")
-    for t in titles:
-        print(f"- {t}")
-    print(
-        "store_memory/manage_relation/consolidate_memories will hard-block until these are "
-        "reviewed via review_core_memory (outcome='demote' or 'archive'). Handle this before it "
-        "blocks unrelated work."
-    )
-    print("</saltmdb-overdue-core-notice>")
+    notice = [
+        "<saltmdb-overdue-core-notice>",
+        f"{count} active core memory review(s) are overdue (core_review_after elapsed).",
+        *(f"- {title}" for title in titles),
+        (
+            "store_memory/manage_relation/consolidate_memories will hard-block until these are "
+            "reviewed via review_core_memory (outcome='demote' or 'archive'). Handle this before "
+            "it blocks unrelated work."
+        ),
+        "</saltmdb-overdue-core-notice>",
+    ]
+    sections.append("\n".join(notice))
+    return "\n\n".join(section for section in sections if section)
+
+
+def main() -> None:
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, OSError):
+        payload = {}
+
+    text = bootstrap_text()
+    if not text:
+        return
+    if payload.get("conversationId"):
+        json.dump({"injectSteps": [{"ephemeralMessage": text}]}, sys.stdout)
+        print()
+        return
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        print()
 
 
 if __name__ == "__main__":
