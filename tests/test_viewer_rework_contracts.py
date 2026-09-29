@@ -104,6 +104,7 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertIn('id="event-detail"', shell)
         expected_navigation = (
             ("overview", "nav-item is-active", "Overview"),
+            ("feed", "nav-item", "Live feed"),
             ("explorer", "nav-item", "Memories"),
             ("events", "nav-item", "Events"),
             ("sessions", "nav-item", "Agent Sessions"),

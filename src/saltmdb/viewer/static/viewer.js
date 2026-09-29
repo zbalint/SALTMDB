@@ -2,7 +2,7 @@
   'use strict';
 
   const state = {
-    view: 'overview', renderController: null, detailController: null, poller: null,
+    view: 'overview', renderController: null, detailController: null, poller: null, feedTimer: null, feedActiveOnly: true, feedSession: '',
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
     focusRelationshipInput: false, skipModalFocusRestore: false,
     sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, eventsPage: 1, eventsPreset: {}, relationOptions: {},
@@ -19,7 +19,7 @@
   const traceDialog = document.querySelector('#trace-detail');
   const traceDetail = document.querySelector('#trace-detail-content');
   const names = {
-    overview: 'Overview', explorer: 'Memories', events: 'Events', sessions: 'Agent Sessions',
+    overview: 'Overview', feed: 'Live feed', explorer: 'Memories', events: 'Events', sessions: 'Agent Sessions',
     relationships: 'Memory Map', quality: 'Memory Quality', operations: 'System Health',
     tags: 'Tags', diagnostics: 'Diagnostics',
   };
@@ -752,6 +752,83 @@
     view.replaceChildren(fragment);
   };
 
+  // Session colour is a pure function of the id (same session, same colour, on every poll and
+  // reload). Applied as a class because the CSP forbids inline styles; the palette is kept apart
+  // from the lifecycle/state colours, which mean health, not identity.
+  const SESSION_COLORS = 6;
+  const sessionColorClass = (sessionId) => {
+    let hash = 5381;
+    for (const character of String(sessionId || '')) hash = ((hash * 33) ^ character.charCodeAt(0)) >>> 0;
+    return `session-color-${hash % SESSION_COLORS}`;
+  };
+  const FEED_MAX_ROWS = 200;
+  const feedRow = (item) => {
+    const row = node('li', undefined, `feed-row ${sessionColorClass(item.session_id)}`);
+    const head = node('div', undefined, 'feed-head');
+    const chip = item.session_id
+      ? button(`${item.actor || 'agent'} · ${item.session_id.slice(0, 6)}`, 'feed-session', guarded(() => { state.feedSession = item.session_id; return render(); }))
+      : node('span', 'no session', 'feed-session muted');
+    chip.title = item.session_id || 'No agent session was recorded for this item';
+    const time = node('time', formatTimestamp(item.timestamp), 'muted'); time.title = item.timestamp;
+    head.append(node('span', item.kind, `feed-kind feed-kind-${item.kind}`), chip, time);
+    if (item.kind === 'trace') head.append(statusBadge(item.status));
+    const body = node('div', undefined, 'feed-body');
+    body.append(node('strong', item.title || item.id), node('p', item.preview || '', 'muted'));
+    row.append(head, body);
+    if (item.kind === 'memory') row.append(button('Open memory', '', click => openDetail(item.id, click.currentTarget)));
+    if (item.kind === 'trace') row.append(button('Open trace', '', click => openTraceDetail(item.id, click.currentTarget)));
+    return row;
+  };
+
+  // The feed keeps its own cursor and timer: unlike the other views it must never be re-rendered
+  // wholesale by the poller, or scroll position and the reader's place would be lost.
+  const feed = async () => {
+    const list = node('ol', undefined, 'feed-list'); list.setAttribute('aria-label', 'Live feed');
+    const empty = node('p', 'Nothing yet. New memories, events and traces appear here as agents work.', 'muted');
+    const notice = node('p', 'Session liveness is unavailable, so every session is shown.', 'muted'); notice.hidden = true;
+    const toolbar = node('div', undefined, 'toolbar');
+    const activeOnly = checkboxField('Active sessions only', state.feedActiveOnly);
+    activeOnly.element.addEventListener('change', guarded(() => { state.feedActiveOnly = activeOnly.element.checked; return render(); }));
+    toolbar.append(activeOnly.wrap);
+    if (state.feedSession) {
+      toolbar.append(node('span', `Session ${state.feedSession.slice(0, 8)}`, `status-pill feed-filter ${sessionColorClass(state.feedSession)}`),
+        button('Show all sessions', '', guarded(() => { state.feedSession = ''; return render(); })));
+    }
+    view.replaceChildren(section('Live feed', 'Memories, events and conversation traces as they happen, newest first.'), toolbar, notice, empty, list);
+    const rows = new Map(); let cursor = null; let polling = false;
+    const query = (extra) => {
+      const params = new URLSearchParams({ limit: '50', ...extra });
+      if (state.feedActiveOnly) params.set('active_only', '1');
+      if (state.feedSession) params.set('session', state.feedSession);
+      return params;
+    };
+    const apply = (data) => {
+      notice.hidden = data.liveness_known || !state.feedActiveOnly;
+      [...data.items].reverse().forEach(item => {
+        const key = `${item.kind}:${item.id}`; rows.get(key)?.remove();
+        const row = feedRow(item); row.dataset.key = key; rows.set(key, row); list.prepend(row);
+      });
+      while (list.children.length > FEED_MAX_ROWS) { rows.delete(list.lastElementChild.dataset.key); list.lastElementChild.remove(); }
+      empty.hidden = list.children.length > 0;
+      if (data.cursor) cursor = data.cursor;
+    };
+    apply(await api(`/api/feed?${query({})}`));
+    const pollFeed = async () => {
+      if (document.hidden || polling) return;
+      polling = true;
+      try {
+        let more = true;
+        for (let round = 0; more && round < 5; round += 1) {
+          const data = await api(`/api/feed?${query(cursor ? { since: cursor } : {})}`);
+          apply(data); more = data.has_more;
+        }
+        status.textContent = 'Live';
+      } finally { polling = false; }
+    };
+    state.feedTimer = setInterval(guarded(pollFeed), 5000);
+    status.textContent = 'Live';
+  };
+
   // Shareable/restorable view state: the hash carries the view, its filters, page, and the
   // selected session or map root, so refresh and back/forward return to the same place.
   const presetKeys = { explorer: 'explorerPreset', events: 'eventsPreset', sessions: 'sessionsPreset', quality: 'qualityPreset' };
@@ -789,9 +866,9 @@
     state.navKey = navKey;
   };
 
-  const loaders = { overview, explorer, events, sessions, relationships, quality, operations, tags, diagnostics };
+  const loaders = { overview, feed, explorer, events, sessions, relationships, quality, operations, tags, diagnostics };
   const render = async () => {
-    state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
+    clearInterval(state.feedTimer); state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
     document.querySelectorAll('.nav-item').forEach(item => {
       const active = item.dataset.view === state.view; item.classList.toggle('is-active', active);
       if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current');
@@ -827,7 +904,7 @@
     if (invoker?.isConnected) invoker.focus();
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render(); });
-  window.addEventListener('beforeunload', () => { clearInterval(state.poller); state.renderController?.abort(); state.detailController?.abort(); });
+  window.addEventListener('beforeunload', () => { clearInterval(state.poller); clearInterval(state.feedTimer); state.renderController?.abort(); state.detailController?.abort(); });
   window.addEventListener('popstate', () => { if (applyViewState(location.hash)) render(); });
   connection('checking', 'Checking connection…'); applyViewState(location.hash); render(); schedule();
 })();

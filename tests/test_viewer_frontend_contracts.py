@@ -4,6 +4,7 @@ No browser, node or playwright is available (RAM-limited dev box), so these pin 
 audit found missing. They cannot prove focus, keyboard or layout behavior at runtime.
 """
 
+import re
 import unittest
 from pathlib import Path
 
@@ -46,6 +47,97 @@ class TestViewerFrontendContracts(unittest.TestCase):
             with self.subTest(stale):
                 self.assertNotIn(stale, self.script)
         self.assertIn("events: 'Events'", self.script)
+
+    def test_live_feed_is_wired_with_its_own_timer_not_the_full_rerender_poll(self):
+        self.assertIn("feed: 'Live feed'", self.script)
+        self.assertRegex(self.script, r"const loaders = \{[^}]*\bfeed\b[^}]*\}")
+        poll_lists = re.findall(r"\[('overview'[^\]]*)\]\.includes\(state\.view\)", self.script)
+        self.assertTrue(poll_lists)
+        for poll_list in poll_lists:
+            self.assertNotIn("'feed'", poll_list)
+        # Leaving the feed (any render) must stop its timer; unloading the page too.
+        render = self.script[self.script.index("const render = ") :]
+        self.assertIn("clearInterval(state.feedTimer)", render[: render.index("try {")])
+        self.assertIn(
+            "clearInterval(state.feedTimer)", self.script[self.script.index("'beforeunload'") :]
+        )
+
+    def test_session_colors_are_a_stable_class_based_palette_apart_from_semantic_colors(self):
+        css = _read_static("viewer.css")
+        palette = dict(re.findall(r"--session-(\d+):\s*(#[0-9a-fA-F]{6})", css))
+        self.assertGreaterEqual(len(palette), 6)
+        semantic = {
+            value.lower()
+            for name, value in re.findall(
+                r"--(lifecycle-[a-z]+|state-[a-z]+):\s*(#[0-9a-fA-F]{6})", css
+            )
+        }
+        self.assertTrue(semantic)
+        self.assertFalse(semantic & {value.lower() for value in palette.values()})
+        for index in palette:
+            with self.subTest(index):
+                self.assertRegex(
+                    css,
+                    rf"\.session-color-{index}\s*\{{[^}}]*--session-color:\s*var\(--session-{index}\)",
+                )
+        body = self._function_body("sessionColorClass", "feed")
+        # Pure function of the id (no counters/maps that depend on arrival order), class based
+        # because the CSP forbids inline style attributes.
+        self.assertIn("% SESSION_COLORS", body)
+        self.assertIn("`session-color-${", body)
+        self.assertIn(f"const SESSION_COLORS = {len(palette)};", self.script)
+        self.assertNotIn(".style", body)
+        self.assertNotIn("setAttribute('style'", self.script)
+
+    def test_feed_rows_show_kind_and_session_chip_that_filters_the_feed(self):
+        body = self._function_body("feedRow", "feed")
+        for expected in (
+            "sessionColorClass(item.session_id)",
+            "feed-kind",
+            "feed-session",
+            "state.feedSession = item.session_id",
+            "formatTimestamp(item.timestamp)",
+            "openDetail(item.id",
+            "openTraceDetail(item.id",
+        ):
+            with self.subTest(expected):
+                self.assertIn(expected, body)
+        # Session ids and previews are untrusted display text, never markup.
+        self.assertNotIn("innerHTML", body)
+        # The chip carries readable text, so colour is never the only session signal.
+        self.assertIn("item.session_id.slice(0, 6)", body)
+
+    def test_feed_polls_incrementally_from_a_cursor_without_rerendering_the_view(self):
+        body = self._function_body("feed", "presetKeys")
+        for expected in (
+            "/api/feed?",
+            "since: cursor",
+            "active_only",
+            "state.feedSession",
+            "data.liveness_known",
+            "data.has_more",
+            "document.hidden",
+            "state.feedTimer = setInterval(",
+            "FEED_MAX_ROWS",
+        ):
+            with self.subTest(expected):
+                self.assertIn(expected, body)
+        poll = body[body.index("const pollFeed = ") :]
+        self.assertNotIn("view.replaceChildren", poll)
+        self.assertNotIn("render()", poll)
+        # A trace that completes resurfaces as the same item: replace it in place by key.
+        self.assertIn("rows.get(key)?.remove()", body)
+
+    def test_feed_rows_are_styled_with_the_session_colour(self):
+        css = _read_static("viewer.css")
+        self.assertRegex(css, r"\.feed-row\s*\{[^}]*border-left:[^;}]*var\(--session-color")
+        self.assertRegex(css, r"\.feed-session\s*\{[^}]*color:\s*var\(--session-color")
+        # A default declared on .feed-row would sit after the .session-color-N rules at equal
+        # specificity and override every session colour; only a var() fallback is safe.
+        self.assertNotRegex(css, r"\.feed-row\s*\{[^}]*--session-color:")
+        for selector in (".feed-list", ".feed-kind", ".feed-head", ".feed-filter"):
+            with self.subTest(selector):
+                self.assertIn(selector, css)
 
     def test_overview_shows_trace_counts_from_stats(self):
         body = self._function_body("overview", "loaders")

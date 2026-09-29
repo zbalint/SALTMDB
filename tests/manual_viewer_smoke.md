@@ -18,6 +18,20 @@ Run this against the daemon-hosted local Viewer using an already installed Chrom
 
 1. Open **Overview** and confirm the *Events & connections* group shows **Traces (last 24 hours)** and **All traces** next to the event and session counts, and that the numbers match the Agent Sessions trace totals.
 
+## Live feed
+
+Run this with at least two agent sessions active (for example one Claude and one Codex) so the colours can be told apart.
+
+1. Open **Live feed**. Confirm rows are newest first, each with a kind badge (memory, event or trace), a time, and a chip such as `claude · 01a0ea`, and that each session has its own colour on the left stripe and chip.
+2. With **Active sessions only** checked, confirm only rows from currently running sessions appear. Uncheck it and confirm recent rows from ended sessions appear too.
+3. Store a memory or log an event from an active session and confirm a new row appears at the top within about 5 seconds, without the page flashing, scrolling back to the top, or losing an expanded dialog.
+4. Scroll down the list, wait for a new row, and confirm your scroll position and focus are unchanged.
+5. Start a conversation turn with trace capture enabled. Confirm a trace row appears as pending, then updates in place to completed (the row moves to the top, and there is no duplicate).
+6. Click a session chip. Confirm the feed filters to that session, a coloured session pill and **Show all sessions** appear, and the colour of that session did not change. Click **Show all sessions** and confirm the full feed returns.
+7. Activate **Open memory** and **Open trace** on rows and confirm the existing detail dialogs open and focus returns to the button on close.
+8. Switch to another tab of the browser for a minute and back; confirm the feed catches up with everything that happened, in order, without gaps.
+9. Leave the Live feed for another view and confirm the feed stops polling (no `/api/feed` requests in the network panel).
+
 ## Events
 
 1. Open **Events** and activate **View details** on an event. Confirm timestamp, type, agent, event/session/context IDs, error code, and content appear in a read-only dialog, and focus returns to the button on close.
