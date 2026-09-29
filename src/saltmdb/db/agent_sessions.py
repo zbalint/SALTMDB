@@ -135,11 +135,20 @@ def get_recent_sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int =
     """
     cursor = conn.execute(
         """
-        SELECT session_id, started_at FROM _agent_sessions
+        SELECT session_id, started_at, owner_id, ended_at, ended_reason FROM _agent_sessions
         WHERE cwd = ?
         ORDER BY started_at DESC
         LIMIT ?
         """,
         (cwd, limit),
     )
-    return [{"session_id": row[0], "started_at": row[1]} for row in cursor.fetchall()]
+    return [
+        {
+            "session_id": row[0],
+            "started_at": row[1],
+            "owner_id": row[2],
+            "ended_at": row[3],
+            "ended_reason": row[4],
+        }
+        for row in cursor.fetchall()
+    ]

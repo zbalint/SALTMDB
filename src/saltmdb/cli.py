@@ -29,7 +29,7 @@ def cmd_bootstrap_digest(args):
 
 
 def cmd_session_digest(args):
-    from saltmdb.config import get_db_path
+    from saltmdb.config import get_db_path, get_handover_max_chars
     from saltmdb.daemon import client as daemon_client
 
     db_path = args.db_path or get_db_path()
@@ -37,8 +37,12 @@ def cmd_session_digest(args):
         return 0
 
     cwd = os.path.realpath(os.getcwd())
+    # Read here, not in the daemon: the hook's environment is what the user configures.
+    max_chars = get_handover_max_chars()
     try:
-        digest = daemon_client.call(db_path, "get_last_session_digest", {"cwd": cwd})
+        digest = daemon_client.call(
+            db_path, "get_last_session_digest", {"cwd": cwd, "max_chars": max_chars}
+        )
     except Exception as e:
         print(f"# Warning: Failed to fetch last-session digest: {e}", file=sys.stderr)
         return 0

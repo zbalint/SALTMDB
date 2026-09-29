@@ -96,7 +96,9 @@ class TestSessionDigestCli(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn(fake_digest, buf.getvalue())
             mock_call.assert_called_once_with(
-                tmp.name, "get_last_session_digest", {"cwd": os.path.realpath(os.getcwd())}
+                tmp.name,
+                "get_last_session_digest",
+                {"cwd": os.path.realpath(os.getcwd()), "max_chars": 40000},
             )
 
     def test_daemon_failure_never_crashes_caller(self):

@@ -83,6 +83,21 @@ def is_trace_capture_enabled() -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+DEFAULT_HANDOVER_MAX_CHARS = 40000
+
+
+def get_handover_max_chars() -> int:
+    """Total character budget for the last-session handover in the session digest
+    (SALTMDB_HANDOVER_MAX_CHARS). 0 disables the handover. Unset, blank, non-integer or
+    negative values fall back to the default so a bad hook environment never breaks bootstrap."""
+    raw = os.environ.get("SALTMDB_HANDOVER_MAX_CHARS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_HANDOVER_MAX_CHARS
+    return value if value >= 0 else DEFAULT_HANDOVER_MAX_CHARS
+
+
 # Dedup / supersession thresholds (cosine similarity, calibrated for bge-small-en-v1.5)
 DEDUP_SUPERSESSION_THRESHOLD = 0.75  # >= this -> log a supersession_candidate event
 DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
