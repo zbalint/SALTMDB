@@ -408,6 +408,75 @@ class TestTraceService(unittest.TestCase):
             len(trace_service.get_trace(a, db_connection=self.conn)["data"]["mid_turn_messages"]), 1
         )
 
+    @staticmethod
+    def _notification(status, summary):
+        return (
+            "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n"
+            f"<output-file>/tmp/b1.output</output-file>\n<status>{status}</status>\n"
+            f"<summary>{summary}</summary>\n</task-notification>"
+        )
+
+    def _stored_prompt(self, text, turn_id="turn-a", harness="claude_code"):
+        from saltmdb.domain.services import trace_service
+
+        result = trace_service.capture_trace_start(
+            agent_session_id="agent-session-a",
+            owner_id="owner-a",
+            harness=harness,
+            harness_session_id="claude-session-a",
+            harness_turn_id=turn_id,
+            user_prompt=text,
+            db_connection=self.conn,
+        )
+        return trace_service.get_trace(result["data"]["id"], db_connection=self.conn)["data"][
+            "user_prompt"
+        ]
+
+    def test_task_notification_is_stored_as_a_labelled_description(self):
+        stored = self._stored_prompt(
+            self._notification(
+                "completed", 'Background command "Run the tests" completed (exit code 0)'
+            )
+        )
+        self.assertEqual(stored, "[background task completed] Run the tests")
+
+    def test_failed_task_notification_keeps_status_and_nonzero_exit_code(self):
+        stored = self._stored_prompt(
+            self._notification(
+                "failed", 'Background command "Run the tests" failed with exit code 3'
+            )
+        )
+        self.assertEqual(stored, "[background task failed] Run the tests (exit 3)")
+
+    def test_description_may_contain_quotes_and_markup_characters(self):
+        stored = self._stored_prompt(
+            self._notification(
+                "completed", 'Background command "echo "a" && cat <f>" completed (exit code 0)'
+            )
+        )
+        self.assertEqual(stored, '[background task completed] echo "a" && cat <f>')
+
+    def test_unrecognised_status_and_summary_shape_pass_through(self):
+        stored = self._stored_prompt(self._notification("killed", "Subagent finished its work"))
+        self.assertEqual(stored, "[background task killed] Subagent finished its work")
+
+    def test_notification_without_summary_falls_back_to_the_raw_text_under_the_label(self):
+        raw = "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"
+        self.assertEqual(self._stored_prompt(raw), f"[background task] {raw}")
+
+    def test_notification_transform_is_claude_code_only_and_needs_the_leading_tag(self):
+        raw = self._notification("completed", 'Background command "x" completed (exit code 0)')
+        self.assertEqual(self._stored_prompt(raw, harness="codex"), raw)
+        mentioned = f"please explain this: {raw}"
+        self.assertEqual(self._stored_prompt(mentioned, turn_id="turn-b"), mentioned)
+
+    def test_notification_hook_retries_stay_idempotent(self):
+        raw = self._notification("completed", 'Background command "x" completed (exit code 0)')
+        first = self._start_text(raw)
+        again = self._start_text(raw)
+        self.assertEqual(first["data"]["id"], again["data"]["id"])
+        self.assertIs(again["data"]["message_appended"], False)
+
     def test_reads_are_cross_agent_but_writes_stay_bound_to_the_writing_agent(self):
         from saltmdb.domain.services import trace_service
 

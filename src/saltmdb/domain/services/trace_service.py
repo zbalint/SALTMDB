@@ -12,6 +12,7 @@ from saltmdb.config import get_db_path
 from saltmdb.db.connection import close_connection, get_connection, write_transaction_retrying
 from saltmdb.utils.envelope import error, ok, rejected, warning
 from saltmdb.utils.text import compute_content_hash, extract_title_and_snippet
+from saltmdb.utils.trace_labels import label_task_notification
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,8 @@ def capture_trace_start(
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         _sweep_abandoned_traces(conn, agent_session_id=agent_session_id)
+        if harness == "claude_code":
+            user_prompt = label_task_notification(user_prompt)
         trace_id = str(uuid6.uuid7())
         now = datetime.now(UTC).isoformat()
         prompt_hash = compute_content_hash(user_prompt)

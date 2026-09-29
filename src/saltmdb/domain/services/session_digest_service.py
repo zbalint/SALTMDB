@@ -9,6 +9,8 @@ across agent restarts.
 
 import os
 
+from saltmdb.utils.trace_labels import BACKGROUND_TASK_PROMPT_PREFIXES
+
 
 def render_last_session_digest(conn, cwd: str) -> str:
     """Look up the most recent prior agent session for this directory and render a short,
@@ -102,8 +104,11 @@ def _message_block(tag: str, text: str, cap: int, attrs: str = "") -> tuple[list
     return [open_tag, _neutralize(body), f"</{tag}>"], cut
 
 
-def _render_session(session, trace, mid_turn: list[str], mid_shown: list[str], cap: int):
-    """One prior session's handover lines: state hints, then its last turn's messages."""
+def _render_session(
+    session, trace, mid_turn: list[str], mid_shown: list[str], cap: int, anchor=None
+):
+    """One prior session's handover lines: state hints, then its last turn's messages. `anchor`
+    is the last real user request when the last turn is only a background-task notice."""
     trace_id, status, prompt, response, created_at = trace
     state = _session_state(session)
     lines = [
@@ -123,6 +128,23 @@ def _render_session(session, trace, mid_turn: list[str], mid_shown: list[str], c
     if status != "completed" and state != "running":
         lines.append(
             "<hint>The last request has no captured response: the work may be unfinished.</hint>"
+        )
+    if anchor is not None:
+        anchor_id, anchor_status, anchor_prompt, anchor_created = anchor
+        lines.append(
+            f'<trace id="{anchor_id}" status="{anchor_status}" created_at="{anchor_created}">'
+        )
+        block, anchor_cut = _message_block("user-message", anchor_prompt, cap)
+        lines.extend(block)
+        lines.append("</trace>")
+        if anchor_cut:
+            lines.append(
+                f"<hint>Truncated: full text via get_trace(trace_id='{anchor_id}').</hint>"
+            )
+        lines.append(
+            "<hint>The trace above is the last real user request. The trace below is a "
+            "background task that finished afterwards; its response is the latest state of "
+            "that work.</hint>"
         )
     lines.append(f'<trace id="{trace_id}" status="{status}" created_at="{created_at}">')
     block, any_cut = _message_block("user-message", prompt, cap)
@@ -172,14 +194,28 @@ def _render_handover(conn, candidates: list[dict], max_chars: int) -> str:
                     (trace[0],),
                 )
             ]
-            picked.append((session, trace, mid_turn))
+            anchor = None
+            if trace[2].startswith(BACKGROUND_TASK_PROMPT_PREFIXES):
+                anchor = conn.execute(
+                    "SELECT id, status, user_prompt, created_at FROM conversation_traces "
+                    "WHERE agent_session_id = ? "
+                    + "AND user_prompt NOT LIKE ? " * len(BACKGROUND_TASK_PROMPT_PREFIXES)
+                    + "ORDER BY created_at DESC LIMIT 1",
+                    (
+                        session["session_id"],
+                        *(f"{prefix}%" for prefix in BACKGROUND_TASK_PROMPT_PREFIXES),
+                    ),
+                ).fetchone()
+            picked.append((session, trace, mid_turn, anchor))
         if len(picked) == HANDOVER_MAX_SESSIONS:
             break
     if not picked:
         return ""
 
-    shown = [mid[-HANDOVER_MAX_MID_TURN:] for _, _, mid in picked]
-    message_count = sum(2 + len(mid) for mid in shown)
+    shown = [mid[-HANDOVER_MAX_MID_TURN:] for _, _, mid, _ in picked]
+    message_count = sum(
+        2 + len(mid) + (item[3] is not None) for mid, item in zip(shown, picked, strict=True)
+    )
     cap = max(1, max_chars // message_count)
     lines = [
         "<saltmdb-session-handover>",
@@ -190,8 +226,8 @@ def _render_handover(conn, candidates: list[dict], max_chars: int) -> str:
         "<hint>Verify against git status/git log and the current files before acting on it; "
         "the repo may have changed since.</hint>",
     ]
-    for (session, trace, mid_turn), mid_shown in zip(picked, shown, strict=True):
-        lines.extend(_render_session(session, trace, mid_turn, mid_shown, cap))
+    for (session, trace, mid_turn, anchor), mid_shown in zip(picked, shown, strict=True):
+        lines.extend(_render_session(session, trace, mid_turn, mid_shown, cap, anchor))
     lines.append("</saltmdb-session-handover>")
     return "\n".join(lines)
 

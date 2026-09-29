@@ -380,6 +380,57 @@ class TestSessionHandover(unittest.TestCase):
         self.assertIn("steer-7", digest)
         self.assertNotIn('n="2"', digest)
 
+    def test_background_update_is_shown_after_the_last_real_request(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace(
+            "s1", "t1", "fix the flaky thing", "started the tests", "2024-01-01T10:01:00+00:00"
+        )
+        self._trace(
+            "s1",
+            "t2",
+            "[background task completed] Run the tests",
+            "all tests pass, work done",
+            "2024-01-01T10:02:00+00:00",
+        )
+        digest = self._digest()
+        self.assertIn("fix the flaky thing", digest)
+        self.assertIn("[background task completed] Run the tests", digest)
+        self.assertIn("all tests pass, work done", digest)
+        self.assertNotIn("started the tests", digest)
+        self.assertLess(digest.index("fix the flaky thing"), digest.index("all tests pass"))
+        self.assertIn("background", digest[digest.index("fix the flaky thing") :].lower())
+
+    def test_legacy_raw_xml_notification_also_gets_the_real_request_anchor(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace("s1", "t1", "real request", "ack", "2024-01-01T10:01:00+00:00")
+        self._trace(
+            "s1",
+            "t2",
+            "<task-notification>\n<status>completed</status>\n</task-notification>",
+            "final summary",
+            "2024-01-01T10:02:00+00:00",
+        )
+        digest = self._digest()
+        self.assertIn("real request", digest)
+        self.assertIn("final summary", digest)
+
+    def test_session_of_only_background_updates_still_renders_its_last_trace(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace(
+            "s1", "t1", "[background task completed] X", "the summary", "2024-01-01T10:01:00+00:00"
+        )
+        digest = self._digest()
+        self.assertIn("[background task completed] X", digest)
+        self.assertIn("the summary", digest)
+
+    def test_a_real_last_request_gets_no_anchor(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace("s1", "t1", "older request", "older answer", "2024-01-01T10:01:00+00:00")
+        self._trace("s1", "t2", "newest request", "newest answer", "2024-01-01T10:02:00+00:00")
+        digest = self._digest()
+        self.assertNotIn("older request", digest)
+        self.assertEqual(digest.count("<trace "), 1)
+
     def test_zero_budget_disables_handover(self):
         self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
         self._trace("s1", "t1", "q", "a", "2024-01-01T10:01:00+00:00")
