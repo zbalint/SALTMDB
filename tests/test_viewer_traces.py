@@ -105,6 +105,24 @@ class TestViewerTraces(unittest.TestCase):
         )
         self.conn.commit()
 
+    def test_trace_detail_returns_mid_turn_messages_in_order(self):
+        self._insert_trace("t1", "sess-a", "2026-09-28T10:00:00+00:00", prompt="opening")
+        for seq, text in ((2, "second steer"), (1, "first steer")):
+            self.conn.execute(
+                """INSERT INTO trace_turn_messages
+                   (id, trace_id, seq, message, message_hash, created_at)
+                   VALUES (?, 't1', ?, ?, ?, '2026-09-28T10:05:00+00:00')""",
+                (f"m{seq}", seq, text, f"h{seq}"),
+            )
+        self.conn.commit()
+
+        status, data = self._get("get_trace_detail", "t1")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [m["message"] for m in data["mid_turn_messages"]], ["first steer", "second steer"]
+        )
+
     def test_trace_detail_returns_full_text_and_linked_memories(self):
         full_prompt = "q" * 500
         full_final = "a" * 500

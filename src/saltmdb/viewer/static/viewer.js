@@ -256,6 +256,7 @@
       traceDetail.append(identity, facts);
       if (data.capture_error) traceDetail.append(node('p', `Capture error: ${data.capture_error}`, 'error'));
       traceDetail.append(section('User prompt'), node('pre', data.user_prompt || '—', 'trace-text'));
+      (data.mid_turn_messages || []).forEach((m, i) => traceDetail.append(section(`Mid-turn message ${i + 1} · ${formatTimestamp(m.created_at)}`), node('pre', m.message, 'trace-text')));
       traceDetail.append(section('Final assistant message'), node('pre', data.final_assistant_message || '—', 'trace-text'));
       const written = node('section', undefined, 'evidence'); written.append(section('Memories written in this turn'));
       const rows = data.linked_memories.map(link => {

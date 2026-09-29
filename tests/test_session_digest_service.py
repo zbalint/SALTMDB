@@ -349,6 +349,37 @@ class TestSessionHandover(unittest.TestCase):
         self.assertIn("get_trace(trace_id='trace-t1')", digest)
         self.assertLess(len(digest), 2500)
 
+    def _mid_turn(self, trace_id, texts):
+        for seq, text in enumerate(texts, start=1):
+            self.conn.execute(
+                """INSERT INTO trace_turn_messages
+                   (id, trace_id, seq, message, message_hash, created_at)
+                   VALUES (?, ?, ?, ?, ?, '2024-01-01T10:05:00+00:00')""",
+                (f"{trace_id}-m{seq}", trace_id, seq, text, f"{trace_id}-h{seq}"),
+            )
+        self.conn.commit()
+
+    def test_mid_turn_messages_are_rendered_between_prompt_and_response(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace("s1", "t1", "opening", "final answer", "2024-01-01T10:01:00+00:00")
+        self._mid_turn("trace-t1", ["do it yourself", "also store memories"])
+        digest = self._digest()
+        self.assertIn('<mid-turn-message n="1" truncated="false">', digest)
+        self.assertIn('<mid-turn-message n="2" truncated="false">', digest)
+        self.assertLess(digest.index("opening"), digest.index("do it yourself"))
+        self.assertLess(digest.index("also store memories"), digest.index("final answer"))
+
+    def test_only_the_newest_mid_turn_messages_are_shown_with_an_omitted_hint(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace("s1", "t1", "opening", "final answer", "2024-01-01T10:01:00+00:00")
+        self._mid_turn("trace-t1", [f"steer-{i}" for i in range(1, 8)])
+        digest = self._digest()
+        self.assertNotIn("steer-1\n", digest)
+        self.assertIn("2 earlier mid-turn message(s) omitted", digest)
+        self.assertIn('n="3"', digest)
+        self.assertIn("steer-7", digest)
+        self.assertNotIn('n="2"', digest)
+
     def test_zero_budget_disables_handover(self):
         self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
         self._trace("s1", "t1", "q", "a", "2024-01-01T10:01:00+00:00")

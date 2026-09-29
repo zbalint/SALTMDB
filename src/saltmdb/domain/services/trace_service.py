@@ -83,6 +83,21 @@ def _sweep_abandoned_traces(
     return write_transaction_retrying(conn, _write)
 
 
+def _append_turn_message(c, trace_id: str, message: str, message_hash: str, now: str) -> bool:
+    """Attach a mid-turn user message to its turn's trace; False if this exact text is already
+    attached (a hook retry)."""
+    cursor = c.execute(
+        """
+        INSERT INTO trace_turn_messages (id, trace_id, seq, message, message_hash, created_at)
+        SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?
+        FROM trace_turn_messages WHERE trace_id = ?
+        ON CONFLICT(trace_id, message_hash) DO NOTHING
+        """,
+        (str(uuid6.uuid7()), trace_id, message, message_hash, now, trace_id),
+    )
+    return cursor.rowcount == 1
+
+
 def capture_trace_start(
     agent_session_id: str,
     owner_id: str,
@@ -93,7 +108,13 @@ def capture_trace_start(
     db_connection=None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
-    """Create an idempotent pending trace for one harness turn."""
+    """Create an idempotent pending trace for one harness turn.
+
+    A second call for the same turn with DIFFERENT text is a message the user sent mid-turn
+    (the harness reuses the turn id for it); it is appended to that trace's turn messages
+    rather than discarded. A repeat of the opening prompt, or of an already-attached message,
+    is a no-op.
+    """
     conn, should_close = _open_connection(db_connection, db_path)
     try:
         _sweep_abandoned_traces(conn, agent_session_id=agent_session_id)
@@ -102,7 +123,7 @@ def capture_trace_start(
         prompt_hash = compute_content_hash(user_prompt)
 
         def _write(c):
-            c.execute(
+            inserted = c.execute(
                 """
                 INSERT INTO conversation_traces
                     (id, agent_session_id, owner_id, harness, harness_session_id,
@@ -124,18 +145,22 @@ def capture_trace_start(
                     now,
                 ),
             )
-            return c.execute(
+            row = c.execute(
                 """
-                SELECT id FROM conversation_traces
+                SELECT id, user_prompt_hash FROM conversation_traces
                 WHERE agent_session_id = ? AND harness_turn_id = ?
                 """,
                 (agent_session_id, harness_turn_id),
             ).fetchone()
+            appended = False
+            if inserted.rowcount == 0 and row is not None and row[1] != prompt_hash:
+                appended = _append_turn_message(c, row[0], user_prompt, prompt_hash, now)
+            return row, appended
 
-        row = write_transaction_retrying(conn, _write)
+        row, appended = write_transaction_retrying(conn, _write)
         if row is None:
             return rejected([error("TRACE_CAPTURE_FAILED", "The trace row could not be resolved.")])
-        return ok({"id": row[0], "status": "pending"})
+        return ok({"id": row[0], "status": "pending", "message_appended": appended})
     except Exception as exc:
         logger.error("Error capturing trace start: %s", exc)
         return rejected([error("TRACE_CAPTURE_FAILED", str(exc))])
@@ -479,6 +504,13 @@ def get_trace(
             """,
             (trace_id,),
         ).fetchall()
+        turn_messages = conn.execute(
+            """
+            SELECT seq, message, created_at FROM trace_turn_messages
+            WHERE trace_id = ? ORDER BY seq ASC
+            """,
+            (trace_id,),
+        ).fetchall()
         return ok(
             {
                 "id": row[0],
@@ -496,6 +528,9 @@ def get_trace(
                 "created_at": row[12],
                 "updated_at": row[13],
                 "completed_at": row[14],
+                "mid_turn_messages": [
+                    {"seq": m[0], "message": m[1], "created_at": m[2]} for m in turn_messages
+                ],
                 "trace_memory_links": [
                     {
                         "entity_id": link[0],

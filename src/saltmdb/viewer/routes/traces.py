@@ -114,6 +114,11 @@ class TracesMixin(ViewerHandlerProtocol):
                 """,
                 (trace_id,),
             ).fetchall()
+            mid_turn = conn.execute(
+                "SELECT message, created_at FROM trace_turn_messages WHERE trace_id = ? "
+                "ORDER BY seq",
+                (trace_id,),
+            ).fetchall()
             self.send_json(
                 {
                     "trace_id": row[0],
@@ -126,6 +131,7 @@ class TracesMixin(ViewerHandlerProtocol):
                     "capture_error": row[7],
                     "created_at": row[8],
                     "completed_at": row[9],
+                    "mid_turn_messages": [{"message": m[0], "created_at": m[1]} for m in mid_turn],
                     "linked_memories": [
                         {"entity_id": lk[0], "title": lk[1] or "Unknown", "write_operation": lk[2]}
                         for lk in links

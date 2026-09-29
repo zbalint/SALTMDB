@@ -348,6 +348,66 @@ class TestTraceService(unittest.TestCase):
         self.assertNotIn("user_prompt", item)
         self.assertEqual(result["warnings"][0]["code"], "TRACE_SEARCH_NOT_YET_SEMANTIC")
 
+    def _start_text(self, text, turn_id="turn-a"):
+        from saltmdb.domain.services import trace_service
+
+        return trace_service.capture_trace_start(
+            agent_session_id="agent-session-a",
+            owner_id="owner-a",
+            harness="claude_code",
+            harness_session_id="claude-session-a",
+            harness_turn_id=turn_id,
+            user_prompt=text,
+            db_connection=self.conn,
+        )
+
+    def test_same_turn_different_text_is_appended_as_a_mid_turn_message_in_order(self):
+        from saltmdb.domain.services import trace_service
+
+        first = self._start_text("Prompt for turn-a")
+        self.assertIs(first["data"]["message_appended"], False)
+        trace_id = first["data"]["id"]
+
+        second = self._start_text("steer one")
+        third = self._start_text("steer two")
+        self.assertEqual(second["data"]["id"], trace_id)
+        self.assertIs(second["data"]["message_appended"], True)
+        self.assertIs(third["data"]["message_appended"], True)
+
+        data = trace_service.get_trace(trace_id, db_connection=self.conn)["data"]
+        self.assertEqual(data["user_prompt"], "Prompt for turn-a")
+        self.assertEqual(
+            [(m["seq"], m["message"]) for m in data["mid_turn_messages"]],
+            [(1, "steer one"), (2, "steer two")],
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM conversation_traces").fetchone()[0], 1
+        )
+
+    def test_hook_retries_are_idempotent_for_opening_prompt_and_mid_turn_messages(self):
+        from saltmdb.domain.services import trace_service
+
+        trace_id = self._start_text("Prompt for turn-a")["data"]["id"]
+        self.assertIs(self._start_text("Prompt for turn-a")["data"]["message_appended"], False)
+        self.assertIs(self._start_text("steer")["data"]["message_appended"], True)
+        self.assertIs(self._start_text("steer")["data"]["message_appended"], False)
+
+        data = trace_service.get_trace(trace_id, db_connection=self.conn)["data"]
+        self.assertEqual([m["message"] for m in data["mid_turn_messages"]], ["steer"])
+
+    def test_mid_turn_messages_do_not_leak_across_turns(self):
+        from saltmdb.domain.services import trace_service
+
+        a = self._start_text("Prompt A", "turn-a")["data"]["id"]
+        b = self._start_text("Prompt B", "turn-b")["data"]["id"]
+        self._start_text("steer for A", "turn-a")
+        self.assertEqual(
+            trace_service.get_trace(b, db_connection=self.conn)["data"]["mid_turn_messages"], []
+        )
+        self.assertEqual(
+            len(trace_service.get_trace(a, db_connection=self.conn)["data"]["mid_turn_messages"]), 1
+        )
+
     def test_reads_are_cross_agent_but_writes_stay_bound_to_the_writing_agent(self):
         from saltmdb.domain.services import trace_service
 

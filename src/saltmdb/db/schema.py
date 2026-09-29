@@ -658,6 +658,25 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "ON trace_memory_links(trace_id, entity_id, content_hash)"
         )
 
+        # Messages the user sent while the agent was mid-turn: the harness fires UserPromptSubmit
+        # for each with the SAME turn id as the turn it interrupted, so they attach to that turn's
+        # trace instead of opening a new one. seq orders them; (trace_id, message_hash) makes a
+        # hook retry idempotent.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS trace_turn_messages (
+            id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL REFERENCES conversation_traces(id) ON DELETE CASCADE,
+            seq INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            message_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_turnmsgs_idem "
+            "ON trace_turn_messages(trace_id, message_hash)"
+        )
+
         # One-time dedup backfill: collapse pre-existing duplicate (source_id, target_id, predicate)
         # rows to the earliest-inserted one before the UNIQUE index below is created (a raw
         # CREATE UNIQUE INDEX would otherwise fail at startup on any DB with existing dupes).

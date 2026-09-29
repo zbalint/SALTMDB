@@ -74,7 +74,10 @@ Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` in the 
 always captures) before enabling these registrations.
 
 - `UserPromptSubmit` calls `capture_trace_start` with the harness-specific literal and
-  `${session_id}`, `${prompt_id}`/`${turn_id}`, and `${prompt}`.
+  `${session_id}`, `${prompt_id}`/`${turn_id}`, and `${prompt}`. Claude Code also fires it, with the same `prompt_id`, for each message the
+  user sends while a turn is running; `capture_trace_start` attaches those to the turn's trace as
+  `mid_turn_messages` instead of discarding them (confirmed live on Claude Code; Codex behavior
+  for steering input is not yet verified).
 - `PostToolUse` matches only the four successful memory-write tool names and calls
   `capture_trace_memory_link` with `${tool_response.data.id}` and `${tool_name}`.
 - `Stop` calls `capture_trace_complete` with the current turn identifier and
