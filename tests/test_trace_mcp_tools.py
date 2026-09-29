@@ -18,7 +18,18 @@ class _CaptureBackend:
 
     def call(self, tool_name: str, kwargs: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool_name, kwargs))
-        return {"status": "ok", "data": {}}
+        return {
+            "status": "ok",
+            "data": {"id": "entity-1", "new_id": "entity-1", "entity_id": "entity-1"},
+        }
+
+
+class _FakeWriteBackend:
+    def __init__(self, data: dict[str, object], status: str = "ok") -> None:
+        self.result = {"status": status, "data": data}
+
+    def call(self, _tool_name: str, _kwargs: dict[str, object]) -> dict[str, object]:
+        return self.result
 
 
 class TestTraceMcpTools(unittest.TestCase):
@@ -50,7 +61,8 @@ class TestTraceMcpTools(unittest.TestCase):
             patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
         ):
             tools.capture_trace_start("codex", "codex-session", "turn-1", "prompt")
-            tools.capture_trace_memory_link("turn-1", "entity-1", "store_memory")
+            tools.store_memory("A title", content="A body")
+            tools.capture_trace_memory_link("turn-1")
             tools.capture_trace_complete("turn-1", "assistant answer")
             tools.search_traces(agent_session_id="filter-session", limit=3)
             tools.get_trace("trace-1")
@@ -58,6 +70,8 @@ class TestTraceMcpTools(unittest.TestCase):
         calls = dict(self.backend.calls)
         self.assertEqual(calls["capture_trace_start"]["owner_id"], "trace_test_agent")
         self.assertEqual(calls["capture_trace_memory_link"]["owner_id"], "trace_test_agent")
+        self.assertEqual(calls["capture_trace_memory_link"]["entity_id"], "entity-1")
+        self.assertEqual(calls["capture_trace_memory_link"]["just_run_tool_name"], "store_memory")
         self.assertEqual(calls["capture_trace_complete"]["owner_id"], "trace_test_agent")
         self.assertNotIn("owner_id", calls["search_traces"])
         self.assertEqual(calls["search_traces"]["agent_session_id"], "filter-session")
@@ -168,10 +182,12 @@ class TestTraceMcpTools(unittest.TestCase):
                         "db-content-hash",
                     ),
                 )
-                linked = cast(
-                    dict[str, object],
-                    tools.capture_trace_memory_link("turn-db", "entity-db", "store_memory"),
-                )
+                with patch(
+                    "saltmdb.mcp.tools._backend_or_raise",
+                    return_value=_FakeWriteBackend({"id": "entity-db"}),
+                ):
+                    _ = tools._call_and_record_write("store_memory", {})
+                linked = cast(dict[str, object], tools.capture_trace_memory_link("turn-db"))
                 completed = cast(
                     dict[str, object],
                     tools.capture_trace_complete("turn-db", "database answer"),
@@ -226,3 +242,108 @@ class TestTraceMcpTools(unittest.TestCase):
 
 if __name__ == "__main__":
     _ = unittest.main()
+
+
+class TestTraceWriteLinking(unittest.TestCase):
+    """The adapter, not a hook template, says which entities a turn wrote."""
+
+    def setUp(self):
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("trace_test_agent")
+        tools._drain_pending_trace_writes()
+        self.backend = _CaptureBackend()
+
+    def tearDown(self):
+        tools._drain_pending_trace_writes()
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_owner("test_agent")
+
+    def _record(self, tool_name, data, status="ok", capture="true"):
+        with (
+            patch.dict(os.environ, {"SALTMDB_TRACE_CAPTURE_ENABLED": capture}),
+            patch(
+                "saltmdb.mcp.tools._backend_or_raise", return_value=_FakeWriteBackend(data, status)
+            ),
+        ):
+            return tools._call_and_record_write(tool_name, {})
+
+    def _link(self, *args, **kwargs):
+        with (
+            patch.dict(os.environ, {"SALTMDB_TRACE_CAPTURE_ENABLED": "true"}),
+            patch("saltmdb.mcp.tools._backend_or_raise", return_value=self.backend),
+        ):
+            return tools.capture_trace_memory_link(*args, **kwargs)
+
+    def _linked_ok(self):
+        def call(tool, kwargs):
+            self.backend.calls.append((tool, kwargs))
+            return {"status": "ok", "data": {"write_operation": "x", "linked": True}}
+
+        self.backend.call = call  # type: ignore[method-assign]
+
+    def test_each_write_tool_records_the_entity_id_from_its_own_result_shape(self):
+        self._record("store_memory", {"id": "e-store"})
+        self._record("revise_memory", {"old_id": "x", "new_id": "e-revise"})
+        self._record("supersede_memory", {"old_id": "x", "new_id": "e-supersede"})
+        self._record("consolidate_memories", {"entity_id": "e-consolidate"})
+        self.assertEqual(
+            tools._drain_pending_trace_writes(),
+            [
+                ("store_memory", "e-store"),
+                ("revise_memory", "e-revise"),
+                ("supersede_memory", "e-supersede"),
+                ("consolidate_memories", "e-consolidate"),
+            ],
+        )
+
+    def test_rejected_writes_and_disabled_capture_record_nothing(self):
+        self._record("store_memory", {"id": "e1"}, status="rejected")
+        self._record("store_memory", {"id": "e2"}, capture="false")
+        self.assertEqual(tools._drain_pending_trace_writes(), [])
+
+    def test_hook_call_links_every_pending_write_then_is_a_noop(self):
+        self._record("store_memory", {"id": "e1"})
+        self._record("revise_memory", {"new_id": "e2"})
+        self._linked_ok()
+        first = cast(dict, self._link("turn-1"))
+        self.assertEqual([r["entity_id"] for r in first["data"]["results"]], ["e1", "e2"])
+        self.assertEqual(
+            [(k["entity_id"], k["just_run_tool_name"]) for _, k in self.backend.calls],
+            [("e1", "store_memory"), ("e2", "revise_memory")],
+        )
+        second = cast(dict, self._link("turn-1"))
+        self.assertEqual(second["data"]["results"], [])
+        self.assertEqual(len(self.backend.calls), 2)
+
+    def test_legacy_hook_arguments_are_ignored(self):
+        self._record("store_memory", {"id": "real-id"})
+        self._linked_ok()
+        _ = self._link("turn-1", "attacker-chosen", "mcp__saltmdb__store_memory")
+        self.assertEqual(self.backend.calls[0][1]["entity_id"], "real-id")
+        self.assertEqual(self.backend.calls[0][1]["just_run_tool_name"], "store_memory")
+
+    def test_unknown_turn_is_reported_per_entity_and_not_fatal(self):
+        self._record("store_memory", {"id": "e1"})
+        self.backend.call = lambda tool, kwargs: {  # type: ignore[method-assign]
+            "status": "rejected",
+            "errors": [{"code": "UNKNOWN_TRACE"}],
+        }
+        result = cast(dict, self._link("turn-x"))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["data"]["results"], [{"entity_id": "e1", "error_code": "UNKNOWN_TRACE"}]
+        )
+
+    def test_daemon_failure_requeues_unprocessed_writes(self):
+        self._record("store_memory", {"id": "e1"})
+        self._record("store_memory", {"id": "e2"})
+
+        def boom(_tool, _kwargs):
+            raise RuntimeError("daemon down")
+
+        self.backend.call = boom  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            self._link("turn-1")
+        self.assertEqual(
+            tools._drain_pending_trace_writes(), [("store_memory", "e1"), ("store_memory", "e2")]
+        )

@@ -50,11 +50,7 @@ class TestCaptureHookConfig(unittest.TestCase):
             )
             self.assertEqual(
                 link["input"],
-                {
-                    "harness_turn_id": f"${{{turn_field}}}",
-                    "entity_id": "${tool_response.data.id}",
-                    "just_run_tool_name": "${tool_name}",
-                },
+                {"harness_turn_id": f"${{{turn_field}}}"},
             )
             self.assertEqual(
                 complete["input"],

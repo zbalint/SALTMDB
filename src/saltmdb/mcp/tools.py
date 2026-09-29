@@ -2,9 +2,11 @@ from typing import Any, Literal, cast
 
 from typing_extensions import TypedDict
 
+import collections
 import json
 import logging
 import re
+import threading
 from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
 from saltmdb.config import is_trace_capture_enabled
@@ -558,7 +560,7 @@ def store_memory(
         _normalize_list_or_str(detail_memory_ids) if detail_memory_ids is not None else None
     )
 
-    return _backend_or_raise().call(
+    return _call_and_record_write(
         "store_memory",
         {
             "content": content,
@@ -972,7 +974,7 @@ def consolidate_memories(
         _normalize_list_or_str(detail_memory_ids) if detail_memory_ids is not None else None
     )
 
-    return _backend_or_raise().call(
+    return _call_and_record_write(
         "consolidate_memories",
         {
             "consolidations": consolidations_,
@@ -1090,7 +1092,7 @@ def revise_memory(
     if content_error is not None:
         return content_error
     owner_id_ = _effective_owner()
-    return _backend_or_raise().call(
+    return _call_and_record_write(
         "revise_memory",
         _replacement_payload(
             entity_id=entity_id,
@@ -1165,7 +1167,7 @@ def supersede_memory(
     if content_error is not None:
         return content_error
     owner_id_ = _effective_owner()
-    return _backend_or_raise().call(
+    return _call_and_record_write(
         "supersede_memory",
         _replacement_payload(
             entity_id=entity_id,
@@ -1210,6 +1212,39 @@ def get_memory(entity_id: str, include_trace_provenance: bool = False) -> dict:
             "include_trace_provenance": include_trace_provenance,
         },
     )
+
+
+# Writes this adapter process itself performed and has not yet attached to a trace. The harness
+# hook only says "a write just happened in turn X"; the adapter is the one party that saw the
+# result, so it -- not a hook template resolving the tool's response -- supplies the entity id.
+# That keeps the link harness-agnostic (no per-harness tool-name/response-shape interpolation)
+# and means a caller can no longer name an arbitrary entity to attach to its own trace.
+_PENDING_TRACE_WRITES: "collections.deque[tuple[str, str]]" = collections.deque(maxlen=100)
+_PENDING_TRACE_WRITES_LOCK = threading.Lock()
+_WRITTEN_ID_KEY = {
+    "store_memory": "id",
+    "revise_memory": "new_id",
+    "supersede_memory": "new_id",
+    "consolidate_memories": "entity_id",
+}
+
+
+def _call_and_record_write(tool_name: str, kwargs: dict):
+    result = _backend_or_raise().call(tool_name, kwargs)
+    if is_trace_capture_enabled() and isinstance(result, dict) and result.get("status") == "ok":
+        data = result.get("data")
+        entity_id = data.get(_WRITTEN_ID_KEY[tool_name]) if isinstance(data, dict) else None
+        if entity_id:
+            with _PENDING_TRACE_WRITES_LOCK:
+                _PENDING_TRACE_WRITES.append((tool_name, entity_id))
+    return result
+
+
+def _drain_pending_trace_writes() -> list[tuple[str, str]]:
+    with _PENDING_TRACE_WRITES_LOCK:
+        drained = list(_PENDING_TRACE_WRITES)
+        _PENDING_TRACE_WRITES.clear()
+    return drained
 
 
 def _trace_capture_disabled() -> dict | None:
@@ -1265,33 +1300,57 @@ def capture_trace_start(
 @mcp.tool()
 def capture_trace_memory_link(
     harness_turn_id: str,
-    entity_id: str,
-    just_run_tool_name: Literal[
-        "store_memory", "revise_memory", "supersede_memory", "consolidate_memories"
-    ],
+    entity_id: str | None = None,
+    just_run_tool_name: str | None = None,
 ) -> dict:
-    """Internal capture tool invoked by SALTMDB's own lifecycle hooks (PostToolUse, filtered to
-    successful store_memory/revise_memory/supersede_memory/consolidate_memories calls) -- not
-    intended for direct agent use. Links a memory write to the trace for the current turn.
-    content_hash and (for store_memory) new-vs-update classification are always re-read
-    server-side, never accepted from the caller.
+    """Internal capture tool invoked by SALTMDB's own lifecycle hooks (PostToolUse on the
+    memory-write tools) -- not intended for direct agent use. Attaches every memory write this
+    adapter has performed and not yet attached to the trace for ``harness_turn_id``. The adapter
+    supplies which entities and which write operation, from the results it itself observed;
+    ``entity_id`` and ``just_run_tool_name`` are ignored (accepted only so older hook
+    configurations keep working) because a hook cannot reliably read a harness's tool response.
+    content_hash and (for store_memory) new-vs-update classification are re-read server-side.
 
-    Returns {"status": "ok", "data": {"trace_id", "entity_id", "write_operation", "linked"},
-    "warnings": [...]} -- an unknown turn or entity is reported as {"status": "rejected", ...},
-    which the calling hook must treat as non-fatal.
+    Returns {"status": "ok", "data": {"results": [{"entity_id", "write_operation", "linked"} |
+    {"entity_id", "error_code"}]}, "warnings": [...]}. Nothing pending is a successful empty
+    result; an unknown turn is reported per entity and is non-fatal for the calling hook.
     """
     if (disabled := _trace_capture_disabled()) is not None:
         return disabled
+    from saltmdb.utils.envelope import ok
+
     owner_id_ = _effective_owner()
-    return _backend_or_raise().call(
-        "capture_trace_memory_link",
-        {
-            "owner_id": owner_id_,
-            "harness_turn_id": harness_turn_id,
-            "entity_id": entity_id,
-            "just_run_tool_name": just_run_tool_name,
-        },
-    )
+    pending = _drain_pending_trace_writes()
+    results: list[dict] = []
+    for index, (tool_name, written_entity_id) in enumerate(pending):
+        try:
+            outcome = _backend_or_raise().call(
+                "capture_trace_memory_link",
+                {
+                    "owner_id": owner_id_,
+                    "harness_turn_id": harness_turn_id,
+                    "entity_id": written_entity_id,
+                    "just_run_tool_name": tool_name,
+                },
+            )
+        except Exception:
+            with _PENDING_TRACE_WRITES_LOCK:
+                _PENDING_TRACE_WRITES.extendleft(reversed(pending[index:]))
+            raise
+        if isinstance(outcome, dict) and outcome.get("status") == "ok":
+            data = outcome.get("data") or {}
+            results.append(
+                {
+                    "entity_id": written_entity_id,
+                    "write_operation": data.get("write_operation"),
+                    "linked": data.get("linked"),
+                }
+            )
+        else:
+            errors = outcome.get("errors") if isinstance(outcome, dict) else None
+            code = errors[0].get("code") if errors else "UNKNOWN"
+            results.append({"entity_id": written_entity_id, "error_code": code})
+    return ok({"results": results})
 
 
 @mcp.tool()

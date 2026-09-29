@@ -72,9 +72,7 @@
             "server": "saltmdb",
             "tool": "capture_trace_memory_link",
             "input": {
-              "harness_turn_id": "${prompt_id}",
-              "entity_id": "${tool_response.data.id}",
-              "just_run_tool_name": "${tool_name}"
+              "harness_turn_id": "${prompt_id}"
             },
             "timeout": 15
           }

@@ -78,17 +78,20 @@ always captures) before enabling these registrations.
   user sends while a turn is running; `capture_trace_start` attaches those to the turn's trace as
   `mid_turn_messages` instead of discarding them (confirmed live on Claude Code; Codex behavior
   for steering input is not yet verified).
-- `PostToolUse` matches only the four successful memory-write tool names and calls
-  `capture_trace_memory_link` with `${tool_response.data.id}` and `${tool_name}`.
+- `PostToolUse` matches only the four memory-write tool names and calls
+  `capture_trace_memory_link` with just the turn identifier. The adapter records each successful
+  write it performs itself and attaches every not-yet-attached one to that turn, so no
+  harness-specific tool name or tool-response shape is interpolated (Claude Code delivers
+  `tool_name` prefixed as `mcp__saltmdb__store_memory` and `tool_response` as a list of MCP
+  content blocks, so `${tool_name}` and `${tool_response.data.id}` never resolved). Older configs
+  that still pass `entity_id`/`just_run_tool_name` keep working; the values are ignored.
 - `Stop` calls `capture_trace_complete` with the current turn identifier and
   `${last_assistant_message}`.
 
 Native registration preserves the adapter's trusted `agent_session_id`; do not replace these
-entries with a CLI or standalone Python bridge. The nested `tool_response.data.id` interpolation
-must be verified once in a live Claude Code session and once in a live Codex session before
-enabling the examples: perform one successful `store_memory`, then confirm a
-`trace_memory_links` row through `get_trace` or `search_traces`. A template-resolution miss is
-non-fatal because `capture_trace_memory_link` rejects an empty or unknown entity id.
+entries with a CLI or standalone Python bridge. After enabling the examples in a live session,
+perform one successful `store_memory` and confirm a `trace_memory_links` row through `get_trace`
+or `search_traces(entity_id=...)`. A failed link is non-fatal for the calling hook.
 
 ## Naming convention
 
