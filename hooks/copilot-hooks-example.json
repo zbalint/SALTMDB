@@ -23,6 +23,20 @@
         "bash": "$HOME/.copilot/hooks/saltmdb-stop-critique-gate.py",
         "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-stop-critique-gate.py\"",
         "timeoutSec": 10
+      },
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-stop-trace-capture.py",
+        "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-stop-trace-capture.py\"",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "$HOME/.copilot/hooks/saltmdb-stop-trace-capture.py",
+        "powershell": "python \"$HOME\\.copilot\\hooks\\saltmdb-stop-trace-capture.py\"",
+        "timeoutSec": 10
       }
     ]
   }

@@ -96,8 +96,16 @@ always captures) before enabling these registrations.
   capture failure is not reported to the hook. Existing live Codex configs need the flag added
   and the MCP server restarted onto this version.
 
-Native registration preserves the adapter's trusted `agent_session_id`; do not replace these
-entries with a CLI or standalone Python bridge. After enabling the examples in a live session,
+Native registration preserves the adapter's trusted `agent_session_id`; where a harness supports
+`mcp_tool` hook entries (Claude Code, Codex) do not replace them with a CLI or standalone Python
+bridge. Copilot CLI has no such entry type, so it alone uses a bridge:
+[`saltmdb-stop-trace-capture.py`](saltmdb-stop-trace-capture.py) on `agentStop` and `sessionEnd`.
+It reads Copilot's transcript (`interactionId` is the turn key), calls the daemon over loopback RPC
+and takes its `agent_session_id` from `~/.saltmdb/copilot_adapter_<copilot pid>.json`, which the MCP
+adapter publishes only when `SALTMDB_TRACE_CAPTURE_ENABLED=true` -- without that file the hook does
+nothing. It never blocks Copilot; failures go to `~/.saltmdb/hooks/trace-capture.log`. Copilot's
+`SALTMDB_AGENT_ID` should be its own value (e.g. `copilot`). Not yet verified on native Windows:
+that the hook and the adapter see the same `COPILOT_LOADER_PID`, or the same parent pid. After enabling the examples in a live session,
 perform one successful `store_memory` and confirm a `trace_memory_links` row through `get_trace`
 or `search_traces(entity_id=...)`. A failed link is non-fatal for the calling hook.
 
@@ -118,7 +126,7 @@ every body is fully shared).
 | [`claude-settings-example.json`](claude-settings-example.json) | Claude Code | Global settings snippet for `~/.claude/settings.json`: `SessionStart`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SessionEnd`. |
 | [`codex-settings-example.json`](codex-settings-example.json) | Codex | Native `mcp_tool` settings snippet for the three conversation-trace capture events. |
 | [`antigravity-settings-example.json`](antigravity-settings-example.json) | Antigravity CLI (`agy`) | Settings snippet for `~/.gemini/antigravity-cli/settings.json`: `PreInvocation`, `PreToolUse`. |
-| [`copilot-hooks-example.json`](copilot-hooks-example.json) | GitHub Copilot CLI | Spec template for `.github/hooks/saltmdb.json`: `sessionStart`, `preToolUse`, `agentStop`. |
+| [`copilot-hooks-example.json`](copilot-hooks-example.json) | GitHub Copilot CLI | Spec template for `.github/hooks/saltmdb.json`: `sessionStart`, `preToolUse`, `agentStop`, `sessionEnd` (trace capture). |
 
 ### Python scripts
 
@@ -130,6 +138,7 @@ every body is fully shared).
 | [`saltmdb-post-tool-response-nudges.py`](saltmdb-post-tool-response-nudges.py) | `PostToolUse` on `store_memory`/`search_memory` | Inspects the tool *response*, not just the tool name: nudges on unacted `duplicate_candidates`, a `store_memory` with no follow-up `manage_relation`, and an empty `mode="strict"` result. Also sets two per-session flags on every `search_memory` call: the retrieval-outcome-pending flag (for the Stop-time gate below) and the search-memory-called flag (for `saltmdb-pre-tool-search-gate.py` above). |
 | [`saltmdb-post-tool-failure-circuit-breaker.py`](saltmdb-post-tool-failure-circuit-breaker.py) | `PostToolUse` on `log_event` | Fingerprints repeated `log_event(event_type="issue")` calls sharing an `error_code`; nudges CLAUDE.md rule 2 (stop after 2 consecutive failures, search memory, replan) instead of relying on the agent remembering it mid-loop. Also clears the retrieval-outcome-pending flag on a matching `log_event(event_type="retrieval_outcome")` call. |
 | [`saltmdb-stop-critique-gate.py`](saltmdb-stop-critique-gate.py) | `Stop` / `agentStop` | Two-stage gate: (1) mandatory self-reflection before closing a turn that touched files/commands — the questions come from an optional `stop-critique-questions.json` next to the script (`{"questions": [...]}`), falling back to two built-in defaults if it is missing or malformed; (2) requires that reflection to become a `store_memory` call or an explicit "no durable lesson" acknowledgment — otherwise a genuine finding just evaporates. Stage 1 is capped per session at a randomized 1–4 distinct episodes (rolled once per session id; retrying an unanswered prompt spends no budget), after which the gate goes quiet; Stage 2 is never capped. |
+| [`saltmdb-stop-trace-capture.py`](saltmdb-stop-trace-capture.py) | `agentStop` / `sessionEnd` (Copilot CLI only) | Trace capture for Copilot, which has no native `mcp_tool` hook entry: parses the session transcript and sends each interaction to the daemon (see "Conversation trace provenance"). Silent no-op unless the adapter has published its session file; always exits 0. |
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
 | [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code and Codex; absent from Antigravity) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first) since a bare script has no MCP tool context of its own. |

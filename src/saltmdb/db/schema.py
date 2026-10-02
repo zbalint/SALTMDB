@@ -165,12 +165,17 @@ def _migrate_owner_id_to_agent_id(conn) -> None:
     conn.execute("DROP INDEX IF EXISTS idx_traces_owner_status")
 
 
-_TRACE_HARNESS_CHECK_OLD = "CHECK(harness IN ('codex','claude_code'))"
-_TRACE_HARNESS_CHECK_NEW = "CHECK(harness IN ('codex','claude_code','omp'))"
+# Every earlier harness CHECK an existing database may still carry, oldest first.
+_TRACE_HARNESS_CHECKS_OLD = (
+    "CHECK(harness IN ('codex','claude_code'))",
+    "CHECK(harness IN ('codex','claude_code','omp'))",
+)
+_TRACE_HARNESS_CHECK_NEW = "CHECK(harness IN ('codex','claude_code','omp','copilot'))"
 
 
-def _allow_omp_trace_harness(conn) -> None:
-    """Add ``omp`` to the ``conversation_traces.harness`` CHECK of an existing database.
+def _allow_trace_harnesses(conn) -> None:
+    """Widen the ``conversation_traces.harness`` CHECK of an existing database to the current set
+    (``omp`` and ``copilot`` were each added after the original ``codex``/``claude_code`` pair).
 
     SQLite cannot alter a CHECK, and rebuilding the table is not an option: ``trace_memory_links``
     and ``trace_turn_messages`` reference it ``ON DELETE CASCADE`` with foreign keys enabled, so
@@ -184,16 +189,17 @@ def _allow_omp_trace_harness(conn) -> None:
     ).fetchone()[0]
     if _TRACE_HARNESS_CHECK_NEW in sql:
         return
-    if _TRACE_HARNESS_CHECK_OLD not in sql:
+    old = next((c for c in _TRACE_HARNESS_CHECKS_OLD if c in sql), None)
+    if old is None:
         raise RuntimeError(
-            "conversation_traces has an unrecognised harness CHECK; refusing to guess how to add 'omp'"
+            "conversation_traces has an unrecognised harness CHECK; refusing to guess how to widen it"
         )
     version = conn.execute("PRAGMA schema_version").fetchone()[0]
     conn.execute("PRAGMA writable_schema=ON")
     conn.execute(
         "UPDATE sqlite_master SET sql=replace(sql, ?, ?) "
         "WHERE type='table' AND name='conversation_traces'",
-        (_TRACE_HARNESS_CHECK_OLD, _TRACE_HARNESS_CHECK_NEW),
+        (old, _TRACE_HARNESS_CHECK_NEW),
     )
     conn.execute(f"PRAGMA schema_version={version + 1}")
     conn.execute("PRAGMA writable_schema=OFF")
@@ -677,7 +683,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             id TEXT PRIMARY KEY,
             agent_session_id TEXT NOT NULL,
             agent_id TEXT NOT NULL,
-            harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code','omp')),
+            harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code','omp','copilot')),
             harness_session_id TEXT NOT NULL,
             harness_turn_id TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('pending','completed','incomplete')),
@@ -691,7 +697,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             completed_at TEXT
         );
         """)
-        _allow_omp_trace_harness(conn)
+        _allow_trace_harnesses(conn)
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_session_harnessturn "
             "ON conversation_traces(agent_session_id, harness_turn_id)"

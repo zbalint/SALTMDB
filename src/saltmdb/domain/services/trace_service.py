@@ -16,7 +16,7 @@ from saltmdb.utils.trace_labels import label_task_notification
 
 logger = logging.getLogger(__name__)
 
-Harness = Literal["codex", "claude_code", "omp"]
+Harness = Literal["codex", "claude_code", "omp", "copilot"]
 LinkOperation = Literal[
     "store_memory",
     "revise_memory",

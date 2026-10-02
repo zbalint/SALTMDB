@@ -3,8 +3,9 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
-from saltmdb.config import get_db_path, get_agent_id
+from saltmdb.config import get_db_path, get_agent_id, is_trace_capture_enabled
 from saltmdb.daemon.client import SessionConnection
+from saltmdb.mcp import copilot_session
 from saltmdb.mcp.identity import SESSION_IDENTITY
 
 # Configure standard logging exclusively to stderr to protect MCP stdio stream
@@ -38,13 +39,21 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         cwd=SESSION_IDENTITY.cwd,
         agent_id=SESSION_IDENTITY.agent_id,
     )
+    published_path: str | None = None
     try:
         # Keep startup inside the cleanup boundary as well: a retryable hello failure must not
         # leave a partially initialized connection or emit a goodbye for a session that never
         # reached durable registration.
         session.open()
+        if is_trace_capture_enabled():
+            # Lets a standalone Copilot hook join this adapter's trace identity (copilot_session).
+            published_path = copilot_session.publish(
+                get_agent_id(), SESSION_IDENTITY.agent_session_id, get_db_path()
+            )
         yield {}
     finally:
+        if published_path:
+            copilot_session.remove(published_path)
         # Codex round-1 finding: without try/finally, an exception raised anywhere during the
         # server's active lifetime (propagated back into this generator via athrow) would skip
         # session.close() entirely, leaking the persistent hello connection.

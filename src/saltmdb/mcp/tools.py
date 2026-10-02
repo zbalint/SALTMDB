@@ -1275,7 +1275,7 @@ def _for_hook(result: dict, hook_output: bool) -> dict:
 
 @mcp.tool()
 def capture_trace_start(
-    harness: Literal["codex", "claude_code", "omp"],
+    harness: Literal["codex", "claude_code", "omp", "copilot"],
     harness_session_id: str,
     harness_turn_id: str,
     user_prompt: str,

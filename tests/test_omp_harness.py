@@ -10,7 +10,8 @@ from saltmdb.domain.services import trace_service
 from saltmdb.mcp import tools
 
 _OLD_CHECK = "CHECK(harness IN ('codex','claude_code'))"
-_NEW_CHECK = "CHECK(harness IN ('codex','claude_code','omp'))"
+_OMP_CHECK = "CHECK(harness IN ('codex','claude_code','omp'))"
+_NEW_CHECK = "CHECK(harness IN ('codex','claude_code','omp','copilot'))"
 
 
 def _table_sql(conn) -> str:
@@ -145,7 +146,7 @@ class TestOmpHarness(unittest.TestCase):
         registered = tools.mcp._tool_manager._tools["capture_trace_start"]
         self.assertEqual(
             set(registered.parameters["properties"]["harness"]["enum"]),
-            {"codex", "claude_code", "omp"},
+            {"codex", "claude_code", "omp", "copilot"},
         )
 
 
