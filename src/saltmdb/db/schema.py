@@ -1193,6 +1193,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_entities_agent_session ON entities(agent_session_id, created_at DESC) WHERE status != 'archived'",
+            "CREATE INDEX IF NOT EXISTS idx_entities_last_touched_session ON entities(last_touched_session_id) WHERE status != 'archived'",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_events_agent_session ON events(agent_session_id, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",

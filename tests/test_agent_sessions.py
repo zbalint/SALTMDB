@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from saltmdb.db.schema import init_db
+from saltmdb.db import agent_sessions
 from saltmdb.db.agent_sessions import (
     record_session,
     get_last_session_for_cwd,
@@ -26,6 +27,47 @@ class TestAgentSessions(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk_entity(
+        self,
+        entity_id,
+        *,
+        agent_session_id=None,
+        last_touched_session_id=None,
+        status="raw",
+    ):
+        now = "2024-01-01T00:00:00+00:00"
+        self.conn.execute(
+            """INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id,
+            scope, status, title, memory_type, full_content, valid_from, agent_session_id,
+            last_touched_session_id) VALUES (?, ?, ?, ?, 'tester', 'shared', ?, ?, 'fact',
+            'body content', ?, ?, ?)""",
+            (
+                entity_id,
+                now,
+                now,
+                now,
+                status,
+                entity_id,
+                now,
+                agent_session_id,
+                last_touched_session_id,
+            ),
+        )
+        self.conn.commit()
+
+    def _mk_trace(self, trace_id, session_id):
+        now = "2024-01-01T00:00:00+00:00"
+        self.conn.execute(
+            """INSERT INTO conversation_traces
+               (id, agent_session_id, agent_id, harness, harness_session_id, harness_turn_id,
+                status, user_prompt, user_prompt_hash, final_assistant_message,
+                final_assistant_message_hash, created_at, updated_at)
+               VALUES (?, ?, 'tester', 'claude_code', 'harness', ?, 'completed',
+                       'prompt', 'prompt-hash', 'response', 'response-hash', ?, ?)""",
+            (trace_id, session_id, f"turn-{trace_id}", now, now),
+        )
+        self.conn.commit()
 
     def test_record_session_idempotent(self):
         """Calling record_session twice with the same session_id should not raise or duplicate."""
@@ -307,6 +349,103 @@ class TestAgentSessions(unittest.TestCase):
         """get_recent_sessions_for_cwd returns [] (not None) when the cwd has no sessions."""
         result = get_recent_sessions_for_cwd(self.conn, "/never/seen")
         self.assertEqual(result, [])
+
+    def test_recent_memories_skip_twelve_newer_empty_sessions(self):
+        cwd = "/project"
+        older = "memory-session"
+        record_session(self.conn, older, cwd, "2024-01-01T10:00:00+00:00")
+        self._mk_entity("memory-entity", agent_session_id=older)
+        for i in range(12):
+            record_session(self.conn, f"empty-{i}", cwd, f"2024-01-02T{i:02d}:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, with_content="memories")
+
+        self.assertEqual([row["session_id"] for row in result], [older])
+
+    def test_recent_memories_include_touch_only_session(self):
+        cwd = "/project"
+        creator = "creator-session"
+        touched = "touched-session"
+        record_session(self.conn, creator, "/other", "2024-01-01T10:00:00+00:00")
+        record_session(self.conn, touched, cwd, "2024-01-01T11:00:00+00:00")
+        self._mk_entity(
+            "touched-entity",
+            agent_session_id=creator,
+            last_touched_session_id=touched,
+        )
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, with_content="memories")
+
+        self.assertEqual([row["session_id"] for row in result], [touched])
+
+    def test_recent_memories_ignore_archived_only_session(self):
+        cwd = "/project"
+        session_id = "archived-session"
+        record_session(self.conn, session_id, cwd, "2024-01-01T10:00:00+00:00")
+        self._mk_entity("archived-entity", agent_session_id=session_id, status="archived")
+
+        self.assertEqual(get_recent_sessions_for_cwd(self.conn, cwd, with_content="memories"), [])
+
+    def test_recent_traces_skip_twelve_newer_traceless_sessions(self):
+        cwd = "/project"
+        older = "trace-session"
+        record_session(self.conn, older, cwd, "2024-01-01T10:00:00+00:00")
+        self._mk_trace("trace-1", older)
+        for i in range(12):
+            record_session(self.conn, f"empty-{i}", cwd, f"2024-01-02T{i:02d}:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, with_content="traces")
+
+        self.assertEqual([row["session_id"] for row in result], [older])
+
+    def test_recent_memories_limit_counts_only_qualifying_sessions(self):
+        cwd = "/project"
+        for i in range(5):
+            qualifying = f"qualifying-{i}"
+            record_session(self.conn, qualifying, cwd, f"2024-01-01T{i * 2:02d}:00:00+00:00")
+            self._mk_entity(f"entity-{i}", agent_session_id=qualifying)
+            record_session(
+                self.conn,
+                f"empty-{i}",
+                cwd,
+                f"2024-01-01T{i * 2 + 1:02d}:00:00+00:00",
+            )
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, limit=3, with_content="memories")
+
+        self.assertEqual(
+            [row["session_id"] for row in result],
+            ["qualifying-4", "qualifying-3", "qualifying-2"],
+        )
+
+    def test_recent_sessions_default_includes_empty_and_unknown_filter_rejected(self):
+        cwd = "/project"
+        record_session(self.conn, "empty", cwd, "2024-01-01T10:00:00+00:00")
+        record_session(self.conn, "non-empty", cwd, "2024-01-01T11:00:00+00:00")
+        self._mk_entity("non-empty-entity", agent_session_id="non-empty")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd)
+
+        self.assertEqual([row["session_id"] for row in result], ["non-empty", "empty"])
+        with self.assertRaisesRegex(ValueError, "memories.*traces"):
+            get_recent_sessions_for_cwd(self.conn, cwd, with_content="events")
+
+    def test_memories_query_uses_both_session_indexes(self):
+        predicate = agent_sessions._CONTENT_PREDICATES["memories"]
+        plan = self.conn.execute(
+            f"""EXPLAIN QUERY PLAN
+                SELECT s.session_id
+                FROM _agent_sessions AS s
+                WHERE s.cwd = ? AND ({predicate})
+                ORDER BY s.started_at DESC
+                LIMIT ?""",
+            ("/project", 10),
+        ).fetchall()
+        plan_text = "\n".join(row[3] for row in plan)
+
+        self.assertIn("idx_entities_agent_session", plan_text)
+        self.assertIn("idx_entities_last_touched_session", plan_text)
+        self.assertNotIn("SCAN e", plan_text)
 
 
 if __name__ == "__main__":

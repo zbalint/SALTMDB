@@ -215,6 +215,22 @@ class TestSessionDigestService(unittest.TestCase):
         self.assertIn("Real Memory", digest)
         self.assertNotIn(newer_empty_session, digest)
 
+    def test_digest_survives_twelve_newer_content_free_sessions(self):
+        cwd = "/test/project"
+        older_session = "older-session-with-content"
+        agent_sessions.record_session(self.conn, older_session, cwd, "2024-01-01T10:00:00+00:00")
+        memory_id = self._mk_entity("Earlier Real Memory", agent_session_id=older_session)
+        for i in range(12):
+            agent_sessions.record_session(
+                self.conn, f"empty-{i}", cwd, f"2024-01-02T{i:02d}:00:00+00:00"
+            )
+
+        digest = session_digest_service.render_last_session_digest(self.conn, cwd)
+
+        self.assertIn(f'session_id="{older_session}"', digest)
+        self.assertIn(f"- {memory_id} [fact] Earlier Real Memory", digest)
+        self.assertNotIn("empty-", digest)
+
     def test_empty_envelope_when_all_recent_sessions_are_content_free(self):
         """If every recent session for this cwd (within the lookback window) has zero surviving
         entities, the digest is still the empty envelope, not an error."""
@@ -294,6 +310,26 @@ class TestSessionHandover(unittest.TestCase):
             self._digest(),
             "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>",
         )
+
+    def test_handover_survives_twelve_newer_traceless_sessions(self):
+        older = "older-trace-session"
+        self._session(older, "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace(
+            older,
+            "older-turn",
+            "older question",
+            "older answer",
+            "2024-01-01T10:01:00+00:00",
+        )
+        for i in range(12):
+            self._session(f"empty-{i}", f"2024-01-02T{i:02d}:00:00+00:00", ended="goodbye")
+
+        digest = self._digest()
+
+        self.assertIn("<saltmdb-session-handover>", digest)
+        self.assertIn("older question", digest)
+        self.assertIn("older answer", digest)
+        self.assertNotIn("empty-", digest)
 
     def test_completed_trace_renders_both_messages_and_state(self):
         self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")

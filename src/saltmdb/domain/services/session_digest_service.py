@@ -23,18 +23,17 @@ def render_last_session_digest(conn, cwd: str) -> str:
     agent_id -- a prior session may have worked with multiple owners, and all their memories
     are still relevant context.
 
-    Walks backward through recent sessions for this cwd (newest first) until it finds one
-    with surviving (non-archived) entities. This matters once more than one agent/process is
-    concurrently active in the same directory: a sibling session's hello can register itself
-    as the newest _agent_sessions row for this cwd before it has produced anything, which
-    would otherwise shadow a genuinely prior, content-having session and render an empty
-    digest for everyone querying that cwd (see SALTMDB memory 8402f500 for the live repro).
+    The lookup selects only sessions that created or touched a non-archived memory, so
+    any number of content-free sessions (own or another agent's) cannot shadow an earlier
+    one. See SALTMDB memory 8402f500 for the live repro and the prior walk-back behavior.
     """
     from saltmdb.db import agent_sessions
     from saltmdb.domain.services.core_governance_service import _escape_yaml_line
 
     normalized_cwd = os.path.realpath(cwd)
-    candidates = agent_sessions.get_recent_sessions_for_cwd(conn, normalized_cwd)
+    candidates = agent_sessions.get_recent_sessions_for_cwd(
+        conn, normalized_cwd, with_content="memories"
+    )
 
     last = None
     rows = []
@@ -243,6 +242,8 @@ def render_session_digest(conn, cwd: str, max_chars: int | None = None) -> str:
     budget = get_handover_max_chars() if max_chars is None else max_chars
     if budget <= 0:
         return index
-    candidates = agent_sessions.get_recent_sessions_for_cwd(conn, os.path.realpath(cwd))
+    candidates = agent_sessions.get_recent_sessions_for_cwd(
+        conn, os.path.realpath(cwd), with_content="traces"
+    )
     handover = _render_handover(conn, candidates, budget)
     return f"{index}\n{handover}" if handover else index

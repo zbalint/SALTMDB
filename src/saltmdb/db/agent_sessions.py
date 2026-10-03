@@ -122,25 +122,65 @@ def get_last_session_for_cwd(conn: sqlite3.Connection, cwd: str) -> dict | None:
     return {"session_id": row[0], "started_at": row[1]}
 
 
-def get_recent_sessions_for_cwd(conn: sqlite3.Connection, cwd: str, limit: int = 10) -> list[dict]:
-    """Return up to ``limit`` most recent _agent_sessions rows for this exact cwd, newest first.
+_CONTENT_PREDICATES: dict[str, str] = {
+    "memories": """
+        (
+            EXISTS (
+                SELECT 1
+                FROM entities e
+                WHERE e.agent_session_id = s.session_id
+                  AND e.status != 'archived'
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM entities e
+                WHERE e.last_touched_session_id = s.session_id
+                  AND e.status != 'archived'
+            )
+        )
+    """,
+    "traces": """
+        EXISTS (
+            SELECT 1
+            FROM conversation_traces t
+            WHERE t.agent_session_id = s.session_id
+        )
+    """,
+}
 
-    Unlike get_last_session_for_cwd (which always returns just the single latest row,
-    regardless of whether that session ever produced anything), this lets a caller walk
-    backward past sessions that turn out to be content-free -- see
-    session_digest_service.render_last_session_digest, which needs that fallback so a
-    concurrently-started sibling session (own or another agent's, freshly registered via
-    hello but with zero entities yet) doesn't shadow a genuinely prior session that has
-    real content.
+
+def get_recent_sessions_for_cwd(
+    conn: sqlite3.Connection,
+    cwd: str,
+    limit: int = 10,
+    *,
+    with_content: str | None = None,
+) -> list[dict]:
+    """Return up to ``limit`` recent sessions for this cwd, newest first.
+
+    ``with_content`` may be ``"memories"`` to select sessions that created or touched
+    a non-archived memory, or ``"traces"`` to select sessions with a conversation
+    trace. ``None`` returns all sessions. The memory-filtered lookup is used by
+    ``session_digest_service.render_last_session_digest``.
     """
+    if with_content is not None and with_content not in _CONTENT_PREDICATES:
+        raise ValueError("with_content must be one of: memories, traces")
+
+    where = "WHERE s.cwd = ?"
+    params: list[str | int] = [cwd]
+    if with_content is not None:
+        where += f" AND {_CONTENT_PREDICATES[with_content]}"
+    params.append(limit)
+
     cursor = conn.execute(
-        """
-        SELECT session_id, started_at, agent_id, ended_at, ended_reason FROM _agent_sessions
-        WHERE cwd = ?
-        ORDER BY started_at DESC
+        f"""
+        SELECT s.session_id, s.started_at, s.agent_id, s.ended_at, s.ended_reason
+        FROM _agent_sessions AS s
+        {where}
+        ORDER BY s.started_at DESC
         LIMIT ?
         """,
-        (cwd, limit),
+        tuple(params),
     )
     return [
         {
