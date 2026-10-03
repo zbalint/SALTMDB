@@ -39,9 +39,17 @@ from _saltmdb_hook_common import (  # noqa: E402
 SEARCH_MEMORY_PATTERN = re.compile(r'"(name|tool|toolName)"\s*:\s*"[^"]*search_memory"')
 
 
+def is_codex_payload(data: dict) -> bool:
+    """Codex uniquely supplies both turn_id and model (same test as stop_block_payload)."""
+    return bool(data.get("turn_id") and data.get("model"))
+
+
 def emit_allow(data: dict) -> None:
     if is_antigravity_payload(data):
         emit({"decision": "allow"})
+        sys.exit(0)
+    if is_codex_payload(data):
+        # Codex's strict PreToolUse schema treats "allow" as unsupported; no output = allow.
         sys.exit(0)
     emit(
         {
@@ -55,6 +63,17 @@ def emit_allow(data: dict) -> None:
 def emit_deny(data: dict, reason: str) -> None:
     if is_antigravity_payload(data):
         emit({"decision": "deny", "reason": reason})
+        sys.exit(0)
+    if is_codex_payload(data):
+        emit(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        )
         sys.exit(0)
     emit(
         {

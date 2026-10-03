@@ -279,12 +279,12 @@ def clear_state(*state_files: Path) -> None:
 
 def run_quiet(cmd: list[str], timeout_secs: int) -> bool:
     try:
-        subprocess.run(
+        proc = subprocess.run(
             cmd,
             capture_output=True,
             timeout=timeout_secs,
             check=False,
         )
-        return True
+        return proc.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False

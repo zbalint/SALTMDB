@@ -16,30 +16,35 @@ import os
 import shutil
 import sys
 
-from _saltmdb_hook_common import run_quiet
+from _saltmdb_hook_common import get_field, read_stdin_json, run_quiet
 
 SWEEP_PROMPT = (
     "You are the SALTMDB pre-compaction sweep hook. The current session's conversation "
     "transcript is about to be compacted and working context will be lost. Review the "
-    "conversation so far for: unresolved decisions, root-cause fixes to bugs/issues, new "
-    "architectural rules, or user preferences established in this session but NOT yet persisted "
+    "conversation (JSON lines at the path given below) for: unresolved decisions, root-cause "
+    "fixes to bugs/issues, new architectural rules, or user preferences established in this session but NOT yet persisted "
     "to SALTMDB. For each item found, first call mcp__saltmdb__search_memory to confirm it is "
-    "not already recorded, and if genuinely new, call mcp__saltmdb__store_memory "
-    '(agent_id="agent_hook_precompact") to persist it, and mcp__saltmdb__log_event for any '
-    "issue/fix worth a short-term event log entry. Do not report back conversationally -- this "
-    "is a background sweep."
+    "not already recorded, and if genuinely new, call mcp__saltmdb__store_memory to persist it, "
+    "and mcp__saltmdb__log_event for any issue/fix worth a short-term event log entry. Do not "
+    "report back conversationally -- this is a background sweep."
 )
 
 TIMEOUT_SECS = int(os.environ.get("SALTMDB_PRECOMPACT_TIMEOUT", "60"))
 
 
 def main() -> None:
+    transcript_path = get_field(read_stdin_json(), "transcript_path", "transcriptPath")
+    if not transcript_path:
+        # No transcript to review (manual/cron run, or a harness that omits it) -- a fresh
+        # headless agent would have no conversation to sweep, so do nothing.
+        sys.exit(0)
+    prompt = f"{SWEEP_PROMPT}\n\nConversation transcript path: {transcript_path}"
     preferred = os.environ.get("SALTMDB_HOOK_PREFERRED_AGENT")
     commands = (["codex", "exec"], ["claude", "-p"])
     if preferred == "claude":
         commands = tuple(reversed(commands))
     for command in commands:
-        if shutil.which(command[0]) and run_quiet([*command, SWEEP_PROMPT], TIMEOUT_SECS):
+        if shutil.which(command[0]) and run_quiet([*command, prompt], TIMEOUT_SECS):
             return
     # No headless CLI-based agent available on PATH -- nothing this script can do without one
     # (storing memories requires an agent's own MCP tool context, not raw SQL). Fail silent/open.
