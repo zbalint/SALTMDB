@@ -257,8 +257,7 @@ def capture_trace_memory_link(
             )
         if outcome == "unknown_entity":
             return rejected([error("UNKNOWN_ENTITY_ID", f"No entity matches '{entity_id}'.")])
-        assert data is not None, "The trace link result was empty."
-        trace_id, operation, linked = data
+        trace_id, operation, linked = cast(tuple[str, str, bool], data)
         return ok(
             {
                 "trace_id": trace_id,
