@@ -1771,6 +1771,70 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
         self.assertIn("entity_id", structured["data"])
 
 
+class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
+    # Reuse the neighboring real-call fixture without inheriting its tests.
+    setUp = TestConsolidateMemoriesOutputSchema.setUp
+    tearDown = TestConsolidateMemoriesOutputSchema.tearDown
+
+    async def test_search_memory_rejects_unknown_query_argument(self):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with self.assertRaises(ToolError) as caught:
+            await tools.mcp.call_tool("search_memory", {"query": "anything"})
+        self.assertIn("query", str(caught.exception))
+        self.assertIn("Extra inputs are not permitted", str(caught.exception))
+
+    async def test_every_registered_tool_forbids_unknown_arguments(self):
+        for tool in tools.mcp._tool_manager.list_tools():
+            with self.subTest(tool=tool.name):
+                self.assertEqual(tool.fn_metadata.arg_model.model_config["extra"], "forbid")
+
+    async def test_search_memory_accepts_query_keywords_argument(self):
+        memory = tools.store_memory(
+            title="Anything argument validation",
+            content="Anything is the keyword for this isolated argument validation record.",
+        )
+        result = await tools.mcp.call_tool("search_memory", {"query_keywords": "anything"})
+        self.assertEqual(
+            json.loads(result[0].text)["id"],
+            memory["data"]["id"],
+        )
+
+    async def test_server_first_import_rejects_unknown_query_argument(self):
+        import subprocess
+        import sys
+
+        probe = """
+import asyncio
+import os
+os.environ["SALTMDB_AGENT_ID"] = "test_agent"
+from saltmdb.mcp.server import mcp
+from mcp.server.fastmcp.exceptions import ToolError
+
+async def main():
+    try:
+        await mcp.call_tool("search_memory", {"query": "x"})
+    except ToolError as error:
+        assert "query" in str(error), str(error)
+        assert "Extra inputs are not permitted" in str(error), str(error)
+    else:
+        raise AssertionError("Unknown query argument was accepted")
+
+asyncio.run(main())
+"""
+        env = os.environ.copy()
+        env.pop("SALTMDB_DB_PATH", None)
+        env["SALTMDB_AGENT_ID"] = "test_agent"
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class TestReviewCoreMemoryTool(unittest.TestCase):
     """End-to-end coverage of the review_core_memory MCP tool through tools.py's own argument-
     normalization layer and daemon/dispatch.py's DISPATCH_TABLE entry -- core_governance_service's

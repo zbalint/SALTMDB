@@ -1762,3 +1762,8 @@ def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
             "agent_id": _effective_agent_id(),
         },
     )
+# Reject misspelled tool arguments instead of silently taking a browse/default path.
+# shortcut: private FastMCP API, replace if the pinned mcp version changes it.
+for _tool in mcp._tool_manager.list_tools():
+    _tool.fn_metadata.arg_model.model_config["extra"] = "forbid"
+    _tool.fn_metadata.arg_model.model_rebuild(force=True)
