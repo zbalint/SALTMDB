@@ -1168,6 +1168,80 @@ class TestMCPToolsWrapper(unittest.TestCase):
             self.assertNotIn("first call within a session", description)
 
 
+class TestGetMemoryAlias(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+        os.environ["SALTMDB_DB_PATH"] = self.db_path
+        self._prev_backend = tools._set_backend_for_test(tools.DirectDispatchBackend())
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_agent_id("test_agent")
+        stored = tools.store_memory(
+            title="Alias lookup target",
+            content="A distinct stored memory for get_memory alias retrieval.",
+        )
+        self.assertEqual(stored["status"], "ok", stored)
+        self.entity_id = stored["data"]["id"]
+
+    def tearDown(self):
+        tools._set_backend_for_test(self._prev_backend)
+        SESSION_IDENTITY.reset()
+        self.conn.close()
+        os.environ.pop("SALTMDB_DB_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _get_memory(self, arguments):
+        result = await tools.mcp.call_tool("get_memory", arguments)
+        content = result[0] if isinstance(result[0], list) else result
+        return json.loads(content[0].text)
+
+    async def test_alias_fetches_stored_memory(self):
+        result = await self._get_memory({"memory_id": self.entity_id})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["id"], self.entity_id)
+
+    async def test_equal_aliases_fetch_stored_memory(self):
+        result = await self._get_memory({"entity_id": self.entity_id, "memory_id": self.entity_id})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["id"], self.entity_id)
+
+    async def test_conflicting_aliases_reject_without_backend_call(self):
+        capture = _CaptureBackend()
+        previous = tools._set_backend_for_test(capture)
+        try:
+            result = await self._get_memory(
+                {"entity_id": self.entity_id, "memory_id": "different-id"}
+            )
+        finally:
+            tools._set_backend_for_test(previous)
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertEqual(result["errors"][0]["field"], "memory_id")
+        self.assertEqual(capture.calls, [])
+
+    async def test_missing_identifier_rejects(self):
+        result = await self._get_memory({})
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertEqual(result["errors"][0]["field"], "entity_id")
+
+    async def test_unknown_identifier_name_is_still_rejected(self):
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with self.assertRaisesRegex(ToolError, "Extra inputs are not permitted"):
+            await tools.mcp.call_tool("get_memory", {"id": self.entity_id})
+
+    async def test_alias_resolves_unambiguous_prefix_like_entity_id(self):
+        prefix = self.entity_id[:8]
+        canonical = await self._get_memory({"entity_id": prefix})
+        alias = await self._get_memory({"memory_id": prefix})
+        self.assertEqual(canonical["status"], "ok", canonical)
+        self.assertEqual(alias["status"], "ok", alias)
+        self.assertEqual(canonical["data"]["id"], self.entity_id)
+        self.assertEqual(alias["data"]["id"], self.entity_id)
+
+
 class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()

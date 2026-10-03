@@ -48,7 +48,7 @@ class TestPhase3McpSurface(unittest.TestCase):
     def test_graph_tools_have_small_explicit_schemas(self):
         self.assertEqual(
             list(inspect.signature(tools.get_memory).parameters),
-            ["entity_id", "include_trace_provenance"],
+            ["entity_id", "include_trace_provenance", "memory_id"],
         )
         self.assertEqual(
             list(inspect.signature(tools.get_lineage).parameters),

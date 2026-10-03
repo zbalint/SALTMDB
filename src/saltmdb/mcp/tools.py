@@ -1202,10 +1202,16 @@ def supersede_memory(
 
 
 @mcp.tool()
-def get_memory(entity_id: str, include_trace_provenance: bool = False) -> dict:
+def get_memory(
+    entity_id: str | None = None,
+    include_trace_provenance: bool = False,
+    memory_id: str | None = None,
+) -> dict:
     """Retrieves ONE memory in full, by exact ID or an unambiguous ID prefix -- when you already
     know (or can uniquely identify) which memory you want. Use search_memory instead to find a
     memory by content/tags/context when you don't already have its ID.
+
+    `memory_id` is accepted as an alias for `entity_id`; pass one of them.
 
     Explicit retrieval includes archived memories (an archived ID is never silently redirected to
     a successor) and always returns full content, status, and lineage -- unlike search_memory's
@@ -1216,15 +1222,41 @@ def get_memory(entity_id: str, include_trace_provenance: bool = False) -> dict:
     ...}, "warnings": [...]}`. `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID" |
     "AMBIGUOUS_ID_PREFIX", "message": "...", "field": "entity_id"}]}` when the ID doesn't resolve
     to exactly one memory -- `AMBIGUOUS_ID_PREFIX` names the matching candidates so you can
-    disambiguate with a longer prefix.
+    disambiguate with a longer prefix. Missing-argument and conflicting-alias cases return
+    `VALIDATION_ERROR`.
 
     Example: `get_memory(entity_id="a1b2c3")`.
     """
+    from saltmdb.utils import error_codes
+    from saltmdb.utils.envelope import error, rejected
+
+    if entity_id is not None and memory_id is not None and entity_id != memory_id:
+        return rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    "entity_id and memory_id are aliases; pass one, or the same value in both.",
+                    "memory_id",
+                )
+            ]
+        )
+    resolved = entity_id if entity_id is not None else memory_id
+    if resolved is None:
+        return rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    "entity_id is required (memory_id is accepted as an alias).",
+                    "entity_id",
+                )
+            ]
+        )
+
     agent_id_ = _effective_agent_id()
     return _backend_or_raise().call(
         "get_memory",
         {
-            "entity_id": entity_id,
+            "entity_id": resolved,
             "agent_id": agent_id_,
             "include_trace_provenance": include_trace_provenance,
         },
