@@ -235,11 +235,13 @@ The viewer is read-only and loopback-only. The current view, filters, page and s
 
 ## 6. Verification & Tests
 
-To verify that the database schemas, triggers, and lock rules operate correctly, run the unified unit tests:
+To verify the database schemas, triggers, lock rules, and all repository quality gates, run:
 
 ```bash
-python -m pytest tests/ hooks/tests/
+./verify
 ```
+This runs `ruff check`, `ruff format --check`, `mypy`, `bandit`, `pip-audit`, `deptry`, and
+`pytest tests/ hooks/tests/`.
 
 When upgrading an existing database, take and verify a physical SQLite backup before reconnecting
 any client. Review the latest migration entry in [`MIGRATION.md`](MIGRATION.md) for the exact

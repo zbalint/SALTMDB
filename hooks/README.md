@@ -22,8 +22,10 @@ Every `saltmdb-*.py` script below has an identical body regardless of which harn
 - **Tool-name vocabulary**: risky-tool matching uses one merged pattern covering all three
   harnesses' own conventions, not per-harness allowlists.
 - **Not every harness supports every lifecycle event, and that's fine.** `PreCompact` is
-  Claude-Code-only today (confirmed absent from Antigravity's and Copilot's own hook event
-  sets) — a harness just doesn't register a hook it has no event for.
+  registered natively only in the Claude Code example; Codex's example has no `PreCompact` entry,
+  and the Antigravity/Copilot examples have no such event. The standalone
+  `saltmdb-pre-compact-sweep.py` is a manual/cron fallback that shells out to `codex exec` or
+  `claude -p`.
 - **Prefer structured `PostToolUse` data over transcript-text scanning when a check can be
   expressed that way.** `tool_name`/`tool_input` arrive as parsed JSON on `PostToolUse`
   regardless of harness, so tracking "did X happen" via a small per-session state file set/cleared
@@ -68,11 +70,6 @@ daemon liveness is unavailable or no `ended_at` is set yet. Session rows are ret
 The conversation-trace Phase 1 capture path is registered directly in the harness settings
 examples, not through a Python subprocess. `hooks/claude-settings-example.json` and
 `hooks/codex-settings-example.json` each register three native `mcp_tool` entries:
-
-Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` in the MCP server's
-`env` (the adapter process gates the `capture_trace_*` tools -- the shared daemon has no flag and
-always captures) before enabling these registrations.
-
 - `UserPromptSubmit` calls `capture_trace_start` with the harness-specific literal and
   `${session_id}`, `${prompt_id}`/`${turn_id}`, and `${prompt}`. Claude Code also fires it, with the same `prompt_id`, for each message the
   user sends while a turn is running; `capture_trace_start` attaches those to the turn's trace as
@@ -87,6 +84,7 @@ always captures) before enabling these registrations.
   that still pass `entity_id`/`just_run_tool_name` keep working; the values are ignored.
 - `Stop` calls `capture_trace_complete` with the current turn identifier and
   `${last_assistant_message}`.
+
 - The Codex example also passes `"hook_output": true` to all three. Codex validates an
   `mcp_tool` hook's text result as event hook JSON against a strict schema and rejects SALTMDB's
   `{status, data, warnings}` envelope (`Hook failed: hook returned invalid ... JSON output` on
@@ -95,6 +93,10 @@ always captures) before enabling these registrations.
   0.158.0). Claude Code accepts the envelope, so its example omits the flag. In this mode a
   capture failure is not reported to the hook. Existing live Codex configs need the flag added
   and the MCP server restarted onto this version.
+
+Capture is disabled by default; set `SALTMDB_TRACE_CAPTURE_ENABLED=true` in the MCP server's
+`env` (the adapter process gates the `capture_trace_*` tools -- the shared daemon has no flag and
+always captures) before enabling these registrations.
 
 Native registration preserves the adapter's trusted `agent_session_id`; where a harness supports
 `mcp_tool` hook entries (Claude Code, Codex) do not replace them with a CLI or standalone Python
@@ -141,7 +143,7 @@ every body is fully shared).
 | [`saltmdb-stop-trace-capture.py`](saltmdb-stop-trace-capture.py) | `agentStop` / `sessionEnd` (Copilot CLI only) | Trace capture for Copilot, which has no native `mcp_tool` hook entry: parses the session transcript and sends each interaction to the daemon (see "Conversation trace provenance"). Silent no-op unless the adapter has published its session file; always exits 0. |
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
-| [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code and Codex; absent from Antigravity) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first) since a bare script has no MCP tool context of its own. |
+| [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code native; standalone/manual fallback for Codex and harnesses without a native agent hook; absent from Antigravity/Copilot examples) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first) since a bare script has no MCP tool context of its own. |
 | [`saltmdb-skill-review-sweep.py`](saltmdb-skill-review-sweep.py) | Manual / cron only (no lifecycle event) | Mining and diagnosis sweep for skill/hook improvements. Shells out to `claude -p` or `codex exec` to perform a 5-step telemetry review (mine, diagnose, pair-check, propose, gate). Never auto-applies file edits; outputs proposals as gated memories for human review. |
 | [`saltmdb-checkable-fact-drift-sweep.py`](saltmdb-checkable-fact-drift-sweep.py) | Manual / cron only (no lifecycle event) | Periodic sweep verifying checkable fact memories against live repository source code to flag stale citations. Never auto-corrects or edits content; flags surface via `search_memory`'s `drift_flag` field. |
 
@@ -176,8 +178,9 @@ Copy hook scripts (including `_saltmdb_hook_common.py`) to `~/.copilot/hooks/` (
 
 ## 🪟 Windows notes
 
-All three example configs invoke scripts as `python <path>` (never a bare `.py` path relying on
-the POSIX shebang line) -- confirmed necessary, not just defensive: native Windows has no shebang
+The three command-based example configs (Claude Code, Antigravity, and Copilot) invoke scripts as
+`python <path>` (never a bare `.py` path relying on the POSIX shebang line); Codex uses native
+`mcp_tool` entries instead. This is confirmed necessary, not just defensive: native Windows has no shebang
 support at all, and `python3` (the POSIX convention this repo otherwise uses) is typically not on
 `PATH` on Windows, only `python`/`py` (community-confirmed, e.g.
 [claude-plugins-official#85](https://github.com/anthropics/claude-plugins-official/issues/85)).

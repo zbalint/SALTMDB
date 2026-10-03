@@ -17,7 +17,7 @@ We welcome contributions from the open-source community! Follow these steps to s
    ```bash
    # Install uv once: https://docs.astral.sh/uv/getting-started/installation/
    uv sync --extra dev   # creates .venv and installs runtime + dev tooling deps
-   uv run python -m pytest tests/ hooks/tests/   # or: uv run <any command>
+   ./verify   # complete local verification gate
    ```
    A manual `venv`/`pip` setup still works if you'd rather not use `uv`:
    ```bash
@@ -78,15 +78,15 @@ that check some of these mechanically).
 15. Don't copy-paste logic that already exists elsewhere — import/reuse it.
 
 **Self-verification**
-16. Run `PYTHONPATH=src python -m pytest tests/ hooks/tests/` as a mandatory last step before
-    declaring any code change done — inspect real failures, fix, re-run.
+16. Run `./verify` as a mandatory last step before declaring any code change done; it runs
+    Ruff, format, mypy, Bandit, pip-audit, deptry, and `pytest tests/ hooks/tests/`.
 17. For new features, prefer writing/extending a failing test first, then implement to green.
 
 ---
 
 ## 3. Testing Changes
 
-Every modification must pass the unit test suite before submission.
+Every modification must pass the full repository verification gate before submission.
 
 1. Set the PYTHONPATH environment variable:
    ```bash
@@ -95,9 +95,9 @@ Every modification must pass the unit test suite before submission.
    # On Unix:
    export PYTHONPATH="src"
    ```
-2. Run the unit test suite (matches the command CI enforces in `.github/workflows/python-tests.yml`):
+2. Run the full repository verification gate:
    ```bash
-   PYTHONPATH=src python -m pytest tests/ hooks/tests/
+   ./verify
    ```
 3. Start or use the SALTMDB daemon with the viewer enabled first (it is enabled by default; set
    `SALTMDB_VIEWER_ENABLED=true` if needed). Then check the viewer status by running:
@@ -139,14 +139,12 @@ Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit
   explicit direct dependency (2026-07-31) after deptry caught it being imported directly
   (`memory_service.py`, cosine similarity) while only present transitively via `fastembed`.
 
-Run everything locally before pushing:
+Run the complete verification gate locally before pushing:
 ```bash
-uv run ruff check . && uv run ruff format --check .
-uv run mypy src
-uv run bandit -c pyproject.toml -r src -q
-uv run pip-audit --skip-editable
-uv run deptry src
+./verify
 ```
+It runs `ruff check`, `ruff format --check`, `mypy`, `bandit`, `pip-audit`, `deptry`, and
+`pytest tests/ hooks/tests/`.
 Or install the git hook once via `uv run pre-commit install` to run the same checks
 automatically on every commit (`.pre-commit-config.yaml`; the `pip-audit`/`deptry` steps are
 CI-only — network/full-env cost makes them a poor fit for every local commit). CI enforces the

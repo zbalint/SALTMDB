@@ -27,7 +27,7 @@ Skills are auto-discovered from `.claude/skills/<name>/SKILL.md` (project-scoped
 `~/.claude/skills/<name>/SKILL.md` (user-scoped, every project). Copy the directory:
 ```bash
 mkdir -p ~/.claude/skills
-cp -r saltmdb-usage ~/.claude/skills/
+cp -r saltmdb-usage saltmdb-skill-review ~/.claude/skills/
 ```
 Claude Code loads the `SKILL.md` frontmatter's `description` at session start and pulls in the
 full body on demand when it's relevant — no further wiring needed.

@@ -21,7 +21,6 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 
 | Id | Type | Title | Status | Notes / links |
 |---|---|---|---|---|
-| BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | queued | Agents repeatedly pass `memory_id`. Scope for now: `get_memory` only; reject if both given and different; document as an alias in the tool description; accepting the alias makes `entity_id` optional in the schema. No longer blocked (BL-002 landed in 93520a5); next step is writing the spec. Widening to every tool with an `entity_id` parameter (generic before-validator vs per-tool alias) only if evidence shows the mistake elsewhere. |
 | BL-003 | feature | Frozen DB snapshot plus replay harness for retrieval failures (Phase B) | open | Needed to replay a ranking miss fairly: memories written after the miss can quote the query and contaminate the corpus. Depends on BL-002. Needs its own spec. |
 | BL-004 | experiment | Overlap/confuser benchmark subset and failure taxonomy | open | Queries where the gold memory and at least one competitor are lexically or semantically close; classify each miss by stage (FTS, vector, RRF, cross-encoder, lifecycle). Do not change ranking before this exists. Depends on BL-002, BL-003. |
 | BL-005 | experiment | Lineage-head tie-break (Phase C) | open | Benchmark-only. Baseline arm must include the existing `collapse_supersedes_families` option. Run with and without the cross-encoder, which can become the final order. Reject if history or conflict queries regress. Depends on BL-004. |
@@ -37,3 +36,4 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 |---|---|---|---|
 | BL-000 | bug | MCP tools silently ignored unknown arguments | e51eb32 (all tools now reject an unknown argument and name it) |
 | BL-002 | feature | Per-candidate ranking diagnostics for `search_memory` (Phase A) | 93520a5 (spec `docs/SPEC-SEARCH-RANKING-DIAGNOSTICS.md`, 34ca32d); `return_diagnostics` is now on the MCP tool |
+| BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | 88a87a0 (spec `docs/SPEC-GET-MEMORY-MEMORY-ID-ALIAS.md`, 6cd8398); `get_memory` only, other tools unchanged |

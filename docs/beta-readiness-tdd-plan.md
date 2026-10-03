@@ -1,4 +1,10 @@
 # Beta readiness fixes: TDD handoff
+> **Historical/superseded (2026-10-03).** This handoff records a point-in-time review of
+> `develop` at `063c1a2`. Subsequent releases shipped the private-memory access checks,
+> pytest plus `hooks/tests/` verification and CI coverage (including `develop`), release
+> gates, and the `agent_id` rename. Keep the body below as history; use current source and
+> `./verify` for live status.
+
 
 Prepared 2026-09-22 from read-only review of `develop` at `063c1a2`. This is a
 plan, not a claim that the findings have been fixed. Recheck HEAD and the working

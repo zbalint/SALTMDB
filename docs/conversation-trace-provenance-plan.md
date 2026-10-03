@@ -7,6 +7,11 @@ in §9 below). Four research passes, direct fetches of the current Codex and Cla
 documentation, and two live empirical hook tests (one per harness) ground this document. Two
 open decisions remain, listed in §16 — resolve those, then run a `spec-writing` pass before
 handing anything to OMP.
+> **Phase 1 shipped (2026-09-29).** The implementation and current behavior are documented in
+> [architecture.md §9](architecture.md#9-conversation-trace-provenance). This plan remains a
+> historical design record; DDL and assumptions explicitly marked **SUPERSEDED** below are
+> retained for provenance, not as the current schema or API contract.
+
 
 Naming: the feature is called **traces** throughout (not "turns"), reviving the term from an
 earlier, never-locked 2026-09-15 design discussion (memory `e62d47ee`).
@@ -20,8 +25,9 @@ already-connected adapter, so the write inherits the adapter's trusted `agent_se
 **empirically confirmed on both Codex and Claude Code**, not just architecturally inferred. Several
 other assumptions in the original brief needed correction along the way:
 
-1. **No existing hook has ever performed a SALTMDB write.** Today's 11 hook scripts are read-only
-   CLI wrappers or local nudges that get the *agent* to call tools itself. This is first-of-its-kind.
+1. **SUPERSEDED (Phase 1 shipped 2026-09-29; see architecture §9):** The plan-era claim was
+   "No existing hook has ever performed a SALTMDB write." The shipped native `mcp_tool` capture
+   path now writes trace rows through the adapter.
 2. **The daemon already runs a real capability-token handshake per session** (`hello` RPC → token →
    HMAC-checked on every call) — not pure client-side trust. No new trust mechanism is needed.
 3. **`retrieval_text` is a column on `entities`, not a separate table.**
@@ -73,9 +79,11 @@ request from the earlier research-fork transcripts if needed during spec-writing
   fixed-signature, `k=60`). `get_memory`'s read-path gap (missing `agent_session_id` exposure) is
   fixed on `develop`. Strict-mode abstention (`ranking.py` `accept_or_abstain`) has no slot for a
   trace-only evidence signal today — see §12.
-- **Hooks**: no existing hook writes to SALTMDB (§0.1). Conventions: pure Python, alias-tolerant
-  field lookup, one JSON payload carrying every harness's expected keys, per-session state in
-  `~/.saltmdb/hooks/.state/`, four documented Windows-specific bugs already fixed once.
+- **Hooks (SUPERSEDED plan-era state):** The plan-era statement that no existing hook writes to
+  SALTMDB is retained as history; the shipped native `mcp_tool` capture path writes traces.
+  Historical conventions were pure Python, alias-tolerant field lookup, one JSON payload carrying
+  every harness's expected keys, per-session state in `~/.saltmdb/hooks/.state/`, and four
+  documented Windows-specific bugs already fixed once.
 - **Viewer**: `src/saltmdb/viewer/routes/entity_detail.py`'s `get_entity_detail()` (backing
   `GET /api/entities/{id}`) returns a curated dict including `agent_session_id`/
   `last_touched_session_id` and a bounded `relations` preview — the natural slot for a bounded
@@ -153,8 +161,9 @@ Two new tables in Phase 1:
 CREATE TABLE IF NOT EXISTS conversation_traces (
     id TEXT PRIMARY KEY,                    -- uuid6.uuid7(), chronologically sortable
     agent_session_id TEXT NOT NULL,         -- adapter-injected, trusted, never caller-suppliable
-    owner_id TEXT NOT NULL,                 -- mirrors entities.owner_id for scope filtering
-    harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code')),
+    owner_id TEXT NOT NULL,                 -- SUPERSEDED: shipped schema uses agent_id
+    harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code')), -- SUPERSEDED: shipped set is
+                                                -- codex, claude_code, omp, copilot
     harness_session_id TEXT NOT NULL,       -- untrusted correlation key
     harness_turn_id TEXT NOT NULL,          -- turn_id (Codex) / prompt_id (Claude Code); untrusted
     status TEXT NOT NULL CHECK(status IN ('pending','completed','incomplete')),
@@ -169,7 +178,7 @@ CREATE TABLE IF NOT EXISTS conversation_traces (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_traces_session_harnessturn
     ON conversation_traces(agent_session_id, harness_turn_id);
-CREATE INDEX IF NOT EXISTS idx_traces_owner_status ON conversation_traces(owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_traces_owner_status ON conversation_traces(owner_id, status); -- SUPERSEDED: shipped schema uses idx_traces_agent_status(agent_id, status).
 
 CREATE TABLE IF NOT EXISTS trace_memory_links (
     id TEXT PRIMARY KEY,
@@ -192,7 +201,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tracelinks_idem
   tool.
 - **No size cap, no truncation, anywhere in the write path** — see §9. This was explicitly
   corrected mid-design: capture the complete text always.
-- `owner_id` is stamped and filtered on every read path exactly like `entities` — see §8.
+- **SUPERSEDED (2026-09-29):** The plan-era requirement to stamp and filter traces by `owner_id`
+  is retained as history; shipped traces use `agent_id` for attribution and cross-agent reads.
 - **Abandonment detection is event-driven, not purely timeout-based.** A background sweep marks a
   `pending` trace `incomplete` when its `agent_session_id` shows up in `_agent_sessions` with
   `ended_at IS NOT NULL` (either `ended_reason`) — this is a real signal the daemon already
@@ -272,12 +282,14 @@ project's no-redaction stance (§8). No cleanup job, no config knob for this in 
   explicitly.
 - `agent_session_id` on `conversation_traces` follows the same non-caller-suppliable convention as
   every write tool — no new trust mechanism for Option A (§3).
-- **SUPERSEDED (2026-09-29): trace reads are now cross-agent** -- `owner_id` is attribution, not access control (private scope is an agent's own per-memory choice; traces are auto-captured with no such choice). The bullet below is kept for history only; do not re-add owner filters to trace reads. Writes stay bound to the writing agent.
-- **Owner/scope isolation is non-negotiable here, not optional** — the two most recent commits on
-  this codebase before this investigation (`7bd34c3`, `56950d2`) were both fixes for exactly this
-  class of bug (cross-owner private-memory disclosure). Every new read path (`search_traces`,
-  `get_trace`, the `trace_provenance`/`trace_evidence_count` hints) must filter by `owner_id`/
-  `scope` with the same rigor from the first line of code.
+- **SUPERSEDED (2026-09-29): trace reads are now cross-agent** -- `agent_id` is attribution, not
+  access control (private scope is an agent's own per-memory choice; traces are auto-captured with
+  no such choice). The bullet below is kept for history only; do not re-add owner filters to trace
+  reads. Writes stay bound to the writing agent.
+- **SUPERSEDED (2026-09-29):** The owner/scope-isolation requirement below is retained as plan
+  history only. It originally required every new read path (`search_traces`, `get_trace`, the
+  `trace_provenance`/`trace_evidence_count` hints) to filter by `owner_id`/`scope`; shipped trace
+  reads are cross-agent and use `agent_id` only for attribution.
 - **No secret redaction — explicit, deliberate policy decision** (stored as SALTMDB memory
   `6233e904`, revised once). zbalint's reasoning: all captured content — both the user's prompt
   and the agent's response — already passed through the AI provider's servers regardless of which
