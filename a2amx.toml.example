@@ -1,0 +1,13 @@
+# Template for a2amx.toml (gitignored). Used by `a2amx team up` / `a2amx team down`.
+# Session names are unique per daemon and shared by every project on the machine, so keep the
+# project prefix. At most one session may have attach = true. command is an argv array.
+
+[[session]]
+name = "saltmdb-architect"
+command = ["claude"]
+attach = true
+
+[[session]]
+name = "saltmdb-developer"
+command = ["omp"]
+cwd = "."
