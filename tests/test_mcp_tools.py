@@ -1800,6 +1800,39 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
             memory["data"]["id"],
         )
 
+    async def test_search_memory_flagged_call_returns_candidate_diagnostics(self):
+        memory = tools.store_memory(
+            title="Diagnostics flagged MCP record",
+            content="distinctive diagnosticmcp keyword for ranking diagnostics",
+        )
+        result = await tools.mcp.call_tool(
+            "search_memory",
+            {"query_keywords": "diagnosticmcp", "return_diagnostics": True},
+        )
+        payload = json.loads(result[0].text)
+        self.assertEqual(
+            {row["id"] for row in payload["results"]},
+            {memory["data"]["id"]},
+        )
+        self.assertTrue(payload["diagnostics"]["candidates"])
+
+    async def test_search_memory_default_wire_shape_has_no_output_schema(self):
+        registered = [
+            tool for tool in await tools.mcp.list_tools() if tool.name == "search_memory"
+        ][0]
+        self.assertIsNone(registered.outputSchema)
+
+    def test_search_memory_forwards_diagnostics_flag_and_default(self):
+        capture = _CaptureBackend()
+        previous = tools._set_backend_for_test(capture)
+        try:
+            tools.search_memory(query_keywords="diagnostic-forward", return_diagnostics=True)
+            tools.search_memory(query_keywords="diagnostic-forward")
+        finally:
+            tools._set_backend_for_test(previous)
+        self.assertTrue(capture.calls[0][1]["return_diagnostics"])
+        self.assertFalse(capture.calls[1][1]["return_diagnostics"])
+
     async def test_server_first_import_rejects_unknown_query_argument(self):
         import subprocess
         import sys

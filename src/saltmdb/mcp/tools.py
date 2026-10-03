@@ -625,6 +625,20 @@ def store_memory(
     call get_memory, never a substitute for it -- absence of a detail from the preview is not
     evidence it's absent from the memory) or `drift_flag` (advisory only, re-verify the citation
     yourself rather than trusting either the flag or the original claim).
+
+    return_diagnostics=True changes the return shape from a list of results to
+    `{"results": [...], "diagnostics": {...}}`; when omitted or false, the default return
+    shape is unchanged. `diagnostics["candidates"]` carries the per-candidate evidence fields
+    (`entity_id`, `provenance`, `rrf_score`, `in_fts`, `in_fts_and`, `in_fts_or_only`, `fts_rank`,
+    `fts_bm25`, `in_semantic`, `semantic_rank`, `semantic_distance`, `dual_channel`, `topic_score`,
+    `semantic_verdict`, `is_resolved_head`, `predecessor_grounded`, `cross_encoder_score`,
+    `pool_rank`, and `final_rank`), capped at 50 records; `candidate_pool_size` reports the
+    uncapped pool count. These records contain ids and numbers only, never memory text; use
+    get_memory for content. `final_rank` is absolute across the full ordered pool, and `None`
+    means the candidate was dropped after ranking.
+    When chunk or retrieval-text candidate channels are enabled, `rrf_score` includes channels
+    not represented by `fts_rank` and `semantic_rank`, so those ranks alone cannot reproduce it.
+    Use this opt-in flag to investigate ranking, not for ordinary retrieval.
     """
 )
 def search_memory(
@@ -639,7 +653,8 @@ def search_memory(
     is_core: bool | None = None,
     include_related: bool | None = None,
     mode: Literal["strict", "broad", "history"] | None = None,
-) -> list:
+    return_diagnostics: bool | None = None,
+) -> Any:
     agent_id_ = _effective_agent_id()
     tags_filter_ = _normalize_list_or_str(tags_filter) if tags_filter else None
 
@@ -657,6 +672,7 @@ def search_memory(
             "cursor": cursor,
             "mode": mode if mode is not None else "broad",
             "include_related": include_related if include_related is not None else True,
+            "return_diagnostics": return_diagnostics if return_diagnostics is not None else False,
         },
     )
 
@@ -1762,6 +1778,8 @@ def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
             "agent_id": _effective_agent_id(),
         },
     )
+
+
 # Reject misspelled tool arguments instead of silently taking a browse/default path.
 # shortcut: private FastMCP API, replace if the pinned mcp version changes it.
 for _tool in mcp._tool_manager.list_tools():

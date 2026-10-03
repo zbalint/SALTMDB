@@ -7,6 +7,7 @@ tests cover legacy topic/supersession behavior; this file targets only the newly
 
 import os
 import importlib.util
+import json
 import pathlib
 import shutil
 import sqlite_vec
@@ -25,6 +26,8 @@ from saltmdb.domain.services.memory_service import (
     reciprocal_rank_fusion,
     search_memory,
     weighted_reciprocal_rank_fusion,
+    get_last_search_diagnostics,
+    orchestrator,
 )
 
 
@@ -245,6 +248,175 @@ class TestSupersedesFamilyCollapse(_DbFixture):
                 collapse_supersedes_families=True,
                 db_path=self.db_path,
             )
+
+
+class TestSearchRankingDiagnostics(_DbFixture):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.object(embedding_service, "embed_text", return_value=_axis(0)))
+        self.enterContext(
+            patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False)
+        )
+        for eid in ("alpha", "beta", "gamma"):
+            self.entity(eid, content=f"diagnosticquery evidence for {eid}")
+
+    def test_broad_candidate_records_describe_full_result_order(self):
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        self.assertEqual(set(result), {"results", "diagnostics"})
+        candidates = result["diagnostics"]["candidates"]
+        expected_keys = {
+            "entity_id",
+            "provenance",
+            "rrf_score",
+            "in_fts",
+            "in_fts_and",
+            "in_fts_or_only",
+            "fts_rank",
+            "fts_bm25",
+            "in_semantic",
+            "semantic_rank",
+            "semantic_distance",
+            "dual_channel",
+            "topic_score",
+            "semantic_verdict",
+            "is_resolved_head",
+            "predecessor_grounded",
+            "cross_encoder_score",
+            "pool_rank",
+            "final_rank",
+        }
+        self.assertEqual({row["id"] for row in result["results"]}, {"alpha", "beta", "gamma"})
+        self.assertEqual(result["diagnostics"]["candidate_pool_size"], 3)
+        for index, candidate in enumerate(candidates):
+            self.assertEqual(set(candidate), expected_keys)
+            self.assertEqual(candidate["pool_rank"], index)
+            self.assertEqual(candidate["fts_rank"], index)
+        surviving = sorted(
+            (candidate for candidate in candidates if candidate["final_rank"] is not None),
+            key=lambda candidate: candidate["final_rank"],
+        )
+        self.assertEqual(
+            [candidate["entity_id"] for candidate in surviving],
+            [row["id"] for row in result["results"]],
+        )
+        json.dumps(result)
+
+    def test_flag_off_leaves_candidate_diagnostics_empty(self):
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        self.assertIsInstance(result, list)
+        diagnostics = get_last_search_diagnostics()
+        self.assertEqual(diagnostics["candidates"], [])
+        self.assertEqual(diagnostics["candidate_pool_size"], 0)
+
+    def test_candidate_diagnostics_are_capped_but_pool_count_is_uncapped(self):
+        with patch.object(orchestrator, "SEARCH_DIAGNOSTICS_MAX_CANDIDATES", 2):
+            result = search_memory(
+                query_keywords="diagnosticquery",
+                limit=10,
+                return_diagnostics=True,
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+        assert isinstance(result, dict)
+        diagnostics = result["diagnostics"]
+        self.assertEqual(len(diagnostics["candidates"]), 2)
+        self.assertGreater(diagnostics["candidate_pool_size"], 2)
+
+    def test_candidate_diagnostics_contain_no_memory_text(self):
+        phrase = "diagnostics-must-not-leak-this-distinctive-text"
+        self.entity("secret", content=f"diagnosticquery {phrase}")
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        self.assertNotIn(phrase, json.dumps(result["diagnostics"]))
+
+    def test_cross_encoder_scores_are_recorded_in_pool_order(self):
+        scores = [0.1, 0.3, 0.2]
+        with (
+            patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+            patch.object(reranker_service, "score_pairs", return_value=scores),
+            patch.object(reranker_service, "get_last_score_diagnostics", return_value={}),
+        ):
+            result = search_memory(
+                query_keywords="diagnosticquery",
+                limit=10,
+                return_diagnostics=True,
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+        assert isinstance(result, dict)
+        candidates = result["diagnostics"]["candidates"]
+        self.assertEqual(
+            [candidate["cross_encoder_score"] for candidate in candidates],
+            sorted(scores, reverse=True),
+        )
+        self.assertEqual(
+            [candidate["pool_rank"] for candidate in candidates],
+            list(range(len(candidates))),
+        )
+
+    def test_strict_diagnostics_include_every_returned_id(self):
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            mode="strict",
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        candidate_ids = {
+            candidate["entity_id"] for candidate in result["diagnostics"]["candidates"]
+        }
+        self.assertTrue({row["id"] for row in result["results"]} <= candidate_ids)
+
+    def test_history_diagnostics_include_pool_records(self):
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            mode="history",
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        self.assertTrue(result["diagnostics"]["candidates"])
+
+    def test_collapsed_member_keeps_evidence_with_no_final_rank(self):
+        self.entity("old", content="diagnosticquery superseded member")
+        self.entity("new", content="diagnosticquery superseding head")
+        self.relation("new", "old")
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            collapse_supersedes_families=True,
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        by_id = {
+            candidate["entity_id"]: candidate for candidate in result["diagnostics"]["candidates"]
+        }
+        self.assertIsInstance(by_id["new"]["final_rank"], int)
+        self.assertIsNone(by_id["old"]["final_rank"])
 
 
 class TestCrossEncoderControls(_DbFixture):

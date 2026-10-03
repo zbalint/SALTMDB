@@ -14,13 +14,14 @@ deferred follow-up work, see the refactor plan's section 3.
 
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from saltmdb.config import (
     get_db_path,
     STRICT_OVERFETCH_CANDIDATE_CAP,
     RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS,
     RELEVANCE_PREVIEW_WARNING_PREFIX,
+    SEARCH_DIAGNOSTICS_MAX_CANDIDATES,
 )
 from saltmdb.db.connection import get_connection, close_connection
 from saltmdb.utils.text import sanitize_fts_query, extract_title_and_snippet
@@ -182,6 +183,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             "execution_count": 0,
             "reason": None,
         },
+        "candidates": [],
+        "candidate_pool_size": 0,
     }
 
     should_close = False
@@ -662,7 +665,9 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             # block -- deterministic fallback to current behavior, no widening.
 
                         superseded_ids_: set = set()
-                        if mode == "strict":
+                        pool_order = list(ranked_pool_)
+                        evidence_map = None
+                        if mode == "strict" or return_diagnostics:
                             evidence_map = ranking._build_candidate_evidence(
                                 ranked_pool_,
                                 rrf_map,
@@ -674,6 +679,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 cross_encoder_scores_map_,
                                 used_or_fallback=used_or_fallback_,
                             )
+                        evidence_map = cast(dict[str, dict[str, Any]], evidence_map)
+                        if mode == "strict":
                             accepted_pool = []
                             for eid in ranked_pool_:
                                 ok, reason = ranking.accept_or_abstain(evidence_map[eid])
@@ -723,6 +730,19 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 "before_count": before_collapse,
                                 "after_count": len(ranked_pool_),
                             }
+                        if return_diagnostics:
+                            final_rank = {eid: i for i, eid in enumerate(ranked_pool_)}
+                            diagnostics["candidate_pool_size"] = len(pool_order)
+                            diagnostics["candidates"] = [
+                                {
+                                    **evidence_map[eid],
+                                    "pool_rank": i,
+                                    "final_rank": final_rank.get(eid),
+                                }
+                                for i, eid in enumerate(
+                                    pool_order[:SEARCH_DIAGNOSTICS_MAX_CANDIDATES]
+                                )
+                            ]
                     else:
                         ranked_pool_ = []
                         superseded_ids_ = set()

@@ -160,6 +160,11 @@ RERANK_SAME_TOPIC_THRESHOLD = 0.7680  # topic_score >= this -> "SAME_SPECIFIC_TO
 RERANK_BROAD_THEME_THRESHOLD = (
     0.5322  # topic_score >= this (and below SAME_TOPIC) -> "BROADLY_RELATED_THEMES"
 )
+# Upper bound on per-candidate records search_memory attaches to diagnostics["candidates"] when
+# return_diagnostics=True. Bounds response size for strict mode, whose overfetch pool can reach
+# STRICT_OVERFETCH_CANDIDATE_CAP (200); ordinary broad/history pools are RERANK_CANDIDATE_POOL_SIZE.
+SEARCH_DIAGNOSTICS_MAX_CANDIDATES = 50
+
 # Query-focused extractive preview for search_memory results (relevance_preview /
 # relevance_preview_meta fields). Reuses entity_chunk_embeddings (CHUNK_SIZE_CHARS,
 # CHUNK_OVERLAP_CHARS above) via a new sibling function to rerank_candidates_by_topic --
