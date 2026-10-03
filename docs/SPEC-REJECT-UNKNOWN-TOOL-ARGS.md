@@ -6,15 +6,15 @@
 
 - Location/branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`. Use the repo `.venv` (`.venv/bin/python -m pytest`), never system python.
 - Test seam: `tools.mcp.call_tool(name, arguments)` (the real FastMCP entry point, as already used in `tests/test_mcp_tools.py:1191`).
-- Scope (may edit): `src/saltmdb/mcp/server.py`, `tests/test_mcp_tools.py` (add tests only).
-- Does not touch: `src/saltmdb/mcp/tools.py`, `src/saltmdb/daemon/**` (daemon dispatch and the `hooks/` RPC path), `domain/**`, hooks, skills.
+- Scope (may edit): `src/saltmdb/mcp/tools.py` (append at end of file only), `tests/test_mcp_tools.py` (add tests only). `server.py` is NOT edited (see Amendment 1).
+- Does not touch: `src/saltmdb/mcp/server.py`, any other part of `tools.py`, `src/saltmdb/daemon/**` (daemon dispatch and the `hooks/` RPC path), `domain/**`, hooks, skills.
 - Developer leaves everything uncommitted; architect reviews and commits.
 
 ## 1. Why
 
 A peer architect called `search_memory` with `query="..."` (the real parameter is `query_keywords`). FastMCP built the argument model with pydantic's default `extra="ignore"`, so the unknown key was dropped, `query_keywords` became `None`, and the call silently took the no-query browse path (`orchestrator.py` ~L863: newest-first, score 0.0, cursor `offset:5`). The result looked like a normal search and the caller concluded search was insensitive to its query. Verified by probe 2026-10-03: `FastMCP.call_tool("f", {"query": "hello"})` ran with `query_keywords=None` and no error; after setting `extra="forbid"` on each tool's `fn_metadata.arg_model` and `model_rebuild(force=True)`, the same call on the real `search_memory` raised `ToolError` naming the field: `Extra inputs are not permitted` for `query`. The same silent drop affects all 24 registered tools (a wrong or stale name such as `owner_id` vanishes silently).
 
-## 2. `src/saltmdb/mcp/server.py`
+## 2. SUPERSEDED by Amendment 1 (original text kept as history; do NOT implement it in server.py)
 
 After the existing line (currently the last statement of the file, ~L66):
 
@@ -59,5 +59,19 @@ Baseline at lock time (before any change), run by the architect in the main chec
 1. `.venv/bin/python -m pytest tests/test_mcp_tools.py -q` -> all pass, including the three new tests.
 2. `.venv/bin/python -m pytest tests/test_mcp_tools.py tests/test_phase3_mcp_surface.py tests/test_phase4_mcp_surface.py tests/test_trace_mcp_tools.py tests/test_retrieve_context_wiring.py -q` -> 150 + the new tests, 0 failed.
 3. Full repo test suite under `.venv` (the repo's documented command) -> no new failures; any failure must be shown to pre-exist (`git stash` comparison) or fixed in scope. If a pre-existing test or caller passes an unknown argument to a tool through `call_tool`, that is a material finding: stop, report `BLOCKED — SPEC ADJUDICATION REQUIRED` with the call; do not widen scope.
-4. `git diff --stat` shows only `src/saltmdb/mcp/server.py` and `tests/test_mcp_tools.py`.
+4. `git diff --stat` shows only `src/saltmdb/mcp/tools.py` and `tests/test_mcp_tools.py`.
 5. Report the new test count, and one manual proof: `mcp.call_tool("search_memory", {"query": "x"})` raises with `query` named.
+
+## Amendment 1 (2026-10-03): enforcement moves to the end of `tools.py`
+
+Trigger: developer BLOCKED (m_193). Verified by architect: `tools.py:10` does `from saltmdb.mcp.server import mcp`, and the real entry (`src/saltmdb/__main__.py:57-58`) and `tests/test_mcp_tools.py:9` import `tools` first. Then `server.py` executes while `tools` is only partially initialised, its line-66 `from saltmdb.mcp import tools` returns immediately, and a loop at the tail of `server.py` sees ZERO registered tools. My original probe imported `server` first, which reverses the order, so it saw 24. The server-tail placement in section 2 is therefore wrong; the architect's pre-lock probe covered only one import order.
+
+Decision: put the loop at the END of `src/saltmdb/mcp/tools.py`, as module-level statements after the last `@mcp.tool()` function (currently ending at the `update_memory_metadata`-style final tool, last decorator at ~L1735). It runs when `tools` finishes executing, by which point all 24 tools are registered, whichever module is imported first (`mcp` is the same object either way). Code, unchanged from section 2, with its comment and `# shortcut:` marker:
+
+```python
+for _tool in mcp._tool_manager.list_tools():
+    _tool.fn_metadata.arg_model.model_config["extra"] = "forbid"
+    _tool.fn_metadata.arg_model.model_rebuild(force=True)
+```
+
+Rules from section 2 (no wrapper function, shortcut comment, default error text) still apply. Edit scope is now `src/saltmdb/mcp/tools.py` (append only, no other line touched) and `tests/test_mcp_tools.py` (add only); `server.py` is untouched. Section 3 tests are unchanged and must pass for both import orders: add one test that runs a fresh subprocess (argument list, no shell) importing `saltmdb.mcp.server` FIRST and asserting `search_memory` with `{"query": "x"}` raises `ToolError`, in addition to the in-process test (which imports `tools` first). Acceptance section 5 is otherwise unchanged except item 4 (already updated above).
