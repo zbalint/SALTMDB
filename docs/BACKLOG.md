@@ -26,7 +26,6 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-005 | experiment | Lineage-head tie-break (Phase C) | open | Benchmark-only. Baseline arm must include the existing `collapse_supersedes_families` option. Run with and without the cross-encoder, which can become the final order. Reject if history or conflict queries regress. Depends on BL-004. |
 | BL-006 | idea | Evidence-origin metadata on memories (Phase E) | needs-owner | Would reverse the recorded decision in `docs/architecture.md` (conversation-trace section) that prompt origin is handled in agent instructions, not in SALTMDB code. Needs an explicit decision to reopen; capture origin at write time, never infer it from trace text. |
 | BL-007 | bug | Stop hooks fire on investigation-only turns; digest labels ended sessions "running" | open | Retrieval-outcome and self-critique gates add little when a turn only investigates. Hooks are managed from `~/.agents`; any change goes through that repo first. Not triaged. |
-| BL-008 | chore | Confirm Dependabot alerts cleared after the lockfile bump | open | Lockfile bumped in 693c0bf and pushed to `develop` and `master`. Alerts were still listed right after the push (likely a stale rescan). One medium `PyJWT` alert had no patched version at the time. Check https://github.com/zbalint/SALTMDB/security/dependabot. |
 | BL-010 | idea | Unknown-argument error could suggest the closest valid parameter name | open | Was left out of scope in the reject-unknown-arguments change. A `did you mean entity_id?` hint would cover the `memory_id` mistake on every tool without aliases. Compare with BL-001 before building either. |
 
 ## Closed
@@ -37,3 +36,4 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-002 | feature | Per-candidate ranking diagnostics for `search_memory` (Phase A) | 93520a5 (spec `docs/SPEC-SEARCH-RANKING-DIAGNOSTICS.md`, 34ca32d); `return_diagnostics` is now on the MCP tool |
 | BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | 88a87a0 (spec `docs/SPEC-GET-MEMORY-MEMORY-ID-ALIAS.md`, 6cd8398); `get_memory` only, other tools unchanged |
 | BL-009 | chore | Merge `develop` to `master` and push so `./verify` is green there | 3dcd37d (owner authorized; `master` fast-forwarded and pushed, `./verify` green) |
+| BL-008 | chore | Confirm Dependabot alerts cleared after the lockfile bump | 693c0bf (owner confirmed 2026-10-03 the Dependabot alert list is empty) |
