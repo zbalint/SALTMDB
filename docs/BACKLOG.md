@@ -27,7 +27,6 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-006 | idea | Evidence-origin metadata on memories (Phase E) | needs-owner | Would reverse the recorded decision in `docs/architecture.md` (conversation-trace section) that prompt origin is handled in agent instructions, not in SALTMDB code. Needs an explicit decision to reopen; capture origin at write time, never infer it from trace text. |
 | BL-007 | bug | Stop hooks fire on investigation-only turns; digest labels ended sessions "running" | open | Retrieval-outcome and self-critique gates add little when a turn only investigates. Hooks are managed from `~/.agents`; any change goes through that repo first. Not triaged. |
 | BL-010 | idea | Unknown-argument error could suggest the closest valid parameter name | open | Was left out of scope in the reject-unknown-arguments change. A `did you mean entity_id?` hint would cover the `memory_id` mistake on every tool without aliases. Compare with BL-001 before building either. |
-| BL-011 | bug | Bootstrap digest and handover go empty after 10 content-free sessions in one directory | in-progress | Owner-reported 2026-10-03. Spec `docs/SPEC-BOOTSTRAP-EMPTY-SESSION-WINDOW.md`. Filter sessions by content in SQL (split `EXISTS` per column) and add a partial index on `entities(last_touched_session_id)`. Follow-up to the sibling-session fix; BL-007 is related but separate. |
 
 ## Closed
 
@@ -38,3 +37,4 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | 88a87a0 (spec `docs/SPEC-GET-MEMORY-MEMORY-ID-ALIAS.md`, 6cd8398); `get_memory` only, other tools unchanged |
 | BL-009 | chore | Merge `develop` to `master` and push so `./verify` is green there | 3dcd37d (owner authorized; `master` fast-forwarded and pushed, `./verify` green) |
 | BL-008 | chore | Confirm Dependabot alerts cleared after the lockfile bump | 693c0bf (owner confirmed 2026-10-03 the Dependabot alert list is empty) |
+| BL-011 | bug | Bootstrap digest and handover go empty after 10 content-free sessions in one directory | c13c53d (spec `docs/SPEC-BOOTSTRAP-EMPTY-SESSION-WINDOW.md`, 9a35d56); sessions are filtered by content in SQL and `entities(last_touched_session_id)` has a partial index. A running MCP server needs a restart from a checkout at or after c13c53d |
