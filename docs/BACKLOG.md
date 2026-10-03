@@ -27,6 +27,7 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-006 | idea | Evidence-origin metadata on memories (Phase E) | needs-owner | Would reverse the recorded decision in `docs/architecture.md` (conversation-trace section) that prompt origin is handled in agent instructions, not in SALTMDB code. Needs an explicit decision to reopen; capture origin at write time, never infer it from trace text. |
 | BL-007 | bug | Stop hooks fire on investigation-only turns; digest labels ended sessions "running" | open | Retrieval-outcome and self-critique gates add little when a turn only investigates. Hooks are managed from `~/.agents`; any change goes through that repo first. Not triaged. |
 | BL-010 | idea | Unknown-argument error could suggest the closest valid parameter name | open | Was left out of scope in the reject-unknown-arguments change. A `did you mean entity_id?` hint would cover the `memory_id` mistake on every tool without aliases. Compare with BL-001 before building either. |
+| BL-011 | bug | Bootstrap digest and handover go empty after 10 content-free sessions in one directory | in-progress | Owner-reported 2026-10-03. Spec `docs/SPEC-BOOTSTRAP-EMPTY-SESSION-WINDOW.md`. Filter sessions by content in SQL (split `EXISTS` per column) and add a partial index on `entities(last_touched_session_id)`. Follow-up to the sibling-session fix; BL-007 is related but separate. |
 
 ## Closed
 
