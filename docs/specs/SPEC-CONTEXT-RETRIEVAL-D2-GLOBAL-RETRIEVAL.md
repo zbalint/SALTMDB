@@ -92,7 +92,7 @@ restated only to the depth needed to implement):
    `search_memory`'s broad mode either. Seeding is unconditional best-effort top-K: there is no
    minimum-similarity abstention floor in v1 (deferred to post-ship real-usage evidence —
    do not add one as a "safety" addition this spec was never asked
-   for).
+   for.
 3. **Synthesis (constraint 26)**: within a selected leaf, members are ranked by
    query-embedding-similarity (not centrality, not similarity to the leaf's own centroid) and
    packed via the existing G8 real-token budget packer (`pack_context_budget`, extended in §4, never

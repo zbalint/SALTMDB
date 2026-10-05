@@ -470,10 +470,10 @@ code) — this module is still unmerged (`feature/context-retrieval-a2` @ `295e7
 does that, and simultaneously extracts the classification logic into its own function so that
 Milestone A slice A3 (lineage assembly, `SPEC-CONTEXT-RETRIEVAL-A3-LINEAGE-ASSEMBLY.md`) can reuse
 the exact same resolved/unresolved verdict rather than re-deriving a second, possibly-divergent
-one — closing a related gap surfaced in A3's own design review (a component A2 classifies
+one — closing a related gap surfaced in A3's own design review; a component A2 classifies
 `unresolved` must never simultaneously get flagged inside A3's `lineage` output; sharing this one
 function is what guarantees that by construction, not by two independently-written checks agreeing
-by luck).
+by luck.
 
 **Why extraction, not just a bugfix in place**: A3 needs the identical "is this contradicts pair
 lifecycle-resolved" answer A2 already computes. Two independently-written versions of the same

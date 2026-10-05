@@ -71,8 +71,8 @@ Leiden on the induced subgraph of any oversized community. This reopens and reve
 constraint 20, which deferred hierarchy to Milestone D; that condition is now empirically met,
 not hypothetical.
 
-This spec implements standing constraint 25 in full, plus the one project-wide side effect resolving the open
-C.5 gap requires a change to already-shipped Milestone C.5 code (§5 below) — C.5's live orphan-to-community
+This spec implements standing constraint 25 in full, plus the one project-wide side effect needed to resolve the open
+C.5 gap: a change to already-shipped Milestone C.5 code (§5 below) — C.5's live orphan-to-community
 centroid lookup
 was written and locked before hierarchy had any concrete shape, under an implicit assumption that
 "every row in `community_embeddings` is a valid match target." Once this spec starts writing

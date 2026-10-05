@@ -56,7 +56,7 @@ This is Milestone C.5 ("orphan-to-community assignment") of the
 explicit edges cannot, by construction, help a **zero-edge** memory;
 the failure mode that drove Milestone C's own greenlight in the first place — a same-topic memory with
 no explicit graph edge to its topic-mates, only recoverable today by plain FTS/vector relevance
-luck). This spec implements standing constraint 16 in full, plus half of constraint 23 (spec-lock-before-
+luck. This spec implements standing constraint 16 in full, plus half of constraint 23 (spec-lock-before-
 calibration ordering, mirroring the sibling Milestone C spec's own treatment of that same
 constraint).
 
