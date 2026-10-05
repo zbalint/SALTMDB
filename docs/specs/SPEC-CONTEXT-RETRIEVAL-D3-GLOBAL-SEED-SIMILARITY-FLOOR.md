@@ -37,8 +37,8 @@ exist (live DNS-query repro: 54 eligible communities, only a handful relevant).
 
 **Why this isn't a one-line patch.** `config.py`'s own constraint-27 comment states the missing
 floor was a *deliberate* choice: `local` strategy's strict, multi-signal abstention gate —
-requires strong lexical support or dual-channel FTS+vector corroboration, not a raw
-similarity threshold already caused a real false-negative production bug, returning `[]` for a
+which requires strong lexical support or dual-channel FTS+vector corroboration, not a raw
+similarity threshold — already caused a real false-negative production bug, returning `[]` for a
 legitimate broad natural-language query (the original DNS-incident query).
 The query's design rationale is that `retrieve_context` must return useful context.
 Constraint 27 explicitly avoided adding "a second uncalibrated threshold in the
