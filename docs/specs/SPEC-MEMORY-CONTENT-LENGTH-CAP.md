@@ -2,22 +2,22 @@
 
 ## 1. Why
 
-A live incident chain this session (SALTMDB memories `575286de`, `badbda38`/`e9e0a617`,
-`d50aabb3`/`3d82d315`, `b93ad8a5`, `794e2743`) traced a recurring WSL2 host freeze back to
+A live incident chain this session (the recorded incident reports)
+traced a recurring WSL2 host freeze back to
 `saltmdb.domain.services.embedding_service.embed_texts()` being called with a large, unchunked
 single batch — the whole chunk list for one memory's content, passed in one call, no size guard.
-A deliberately reproduced test (`b93ad8a5`) confirmed the failure trigger sits around
+A deliberately reproduced test confirmed the failure trigger sits around
 `n_chunks≈400` (roughly 400,000 characters of content, at this project's
 `CHUNK_SIZE_CHARS=1200`/`CHUNK_OVERLAP_CHARS=200` → ~1000-char stride per chunk), under
 worst-case stacked memory pressure on a 4GB-capped WSL2 host.
 
-zbalint's decision (this session, in conversation, not yet in code): cap memory content at write
+The owner's decision (this session, in conversation, not yet in code): cap memory content at write
 time to 40,000 characters (~40 chunks) — roughly 10x below the measured worst-case trigger, and
 well above the largest content this project's chunking benchmarks have exercised. Two follow-up
-questions were resolved explicitly by zbalint in the same conversation:
+questions were resolved explicitly by the owner in the same conversation:
 
-1. **Existing over-cap memories** (30 confirmed in production, largest 128,605 chars — see
-   `21282b46`): accepted as-is. This spec protects new writes only; no backfill, no migration,
+1. **Existing over-cap memories** (30 confirmed in production, largest 128,605 chars): accepted as-is.
+   This spec protects new writes only; no backfill, no migration,
    no retroactive check against existing rows.
 2. **The consolidation side-door**: `consolidate_memories`'s `content` parameter is a plain
    caller-supplied string, not auto-assembled from parents — nothing currently stops a caller
@@ -206,7 +206,7 @@ multiplication combined with these call names. No existing test needs to change.
   calls `embed_texts()` directly (e.g. a backfill/reconcile job), and is explicitly not addressed
   here.
 - **No backfill, migration, or any check against the 30 existing memories already over 40,000
-  characters.** Per zbalint's explicit decision (§1): accepted as-is, untouched.
+  characters. Per the owner's explicit decision (§1): accepted as-is, untouched.
 - **No change to `CORE_MAX_CONTENT_CHARS` (2500) or any other existing core-governance
   constant/check** in `core_governance_service.py`. The new `MAX_MEMORY_CONTENT_CHARS` check is
   independent of and additional to the existing core-specific check, not a replacement — a

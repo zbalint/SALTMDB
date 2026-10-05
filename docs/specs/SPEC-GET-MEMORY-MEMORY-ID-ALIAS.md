@@ -4,7 +4,7 @@
 
 **LOCKED** (2026-10-03). Backlog item BL-001. Context: `saltmdb-bl001-get-memory-alias-2026-10-03`.
 
-- Location/branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`. Use the repo `.venv`, never system python.
+- Location/branch: main checkout `<repo>`, branch `develop`. Use the repo `.venv`, never system python.
 - Test seams: `tools.get_memory(...)` as a plain function (as in `tests/test_mcp_tools.py:53`) and `tools.mcp.call_tool(name, arguments)` (the real FastMCP entry, as in `tests/test_mcp_tools.py:1219` via `_call_as`).
 - Scope (may edit): `src/saltmdb/mcp/tools.py` (the `get_memory` function only, L1204-1232), `tests/test_phase3_mcp_surface.py` (one list literal, L49-52), `tests/test_mcp_tools.py` (add tests only).
 - Does not touch: `src/saltmdb/daemon/**` (dispatch, protocol), `domain/**`, every other tool in `tools.py`, hooks, skills, README and other docs (a separate docs-sweep task owns those), `docs/BACKLOG.md` (architect updates it).

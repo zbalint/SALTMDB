@@ -2,9 +2,9 @@
 
 ## 0. Status
 
-**LOCKED** (2026-10-03, architect `saltmdb-architect@desktop-aavo022`).
+**LOCKED** (2026-10-03, reviewed by the architect).
 
-- **Location / branch:** main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`
+- **Location / branch:** main checkout `<repo>`, branch `develop`
   (baseline `693c0bf`). One active writer: the developer, until handoff.
 - **Shared `context_id`:** `saltmdb-search-ranking-diagnostics-2026-10-03`.
 - **Scope (files that may be edited):**

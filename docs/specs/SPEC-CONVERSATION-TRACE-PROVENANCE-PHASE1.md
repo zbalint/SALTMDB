@@ -69,7 +69,7 @@ any existing tool's required argument shape.
 
 The full design investigation (four research passes, two live empirical hook tests confirming
 identity binding on both Claude Code and Codex, and direct reads of the current `develop` tree) is
-already complete and captured in `docs/conversation-trace-provenance-plan.md` (v2, commit
+already complete and captured in `docs/specs/conversation-trace-provenance-plan.md` (v2, commit
 `47a2765`) — this spec does not re-derive that reasoning, it operationalizes §§2–11 and §§13–15 of
 that document into exact, file-level instructions, resolving several mechanical gaps the plan left
 implicit (see §5, §7's `write_operation` resolution, and §9's owner-injection decision).
@@ -858,7 +858,7 @@ settings JSON, naming the target tool and templating its arguments from harness-
 the harness itself makes the call, over its own already-authenticated MCP connection, with no
 script in between. Plan §3 explicitly rejected the alternative (a dedicated CLI/script bridge,
 "Option B") as unneeded surface once Option A was empirically confirmed live on both harnesses
-(memories `9eb3c174` Claude Code, `f81f6361` Codex — both confirm a hook-triggered `mcp_tool` call
+(two live harness tests — both confirm a hook-triggered `mcp_tool` call
 carries the exact same `agent_session_id` as the live conversation's own in-session tool calls).
 §13 as originally locked cited this same empirical work but then contradicted its own conclusion by
 routing the actual invocation through a script anyway — that contradiction is what OMP correctly
@@ -896,7 +896,7 @@ responses — a shape that a template engine doing plain field-path lookups (`${
 cannot dereference through. Whether Claude Code's and Codex's `mcp_tool` hook templating can resolve
 a *nested* path (`tool_response.data.id`), and whether either harness delivers `tool_response` in
 the string-encoded shape for this specific `PostToolUse` case, is **not empirically confirmed** —
-the two prior live tests (`9eb3c174`, `f81f6361`) only confirmed flat, harness-level fields
+the two prior live tests only confirmed flat, harness-level fields
 (`session_id`, `turn_id`), never a nested path into the just-run tool's own response payload. If
 nested-path resolution fails silently on either harness, `capture_trace_memory_link` would receive
 an empty/literal-unsubstituted `entity_id` and gracefully no-op (per the paragraph above — never a
@@ -1089,7 +1089,7 @@ fixture (there is no script to invoke):
   shape — this feature is purely additive (plan §11).
 - A dedicated trace-browsing viewer page/route — plan §13 explicitly calls the two additions in
   §10/§11 sufficient for Phase 1; a standalone page is a nice-to-have, not built here.
-- Redaction of captured trace content — plan §8/memory `6233e904`'s standing, explicit
+- Redaction of captured trace content — plan §8's standing, explicit
   no-redaction policy; not reopened by this spec.
 - A hard `RLIMIT_AS` memory ceiling anywhere in this feature's write path — plan §9 defers this
   explicitly to Phase 2 implementation time (it only matters once trace *embedding* exists; Phase 1
@@ -1169,7 +1169,7 @@ already correctly described this file as Phase 1 work, so it required no change 
 the allowlist that was wrong, not the rationale.
 
 **Gate re-run against this amendment**: checked every other section for the same file name
-(`rg -n "codex-settings-example" docs/SPEC-CONVERSATION-TRACE-PROVENANCE-PHASE1.md`) — exactly the
+(`rg -n "codex-settings-example" docs/specs/SPEC-CONVERSATION-TRACE-PROVENANCE-PHASE1.md`) — exactly the
 two original references (the now-consistent "does not touch" parenthetical, and §13's requirement)
 plus this amendment and the now-added allowlist entry; no third, conflicting mention exists. No
 other file name was found to have the same allowlist/requirement mismatch (spot-checked every
@@ -1214,7 +1214,7 @@ suppress safe auto-retry on a `MID_CALL_FAILURE` for what remains, from the call
 pure read. Removing the sweep entirely (OMP's option 2) was also rejected: it would silently
 reintroduce staleness this feature exists to avoid (a `search_traces`/`get_trace` caller could see a
 `pending` trace for a session that has actually ended), and the plan's own design already committed
-to this as the tools' opportunistic sweep trigger (memory `5c778689`, point 3).
+to this as the tools' opportunistic sweep trigger (the plan's point 3).
 
 Instead (OMP's option 1, narrowed): the sweep alone — not the read — gets a scoped, synchronous
 coordinator round-trip, using the same `coordinator=None`-optional-parameter convention `write.py`
@@ -1273,7 +1273,7 @@ omitting a required wrapper or breaking that guard test. OMP correctly declined 
 reported both the requirement and the blocking assertion.
 
 **Verified against the actual worktree** (not just OMP's one citation): this exact contradiction
-shape has occurred before in this project — memory `aeff65d9` documents an identical
+shape has occurred before in this project — an earlier project record documents an identical
 `BLOCKED`/adjudication on a different feature (Milestone A slice A5, `retrieve_context`, 18→19),
 where the count guard's own precedent (grepping the whole tree for every
 `len(tools.mcp._tool_manager._tools)`/hardcoded-registry-count site rather than trusting OMP's
@@ -1296,16 +1296,16 @@ was locked against a tree already carrying A5's fix, and inherits its exact thre
   (`grep -rn "len(dispatch\|len(protocol\|len(.*DISPATCH_TABLE\|len(.*MUTATING_TOOLS\|len(.*WRITE_TOOLS\|len(.*READ_TOOLS\|len(.*_OWNER_INJECTED_TOOLS" tests/ src/`)
   — zero matches; no test hardcodes a count on `dispatch.DISPATCH_TABLE`, `protocol.READ_TOOLS`/
   `WRITE_TOOLS`, or `_OWNER_INJECTED_TOOLS` directly, only the three MCP-registry-size assertions
-  above needed touching, exactly mirroring `aeff65d9`'s own finding for A5.
+  above needed touching, exactly mirroring the earlier project's finding for A5.
 
-**Why the original spec missed this**: the same root cause `aeff65d9` already named as a standing
+**Why the original spec missed this**: the same root cause an earlier project record already named as a standing
 lesson for this project — a blanket "does not touch: any existing test file" is never itself
 grepped for a load-bearing conflict the way a positive scope entry is; a new tool's mere
 *existence* invalidates a hardcoded-count assertion in a file the new code never otherwise touches.
 This spec's pre-lock gate ran the file-list/allowlist reconciliation (Amendment 1's own gap) but,
 like A5's original lock, did not re-run this specific check against the tool-count guards.
 
-**Resolution** (mirrors `aeff65d9`'s exactly, scope-widening not bar-lowering): §0's "Scope — may
+**Resolution** (mirrors the earlier project's exactly, scope-widening not bar-lowering): §0's "Scope — may
 edit/create" list now includes all three files, each narrowly scoped to only the tool-count
 assertion and its adjacent explanatory comment (added above, in place) — no other line in any of
 the three files may change. §17's acceptance bar (full suite must exit 0) is unchanged, not
@@ -1378,8 +1378,8 @@ already deselects — and that the newly-failing test passed 1/1 in isolation, w
 or relation-test file touched by this feature. This reads as ordinary test-order-dependent flakiness
 in an unrelated area, not a new contradiction requiring an amendment — but this specific symptom has
 not been independently verified against a SALTMDB-repo precedent in this adjudication (a superficially
-similar pass/fail-flip pattern is documented for a *different* codebase, ACIE, in memory `46e9d174`;
-that memory does not apply here and is not cited as grounding). OMP's own diagnosis stands on its own
+similar pass/fail-flip pattern is documented for a *different* codebase, in an unrelated record;
+that record does not apply here and is not cited as grounding). OMP's own diagnosis stands on its own
 evidence (isolated re-run passed 1/1, no relation-code/relation-test file in this feature's diff) and
 followed this project's own protocol correctly (isolate, confirm unrelated, don't fix out-of-scope,
 don't block on it) — noted here only so a future session isn't puzzled by the count mismatch in OMP's
@@ -1415,13 +1415,13 @@ gap to be resolved rather than silently picking a side.
   `saltmdb-pre-compact-sweep.py`'s fallback-to-`claude -p`/`codex exec` design, it states plainly "a
   bare script has no MCP tool context of its own" — this project's own documentation already
   confirms OMP's core claim, independently of anything OMP said.
-- Read `docs/conversation-trace-provenance-plan.md` §3 directly: it already adopted **Option A**
+- Read `docs/specs/conversation-trace-provenance-plan.md` §3 directly: it already adopted **Option A**
   ("`mcp_tool` hook reuses the existing adapter connection... No new capability mechanism, no new
   trust boundary") and explicitly rejected **Option B** (a dedicated CLI/script bridge) as "unneeded
   surface" once Option A was empirically confirmed live. This resolution predates this spec — §13 as
-  originally locked cited the same empirical tests (memories `9eb3c174`, `f81f6361`) but then
+  originally locked cited the same empirical tests but then
   contradicted the very conclusion those tests established by routing invocation through a script
-  anyway. Read both memories' full content directly (not from search preview) to confirm exactly
+  anyway. Read the underlying test records directly (not from search preview) to confirm exactly
   what was tested: both are pure `settings.local.json` configuration changes — a `"type": "mcp_tool"`
   hook entry added directly to the harness's own settings file, no Python script involved at any
   point in either test.
@@ -1439,7 +1439,7 @@ gap to be resolved rather than silently picking a side.
   resolve a *nested* JSON path (`${tool_response.data.id}`) rather than only the flat top-level
   fields the two prior empirical tests confirmed (`session_id`, `prompt_id`) — this session's own
   attempt to add a temporary probe hook to this repository's own `.claude/settings.local.json`
-  (mirroring memory `9eb3c174`'s exact method) was blocked by Claude Code's own self-modification
+  (mirroring the earlier test method) was blocked by Claude Code's own self-modification
   guardrail (editing a live hook config that would alter this session's own runtime behavior). Not
   worked around, per that guardrail's own instructions. This leaves the nested-path question
   genuinely open — addressed below rather than assumed either way.
@@ -1529,10 +1529,10 @@ instead of a changed-content `store_memory` update.
 - Read `write.py:70-165` (`_legacy_update_guard`) in full: it rejects any change to
   `title`/`full_content`/`owner_id`/`scope`/`memory_type`/`context_id`/`tags` on an existing
   `entity_id`, unconditionally, with zero writes — confirmed this is a deliberate, already-shipped
-  invariant (not incidental), cross-checked against 3 independent prior SALTMDB memories describing
+  invariant (not incidental), cross-checked against 3 independent prior project records describing
   the "Phase 4 Agent API Redesign" that introduced it specifically to close "a review-found bypass"
-  and enforce frozen-field immutability project-wide (`d0d89276`, `5bd0984a`, `f0c36961` — read by
-  title/preview only, sufficient to confirm this is settled, pre-existing project history, not
+  enforce frozen-field immutability project-wide (the records were read by title/preview only,
+  sufficient to confirm this is settled, pre-existing project history, not
   something to second-guess for a Phase 1 trace-capture feature).
 - Read `write.py:715` directly: `content_hash = compute_content_hash(redacted_content)` — computed
   from `full_content` alone, confirmed via `compute_content_hash`'s own definition
@@ -1554,7 +1554,7 @@ instead of a changed-content `store_memory` update.
   make both of its assertions (byte-identical-enough-to-pass-the-guard, yet different-enough-to-not-
   collapse) simultaneously true. This is not a scope gap OMP could have engineered around; the two
   requirements were mutually exclusive from how the scenario was specified.
-- Traced the same unreachable assumption to its origin: `docs/conversation-trace-provenance-plan.md`
+- Traced the same unreachable assumption to its origin: `docs/specs/conversation-trace-provenance-plan.md`
   §15's own TDD matrix ("`store_memory` in-place-update path: same `entity_id` written twice in one
   trace → two distinct `content_hash`-keyed links, not one collapsed link") states the identical
   claim this spec's §15.1/§3.2 operationalized — the plan doc itself never verified this against

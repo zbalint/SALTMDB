@@ -10,7 +10,9 @@ issue or commit the entry links to.
 - Give every entry the next free `BL-nnn` id. Never reuse or renumber an id.
 - Change an entry's **Status** in place; when it ships or is dropped, move it to **Closed** with the
   commit or reason.
-- An entry that becomes real work gets a spec in `docs/SPEC-*.md`; link it in **Links**.
+- An entry that becomes real work gets a spec in `docs/specs/` (start from `docs/specs/TEMPLATE.md`); link it in **Notes / links**.
+- This is a tracker, not a design: a decision belongs in `docs/architecture.md`. Entries can lag the code, so check an entry against the code before acting on it.
+- In **Notes / links**, say how the state was learned when it matters: `code`, `docs`, `manual`, or `reported` (the owner said so and it was not re-run).
 
 **Types:** `feature`, `bug`, `chore`, `idea` (not yet decided), `experiment` (benchmark-first).
 
@@ -33,8 +35,8 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | Id | Type | Title | Closed by |
 |---|---|---|---|
 | BL-000 | bug | MCP tools silently ignored unknown arguments | e51eb32 (all tools now reject an unknown argument and name it) |
-| BL-002 | feature | Per-candidate ranking diagnostics for `search_memory` (Phase A) | 93520a5 (spec `docs/SPEC-SEARCH-RANKING-DIAGNOSTICS.md`, 34ca32d); `return_diagnostics` is now on the MCP tool |
-| BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | 88a87a0 (spec `docs/SPEC-GET-MEMORY-MEMORY-ID-ALIAS.md`, 6cd8398); `get_memory` only, other tools unchanged |
+| BL-002 | feature | Per-candidate ranking diagnostics for `search_memory` (Phase A) | 93520a5 (spec `docs/specs/SPEC-SEARCH-RANKING-DIAGNOSTICS.md`, 34ca32d); `return_diagnostics` is now on the MCP tool |
+| BL-001 | feature | `get_memory` accepts `memory_id` as an alias for `entity_id` | 88a87a0 (spec `docs/specs/SPEC-GET-MEMORY-MEMORY-ID-ALIAS.md`, 6cd8398); `get_memory` only, other tools unchanged |
 | BL-009 | chore | Merge `develop` to `master` and push so `./verify` is green there | 3dcd37d (owner authorized; `master` fast-forwarded and pushed, `./verify` green) |
 | BL-008 | chore | Confirm Dependabot alerts cleared after the lockfile bump | 693c0bf (owner confirmed 2026-10-03 the Dependabot alert list is empty) |
-| BL-011 | bug | Bootstrap digest and handover go empty after 10 content-free sessions in one directory | c13c53d (spec `docs/SPEC-BOOTSTRAP-EMPTY-SESSION-WINDOW.md`, 9a35d56); sessions are filtered by content in SQL and `entities(last_touched_session_id)` has a partial index. A running MCP server needs a restart from a checkout at or after c13c53d |
+| BL-011 | bug | Bootstrap digest and handover go empty after 10 content-free sessions in one directory | c13c53d (spec `docs/specs/SPEC-BOOTSTRAP-EMPTY-SESSION-WINDOW.md`, 9a35d56); sessions are filtered by content in SQL and `entities(last_touched_session_id)` has a partial index. A running MCP server needs a restart from a checkout at or after c13c53d |

@@ -1,4 +1,4 @@
-"""Behavioural contract for the owner_id -> agent_id rename (docs/SPEC-AGENT-ID-RENAME.md).
+"""Behavioural contract for the owner_id -> agent_id rename (docs/specs/SPEC-AGENT-ID-RENAME.md).
 
 This file is allowed to mention the old names: it asserts how they are handled.
 """

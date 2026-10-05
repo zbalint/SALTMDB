@@ -4,7 +4,7 @@
 
 **LOCKED** (2026-10-03). Backlog item BL-011. Context: `saltmdb-bootstrap-empty-window-2026-10-03`.
 
-- Location/branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`. Use the repo `.venv`, never system python.
+- Location/branch: main checkout `<repo>`, branch `develop`. Use the repo `.venv`, never system python.
 - Test seams: `agent_sessions.get_recent_sessions_for_cwd(conn, cwd, limit=10, *, with_content=None)` (real SQLite via `init_db`, as in `tests/test_agent_sessions.py`), `session_digest_service.render_last_session_digest(conn, cwd)` and `session_digest_service.render_session_digest(conn, cwd, max_chars)` (as in `tests/test_session_digest_service.py`).
 - Scope (may edit): `src/saltmdb/db/agent_sessions.py` (`get_recent_sessions_for_cwd` and its docstring only), `src/saltmdb/db/schema.py` (add exactly one index string to the performance-index list at L1185-1199), `src/saltmdb/domain/services/session_digest_service.py` (the two `get_recent_sessions_for_cwd` call sites at L37 and L246, plus the `render_last_session_digest` docstring), `tests/test_agent_sessions.py` (add tests only), `tests/test_session_digest_service.py` (add tests only).
 - Does not touch: `get_last_session_for_cwd`, `record_session`, `close_session`, `reconcile_orphaned_sessions`, the hooks (`hooks/**`), the daemon and MCP layers (`src/saltmdb/daemon/**`, `src/saltmdb/mcp/**`), every other table or index in `schema.py`, `docs/architecture.md`, `INSTALL.md`, `docs/BACKLOG.md` (architect updates it).
@@ -17,7 +17,7 @@ The session-start bootstrap shows a last-session memory digest and a last-exchan
 
 Failure (owner-reported, 2026-10-03): a test project's agent started more than 10 sessions that produced nothing; the next real session received no bootstrap at all. With 10 content-free rows at the top, both functions return empty, even though an earlier session with real memories and traces exists. The failure is silent.
 
-Earlier attempt: SALTMDB memory `8402f500` found the same class of bug for a single concurrent empty sibling session, and the fix added a walk-back past content-free sessions. It kept the fixed 10-row window, so it only holds up to nine empty sessions. The test `test_empty_envelope_when_all_recent_sessions_are_content_free` (`tests/test_session_digest_service.py`) documents "within the lookback window" as an assumption.
+Earlier investigation found the same class of bug for a single concurrent empty sibling session, and the fix added a walk-back past content-free sessions. It kept the fixed 10-row window, so it only holds up to nine empty sessions. The test `test_empty_envelope_when_all_recent_sessions_are_content_free` (`tests/test_session_digest_service.py`) documents "within the lookback window" as an assumption.
 
 Decision (owner approved, 2026-10-03): filter sessions by content in SQL, then apply the limit, so empty sessions can never push a real one out of the window. Raising the limit was rejected (it only moves the cutoff).
 
@@ -84,7 +84,7 @@ Add this string to the performance-index list, directly after the existing `idx_
 
 1. L37 in `render_last_session_digest`: `candidates = agent_sessions.get_recent_sessions_for_cwd(conn, normalized_cwd, with_content="memories")`.
 2. L246 in `render_session_digest`: `candidates = agent_sessions.get_recent_sessions_for_cwd(conn, os.path.realpath(cwd), with_content="traces")`.
-3. Update the `render_last_session_digest` docstring paragraph that describes walking back through recent sessions: state that the lookup now selects only sessions that created or touched a non-archived memory, so any number of content-free sessions (own or another agent's) cannot shadow an earlier one. Keep the reference to memory `8402f500`.
+3. Update the `render_last_session_digest` docstring paragraph that describes walking back through recent sessions: state that the lookup now selects only sessions that created or touched a non-archived memory, so any number of content-free sessions (own or another agent's) cannot shadow an earlier one. Keep the reference to the earlier investigation.
 
 Do not change the loop bodies. The `if candidate_rows:` check in `render_last_session_digest` and the `trace is not None` check in `_render_handover` stay as defensive checks. Do not change `HANDOVER_MAX_SESSIONS`, the render functions, or the default `limit`.
 
@@ -119,14 +119,14 @@ pgrep -af 'pytest|verify' # require no other pytest or verify process
 
 If either check fails, wait and re-check; do not start a full run. Run the full gate once, alone, with nothing else of yours running. Do not run two gates in parallel, and do not run the focused tests while the full gate runs.
 
-If the full gate fails on a timing or memory test (`tests/test_adapter_signal_shutdown.py` SIGINT test, `tests/test_run_retrieval_bakeoff.py::test_apply_memory_ceiling_contains_a_runaway_allocation`, or any other test you did not touch), apply the circuit breaker: re-run only that one test in isolation once, report both results, and do not loop. These two failed in earlier runs under concurrent load and passed alone (SALTMDB memory `e8345ede` for the incident record); a failure of a test this change touches is not covered by that exception.
+If the full gate fails on a timing or memory test (`tests/test_adapter_signal_shutdown.py` SIGINT test, `tests/test_run_retrieval_bakeoff.py::test_apply_memory_ceiling_contains_a_runaway_allocation`, or any other test you did not touch), apply the circuit breaker: re-run only that one test in isolation once, report both results, and do not loop. These two failed in earlier runs under concurrent load and passed alone (an earlier incident record); a failure of a test this change touc...
 
 ## 7. Out of scope
 
 - Raising, removing or making the default `limit` configurable.
 - `get_last_session_for_cwd` and its callers and tests.
 - Any change to `render_last_session_digest` output format, `_render_handover`, `HANDOVER_MAX_SESSIONS`, or the hook scripts and their docs.
-- Excluding the calling session from the lookup (a separate idea from memory `8402f500`; the content filter already skips the caller's own empty row).
+- Excluding the calling session from the lookup (a separate idea from the earlier investigation; the content filter already skips the caller's own empty row).
 - Adding an index on `conversation_traces`, `_agent_sessions` or any other table.
 - Running `ANALYZE`, `VACUUM`, or changing PRAGMAs.
 - `docs/architecture.md` L162 already says the digest walks back past content-free sessions and stays accurate.

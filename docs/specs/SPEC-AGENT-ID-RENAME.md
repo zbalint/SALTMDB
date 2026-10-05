@@ -2,7 +2,7 @@
 
 ## 0. Status
 
-**LOCKED** — 2026-09-29, against `develop` @ `0b2de50`. Written by Claude, decisions by zbalint.
+**LOCKED** — 2026-09-29, against `develop` @ `0b2de50`. Written by an agent; decisions by the owner.
 
 **Scope (files you may edit or create).** Every tracked file that the command in §13 (Acceptance **A**)
 lists on the *unmodified* tree — 138 files on 2026-09-29: 37 under `src/saltmdb/`, 86 under `tests/`
@@ -13,8 +13,8 @@ plus one file the
 scan cannot list because it does not exist yet: the new `tests/test_agent_id_rename.py` (§10). The new prose
 required in `docs/architecture.md`, `SECURITY.md` (§9) and `MIGRATION.md` (§11) lands in files already in scope.
 
-**Does not touch:** `docs/SPEC-*.md` (including this file), `docs/beta-readiness-tdd-plan.md`,
-`docs/conversation-trace-provenance-plan.md`, `specs/` (historical records; they keep the old name),
+**Does not touch:** `docs/specs/SPEC-*.md` (including this file), `docs/specs/beta-readiness-tdd-plan.md`,
+`docs/specs/conversation-trace-provenance-plan.md`, the other files in `docs/specs/` (historical records; they keep the old name),
 the existing rows of `MIGRATION.md`, `pyproject.toml`, `uv.lock`, `src/saltmdb/config.py::__version__`
 (no version bump — that is a release decision made at commit time, and `tests/test_version_consistency.py`
 ties `uv.lock` to it), anything outside this repository (`~/.agents`, harness MCP configs, live databases).
@@ -30,7 +30,7 @@ sessions are already `agent_session_id`. Two names for one thing is the smell be
 This rename is the prerequisite for the planned *remote mode* work: a network daemon will authenticate
 per-agent and must talk about an `agent_id` from day one.
 
-**Decisions locked by zbalint (2026-09-29):**
+**Decisions locked by the owner (2026-09-29):**
 
 1. Rename the database columns, with a migration (not an API-only rename).
 2. Env var becomes `SALTMDB_AGENT_ID`; `SALTMDB_OWNER_ID` remains accepted as a deprecated fallback.
@@ -324,8 +324,8 @@ unmodified tree and record the result; a failure that already exists there is no
 ```
 rg -l -i -e 'owner_id' -e '_effective_owner' -e 'configure_owner' -e 'owner_val' -e '_OWNER_INJECTED' \
    -e 'inherited_owner' -e 'existing_owner' -e 'item_owner' -e 'eowner' -e 'ownerField' . \
-   --glob '!.venv/**' --glob '!docs/SPEC-*' --glob '!docs/beta-readiness-tdd-plan.md' \
-   --glob '!docs/conversation-trace-provenance-plan.md' --glob '!specs/**' | sort
+   --glob '!.venv/**' --glob '!docs/specs/SPEC-*' --glob '!docs/specs/beta-readiness-tdd-plan.md' \
+   --glob '!docs/specs/conversation-trace-provenance-plan.md' --glob '!docs/specs/**' | sort
 ```
 
 ```
@@ -342,7 +342,7 @@ rg -l -i -e 'owner_id' -e '_effective_owner' -e 'configure_owner' -e 'owner_val'
 
 **B.** `rg -n "'Owner'|Owner id" src/saltmdb/viewer` prints nothing.
 
-**C.** `git diff --name-only -- docs/SPEC-CONVERSATION-TRACE-PROVENANCE-PHASE1.md docs/beta-readiness-tdd-plan.md docs/conversation-trace-provenance-plan.md specs pyproject.toml uv.lock` prints nothing.
+**C.** `git diff --name-only -- docs/specs/SPEC-CONVERSATION-TRACE-PROVENANCE-PHASE1.md docs/specs/beta-readiness-tdd-plan.md docs/specs/conversation-trace-provenance-plan.md pyproject.toml uv.lock` prints nothing.
 
 **D. Tests and lint** (the repo's documented commands):
 

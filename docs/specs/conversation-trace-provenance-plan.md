@@ -6,7 +6,7 @@ investigation. All codebase claims were verified against `develop` (this branch 
 in §9 below). Four research passes, direct fetches of the current Codex and Claude Code hooks
 documentation, and two live empirical hook tests (one per harness) ground this document. Two
 open decisions remain, listed in §16 — resolve those, then run a `spec-writing` pass before
-handing anything to OMP.
+handing anything to the developer.
 > **Phase 1 shipped (2026-09-29).** The implementation and current behavior are documented in
 > [architecture.md §9](architecture.md#9-conversation-trace-provenance). This plan remains a
 > historical design record; DDL and assumptions explicitly marked **SUPERSEDED** below are
@@ -14,7 +14,7 @@ handing anything to OMP.
 
 
 Naming: the feature is called **traces** throughout (not "turns"), reviving the term from an
-earlier, never-locked 2026-09-15 design discussion (memory `e62d47ee`).
+earlier, never-locked 2026-09-15 design discussion.
 
 ---
 
@@ -123,15 +123,13 @@ mechanism, no new trust boundary — new capture tools sit behind the exact same
 `_validate_caller_session` wall every existing write tool already sits behind.
 
 Empirical confirmation:
-- **Claude Code** (this session, 2026-09-28): a temporary `PostToolUse`/`mcp_tool` hook calling
-  `log_event` recorded `agent_session_id: 01a0e816-645b-7f8d-8a7f-244573dc4051` — exact match to
-  this conversation's own session identity. Hot-reloaded via the existing settings-file watcher,
-  no adapter restart.
-- **Codex** (same day, run by a Codex session): same test, same result —
-  `01a0e85b-70f0-7bf0-8e61-dc1c20793386` matched on both sides. One caveat Codex itself caught: its
+- **Harness A** (2026-09-28): a temporary `PostToolUse`/`mcp_tool` hook calling
+  `log_event` recorded the current `agent_session_id`, exactly matching the conversation's own session identity.
+  Hot-reloaded via the existing settings-file watcher, with no adapter restart.
+- **Harness B** (same day): same test, same result. One caveat: its
   adapter *restarted* (new `agent_session_id`) during the hook's approval flow, so its first
-  pre-approval baseline was stale — Codex correctly re-ran a contemporaneous control call instead
-  of trusting it. **New nuance for implementation**: on Codex, installing/approving a new
+  pre-approval baseline was stale — the harness correctly re-ran a contemporaneous control call instead
+  of trusting it. **New nuance for implementation**: installing/approving a new
   `mcp_tool` hook can force an adapter reconnect. Likely a one-time cost at initial hook
   installation (before any real traces are captured), but Phase 1 should explicitly check whether
   this can also happen *mid-session* after hooks are already approved and running — if so, a trace
@@ -260,8 +258,7 @@ typically lack it) — both expected and diagnosable via `status`, not integrity
 - `memory_service/orchestrator.py` (`search_memory`): add a cheap `trace_evidence_count` field per
   result item (one batched `IN (...)` count query after ranking, not inside the ranking pipeline).
 - **Deferred, not built now**: a combined memories+events+traces session-timeline tool. Same
-  reasoning as the pre-existing, still-open question from the original `agent_session_id` design
-  (memory `a689563e`, decision 5) — three separately-filterable calls
+  reasoning as the pre-existing, still-open question from the original `agent_session_id` design — three separately-filterable calls
   (`get_events`/`search_memory`/`search_traces`, all sharing `agent_session_id`) get you the same
   information, and UUIDv7's embedded ordering makes client-side merging trivial.
 - `config.py`: `SALTMDB_TRACE_CAPTURE_ENABLED` / `SALTMDB_TRACE_EMBEDDING_ENABLED` feature flags
@@ -290,11 +287,10 @@ project's no-redaction stance (§8). No cleanup job, no config knob for this in 
   history only. It originally required every new read path (`search_traces`, `get_trace`, the
   `trace_provenance`/`trace_evidence_count` hints) to filter by `owner_id`/`scope`; shipped trace
   reads are cross-agent and use `agent_id` only for attribution.
-- **No secret redaction — explicit, deliberate policy decision** (stored as SALTMDB memory
-  `6233e904`, revised once). zbalint's reasoning: all captured content — both the user's prompt
-  and the agent's response — already passed through the AI provider's servers regardless of which
-  side originated it, so by the same "already exposed to a third party" logic neither side is
-  "secret" in a way SALTMDB capturing it changes. This is a standing data-handling policy, not
+- **No secret redaction — explicit, deliberate policy decision** (standing policy).
+  Captured content — both the user's prompt and the agent's response — already passed through provider
+  servers regardless of origin; by the same exposure logic, capture does not newly create a secret.
+  This is a standing data-handling policy, not
   scoped only to this feature; don't propose redaction middleware for conversational text without
   re-confirming if the context changes (e.g. multi-tenant use, which this system is not).
 
@@ -302,15 +298,15 @@ project's no-redaction stance (§8). No cleanup job, no config knob for this in 
 
 **No truncation, no size cap, ever, at storage time.** `conversation_traces.user_prompt`/
 `final_assistant_message` store the complete text unconditionally — explicitly corrected mid-design
-after an initial (wrong) truncate-with-marker proposal. Rationale (zbalint): the entire point of
+after an initial (wrong) truncate-with-marker proposal. Rationale: the entire point of
 capture is to be a cheaper alternative to reading a raw transcript file when a memory alone isn't
 enough to decide something; truncating would fail exactly the long, complex traces most worth
 having provenance for.
 
 This does **not** mean no safety work — it means the safety work belongs entirely in Phase 2's
-*embedding* step, which is where two real past incidents on this project actually happened (memory
-`575286de`: an overnight bakeoff run froze the whole host; memory `4bf438f0`: a WSL2 OOM in the
-Needle-evaluation experiment) — both caused by passing an entire chunk list to one unbounded
+*embedding* step, which is where two real past incidents on this project actually happened —
+an overnight bakeoff run froze the whole host; a WSL2 OOM occurred in the
+Needle-evaluation experiment — both caused by passing an entire chunk list to one unbounded
 `embed_texts()`/fastembed batch call.
 
 **Already fixed, independent of this feature, merged to `develop` before this branch was cut**

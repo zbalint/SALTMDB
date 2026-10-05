@@ -4,7 +4,7 @@
 
 **LOCKED** (2026-10-03). Context: `saltmdb-feedback-a2amx-architect-2026-10-03`.
 
-- Location/branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`. Use the repo `.venv` (`.venv/bin/python -m pytest`), never system python.
+- Location/branch: main checkout `<repo>`, branch `develop`. Use the repo `.venv` (`.venv/bin/python -m pytest`), never system python.
 - Test seam: `tools.mcp.call_tool(name, arguments)` (the real FastMCP entry point, as already used in `tests/test_mcp_tools.py:1191`).
 - Scope (may edit): `src/saltmdb/mcp/tools.py` (append at end of file only), `tests/test_mcp_tools.py` (add tests only). `server.py` is NOT edited (see Amendment 1).
 - Does not touch: `src/saltmdb/mcp/server.py`, any other part of `tools.py`, `src/saltmdb/daemon/**` (daemon dispatch and the `hooks/` RPC path), `domain/**`, hooks, skills.

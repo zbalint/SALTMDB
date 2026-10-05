@@ -9,7 +9,7 @@
 Prepared 2026-09-22 from read-only review of `develop` at `063c1a2`. This is a
 plan, not a claim that the findings have been fixed. Recheck HEAD and the working
 tree after a context clear before changing files. Never modify `master` without
-zbalint's fresh, action-specific permission.
+the owner's fresh, action-specific permission.
 
 ## Baseline and evidence
 
@@ -27,7 +27,7 @@ zbalint's fresh, action-specific permission.
   `get_memory`, but `daemon/dispatch.py::_dispatch_get_memory` discards it;
   `memory_service/lifecycle.py::get_memory` has no owner check. The same family
   of explicit-ID and graph retrieval tools requires an access audit. Search is
-  already owner-filtered. See SALTMDB memory `1225cba9` (2026-09-21), then
+  already owner-filtered. See the recorded private-scope finding (2026-09-21), then
   verify the current code again.
 - CI triggers only on `master`/`main`; `INSTALL.md:229` and
   `CONTRIBUTING.md:20,81` still recommend `unittest` despite pytest-only tests.
@@ -37,8 +37,8 @@ zbalint's fresh, action-specific permission.
 Read the installed `tdd` and `systematic-debugging` skills at the start of the
 fix session. The architect's chosen security seam is two configured MCP adapters
 (different owner IDs) calling the public tools against one temporary DB.
-zbalint's request to fix this plan after the context clear confirms that seam
-for TDD; if he requests a different seam, update the plan first. For CI/test
+The owner's request to fix this plan after the context clear confirms that seam
+for TDD; if a different seam is requested, update the plan first. For CI/test
 discovery, the observable seam is the repository's
 documented `verify` command and the GitHub workflow. Use a real temporary DB,
 not mocks of internal services. Each cycle is one failing behavior test or gate,
@@ -110,13 +110,12 @@ including `pip-audit` and build sanity in an environment with network access.
 Check Python 3.10 as the declared minimum; CI currently exercises only Linux
 Python 3.11. Inspect `git diff` and report all changed files, test counts,
 remaining failures, and the exact GitHub CI run result once available. Recheck
-the beta release wayfinder map (`cdaba427`) and its other open tickets,
+the beta release wayfinder map and its other open tickets,
 including the duplicate-detection FTS fallback, before claiming beta-ready.
 This plan does not authorize tagging, publishing, pushing, or changing `master`.
 
 ## Resume pointer
 
-Read this file, the current source, and SALTMDB memories `335698b0` (gate/docs
-review), `782326de` (omitted hook tests), and `1225cba9` (private scope), using
-`get_memory` for any memory cited as fact. Search memory for newer decisions.
+Read this file, the current source, and the recorded gate/docs review, omitted hook tests,
+and private-scope decision, using `get_memory` for any cited fact. Search memory for newer decisions.
 Begin at the public MCP security seam with one failing cross-owner test.
