@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from mcp.server.fastmcp import FastMCP
 from saltmdb.config import get_db_path, get_agent_id, is_trace_capture_enabled
+from saltmdb.daemon import client
 from saltmdb.daemon.client import SessionConnection
 from saltmdb.mcp import copilot_session
 from saltmdb.mcp.identity import SESSION_IDENTITY
@@ -33,18 +34,25 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # identity here as well so no hello can be emitted with agent_id=None when startup wiring is
     # bypassed.  configure_agent_id is immutable and idempotent for the already-configured value.
     SESSION_IDENTITY.configure_agent_id(get_agent_id())
+    db_path = get_db_path()
     session = SessionConnection(
-        get_db_path(),
+        db_path,
         session_id=SESSION_IDENTITY.agent_session_id,
         cwd=SESSION_IDENTITY.cwd,
         agent_id=SESSION_IDENTITY.agent_id,
     )
     published_path: str | None = None
     try:
-        # Keep startup inside the cleanup boundary as well: a retryable hello failure must not
-        # leave a partially initialized connection or emit a goodbye for a session that never
-        # reached durable registration.
-        session.open()
+        # A reachable daemon can take the fast path; otherwise publish the adapter and let the
+        # background opener wait without delaying the MCP initialize handshake.
+        if client.reachable_daemon_info(db_path) is not None:
+            try:
+                session.open()
+            except (client.DaemonStartupError, client.DaemonRpcError, OSError) as exc:
+                logger.warning("Synchronous daemon session open failed; using lazy start: %s", exc)
+                client.begin_lazy_start(session)
+        else:
+            client.begin_lazy_start(session)
         if is_trace_capture_enabled():
             # Lets a standalone Copilot hook join this adapter's trace identity (copilot_session).
             published_path = copilot_session.publish(

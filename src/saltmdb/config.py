@@ -681,6 +681,19 @@ DAEMON_DISCOVERY_RETRY_DELAY_S = 0.25
 # drain-retry livelock where a single speculative spawn could lose the race against a still-
 # shutting-down prior owner with nothing left retrying (Codex round-2 finding).
 DAEMON_RESPAWN_RETRY_INTERVAL = 8
+# Maximum progress-aware wait for one adapter/tool startup attempt.
+DAEMON_STARTUP_PROGRESS_CAP_S = 25.0
+# Maximum background wait for a lazy session hello after adapter startup.
+DAEMON_LAZY_OPEN_CAP_S = 120.0
+# Probe at most once per second while deciding whether a daemon owner is alive.
+DAEMON_OWNER_PROBE_INTERVAL_S = 1.0
+# Require three consecutive unanswered owner probes before respawning.
+DAEMON_OWNER_PROBE_MISSES = 3
+# Minimum per-process gap between speculative daemon spawns.
+DAEMON_SPAWN_MIN_INTERVAL_S = 15.0
+# Bound the hello after a background readiness wait.
+DAEMON_LAZY_HELLO_BUDGET_S = 5.0
+
 
 # Daemon grace-period shutdown timer once the last session disconnects -- matches the pre-Track-B
 # viewer liveness watchdog's existing grace_period default exactly, no user-visible behavior change.

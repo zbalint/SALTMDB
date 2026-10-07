@@ -4,6 +4,7 @@ import shutil
 import unittest
 from unittest.mock import MagicMock, patch
 
+from saltmdb.daemon import client as daemon_client
 from saltmdb.mcp.identity import SESSION_IDENTITY
 from saltmdb.mcp.server import server_lifespan
 
@@ -42,6 +43,10 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
         with (
             patch("saltmdb.mcp.server.get_db_path", return_value=self.db_path),
             patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session) as mock_cls,
+            patch(
+                "saltmdb.daemon.client.reachable_daemon_info",
+                return_value={"db_path": self.db_path},
+            ),
         ):
             async with server_lifespan(MagicMock()):
                 mock_cls.assert_called_once_with(
@@ -62,11 +67,66 @@ class TestMCPServerLifespan(unittest.IsolatedAsyncioTestCase):
         with (
             patch("saltmdb.mcp.server.get_db_path", return_value=self.db_path),
             patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session),
+            patch(
+                "saltmdb.daemon.client.reachable_daemon_info",
+                return_value={"db_path": self.db_path},
+            ),
         ):
             with self.assertRaises(RuntimeError):
                 async with server_lifespan(MagicMock()):
                     raise RuntimeError("boom")
             mock_session.open.assert_called_once()
+            mock_session.close.assert_called_once()
+
+    async def test_unreachable_daemon_uses_lazy_path_without_synchronous_open(self):
+        mock_session = MagicMock()
+        with (
+            patch("saltmdb.mcp.server.get_db_path", return_value=self.db_path),
+            patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session),
+            patch("saltmdb.daemon.client.reachable_daemon_info", return_value=None),
+            patch("saltmdb.daemon.client.begin_lazy_start") as begin_lazy,
+        ):
+            async with server_lifespan(MagicMock()):
+                mock_session.open.assert_not_called()
+                begin_lazy.assert_called_once_with(mock_session)
+            mock_session.close.assert_called_once()
+
+    async def test_reachable_daemon_startup_failure_falls_back_to_lazy_path(self):
+        mock_session = MagicMock()
+        with (
+            patch("saltmdb.mcp.server.get_db_path", return_value=self.db_path),
+            patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session),
+            patch(
+                "saltmdb.daemon.client.reachable_daemon_info",
+                return_value={"db_path": self.db_path},
+            ),
+            patch("saltmdb.daemon.client.begin_lazy_start") as begin_lazy,
+            patch.object(
+                mock_session,
+                "open",
+                side_effect=daemon_client.DaemonStartupError("still starting"),
+            ),
+        ):
+            async with server_lifespan(MagicMock()):
+                begin_lazy.assert_called_once_with(mock_session)
+            mock_session.close.assert_called_once()
+
+    async def test_reachable_daemon_unexpected_open_error_propagates(self):
+        mock_session = MagicMock()
+        with (
+            patch("saltmdb.mcp.server.get_db_path", return_value=self.db_path),
+            patch("saltmdb.mcp.server.SessionConnection", return_value=mock_session),
+            patch(
+                "saltmdb.daemon.client.reachable_daemon_info",
+                return_value={"db_path": self.db_path},
+            ),
+            patch("saltmdb.daemon.client.begin_lazy_start") as begin_lazy,
+            patch.object(mock_session, "open", side_effect=ValueError("bad session")),
+        ):
+            with self.assertRaises(ValueError):
+                async with server_lifespan(MagicMock()):
+                    pass
+            begin_lazy.assert_not_called()
             mock_session.close.assert_called_once()
 
 

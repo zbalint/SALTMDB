@@ -7,6 +7,7 @@ See scratch/plans/track_b_daemon_detailed.md §4/§5/§12/§13 for the full desi
 trail.
 """
 
+import contextvars
 import hmac
 import logging
 import os
@@ -15,15 +16,21 @@ import subprocess  # nosec B404 -- daemon spawn uses a fixed module argv and nev
 import sys
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from saltmdb.config import (
     DAEMON_DISCOVERY_RETRY_ATTEMPTS,
     DAEMON_DISCOVERY_RETRY_DELAY_S,
+    DAEMON_LAZY_HELLO_BUDGET_S,
+    DAEMON_LAZY_OPEN_CAP_S,
+    DAEMON_OWNER_PROBE_INTERVAL_S,
+    DAEMON_OWNER_PROBE_MISSES,
     DAEMON_RESPAWN_RETRY_INTERVAL,
     DAEMON_RPC_CALL_TIMEOUT_S,
     DAEMON_RPC_CONNECT_TIMEOUT_S,
+    DAEMON_SPAWN_MIN_INTERVAL_S,
+    DAEMON_STARTUP_PROGRESS_CAP_S,
 )
 from saltmdb.daemon import discovery, protocol
 
@@ -31,7 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 class DaemonStartupError(Exception):
-    """Raised when ensure_daemon_running() exhausts its bounded discovery-retry window."""
+    """Raised when ensure_daemon_running() cannot establish a daemon connection."""
+
+
+class DaemonStartingError(DaemonStartupError):
+    """Raised when a matching daemon owner is alive but has not become reachable yet."""
 
 
 class DaemonRpcError(Exception):
@@ -52,15 +63,96 @@ class DaemonRpcError(Exception):
 # as mcp/tools.py's configure_backend(). None outside any server_lifespan (e.g. cli.py's direct
 # usage, §14) -- the restart-detection check is simply skipped in that case.
 _current_session: "SessionConnection | None" = None
+_startup_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "startup_deadline", default=None
+)
+_spawn_lock = threading.Lock()
+_last_spawn_at: float | None = None
+
+
+@contextmanager
+def startup_budget(seconds: float | None = None):
+    """Share one monotonic startup deadline across nested adapter operations."""
+    if _startup_deadline.get() is not None:
+        yield
+        return
+    budget = DAEMON_STARTUP_PROGRESS_CAP_S if seconds is None else seconds
+    token = _startup_deadline.set(time.monotonic() + budget)
+    try:
+        yield
+    finally:
+        _startup_deadline.reset(token)
 
 
 def get_current_session() -> "SessionConnection | None":
-    """Public accessor for the process's one SessionConnection, if any is currently open.
-
-    Added so a signal handler outside server_lifespan's own closure (see __main__.py's
-    SIGTERM/SIGINT handling) can reach the exact same object server_lifespan's `finally` would
-    otherwise close, to send a synchronous goodbye before a forced process exit."""
+    """Public accessor for the process's one SessionConnection, which may be adopted before its
+    persistent hello connection is established."""
     return _current_session
+
+
+def adopt_current_session(session: "SessionConnection") -> None:
+    """Publish a lazy-start session before its background hello completes."""
+    global _current_session
+    _current_session = session
+
+
+def _spawn_if_due(db_path: str) -> bool:
+    """Spawn at most once per configured interval in this adapter process."""
+    global _last_spawn_at
+    now = time.monotonic()
+    with _spawn_lock:
+        if _last_spawn_at is not None and now - _last_spawn_at < DAEMON_SPAWN_MIN_INTERVAL_S:
+            return False
+        _last_spawn_at = now
+        _spawn_daemon_subprocess(db_path)
+        return True
+
+
+def begin_lazy_start(session: "SessionConnection") -> None:
+    """Publish a session and start daemon readiness/hello without blocking adapter startup."""
+    adopt_current_session(session)
+
+    def _wait_and_open() -> None:
+        started_at = time.monotonic()
+        if probe_owner(session.db_path) is None:
+            _ = _spawn_if_due(session.db_path)
+        deadline = started_at + DAEMON_LAZY_OPEN_CAP_S
+        startup_logged = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "Lazy daemon startup exceeded %.0f seconds for %s",
+                    DAEMON_LAZY_OPEN_CAP_S,
+                    session.db_path,
+                )
+                return
+            try:
+                ensure_daemon_running(session.db_path, cap_s=remaining)
+            except DaemonStartupError as exc:
+                if not startup_logged:
+                    logger.warning("Lazy daemon startup still pending: %s", exc)
+                    startup_logged = True
+                time.sleep(min(DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
+                continue
+
+            if get_current_session() is not session:
+                return
+            try:
+                with startup_budget(DAEMON_LAZY_HELLO_BUDGET_S):
+                    session.open()
+            except (DaemonStartupError, DaemonRpcError, OSError) as exc:
+                logger.warning("Lazy session hello failed: %s", exc)
+            return
+
+    # shortcut: a close racing this daemon thread can reopen once; add a stop flag if this
+    # process ever needs to keep the thread alive after the lifespan exits.
+    thread = threading.Thread(
+        target=_wait_and_open,
+        name="saltmdb-lazy-session-open",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _identify_probe(db_path: str, key: str) -> dict[str, Any] | None:
@@ -192,7 +284,7 @@ def _spawn_daemon_process(db_path: str) -> None:
 
     env = dict(os.environ)
     env["SALTMDB_DB_PATH"] = db_path
-
+    env["SALTMDB_DAEMON_SPAWNED_AT"] = repr(time.time())
     popen_kwargs: dict[str, Any] = {
         "stdout": log_file,
         "stderr": log_file,
@@ -289,15 +381,72 @@ def _authenticated_ping_ok(info: dict[str, Any]) -> bool:
         return False
 
 
-def ensure_daemon_running(db_path: str) -> dict[str, Any]:
-    """Spawn-or-connect handshake -- the single chokepoint both SessionConnection's restart-
-    detection and call_method()'s connect-phase-failure retry go through. Corrected after Codex
-    round 5: canonicalizes its own input, unconditionally -- no caller is trusted to have done it
-    already."""
+def reachable_daemon_info(db_path: str) -> dict[str, Any] | None:
+    """Return authenticated discovery information for this canonical database, if reachable."""
+    canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+    key = discovery.daemon_key(canonical_db_path)
+    info = discovery.read(key)
+    if info and info.get("db_path") == canonical_db_path and _authenticated_ping_ok(info):
+        return info
+    return None
+
+
+def probe_owner(db_path: str) -> str | None:
+    """Return a matching daemon's startup state from the lightweight identify probe."""
+    canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+    key = discovery.daemon_key(canonical_db_path)
+    info = _identify_probe(canonical_db_path, key)
+    if (
+        isinstance(info, dict)
+        and info.get("db_path") == canonical_db_path
+        and info.get("state") in {"initializing", "ready"}
+    ):
+        return info["state"]
+    return None
+
+
+def _startup_failure(
+    db_path: str, key: str, started_at: float, owner_alive: bool
+) -> DaemonStartupError:
+    if owner_alive:
+        elapsed = time.monotonic() - started_at
+        return DaemonStartingError(
+            f"the SALTMDB daemon is still starting (initializing after {elapsed:.0f} s)"
+        )
+    return DaemonStartupError(_classify_startup_failure(db_path, key))
+
+
+def _startup_deadline_for(started_at: float, cap_s: float | None) -> float:
+    if cap_s is not None:
+        return started_at + cap_s
+    inherited_deadline = _startup_deadline.get()
+    if inherited_deadline is not None:
+        return inherited_deadline
+    return started_at + DAEMON_STARTUP_PROGRESS_CAP_S
+
+
+def _update_owner_probe(
+    owner: str | None,
+    owner_alive: bool,
+    owner_misses: int,
+    legacy_attempts: int,
+) -> tuple[bool, int, int]:
+    if owner is not None:
+        return True, 0, 0
+    if not owner_alive:
+        return owner_alive, owner_misses, legacy_attempts
+    owner_misses += 1
+    if owner_misses >= DAEMON_OWNER_PROBE_MISSES:
+        owner_alive = False
+    return owner_alive, owner_misses, legacy_attempts
+
+
+def ensure_daemon_running(db_path: str, *, cap_s: float | None = None) -> dict[str, Any]:
+    """Connect to a reachable daemon or wait for one with owner-aware progress detection."""
     db_path = discovery.resolve_canonical_db_path(db_path)
     key = discovery.daemon_key(db_path)
-    info = discovery.read(key)
-    if info and info.get("db_path") == db_path and _authenticated_ping_ok(info):
+    info = reachable_daemon_info(db_path)
+    if info is not None:
         logger.debug(
             "ensure_daemon_running: existing daemon reachable (pid=%s port=%s), no spawn needed",
             info.get("daemon_pid"),
@@ -305,36 +454,52 @@ def ensure_daemon_running(db_path: str) -> dict[str, Any]:
         )
         return info
 
-    logger.info(
-        "ensure_daemon_running: no reachable daemon for db_path=%s (caller_pid=%d); spawning",
-        db_path,
-        os.getpid(),
-    )
-    _spawn_daemon_subprocess(db_path)
-    for attempt in range(DAEMON_DISCOVERY_RETRY_ATTEMPTS):
-        time.sleep(DAEMON_DISCOVERY_RETRY_DELAY_S)
-        info = discovery.read(key)
-        if info and info.get("db_path") == db_path and _authenticated_ping_ok(info):
+    started_at = time.monotonic()
+    deadline = _startup_deadline_for(started_at, cap_s)
+
+    owner = probe_owner(db_path)
+    if owner is None:
+        _spawn_if_due(db_path)
+    owner_alive = True
+    owner_misses = 0
+    legacy_attempts = 0
+    last_probe_at = started_at
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _startup_failure(db_path, key, started_at, owner_alive)
+        time.sleep(min(DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
+        now = time.monotonic()
+
+        info = reachable_daemon_info(db_path)
+        if info is not None:
             logger.info(
-                "ensure_daemon_running: daemon reachable after %d discovery attempt(s) "
-                "(pid=%s port=%s)",
-                attempt + 1,
+                "ensure_daemon_running: daemon reachable after %.2f s (pid=%s port=%s)",
+                now - started_at,
                 info.get("daemon_pid"),
                 info.get("service_port"),
             )
             return info
-        # Round-2 fix: periodically re-attempt a fresh spawn, not just re-poll, so progress
-        # doesn't depend on winning a one-shot timing race against an unrelated shutdown.
-        if attempt % DAEMON_RESPAWN_RETRY_INTERVAL == 0:
-            logger.info(
-                "ensure_daemon_running: still no reachable daemon at attempt %d; respawn retry",
-                attempt,
+
+        if now - last_probe_at >= DAEMON_OWNER_PROBE_INTERVAL_S:
+            owner = probe_owner(db_path)
+            last_probe_at = now
+            owner_alive, owner_misses, legacy_attempts = _update_owner_probe(
+                owner, owner_alive, owner_misses, legacy_attempts
             )
-            _spawn_daemon_subprocess(db_path)
-    logger.warning(
-        "ensure_daemon_running: exhausted discovery-retry window for db_path=%s", db_path
-    )
-    raise DaemonStartupError(_classify_startup_failure(db_path, key))
+
+        if owner_alive:
+            continue
+
+        legacy_attempts += 1
+        if legacy_attempts % DAEMON_RESPAWN_RETRY_INTERVAL == 0:
+            logger.info(
+                "ensure_daemon_running: still no owner at legacy attempt %d; respawn retry",
+                legacy_attempts,
+            )
+            _spawn_if_due(db_path)
+        if legacy_attempts >= DAEMON_DISCOVERY_RETRY_ATTEMPTS:
+            raise _startup_failure(db_path, key, started_at, False)
 
 
 def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine is intentionally centralized
@@ -457,26 +622,27 @@ def call(
     caller_agent_session_capability: str | None = None,
 ) -> Any:
     """Call one daemon tool, with optional adapter-only session metadata."""
-    params: dict[str, Any] = {"tool": tool_name, "kwargs": kwargs}
-    if caller_agent_session_id is not None:
-        params["caller_agent_session_id"] = caller_agent_session_id
-        if caller_agent_session_capability is not None:
-            params["caller_agent_session_capability"] = caller_agent_session_capability
-    session = None
-    if _current_session is not None:
-        # The logical ID is immutable for the adapter lifetime.  Passing the session into
-        # call_method lets it acquire the lock before refreshing and deciding which capability to
-        # attach; an explicitly mismatched caller ID is never silently rewritten.
-        if caller_agent_session_id == _current_session._agent_session_id:
-            session = _current_session
-    return call_method(
-        db_path,
-        "tool_call",
-        params,
-        _session=session,
-        _caller_agent_session_id=caller_agent_session_id,
-        _caller_agent_session_capability=caller_agent_session_capability,
-    )
+    with startup_budget():
+        params: dict[str, Any] = {"tool": tool_name, "kwargs": kwargs}
+        if caller_agent_session_id is not None:
+            params["caller_agent_session_id"] = caller_agent_session_id
+            if caller_agent_session_capability is not None:
+                params["caller_agent_session_capability"] = caller_agent_session_capability
+        session = None
+        if _current_session is not None:
+            # The logical ID is immutable for the adapter lifetime.  Passing the session into
+            # call_method lets it acquire the lock before refreshing and deciding which capability
+            # to attach; an explicitly mismatched caller ID is never silently rewritten.
+            if caller_agent_session_id == _current_session._agent_session_id:
+                session = _current_session
+        return call_method(
+            db_path,
+            "tool_call",
+            params,
+            _session=session,
+            _caller_agent_session_id=caller_agent_session_id,
+            _caller_agent_session_capability=caller_agent_session_capability,
+        )
 
 
 class SessionConnection:

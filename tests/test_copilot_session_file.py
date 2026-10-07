@@ -95,6 +95,10 @@ class TestLifespanPublishing(unittest.IsolatedAsyncioTestCase):
         with (
             mock.patch("saltmdb.mcp.server.SessionConnection"),
             mock.patch("saltmdb.mcp.server.get_db_path", return_value="/db/x"),
+            mock.patch(
+                "saltmdb.daemon.client.reachable_daemon_info",
+                return_value={"db_path": "/db/x"},
+            ),
             mock.patch("saltmdb.mcp.server.is_trace_capture_enabled", return_value=enabled),
             mock.patch("saltmdb.mcp.server.copilot_session") as cs,
         ):

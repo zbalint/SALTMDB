@@ -100,6 +100,67 @@ class _AbruptCloseServer:
         self._sock.close()
 
 
+class _CountingRpcServer:
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(5)
+        self._sock.settimeout(0.1)
+        self.port = self._sock.getsockname()[1]
+        self.methods: list[str] = []
+        self.hello_seen = threading.Event()
+        self.tool_seen = threading.Event()
+        self._stop = threading.Event()
+        self._connections: list[socket.socket] = []
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except (OSError, TimeoutError):
+                continue
+            self._connections.append(conn)
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            while not self._stop.is_set():
+                request = protocol.recv_frame(conn)
+                method = request.get("method")
+                self.methods.append(method)
+                if method == "hello":
+                    self.hello_seen.set()
+                    response = protocol.build_ok_response(
+                        "x", {"caller_agent_session_capability": "server-capability"}
+                    )
+                elif method == "tool_call":
+                    self.tool_seen.set()
+                    response = protocol.build_ok_response("x", "ok")
+                else:
+                    response = protocol.build_ok_response("x", {})
+                protocol.send_frame(conn, response)
+                if method in {"tool_call", "goodbye"}:
+                    return
+        except (OSError, protocol.FrameError):
+            return
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self._sock.close()
+        for conn in self._connections:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 class TestSessionConnectionOpen(unittest.TestCase):
     def setUp(self):
         client._current_session = None
@@ -673,6 +734,7 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         _, kwargs = mock_popen.call_args
         self.assertNotIn("creationflags", kwargs)
         self.assertTrue(kwargs["start_new_session"])
+        self.assertIsInstance(float(kwargs["env"]["SALTMDB_DAEMON_SPAWNED_AT"]), float)
 
     def test_posix_spawn_oserror_propagates_not_silently_retried(self):
         with (
@@ -706,6 +768,403 @@ class TestIntermediaryMain(unittest.TestCase):
     def test_missing_db_path_exits_with_usage(self):
         with self.assertRaises(SystemExit):
             client._intermediary_main(["client.py", "--spawn-detached"])
+
+
+class _StartupClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class TestColdStartWait(unittest.TestCase):
+    def setUp(self):
+        self.clock = _StartupClock()
+        self.db_path = "/tmp/cold-start-test.db"
+        self.info = {"db_path": self.db_path, "service_port": 1, "auth_token": "tok"}
+        clock_patch = patch.object(client, "time", self.clock)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        spawn_patch = patch.object(client, "_spawn_daemon_subprocess")
+        self.spawn = spawn_patch.start()
+        self.addCleanup(spawn_patch.stop)
+        last_spawn_patch = patch.object(client, "_last_spawn_at", None, create=True)
+        last_spawn_patch.start()
+        self.addCleanup(last_spawn_patch.stop)
+        classify_patch = patch.object(client, "_classify_startup_failure", return_value="no owner")
+        classify_patch.start()
+        self.addCleanup(classify_patch.stop)
+
+    def test_existing_initializing_owner_can_take_twenty_seconds(self):
+        with (
+            patch.object(client, "probe_owner", return_value="initializing", create=True),
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                side_effect=lambda _: self.info if self.clock.now >= 20 else None,
+                create=True,
+            ),
+            patch.object(client.discovery, "read", return_value=None),
+        ):
+            self.assertEqual(client.ensure_daemon_running(self.db_path), self.info)
+        self.assertEqual(self.clock.now, 20.0)
+        self.spawn.assert_not_called()
+
+    def test_new_owner_needs_only_one_spawn_while_initializing(self):
+        with (
+            patch.object(
+                client,
+                "probe_owner",
+                side_effect=lambda _: None if self.clock.now == 0 else "initializing",
+                create=True,
+            ),
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                side_effect=lambda _: self.info if self.clock.now >= 20 else None,
+                create=True,
+            ),
+            patch.object(client.discovery, "read", return_value=None),
+        ):
+            self.assertEqual(client.ensure_daemon_running(self.db_path), self.info)
+        self.spawn.assert_called_once_with(self.db_path)
+
+    def test_missing_owner_exhausts_legacy_window_without_spawn_storm(self):
+        with (
+            patch.object(client, "probe_owner", return_value=None, create=True),
+            patch.object(client, "reachable_daemon_info", return_value=None, create=True),
+            patch.object(client.discovery, "read", return_value=None),
+        ):
+            with self.assertRaises(client.DaemonStartupError) as caught:
+                client.ensure_daemon_running(self.db_path)
+        self.assertEqual(type(caught.exception), client.DaemonStartupError)
+        self.assertGreaterEqual(self.clock.now, 10.0)
+        self.assertLessEqual(self.clock.now, 14.0)
+        self.spawn.assert_called_once_with(self.db_path)
+
+    def test_alive_owner_expires_at_twenty_five_seconds(self):
+        with (
+            patch.object(client, "probe_owner", return_value="initializing", create=True),
+            patch.object(client, "reachable_daemon_info", return_value=None, create=True),
+        ):
+            with self.assertRaisesRegex(client.DaemonStartingError, "initializing after 25"):
+                client.ensure_daemon_running(self.db_path)
+        self.assertEqual(self.clock.now, 25.0)
+        self.spawn.assert_not_called()
+
+    def test_transient_probe_holes_and_ready_state_keep_owner_alive(self):
+        for answers in (
+            ["initializing", None] * 20,
+            ["initializing", None, "initializing"] + ["initializing"] * 20,
+            ["ready"] * 20,
+        ):
+            with self.subTest(answers=answers[:3]):
+                self.clock.now = 0
+                with (
+                    patch.object(client, "probe_owner", side_effect=answers, create=True),
+                    patch.object(
+                        client,
+                        "reachable_daemon_info",
+                        side_effect=lambda _: self.info if self.clock.now >= 10 else None,
+                        create=True,
+                    ),
+                ):
+                    self.assertEqual(client.ensure_daemon_running(self.db_path), self.info)
+                self.assertEqual(self.clock.now, 10.0)
+        self.spawn.assert_not_called()
+
+    def test_owner_probes_are_throttled(self):
+        with (
+            patch.object(client, "probe_owner", return_value="initializing", create=True) as probe,
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                side_effect=lambda _: self.info if self.clock.now >= 10 else None,
+                create=True,
+            ),
+        ):
+            self.assertEqual(client.ensure_daemon_running(self.db_path), self.info)
+        self.assertLessEqual(probe.call_count, 11)
+
+    def test_reachable_and_probe_helpers_validate_identity_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = os.path.join(temp_dir, "real.db")
+            link = os.path.join(temp_dir, "link.db")
+            os.symlink(target, link)
+            canonical = os.path.realpath(link)
+            info = {"db_path": canonical, "service_port": 1, "auth_token": "tok"}
+
+            with (
+                patch.object(client.discovery, "read", return_value=info),
+                patch.object(client, "_authenticated_ping_ok", return_value=True),
+            ):
+                self.assertEqual(client.reachable_daemon_info(link), info)
+            with patch.object(client.discovery, "read", return_value=None):
+                self.assertIsNone(client.reachable_daemon_info(link))
+            with (
+                patch.object(
+                    client.discovery, "read", return_value={**info, "db_path": "/other.db"}
+                ),
+                patch.object(client, "_authenticated_ping_ok", return_value=True),
+            ):
+                self.assertIsNone(client.reachable_daemon_info(link))
+            with (
+                patch.object(client.discovery, "read", return_value=info),
+                patch.object(client, "_authenticated_ping_ok", return_value=False),
+            ):
+                self.assertIsNone(client.reachable_daemon_info(link))
+
+            with patch.object(
+                client, "_identify_probe", return_value={"db_path": canonical, "state": "ready"}
+            ):
+                self.assertEqual(client.probe_owner(link), "ready")
+            for response in (None, {}, {"db_path": "/other.db", "state": "ready"}, "ready"):
+                with patch.object(client, "_identify_probe", return_value=response):
+                    self.assertIsNone(client.probe_owner(link))
+
+    def test_nested_and_sequential_waits_share_one_budget(self):
+        with (
+            patch.object(client, "probe_owner", return_value="initializing", create=True),
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                side_effect=lambda _: self.info if self.clock.now == 20 else None,
+                create=True,
+            ),
+        ):
+            with client.startup_budget():
+                self.assertEqual(client.ensure_daemon_running(self.db_path), self.info)
+                with client.startup_budget(100):
+                    self.clock.sleep(0.25)
+                    with self.assertRaises(client.DaemonStartingError):
+                        client.ensure_daemon_running(self.db_path)
+            self.assertEqual(self.clock.now, 25.0)
+            with client.startup_budget():
+                with self.assertRaises(client.DaemonStartingError):
+                    client.ensure_daemon_running(self.db_path)
+            self.assertEqual(self.clock.now, 50.0)
+
+    def test_spawn_throttle_allows_next_spawn_at_fifteen_seconds(self):
+        for now in (0, 5, 14):
+            self.clock.now = now
+            client._spawn_if_due(self.db_path)
+        self.spawn.assert_called_once_with(self.db_path)
+        self.clock.now = 15
+        self.assertTrue(client._spawn_if_due(self.db_path))
+        self.assertEqual(self.spawn.call_count, 2)
+
+    def test_begin_lazy_start_adopts_session_and_skips_spawn_for_owner(self):
+        session = MagicMock()
+        session.db_path = self.db_path
+        thread = MagicMock()
+        with (
+            patch.object(client, "probe_owner", return_value="initializing"),
+            patch.object(client, "_spawn_if_due") as spawn_if_due,
+            patch.object(client.threading, "Thread", return_value=thread) as thread_cls,
+        ):
+            client.begin_lazy_start(session)
+        self.assertIs(client.get_current_session(), session)
+        spawn_if_due.assert_not_called()
+        thread_cls.assert_called_once()
+        thread.start.assert_called_once()
+        client._current_session = None
+
+    def test_lazy_thread_retries_pre_probe_startup_then_hellos(self):
+        session = MagicMock()
+        session.db_path = self.db_path
+        ensure_calls = []
+
+        def fake_ensure(_db_path, *, cap_s):
+            ensure_calls.append(cap_s)
+            if len(ensure_calls) == 1:
+                self.clock.now = 20
+                raise client.DaemonStartupError("no owner during imports")
+            self.clock.now = 60
+            return self.info
+
+        thread = MagicMock()
+        with (
+            patch.object(client, "probe_owner", return_value=None),
+            patch.object(client, "_spawn_if_due"),
+            patch.object(client, "ensure_daemon_running", side_effect=fake_ensure),
+            patch.object(client.threading, "Thread", return_value=thread) as thread_cls,
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            client.begin_lazy_start(session)
+            thread_cls.call_args.kwargs["target"]()
+        self.assertEqual(len(ensure_calls), 2)
+        session.open.assert_called_once()
+        self.assertEqual(sum("still pending" in message for message in logs.output), 1)
+        client._current_session = None
+
+    def test_lazy_thread_stops_at_cap_when_daemon_never_appears(self):
+        session = MagicMock()
+        session.db_path = self.db_path
+        ensure_calls = []
+
+        def fake_ensure(_db_path, *, cap_s):
+            ensure_calls.append(cap_s)
+            self.clock.now += 20
+            raise client.DaemonStartupError("still importing")
+
+        thread = MagicMock()
+        with (
+            patch.object(client, "probe_owner", return_value=None),
+            patch.object(client, "_spawn_if_due"),
+            patch.object(client, "ensure_daemon_running", side_effect=fake_ensure),
+            patch.object(client.threading, "Thread", return_value=thread) as thread_cls,
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            client.begin_lazy_start(session)
+            thread_cls.call_args.kwargs["target"]()
+        self.assertGreaterEqual(self.clock.now, 120)
+        self.assertEqual(session.open.call_count, 0)
+        self.assertEqual(sum("still pending" in message for message in logs.output), 1)
+        self.assertTrue(any("exceeded 120 seconds" in message for message in logs.output))
+        client._current_session = None
+
+    def test_lazy_adoption_keeps_first_tool_call_attribution(self):
+        session = client.SessionConnection.__new__(client.SessionConnection)
+        session.db_path = self.db_path
+        session._sock = None
+        session._auth_token = None
+        session._agent_session_id = "logical-session"
+        session._session_capability = "lazy-capability"
+        session._state_lock = threading.RLock()
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+        with (
+            patch.object(client, "probe_owner", return_value="initializing"),
+            patch.object(client, "_spawn_if_due"),
+            patch.object(client.threading, "Thread", return_value=MagicMock()),
+            patch.object(session, "ensure_fresh"),
+            patch.object(client, "ensure_daemon_running", return_value=self.info),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol, "recv_frame", return_value=protocol.build_ok_response("x", "ok")
+            ),
+        ):
+            client.begin_lazy_start(session)
+            result = client.call(
+                self.db_path,
+                "search_tags",
+                {},
+                caller_agent_session_id="logical-session",
+            )
+        self.assertEqual(result, "ok")
+        self.assertEqual(sent_requests[0]["params"]["caller_agent_session_id"], "logical-session")
+        self.assertEqual(
+            sent_requests[0]["params"]["caller_agent_session_capability"], "lazy-capability"
+        )
+        client._current_session = None
+
+    def test_background_thread_hellos_without_a_tool_call(self):
+        server = _CountingRpcServer()
+        info = {**self.info, "service_port": server.port}
+        session = client.SessionConnection(
+            self.db_path,
+            session_id="background-session",
+            cwd="/tmp",
+            agent_id="test-agent",
+        )
+        try:
+            with (
+                patch.object(client, "probe_owner", return_value="initializing"),
+                patch.object(client, "_spawn_if_due"),
+                patch.object(client, "ensure_daemon_running", return_value=info),
+            ):
+                client.begin_lazy_start(session)
+                self.assertTrue(server.hello_seen.wait(2))
+            self.assertEqual(server.methods, ["hello"])
+            self.assertFalse(server.tool_seen.is_set())
+        finally:
+            session.close(send_goodbye=False)
+            client._current_session = None
+            server.close()
+
+    def test_racing_tool_call_does_not_send_a_second_hello(self):
+        server = _CountingRpcServer()
+        info = {**self.info, "service_port": server.port}
+        session = client.SessionConnection(
+            self.db_path,
+            session_id="racing-session",
+            cwd="/tmp",
+            agent_id="test-agent",
+        )
+        worker_started = threading.Event()
+        worker_allowed = threading.Event()
+        worker_done = threading.Event()
+        main_thread = threading.current_thread()
+
+        def fake_ensure(_db_path, *, cap_s=None):
+            if threading.current_thread() is not main_thread:
+                worker_started.set()
+                self.assertTrue(worker_allowed.wait(2))
+                worker_done.set()
+            return info
+
+        try:
+            with (
+                patch.object(client, "probe_owner", return_value="initializing"),
+                patch.object(client, "_spawn_if_due"),
+                patch.object(client, "ensure_daemon_running", side_effect=fake_ensure),
+                patch.object(client.discovery, "read", return_value=info),
+            ):
+                client.begin_lazy_start(session)
+                self.assertTrue(worker_started.wait(2))
+                result = client.call(
+                    self.db_path,
+                    "search_tags",
+                    {},
+                    caller_agent_session_id="racing-session",
+                )
+                self.assertEqual(result, "ok")
+                self.assertTrue(server.tool_seen.wait(2))
+                worker_allowed.set()
+                self.assertTrue(worker_done.wait(2))
+            self.assertEqual(server.methods.count("hello"), 1)
+            self.assertEqual(server.methods.count("tool_call"), 1)
+        finally:
+            worker_allowed.set()
+            session.close(send_goodbye=False)
+            client._current_session = None
+            server.close()
+
+    def test_begin_lazy_start_returns_while_probe_is_blocked(self):
+        session = MagicMock()
+        session.db_path = self.db_path
+        probe_started = threading.Event()
+        probe_release = threading.Event()
+        hello_done = threading.Event()
+
+        def blocked_probe(_db_path):
+            probe_started.set()
+            probe_release.wait(2)
+            return "initializing"
+
+        session.open.side_effect = lambda: hello_done.set()
+        started_at = time.monotonic()
+        with (
+            patch.object(client, "probe_owner", side_effect=blocked_probe),
+            patch.object(client, "_spawn_if_due"),
+            patch.object(client, "ensure_daemon_running", return_value=self.info),
+        ):
+            client.begin_lazy_start(session)
+            self.assertTrue(probe_started.wait(1))
+            self.assertLess(time.monotonic() - started_at, 0.2)
+            probe_release.set()
+            self.assertTrue(hello_done.wait(1))
+        client._current_session = None
 
 
 if __name__ == "__main__":

@@ -208,69 +208,92 @@ class RpcBackend:
     """The only backend used in real production adapter runtime -- configured exactly once, by
     __main__.py's default branch, synchronously, BEFORE mcp.run() is called (not inside
     server_lifespan, which owns only the SessionConnection). Classifies mid-call RPC failures per
-    protocol.WRITE_TOOLS/READ_TOOLS (§12): a write tool never silently retries, a read tool does."""
+    protocol.WRITE_TOOLS/READ_TOOLS (§12): a write tool never silently retries, a read tool does.
+    A progress-aware cold-start timeout returns ``status="DAEMON_STARTING"`` so callers can retry."""
 
     def call(self, tool_name: str, kwargs: dict):
         from saltmdb.config import get_db_path
         from saltmdb.mcp.identity import SESSION_IDENTITY
 
-        # The adapter is the trust boundary for agent identity.  Public wrappers already add
-        # this field for the daemon, but re-assert it here so an internal caller (or a stale
-        # wrapper) cannot smuggle a different agent_id through the transport envelope.  Tools whose
-        # contract is intentionally cross-agent/ownership-neutral must not receive an agent_id key,
-        # except get_events, whose agent_id is a read filter and passes through untouched.
-        if tool_name in _AGENT_ID_INJECTED_TOOLS:
-            kwargs = {**kwargs, "agent_id": _effective_agent_id()}
-        elif tool_name in _AGENT_ID_PASSTHROUGH_TOOLS:
-            pass
-        else:
-            kwargs = {key: value for key, value in kwargs.items() if key != "agent_id"}
+        with daemon_client.startup_budget():
+            # The adapter is the trust boundary for agent identity.  Public wrappers already add
+            # this field for the daemon, but re-assert it here so an internal caller (or a stale
+            # wrapper) cannot smuggle a different agent_id through the transport envelope.  Tools
+            # whose contract is intentionally cross-agent/ownership-neutral must not receive an
+            # agent_id key, except get_events, whose agent_id is a read filter and passes through
+            # untouched.
+            if tool_name in _AGENT_ID_INJECTED_TOOLS:
+                kwargs = {**kwargs, "agent_id": _effective_agent_id()}
+            elif tool_name in _AGENT_ID_PASSTHROUGH_TOOLS:
+                pass
+            else:
+                kwargs = {key: value for key, value in kwargs.items() if key != "agent_id"}
 
-        if tool_name in {
-            "log_event",
-            "store_memory",
-            "consolidate_memories",
-            "revise_memory",
-            "supersede_memory",
-            "update_memory_metadata",
-            "capture_trace_start",
-            "capture_trace_memory_link",
-            "capture_trace_complete",
-        }:
-            kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
+            if tool_name in {
+                "log_event",
+                "store_memory",
+                "consolidate_memories",
+                "revise_memory",
+                "supersede_memory",
+                "update_memory_metadata",
+                "capture_trace_start",
+                "capture_trace_memory_link",
+                "capture_trace_complete",
+            }:
+                kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
 
-        # Transport metadata, consumed by daemon/server.py before ordinary tool dispatch.  This
-        # intentionally differs from public agent_session_id filters on search/event tools.
-        db_path = get_db_path()
-        try:
-            return daemon_client.call(
-                db_path,
-                tool_name,
-                kwargs,
-                caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
-            )
-        except daemon_client.DaemonRpcError as e:
-            if e.code == "MID_CALL_FAILURE":
-                if tool_name in protocol.READ_TOOLS:
-                    return daemon_client.call(
-                        db_path,
-                        tool_name,
-                        kwargs,
-                        caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
-                    )
-                if tool_name in protocol.WRITE_TOOLS:
-                    return {
-                        "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
-                        "tool": tool_name,
-                        "advice": (
-                            "The daemon connection was lost while this write was in flight. "
-                            "Whether it committed is unknown from here -- SQLite's own transaction "
-                            "durability means it either fully committed or fully rolled back, "
-                            "never partially, but that answer didn't make it back over this "
-                            "connection. Re-verify before retrying, to avoid creating a duplicate."
-                        ),
-                    }
-            raise
+            # Transport metadata, consumed by daemon/server.py before ordinary tool dispatch.  This
+            # intentionally differs from public agent_session_id filters on search/event tools.
+            db_path = get_db_path()
+            try:
+                return daemon_client.call(
+                    db_path,
+                    tool_name,
+                    kwargs,
+                    caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
+                )
+            except daemon_client.DaemonStartingError:
+                return {
+                    "status": "DAEMON_STARTING",
+                    "tool": tool_name,
+                    "advice": (
+                        "The SALTMDB daemon is still starting after a restart. Wait a few seconds "
+                        "and repeat the call; nothing was executed."
+                    ),
+                }
+            except daemon_client.DaemonRpcError as e:
+                if e.code == "MID_CALL_FAILURE":
+                    if tool_name in protocol.READ_TOOLS:
+                        try:
+                            return daemon_client.call(
+                                db_path,
+                                tool_name,
+                                kwargs,
+                                caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
+                            )
+                        except daemon_client.DaemonStartingError:
+                            return {
+                                "status": "DAEMON_STARTING",
+                                "tool": tool_name,
+                                "advice": (
+                                    "The SALTMDB daemon is still starting after a restart. Wait a "
+                                    "few seconds and repeat the call; nothing was executed."
+                                ),
+                            }
+                    if tool_name in protocol.WRITE_TOOLS:
+                        return {
+                            "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
+                            "tool": tool_name,
+                            "advice": (
+                                "The daemon connection was lost while this write was in flight. "
+                                "Whether it committed is unknown from here -- SQLite's own "
+                                "transaction durability means it either fully committed or fully "
+                                "rolled back, never partially, but that answer didn't make it "
+                                "back over this connection. Re-verify before retrying, to avoid "
+                                "creating a duplicate."
+                            ),
+                        }
+                raise
 
 
 _backend = None  # unconfigured by default -- calling a tool with no backend set raises clearly

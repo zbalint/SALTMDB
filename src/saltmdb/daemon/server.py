@@ -831,13 +831,22 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         _daemon_log_redirect(db_path)
     _configure_stdio_logging()
 
+    spawned_at = os.environ.get("SALTMDB_DAEMON_SPAWNED_AT")
+    if spawned_at is None:
+        startup_lag_s = "n/a"
+    else:
+        try:
+            startup_lag_s = f"{time.time() - float(spawned_at):.3f}"
+        except ValueError:
+            startup_lag_s = "n/a"
     logger.info(
-        "Daemon process starting: pid=%d ppid=%d argv=%s cwd=%s foreground=%s",
+        "Daemon process starting: pid=%d ppid=%d argv=%s cwd=%s foreground=%s startup_lag_s=%s",
         os.getpid(),
         os.getppid(),
         sys.argv,
         os.getcwd(),
         args.foreground,
+        startup_lag_s,
     )
 
     for _blas_var in (
@@ -879,6 +888,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     # Probe-port bind, immediately after winning the guard. Rollback on failure (round-4 fix):
     # close the guard rather than leaving a half-started daemon holding it.
     probe_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform != "win32":
+        probe_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe_sock.bind(("127.0.0.1", p_port))
         probe_sock.listen(config.DAEMON_IDENTIFY_MAX_CONCURRENT)
