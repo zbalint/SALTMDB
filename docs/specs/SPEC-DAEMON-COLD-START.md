@@ -4,6 +4,8 @@
 
 **LOCKED** (2026-10-05, pre-lock gate run against develop at the commit named below; gate notes in section 9). Backlog item BL-012. Context: `mcp-cold-start-2026-10-05`. First consultant review (3 blockers, 1 should-fix, 3 nits) and second look (1 blocker, 3 should-fix, 3 nits) are incorporated in this revision.
 
+**Amendment 1** (developer BLOCKED: the L20 comment in `__main__.py` is outside the L55-70 edit scope but matched the plain `rg` of section 4 item 13): the acceptance search now ignores comment lines (section 4 item 13), and section 8 item 3 says three commands. Scope and decisions are unchanged.
+
 - Location/branch: main checkout `<repo>`, branch `develop`. Use the repo `.venv`, never system python. Baseline: the spec's commit on develop (parent: the docs commit that moved the specs; no source file changed since the baseline run). `.venv/bin/pytest -q tests/test_daemon_client.py tests/test_mcp_server.py` gave `25 passed`; the full `./verify` gave `1981 passed, 142 subtests passed`.
 - Test seams: `saltmdb.daemon.client` (`ensure_daemon_running`, `reachable_daemon_info`, `probe_owner`, `adopt_current_session`, `begin_lazy_start`, `call`), `saltmdb.mcp.server.server_lifespan` (as in `tests/test_mcp_server.py`), `saltmdb.mcp.tools.RpcBackend.call`. Existing pattern for fake time and sockets: `tests/test_daemon_client.py`.
 - Scope (may edit exactly these files): `src/saltmdb/daemon/client.py` (`ensure_daemon_running`, `_spawn_daemon_process`'s env only, the error classes next to `DaemonStartupError`, `call`, `get_current_session`'s docstring, and new small functions), `src/saltmdb/config.py` (six constants beside L678-683), `src/saltmdb/mcp/server.py` (`server_lifespan` only), `src/saltmdb/__main__.py` (L55-70 region only), `src/saltmdb/mcp/tools.py` (`RpcBackend.call` only), `src/saltmdb/daemon/server.py` (the probe-socket bind at L879-883 and the 'Daemon process starting' log line at L835-841 only, D11 and D12), `tests/test_daemon_client.py` (add tests only), `tests/test_mcp_server.py` (add tests; and the existing lifespan tests at L36-69 may be edited only to patch `saltmdb.daemon.client.reachable_daemon_info`, see section 4), `tests/test_rpc_backend_starting.py` (new), `docs/architecture.md` (the daemon startup paragraph only).
@@ -90,7 +92,7 @@ Fake time and sockets in the style of `tests/test_daemon_client.py` (patch `salt
 11b. Pre-probe phase (second-look blocker): the probe answers `None` for 20 simulated seconds (daemon still importing), then `initializing` for 40 more, then the daemon is reachable; the thread of `begin_lazy_start` survives the `DaemonStartupError` of the first window, retries, and the fake receives the hello at about 60 seconds with no tool call made. A thread whose daemon never appears stops retrying at 120 simulated seconds, having logged a warning.
 11c. `_spawn_daemon_process` puts `SALTMDB_DAEMON_SPAWNED_AT` (a float string) in the Popen env (patched `subprocess.Popen`), keeping `SALTMDB_DB_PATH` unchanged.
 12. In the new `tests/test_rpc_backend_starting.py`: `RpcBackend.call` with `daemon_client.call` patched to raise `DaemonStartingError` returns the dict of D9 with the tool name; the same when the error is raised from the `MID_CALL_FAILURE` read retry; with a plain `DaemonStartupError` the exception propagates.
-13. Acceptance commands, not pytest: `rg -n 'ensure_daemon_running' src/saltmdb/__main__.py` prints nothing; `rg -n 'SO_REUSEADDR' src/saltmdb/daemon/server.py` prints a match in the probe block; `rg -n 'startup_lag_s' src/saltmdb/daemon/server.py` prints the new log field.
+13. Acceptance commands, not pytest: `rg -n '^[^#]*ensure_daemon_running' src/saltmdb/__main__.py` prints nothing (the L20 comment, which stays accurate because `call_method` still calls it, starts with `#` and does not match; the import at L56 must also go, so no code reference remains); `rg -n 'SO_REUSEADDR' src/saltmdb/daemon/server.py` prints a match in the probe block; `rg -n 'startup_lag_s' src/saltmdb/daemon/server.py` prints the new log field.
 
 ## 5. Documentation
 
@@ -114,7 +116,7 @@ In order, at the main checkout with the repo `.venv`:
 
 1. Baseline (recorded in section 0): `.venv/bin/pytest -q tests/test_daemon_client.py tests/test_mcp_server.py` = 25 passed. After implementation: the section 6 targeted command passes with zero failures and the new tests included.
 2. `.venv/bin/ruff check src tests`, `.venv/bin/ruff format --check src tests`, `.venv/bin/mypy src`: exit 0 (no new `noqa` unless justified in the report).
-3. The two `rg` commands of section 4 item 13.
+3. The three `rg` commands of section 4 item 13.
 4. `./verify`: exit 0, report counts.
 5. `git diff --stat` and `git status --short` list only files in section 0 scope.
 6. Manual, owner (not run by the developer): stop the daemon, start an agent session, and see the MCP server connect; the first tool call returns its result or `DAEMON_STARTING` and succeeds on repeat; the daemon survives past 30 s without any tool call.
