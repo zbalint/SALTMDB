@@ -159,6 +159,34 @@ class TestBuildParser(unittest.TestCase):
         self.assertEqual(args.days, 7)
         self.assertEqual(args.telemetry_limit, 10)
 
+    def test_daemon_parser_surface(self):
+        parser = build_parser()
+        install = parser.parse_args(["daemon", "install-service", "--dry-run", "--no-start"])
+        self.assertTrue(install.dry_run)
+        self.assertTrue(install.no_start)
+        self.assertTrue(callable(install.func))
+        for command in ("start", "stop", "status", "uninstall-service"):
+            args = parser.parse_args(["daemon", command])
+            self.assertTrue(callable(args.func), command)
+        self.assertEqual(
+            parser.description,
+            "SALTMDB CLI (read-only data commands plus daemon lifecycle).",
+        )
+
+    def test_daemon_status_command_prints_service_result(self):
+        from saltmdb.daemon.service import ServiceResult
+
+        args = build_parser().parse_args(["daemon", "status"])
+        with patch(
+            "saltmdb.daemon.service.daemon_status",
+            return_value=ServiceResult(3, "not running"),
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                result = args.func(args)
+        self.assertEqual(result, 3)
+        self.assertEqual(buf.getvalue(), "not running\n")
+
 
 class _OrphansArgs:
     def __init__(self, db_path=None):

@@ -693,6 +693,10 @@ DAEMON_OWNER_PROBE_MISSES = 3
 DAEMON_SPAWN_MIN_INTERVAL_S = 15.0
 # Bound the hello after a background readiness wait.
 DAEMON_LAZY_HELLO_BUDGET_S = 5.0
+# Maximum time for the persistent daemon start readiness loop.
+DAEMON_START_WAIT_S = 120.0
+# Maximum time to wait for a SIGTERM'd daemon process to exit.
+DAEMON_STOP_WAIT_S = 30.0
 
 
 # Daemon grace-period shutdown timer once the last session disconnects -- matches the pre-Track-B

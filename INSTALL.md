@@ -65,6 +65,52 @@ uv run python -m saltmdb
 - `SALTMDB_RERANKER_MODEL`: Enables the optional ONNX cross-encoder final-reranker stage of `search_memory` with a supported model name (default: unset, RRF ordering; see [`docs/architecture.md`](docs/architecture.md)).
 - `SALTMDB_DISABLE_COMMUNITY_DETECTION`: Set to any non-empty value to suppress the background Leiden community-detection recompute that backs `retrieve_context`'s global strategy; also suppressed under `SALTMDB_TEST_MODE`.
 
+
+### Running the daemon persistently
+
+The daemon can be run without an adapter-owned 30-second idle timer. For a foreground process
+that logs to the terminal, run:
+
+```bash
+python -m saltmdb.daemon.server --foreground
+```
+
+For a detached daemon with output redirected to `daemon.log`, use:
+
+```bash
+saltmdb-cli daemon start
+```
+
+On Linux and WSL2, `saltmdb-cli daemon install-service` writes a systemd user unit with the
+canonical database path, reloads the user manager, and enables the unit. Add `--no-start` to
+enable without starting it, or `--dry-run` to print the unit and planned commands without
+writing a file or invoking `systemctl`. WSL2 requires systemd enabled in `/etc/wsl.conf`:
+`[boot] systemd=true`; restart WSL after changing it. To start the service at boot without a
+login session, run `loginctl enable-linger $USER` yourself; the installer never changes login
+manager state. Remove the unit with `saltmdb-cli daemon uninstall-service`.
+
+Daemon lifecycle commands use exit code 0 for success, 1 for a refusal or failure, and 3 for
+`daemon status` when no daemon is running or one is starting or stopping. A running status is
+one line in the form `running pid=P port=N started_at=T db=PATH`; it never prints the
+authentication token. `saltmdb-cli daemon stop` refuses while the unit is active; stop a managed
+daemon with `systemctl --user stop saltmdb-daemon`. If the unit is only retrying
+(`activating (auto-restart)`), `daemon stop` proceeds and stops the daemon that currently holds
+the election, after which the unit can take over.
+
+Adapters still start their own grace-timer daemon when no daemon is reachable. While agent
+sessions keep cycling, that adapter-spawned daemon can win the election each time the previous
+one exits, so a newly installed unit may not take over until agents are idle for 30 seconds.
+Starting with `saltmdb-cli daemon start` while an enabled unit is installed leaves the unit
+retrying every 30 seconds after its failed election; use `systemctl --user start
+saltmdb-daemon` instead. `daemon status` cannot distinguish a persistent daemon from one spawned
+by an adapter.
+
+The unit records the canonical database path from the shell that ran `install-service`. A later
+CLI invocation from a shell with a different `SALTMDB_DB_PATH` inspects that different daemon.
+A systemd-started daemon does not inherit the shell environment; add viewer or other environment
+settings with `systemctl --user edit saltmdb-daemon`. An adapter-spawned daemon copies the
+adapter's environment.
+
 ### Adapter identity and session lifecycle
 
 `SALTMDB_AGENT_ID` is configured once in each MCP server entry; agents must not pass

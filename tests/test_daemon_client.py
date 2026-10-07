@@ -736,6 +736,31 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
         self.assertTrue(kwargs["start_new_session"])
         self.assertIsInstance(float(kwargs["env"]["SALTMDB_DAEMON_SPAWNED_AT"]), float)
 
+    def test_persistent_posix_spawn_disables_idle_timer(self):
+        import sys
+
+        with (
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_process(self.db_path, persistent=True)
+        args, kwargs = mock_popen.call_args
+        self.assertEqual(args[0], [sys.executable, "-m", "saltmdb.daemon.server", "--foreground"])
+        self.assertEqual(kwargs["env"]["SALTMDB_DB_PATH"], self.db_path)
+        self.assertTrue(kwargs["start_new_session"])
+
+    def test_default_posix_spawn_keeps_idle_timer(self):
+        import sys
+
+        with (
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_process(self.db_path)
+        self.assertEqual(
+            mock_popen.call_args.args[0], [sys.executable, "-m", "saltmdb.daemon.server"]
+        )
+
     def test_posix_spawn_oserror_propagates_not_silently_retried(self):
         with (
             patch.object(client.sys, "platform", "linux"),

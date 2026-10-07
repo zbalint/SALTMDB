@@ -270,7 +270,7 @@ def _spawn_daemon_via_intermediary(db_path: str) -> None:
         _spawn_daemon_process(db_path)
 
 
-def _spawn_daemon_process(db_path: str) -> None:
+def _spawn_daemon_process(db_path: str, *, persistent: bool = False) -> None:
     """Detached, log-redirected daemon spawn -- matches viewer/server.py's start_viewer() existing
     Popen kwargs shape. env carries the CANONICAL db_path explicitly, never a re-derived/raw
     value. A losing contender's own election-bind attempt (daemon/server.py) fails almost
@@ -329,6 +329,8 @@ def _spawn_daemon_process(db_path: str) -> None:
         popen_kwargs["start_new_session"] = True
 
     args = [sys.executable, "-m", "saltmdb.daemon.server"]
+    if persistent:
+        args.append("--foreground")
     logger.info(
         "Spawning daemon subprocess: args=%s platform=%s creationflags=%s parent_pid=%d",
         args,

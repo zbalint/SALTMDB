@@ -276,8 +276,48 @@ def cmd_corpus_health(args):
     return 0
 
 
+def _print_daemon_result(result):
+    print(result.message)
+    return result.exit_code
+
+
+def cmd_daemon_start(args):
+    from saltmdb.daemon import service
+
+    return _print_daemon_result(service.start_daemon(args.db_path))
+
+
+def cmd_daemon_stop(args):
+    from saltmdb.daemon import service
+
+    return _print_daemon_result(service.stop_daemon(args.db_path))
+
+
+def cmd_daemon_status(args):
+    from saltmdb.daemon import service
+
+    return _print_daemon_result(service.daemon_status(args.db_path))
+
+
+def cmd_daemon_install_service(args):
+    from saltmdb.daemon import service
+
+    return _print_daemon_result(
+        service.install_service(args.db_path, dry_run=args.dry_run, no_start=args.no_start)
+    )
+
+
+def cmd_daemon_uninstall_service(args):
+    from saltmdb.daemon import service
+
+    return _print_daemon_result(service.uninstall_service())
+
+
 def build_parser():
-    p = argparse.ArgumentParser(prog="saltmdb-cli", description="Read-only SALTMDB CLI.")
+    p = argparse.ArgumentParser(
+        prog="saltmdb-cli",
+        description="SALTMDB CLI (read-only data commands plus daemon lifecycle).",
+    )
     p.add_argument("--db-path", default=None, help="Override SALTMDB_DB_PATH.")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -325,6 +365,25 @@ def build_parser():
         help="Max distinct error codes to report, ranked by count (default 10).",
     )
     c.set_defaults(func=cmd_corpus_health)
+
+    daemon = sub.add_parser("daemon", help="Manage the persistent SALTMDB daemon.")
+    daemon_sub = daemon.add_subparsers(dest="daemon_command", required=True)
+    daemon_start = daemon_sub.add_parser("start", help="Start a persistent daemon.")
+    daemon_start.set_defaults(func=cmd_daemon_start)
+    daemon_stop = daemon_sub.add_parser("stop", help="Stop a local daemon.")
+    daemon_stop.set_defaults(func=cmd_daemon_stop)
+    daemon_status = daemon_sub.add_parser("status", help="Report daemon status.")
+    daemon_status.set_defaults(func=cmd_daemon_status)
+    install = daemon_sub.add_parser("install-service", help="Install the systemd user service.")
+    install.add_argument("--dry-run", action="store_true", help="Print planned changes only.")
+    install.add_argument(
+        "--no-start", action="store_true", help="Enable the unit without starting it."
+    )
+    install.set_defaults(func=cmd_daemon_install_service)
+    uninstall = daemon_sub.add_parser(
+        "uninstall-service", help="Disable and remove the systemd user service."
+    )
+    uninstall.set_defaults(func=cmd_daemon_uninstall_service)
 
     return p
 
