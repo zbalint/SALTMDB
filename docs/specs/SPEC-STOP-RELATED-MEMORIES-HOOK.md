@@ -190,3 +190,22 @@ A read-only review (tester) changed the design: shown-id state instead of a tran
 prompt per turn through `pending_continuation`, title and id hygiene, `resolve_cli()` in the common
 module, default-off constants, example-file placement; the changes were applied and D1-D9 re-read
 against each other. No second pass. Acceptance 1 runs after implementation.
+
+## Amendment 1 (2026-10-10)
+
+Found by the developer, verified by the architect: `hooks/tests/test_capture_hook_config.py`
+`test_claude_pre_existing_entries_remain_byte_identical` compares the working tree's `command`
+hooks per event with `git show HEAD:hooks/claude-settings-example.json` and asserts equality, so
+any appended Stop command entry (D9) makes it fail while the change is uncommitted, and acceptance
+3 cannot pass.
+
+- A1.1. `hooks/tests/test_capture_hook_config.py` joins the §0 scope for exactly one line: the
+  assertion `self.assertEqual(after_commands, before_commands)` becomes
+  `self.assertEqual(after_commands[: len(before_commands)], before_commands)`. The test keeps its
+  purpose (pre-existing command entries stay unchanged and in the same order) and allows entries
+  appended after them. The `capture_count` assertion is unchanged.
+- A1.2. D9 and T8 stand; the new Stop command entry is appended after the existing ones in the
+  Stop group. Acceptance 4 now lists this test file as an allowed change.
+- A1.3. Pre-lock check for the amendment: `rg -n "claude-settings-example|codex-settings-example"`
+  over `tests/` and `hooks/tests/` finds this test file and the new T8 only; the Codex example has
+  no equivalent baseline test.
