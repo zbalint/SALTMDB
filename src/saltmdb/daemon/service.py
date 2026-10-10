@@ -60,6 +60,7 @@ def render_unit(python: str, db_path: str) -> str:
         "[Service]\n"
         "Type=simple\n"
         f"Environment=SALTMDB_DB_PATH={db_path}\n"
+        f"Environment=MALLOC_ARENA_MAX={config.DAEMON_MALLOC_ARENA_MAX}\n"
         f"ExecStart={python} -m saltmdb.daemon.server --foreground\n"
         "Restart=always\n"
         "RestartSec=30\n"

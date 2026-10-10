@@ -761,6 +761,30 @@ class TestSpawnDaemonSubprocessWindowsJobBreakaway(unittest.TestCase):
             mock_popen.call_args.args[0], [sys.executable, "-m", "saltmdb.daemon.server"]
         )
 
+    def test_posix_spawn_defaults_malloc_arena_max_without_parent_override(self):
+        with (
+            patch.dict(os.environ),
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            os.environ.pop("MALLOC_ARENA_MAX", None)
+            self.assertNotIn("MALLOC_ARENA_MAX", os.environ)
+            client._spawn_daemon_process(self.db_path)
+            _, kwargs = mock_popen.call_args
+            self.assertEqual(kwargs["env"]["MALLOC_ARENA_MAX"], "2")
+            self.assertNotIn("MALLOC_ARENA_MAX", os.environ)
+
+    def test_posix_spawn_preserves_parent_malloc_arena_max(self):
+        with (
+            patch.dict(os.environ, {"MALLOC_ARENA_MAX": "4"}),
+            patch.object(client.sys, "platform", "linux"),
+            patch.object(client.subprocess, "Popen") as mock_popen,
+        ):
+            client._spawn_daemon_process(self.db_path)
+            _, kwargs = mock_popen.call_args
+            self.assertEqual(kwargs["env"]["MALLOC_ARENA_MAX"], "4")
+            self.assertEqual(os.environ["MALLOC_ARENA_MAX"], "4")
+
     def test_posix_spawn_oserror_propagates_not_silently_retried(self):
         with (
             patch.object(client.sys, "platform", "linux"),

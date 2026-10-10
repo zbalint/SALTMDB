@@ -701,6 +701,8 @@ DAEMON_OWNER_PROBE_INTERVAL_S = 1.0
 DAEMON_OWNER_PROBE_MISSES = 3
 # Minimum per-process gap between speculative daemon spawns.
 DAEMON_SPAWN_MIN_INTERVAL_S = 15.0
+# BL-017 arena-off RSS probe: MALLOC_ARENA_MAX=2 held about 450 MB after the batches and rerank.
+DAEMON_MALLOC_ARENA_MAX = "2"
 # Bound the hello after a background readiness wait.
 DAEMON_LAZY_HELLO_BUDGET_S = 5.0
 # Maximum time for the persistent daemon start readiness loop.

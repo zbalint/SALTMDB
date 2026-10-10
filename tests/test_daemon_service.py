@@ -54,22 +54,37 @@ class TestDaemonService(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_render_unit_exact_text(self):
+        rendered = service.render_unit("/home/u/.venv/bin/python", "/home/u/.saltmdb/saltmdb.db")
+        sections: dict[str, list[str]] = {}
+        current_section = ""
+        for line in rendered.splitlines():
+            if line.startswith("[") and line.endswith("]"):
+                current_section = line
+                sections[current_section] = []
+            elif line:
+                self.assertTrue(current_section)
+                sections[current_section].append(line)
+
+        self.assertEqual(list(sections), ["[Unit]", "[Service]", "[Install]"])
         self.assertEqual(
-            service.render_unit("/home/u/.venv/bin/python", "/home/u/.saltmdb/saltmdb.db"),
-            "[Unit]\n"
-            "Description=SALTMDB daemon (persistent)\n"
-            "StartLimitIntervalSec=0\n"
-            "\n"
-            "[Service]\n"
-            "Type=simple\n"
-            "Environment=SALTMDB_DB_PATH=/home/u/.saltmdb/saltmdb.db\n"
-            "ExecStart=/home/u/.venv/bin/python -m saltmdb.daemon.server --foreground\n"
-            "Restart=always\n"
-            "RestartSec=30\n"
-            "\n"
-            "[Install]\n"
-            "WantedBy=default.target\n",
+            sections["[Unit]"],
+            [
+                "Description=SALTMDB daemon (persistent)",
+                "StartLimitIntervalSec=0",
+            ],
         )
+        self.assertEqual(
+            sections["[Service]"],
+            [
+                "Type=simple",
+                "Environment=SALTMDB_DB_PATH=/home/u/.saltmdb/saltmdb.db",
+                "Environment=MALLOC_ARENA_MAX=2",
+                "ExecStart=/home/u/.venv/bin/python -m saltmdb.daemon.server --foreground",
+                "Restart=always",
+                "RestartSec=30",
+            ],
+        )
+        self.assertEqual(sections["[Install]"], ["WantedBy=default.target"])
 
     def test_render_unit_rejects_unsafe_values(self):
         cases = [

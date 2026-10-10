@@ -24,6 +24,7 @@ from saltmdb.config import (
     DAEMON_DISCOVERY_RETRY_DELAY_S,
     DAEMON_LAZY_HELLO_BUDGET_S,
     DAEMON_LAZY_OPEN_CAP_S,
+    DAEMON_MALLOC_ARENA_MAX,
     DAEMON_OWNER_PROBE_INTERVAL_S,
     DAEMON_OWNER_PROBE_MISSES,
     DAEMON_RESPAWN_RETRY_INTERVAL,
@@ -327,6 +328,7 @@ def _spawn_daemon_process(db_path: str, *, persistent: bool = False) -> None:
     log_file = open(log_path, "a", encoding="utf-8")
 
     env = dict(os.environ)
+    env.setdefault("MALLOC_ARENA_MAX", DAEMON_MALLOC_ARENA_MAX)
     env["SALTMDB_DB_PATH"] = db_path
     env["SALTMDB_DAEMON_SPAWNED_AT"] = repr(time.time())
     popen_kwargs: dict[str, Any] = {
