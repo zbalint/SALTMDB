@@ -401,5 +401,60 @@ class TestCorpusHealthCli(unittest.TestCase):
         )
 
 
+class TestSnapshotCli(unittest.TestCase):
+    """SPEC-DB-SNAPSHOT-CLI T8: `saltmdb-cli snapshot` through main(); the daemon call is patched."""
+
+    def _main(self, argv):
+        from saltmdb.cli import main
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.argv", ["saltmdb-cli", *argv]), redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(SystemExit) as exit_info:
+                main()
+        return exit_info.exception.code, out.getvalue(), err.getvalue()
+
+    def test_success_prints_path_and_exits_zero(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            with patch(
+                "saltmdb.daemon.client.call_method", return_value={"path": "/snap/s.db"}
+            ) as call:
+                code, out, _err = self._main(["--db-path", tmp.name, "snapshot"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "/snap/s.db")
+        call.assert_called_once_with(tmp.name, "create_snapshot_now", {})
+
+    def test_missing_db_exits_one_without_calling_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.db")
+            with patch("saltmdb.daemon.client.call_method") as call:
+                code, out, err = self._main(["--db-path", missing, "snapshot"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("# Error: no database at", err)
+        call.assert_not_called()
+
+    def test_daemon_failure_exits_one_with_error_on_stderr(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            with patch("saltmdb.daemon.client.call_method", side_effect=RuntimeError("boom")):
+                code, out, err = self._main(["--db-path", tmp.name, "snapshot"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("# Error:", err)
+        self.assertIn("boom", err)
+
+    def test_relative_dest_dir_reaches_daemon_as_absolute(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            with patch(
+                "saltmdb.daemon.client.call_method", return_value={"path": "/snap/s.db"}
+            ) as call:
+                code, _out, _err = self._main(
+                    ["--db-path", tmp.name, "snapshot", "--dest-dir", "rel/out"]
+                )
+        self.assertEqual(code, 0)
+        sent = call.call_args.args[2]["dest_dir"]
+        self.assertTrue(os.path.isabs(sent))
+        self.assertEqual(sent, os.path.abspath("rel/out"))
+
+
 if __name__ == "__main__":
     unittest.main()

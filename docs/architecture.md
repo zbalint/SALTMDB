@@ -48,7 +48,7 @@ graph TD
 The SQLite database operates in **Write-Ahead Logging (WAL)** mode (`PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`). All writes use explicit `BEGIN IMMEDIATE` transactions with exponential backoff retry (up to 4 total attempts). The current migration marker is `PRAGMA user_version=3`; initialization reaches it atomically only after the v1/v2 prerequisites and the lifecycle cleanup described in `MIGRATION.md`, leaving the prior version intact for retry if migration fails.
 
 > [!WARNING]
-> **Never open the database file directly** (`sqlite3 saltmdb.db`, a DB browser GUI, or any ad hoc script) — not even for a read-only query. The single-owner backend daemon below is the only process meant to ever open this file; a second connection risks WAL lock contention with the daemon's own writer, and any write made outside it skips the secrets-redaction middleware and the FTS5 sync triggers entirely, silently corrupting search/redaction state. Use the MCP tools, `saltmdb-cli`, or the Viewer instead.
+> **Never open the database file directly** (`sqlite3 saltmdb.db`, a DB browser GUI, or any ad hoc script) — not even for a read-only query. The single-owner backend daemon below is the only process meant to ever open this file; a second connection risks WAL lock contention with the daemon's own writer, and any write made outside it skips the secrets-redaction middleware and the FTS5 sync triggers entirely, silently corrupting search/redaction state. Use the MCP tools, `saltmdb-cli`, or the Viewer instead. To copy the database for offline evaluation, run `saltmdb-cli snapshot`: the daemon writes a consistent, owner-only copy with SQLite's backup API.
 
 The schema includes the following tables:
 

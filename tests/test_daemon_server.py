@@ -826,5 +826,51 @@ class TestDaemonSignalShutdown(unittest.TestCase):
                 pass
 
 
+class TestCreateSnapshotNow(unittest.TestCase):
+    """SPEC-DB-SNAPSHOT-CLI T7: the daemon admin method, on a temp database only."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.db_path = os.path.join(self.tmp, "live.db")
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("CREATE TABLE entities (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO entities VALUES ('e1')")
+        conn.close()
+        self.state = _DaemonState(db_path=self.db_path, key="testkey", foreground=True)
+        self.state.auth_token = "tok"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _call(self, params):
+        return self.state.handle_request(
+            protocol.build_request("create_snapshot_now", params, token="tok")
+        )
+
+    def test_absolute_dest_dir_returns_path(self):
+        dest = os.path.join(self.tmp, "out")
+        response = self._call({"dest_dir": dest})
+        self.assertTrue(response["ok"], response)
+        path = response["result"]["path"]
+        self.assertTrue(os.path.isabs(path))
+        self.assertEqual(os.path.dirname(path), os.path.realpath(dest))
+        self.assertTrue(os.path.isfile(path))
+
+    def test_relative_dest_dir_is_an_error_response(self):
+        response = self._call({"dest_dir": "relative/out"})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], protocol.INTERNAL_ERROR)
+        self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "relative")))
+
+    def test_method_is_not_a_tool(self):
+        from saltmdb.daemon import dispatch
+
+        self.assertNotIn("create_snapshot_now", protocol.READ_TOOLS)
+        self.assertNotIn("create_snapshot_now", protocol.WRITE_TOOLS)
+        self.assertNotIn("create_snapshot_now", dispatch.DISPATCH_TABLE)
+
+
 if __name__ == "__main__":
     unittest.main()

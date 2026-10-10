@@ -113,6 +113,29 @@ def cmd_related_memories(args):
     return 0
 
 
+def cmd_create_snapshot(args):
+    """Ask the daemon for a database copy (SPEC-DB-SNAPSHOT-CLI): the daemon stays the only
+    process that opens the database. A maintenance command, so failures exit 1 visibly."""
+    from saltmdb.config import get_db_path
+    from saltmdb.daemon import client as daemon_client
+
+    db_path = args.db_path or get_db_path()
+    if not os.path.exists(db_path):
+        print(f"# Error: no database at {db_path}", file=sys.stderr)
+        return 1
+    params = {}
+    if args.dest_dir:
+        # The daemon runs in another working directory, so a relative path must not reach it.
+        params["dest_dir"] = os.path.abspath(os.path.expanduser(args.dest_dir))
+    try:
+        result = daemon_client.call_method(db_path, "create_snapshot_now", params)
+    except Exception as e:
+        print(f"# Error: {e}", file=sys.stderr)
+        return 1
+    print(result["path"])
+    return 0
+
+
 def cmd_export_corpus_snapshot(args):
     """Agent API redesign plan §5.12/Phase 7 item 29: export_corpus_snapshot moved off MCP --
     "evaluation/benchmark tooling for building SALTMDB itself, not agent operation" (§5.12).
@@ -415,6 +438,15 @@ def build_parser():
     )
     e.add_argument("--out", default=None, help="Write to this file instead of stdout.")
     e.set_defaults(func=cmd_export_corpus_snapshot)
+
+    snap = sub.add_parser(
+        "snapshot",
+        help="Have the daemon copy the database with SQLite's backup API (offline evaluation).",
+    )
+    snap.add_argument(
+        "--dest-dir", default=None, help="Directory for the copy (default <db dir>/backups)."
+    )
+    snap.set_defaults(func=cmd_create_snapshot)
 
     o = sub.add_parser(
         "orphans", help="List active memories with zero relationship links (maintenance scan)."

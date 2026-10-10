@@ -286,7 +286,7 @@ class _DaemonState:
             "service_port": self.service_port,
         }
 
-    def handle_request(  # noqa: PLR0911
+    def handle_request(  # noqa: PLR0911, PLR0912 -- flat method router, one branch per RPC method
         self, request: dict[str, Any], session_id: int | None = None
     ) -> dict[str, Any]:
         request_id: str | None = request.get("id")
@@ -326,6 +326,8 @@ class _DaemonState:
                 return self._handle_run_librarian(request_id, params)
             elif method == "run_backfill_chunk_embeddings_now":
                 return self._handle_run_backfill(request_id)
+            elif method == "create_snapshot_now":
+                return self._handle_create_snapshot(request_id, params)
             else:
                 return protocol.build_error_response(
                     request_id, protocol.UNKNOWN_METHOD, f"unknown method: {method}"
@@ -571,6 +573,22 @@ class _DaemonState:
             db_path=self.db_path, force=params.get("force", True), coordinator=self.coordinator
         )
         return protocol.build_ok_response(request_id, result)
+
+    def _handle_create_snapshot(
+        self, request_id: str | None, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Copy the database with SQLite's backup API (admin method, not a tool_call tool).
+
+        # shortcut: a backup longer than the 60 s RPC timeout leaves the CLI exiting 1 and an
+        # orphan file; add a progress/async path only if the database outgrows that.
+        """
+        from saltmdb.db import backup
+
+        dest_dir = params.get("dest_dir")
+        if dest_dir is not None and not (isinstance(dest_dir, str) and os.path.isabs(dest_dir)):
+            raise ValueError("dest_dir must be an absolute path string")
+        path = backup.create_snapshot(self.db_path, dest_dir)
+        return protocol.build_ok_response(request_id, {"path": path})
 
     def _handle_run_backfill(self, request_id: str | None) -> dict[str, Any]:
         """Trigger a full chunk-embedding backfill pass over all active entities."""
