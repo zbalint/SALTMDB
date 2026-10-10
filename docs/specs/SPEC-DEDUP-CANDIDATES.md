@@ -172,3 +172,11 @@ off the writer thread (BL-023), a vector pre-filter, caching.
   fixture traps; all amended here.
 - Known limit: `_run_fts_search` orders by `bm25 * weight`, so a high-weight unrelated row can rank into the top 10; the
   tester's corpus used default weights, so the 12/12 rank result does not cover that case. Accepted.
+
+## Amendment 1 (2026-10-10, architect, found by the tester's independent pass)
+
+D2 said that when stop-word removal leaves no terms the unfiltered split is used. That fallback was uncapped: a text of 10,000
+stop words built a 10,000-term OR query and took 48.9 s in `check_duplicate_memories` on the writer thread (the old code needed
+6.4 s for 40,000 tokens). Corrected rule: the term list is `(kept_terms or raw_terms)[:DEDUP_FTS_MAX_TERMS]`, so the cap applies
+to the fallback too. Test: `test_dedup_check_caps_terms_for_stop_word_only_text` in `tests/test_cross_owner_dedup.py`
+(red without the cap, green with it). The docstring edit in `_run_fts_search` keeps the blank line after its summary line.

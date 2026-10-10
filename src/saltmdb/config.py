@@ -122,7 +122,10 @@ DEDUP_LEXICAL_THRESHOLD = 0.40  # non-semantic (word_sim) fallback threshold
 # Dedup cross-encoder final-judge candidate.  This is deliberately separate from the
 # search-time, opt-in CROSS_ENCODER_* settings below.
 DEDUP_CROSS_ENCODER_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
-DEDUP_CROSS_ENCODER_MAX_CANDIDATES = 30  # matches the FTS duplicate pre-filter LIMIT 30
+DEDUP_CROSS_ENCODER_MAX_CANDIDATES = 10
+# Cap duplicate pre-filter terms at 40: measured FTS cost was 8/15/27 ms at 20/40/80
+# terms with the true parent rank unchanged.
+DEDUP_FTS_MAX_TERMS = 40
 # Raw CE logit >= this counts as a duplicate candidate. Set from a single eyeball banding
 # pass over candidate_results.json (2026-08-21, see SALTMDB memory `710882a0` follow-up):
 # scores >=6.2 were ~100% genuine near-duplicates in sample, 5.0-6.2 ~50%, 4.0-5.0 ~35-45%,

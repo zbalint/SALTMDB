@@ -5,7 +5,7 @@ Pure code-motion extraction (see refactor plan).
 
 import sqlite3
 import math
-from typing import Any
+from typing import Any, cast
 
 from saltmdb.config import (
     CROSS_ENCODER_MAX_CHARS,
@@ -13,6 +13,7 @@ from saltmdb.config import (
     DEDUP_CROSS_ENCODER_MAX_CANDIDATES,
     DEDUP_CROSS_ENCODER_MODEL,
     DEDUP_CROSS_ENCODER_THRESHOLD,
+    DEDUP_FTS_MAX_TERMS,
     DEDUP_LEXICAL_THRESHOLD,
     DEDUP_SUPERSESSION_THRESHOLD,
     get_db_path,
@@ -75,32 +76,52 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
         input_text = f"{title or ''} {content or ''}"
         duplicates = []
 
-        # Pre-filter using FTS5 to reduce candidates from O(N) to ~30 max
+        # Pre-filter with the OR-only BM25-ranked FTS5 search; SQLite errors retain the
+        # bounded scalar fallback as an explicitly degraded path.
         fts_candidates = []
+        fts_error = False
         search_terms = sanitize_fts_query(input_text)
-        if search_terms:
+        raw_terms = search_terms.split()
+        kept_terms = []
+        seen_terms = set()
+        for term in raw_terms:
+            normalized_term = term.lower()
+            if normalized_term in search_primitives.STOP_WORDS or normalized_term in seen_terms:
+                continue
+            seen_terms.add(normalized_term)
+            kept_terms.append(term)
+        capped_terms = (kept_terms or raw_terms)[:DEDUP_FTS_MAX_TERMS]
+        if capped_terms:
             try:
-                fts_where = " AND ".join(fts_where_clauses) if fts_where_clauses else "1=1"
-                fts_rows = conn.execute(
-                    f"SELECT e.id, e.title, e.full_content, e.agent_id, e.scope FROM entities_fts fts "
-                    f"JOIN entities e ON fts.id = e.id "
-                    f"WHERE entities_fts MATCH ? AND {fts_where} LIMIT 30",
-                    [search_terms] + params,
-                ).fetchall()
-                fts_candidates = fts_rows
+                fts_rows = cast(
+                    list[Any],
+                    search_primitives._run_fts_search(
+                        conn,
+                        " ".join(capped_terms),
+                        fts_where_clauses,
+                        params,
+                        DEDUP_CROSS_ENCODER_MAX_CANDIDATES,
+                        0,
+                        or_only=True,
+                    ),
+                )
+                fts_candidates = [(row[0], row[1], row[2], row[8], row[9]) for row in fts_rows]
             except sqlite3.Error as exc:
+                fts_error = True
                 logger.warning(
                     "FTS duplicate pre-filter unavailable; using scalar fallback: %s", exc
                 )
 
-        # Fallback to full scan only if FTS returned nothing
-        if not fts_candidates:
+        if fts_error:
             cursor = conn.execute(
                 f"SELECT id, title, full_content, agent_id, scope FROM entities "
                 f"WHERE {' AND '.join(where) if where else '1=1'} LIMIT 30",
                 params,
             )
             fts_candidates = cursor.fetchall()
+
+        if not fts_candidates and not fts_error:
+            return {"duplicate_found": False, "potential_duplicates": []}
 
         try:
             capped_query = input_text[:CROSS_ENCODER_MAX_QUERY_CHARS]

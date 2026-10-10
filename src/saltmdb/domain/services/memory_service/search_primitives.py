@@ -78,8 +78,9 @@ def _run_fts_search(
     offset: int,
     *,
     return_fallback_flag: bool = False,
+    or_only: bool = False,
 ) -> list | tuple[list, bool]:
-    """Execute the FTS5/BM25 query with AND->OR fallback. Returns sqlite3 Row list.
+    """Execute the FTS5/BM25 query, optionally skipping its AND attempt. Returns sqlite3 Row list.
 
     Each row's last column, fts_snippet, is a query-centered excerpt of full_content
     (FTS5 snippet(), column index 2) -- populated because this row genuinely matched via
@@ -88,11 +89,10 @@ def _run_fts_search(
     `return_fallback_flag` (opt-in, default False for backward compatibility with the two
     benchmark scripts that call this function directly): when True, returns
     `(rows, used_or_fallback)` instead of a bare row list, where `used_or_fallback` is True iff
-    the AND-joined MATCH found nothing and the OR-joined retry is what actually produced `rows`.
-    This is a single pool-level bool, not a per-row property -- the OR-fallback is an
-    all-or-nothing property of how the query as a whole was executed. Every return path
-    (including the early-return empty-terms case) honors the flag: `([], False)`, never a bare
-    `[]`, when `return_fallback_flag=True`.
+    the OR query produced the returned rows. This is a single pool-level bool, not a per-row
+    property -- the OR query is an all-or-nothing property of how the query as a whole was
+    executed. Every return path (including the early-return empty-terms case) honors the flag:
+    `([], False)`, never a bare `[]`, when `return_fallback_flag=True`.
     """
     raw_terms = sanitized_query.split()
     terms = [t for t in raw_terms if t.lower() not in STOP_WORDS]
@@ -102,7 +102,9 @@ def _run_fts_search(
     if not terms:
         return ([], False) if return_fallback_flag else []
 
-    fts_query_str = " ".join(f'"{t}"*' for t in terms)
+    fts_query_str = (
+        " OR ".join(f'"{t}"*' for t in terms) if or_only else " ".join(f'"{t}"*' for t in terms)
+    )
     where_sql = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
     bm25_weights = f"{BM25_TITLE_WEIGHT}, {BM25_CONTENT_WEIGHT}, {BM25_ALIAS_WEIGHT}"
     # full_content is column index 2 in entities_fts (id=0 UNINDEXED, title=1, full_content=2,
@@ -127,8 +129,8 @@ def _run_fts_search(
     """
     exec_params = [fts_query_str] + params + [limit, offset]
     rows = conn.execute(sql, exec_params).fetchall()
-    used_or_fallback = False
-    if not rows and len(terms) > 1:
+    used_or_fallback = bool(or_only and len(terms) > 1 and rows)
+    if not or_only and not rows and len(terms) > 1:
         fts_fallback_query = " OR ".join(f'"{t}"*' for t in terms)
         exec_params_fb = [fts_fallback_query] + params + [limit, offset]
         rows = conn.execute(sql, exec_params_fb).fetchall()

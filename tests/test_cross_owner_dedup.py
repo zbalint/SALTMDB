@@ -2,10 +2,13 @@ import unittest
 import tempfile
 import os
 import shutil
-from unittest.mock import patch
+import sqlite3
+from unittest.mock import Mock, patch
 import sqlite_vec
+from saltmdb.config import DEDUP_CROSS_ENCODER_MAX_CANDIDATES, DEDUP_FTS_MAX_TERMS
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services import memory_service, embedding_service
+from saltmdb.domain.services import memory_service, embedding_service, reranker_service
+from saltmdb.domain.services.memory_service import search_primitives
 from saltmdb.db.connection import write_transaction_retrying
 
 
@@ -213,16 +216,66 @@ class TestCrossOwnerDedup(unittest.TestCase):
             "Candidate C (lexically dissimilar) must not be included in potential duplicates",
         )
 
-    def test_dedup_check_fts_fallback_scan_is_bounded(self):
-        """FTS-fallback scan is bounded: when FTS candidates are empty against 35+ entities, fallback query uses LIMIT 30."""
+    def test_dedup_check_without_fts_hits_runs_no_scan_and_no_cross_encoder(self):
+        """An FTS miss is an empty candidate set, not permission for an arbitrary entity scan."""
         owner = "agent_dedup"
-        for i in range(35):
-            memory_service.store_memory(
-                title=f"Standard System Memory Item {i:02d}",
-                content=f"Detailed content for standard system memory entity index {i:02d}",
+        fake_model = Mock()
+        fake_model.rerank.side_effect = lambda _query, texts: [0.0] * len(texts)
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model) as get_model_mock,
+        ):
+            for i in range(35):
+                memory_service.store_memory(
+                    title=f"Standard System Memory Item {i:02d}",
+                    content=f"Detailed content for standard system memory entity index {i:02d}",
+                    agent_id=owner,
+                    db_connection=self.conn,
+                )
+
+            executed_sqls = []
+
+            class ConnectionProxy:
+                def __init__(self, target):
+                    self._target = target
+
+                def execute(self, sql, *args, **kwargs):
+                    executed_sqls.append(str(sql))
+                    return self._target.execute(sql, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self._target, name)
+
+            get_model_mock.reset_mock()
+            dup_check = memory_service.check_duplicate_memories(
+                title="ZzzUnmatchedQueryTermXyz",
+                content="ZzzUnmatchedQueryTermXyz",
                 agent_id=owner,
-                db_connection=self.conn,
+                db_connection=ConnectionProxy(self.conn),
             )
+
+        self.assertNotIn("error", dup_check)
+        self.assertFalse(dup_check["duplicate_found"])
+        self.assertEqual(dup_check["potential_duplicates"], [])
+        self.assertFalse(any("FROM entities" in sql and "LIMIT 30" in sql for sql in executed_sqls))
+        get_model_mock.assert_not_called()
+
+    def test_dedup_check_fts_error_keeps_bounded_scan(self):
+        """An FTS SQL error keeps the intentionally bounded degraded-path scan."""
+        owner = "agent_dedup"
+        fake_model = Mock()
+        fake_model.rerank.side_effect = lambda _query, texts: [0.0] * len(texts)
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model),
+        ):
+            for i in range(3):
+                memory_service.store_memory(
+                    title=f"Standard System Memory Item {i:02d}",
+                    content=f"Detailed content for standard system memory entity index {i:02d}",
+                    agent_id=owner,
+                    db_connection=self.conn,
+                )
 
         executed_sqls = []
 
@@ -231,31 +284,133 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 self._target = target
 
             def execute(self, sql, *args, **kwargs):
-                executed_sqls.append(str(sql))
+                sql_text = str(sql)
+                executed_sqls.append(sql_text)
+                if "entities_fts MATCH" in sql_text:
+                    raise sqlite3.OperationalError("FTS unavailable")
                 return self._target.execute(sql, *args, **kwargs)
 
             def __getattr__(self, name):
                 return getattr(self._target, name)
 
-        proxy_conn = ConnectionProxy(self.conn)
-
-        dup_check = memory_service.check_duplicate_memories(
-            title="ZzzUnmatchedQueryTermXyz",
-            content="ZzzUnmatchedQueryTermXyz",
-            agent_id=owner,
-            db_connection=proxy_conn,
-        )
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model),
+        ):
+            dup_check = memory_service.check_duplicate_memories(
+                title="ZzzUnmatchedQueryTermXyz",
+                content="ZzzUnmatchedQueryTermXyz",
+                agent_id=owner,
+                db_connection=ConnectionProxy(self.conn),
+            )
+            excluded_ids = [
+                row[0] for row in self.conn.execute("SELECT id FROM entities").fetchall()
+            ]
+            empty_fallback_check = memory_service.check_duplicate_memories(
+                title="ZzzUnmatchedQueryTermXyz",
+                content="ZzzUnmatchedQueryTermXyz",
+                agent_id=owner,
+                exclude_ids=excluded_ids,
+                db_connection=ConnectionProxy(self.conn),
+            )
 
         self.assertNotIn("error", dup_check)
+        self.assertTrue(any("FROM entities" in sql and "LIMIT 30" in sql for sql in executed_sqls))
+        self.assertNotIn("error", empty_fallback_check)
+        self.assertEqual(fake_model.rerank.call_args.args[1], [])
 
-        fallback_queries = [
-            sql for sql in executed_sqls if "FROM entities" in sql and "LIMIT 30" in sql
+    def test_dedup_check_finds_parent_beyond_first_thirty_rows(self):
+        """BM25-ordered FTS candidates find a parent after the old arbitrary first 30 rows."""
+        owner = "agent_dedup"
+        fake_model = Mock()
+        fake_model.rerank.side_effect = lambda _query, texts: [
+            8.0 if "needle parent" in text else 0.0 for text in texts
         ]
-        self.assertGreaterEqual(
-            len(fallback_queries),
-            1,
-            "FTS fallback branch must execute a query with 'LIMIT 30' when FTS candidates are empty",
-        )
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model),
+        ):
+            for i in range(40):
+                memory_service.store_memory(
+                    title=f"Unrelated Archive Item {i:02d}",
+                    content=f"Background text for unrelated archive entity {i:02d}",
+                    agent_id=owner,
+                    db_connection=self.conn,
+                )
+            parent = memory_service.store_memory(
+                title="needle parent",
+                content="needle parent contains a distinctive duplicate candidate body",
+                agent_id=owner,
+                db_connection=self.conn,
+            )
+            parent_id = parent["data"]["id"]
+            dup_check = memory_service.check_duplicate_memories(
+                title="needle parent revised",
+                content="needle parent contains a distinctive duplicate candidate body with one change",
+                agent_id=owner,
+                db_connection=self.conn,
+            )
+
+        self.assertNotIn("error", dup_check)
+        self.assertIn(parent_id, {item["id"] for item in dup_check["potential_duplicates"]})
+        rerank_call = fake_model.rerank.call_args
+        self.assertTrue(any("needle parent" in text for text in rerank_call.args[1]))
+
+    def test_dedup_check_candidate_cap_is_ten(self):
+        """The cross-encoder receives no more than the configured ten FTS candidates."""
+        owner = "agent_dedup"
+        fake_model = Mock()
+        fake_model.rerank.side_effect = lambda _query, texts: [0.0] * len(texts)
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model),
+        ):
+            for i in range(15):
+                memory_service.store_memory(
+                    title=f"Shared Candidate Term {i:02d}",
+                    content=f"Shared Candidate Term body {i:02d} with enough repeated context",
+                    agent_id=owner,
+                    db_connection=self.conn,
+                )
+            memory_service.check_duplicate_memories(
+                title="Shared Candidate Term query",
+                content="Shared Candidate Term body query with enough repeated context",
+                agent_id=owner,
+                db_connection=self.conn,
+            )
+
+        rerank_call = fake_model.rerank.call_args
+        self.assertEqual(len(rerank_call.args[1]), DEDUP_CROSS_ENCODER_MAX_CANDIDATES)
+
+    def test_dedup_check_caps_terms_for_stop_word_only_text(self):
+        """Text made only of stop words falls back to its raw terms, which must still be capped."""
+        owner = "agent_dedup"
+        fake_model = Mock()
+        fake_model.rerank.side_effect = lambda _query, texts: [0.0] * len(texts)
+        real_run_fts_search = search_primitives._run_fts_search
+        with (
+            patch.object(memory_service._embed_pool, "submit", return_value=None),
+            patch.object(reranker_service, "get_model", return_value=fake_model),
+        ):
+            memory_service.store_memory(
+                title="Baseline Entity",
+                content="Some baseline content for the stop word cap test",
+                agent_id=owner,
+                db_connection=self.conn,
+            )
+            with patch.object(
+                search_primitives, "_run_fts_search", wraps=real_run_fts_search
+            ) as run_fts:
+                dup_check = memory_service.check_duplicate_memories(
+                    title="the and of",
+                    content=" ".join(["the", "and", "of", "to"] * 2000),
+                    agent_id=owner,
+                    db_connection=self.conn,
+                )
+
+        self.assertNotIn("error", dup_check)
+        queried_terms = run_fts.call_args.args[1].split()
+        self.assertLessEqual(len(queried_terms), DEDUP_FTS_MAX_TERMS)
 
 
 if __name__ == "__main__":

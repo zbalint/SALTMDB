@@ -444,6 +444,28 @@ class TestRunFtsSearchFallbackFlag(unittest.TestCase):
         self.assertIsInstance(rows, list)
         self.assertEqual({r[0] for r in rows}, {"both"})
 
+    def test_or_only_skips_and_and_returns_all_term_matches(self):
+        """The duplicate pre-filter can request OR directly even when AND would hit one row."""
+        self._insert_entity("both", "alpha beta together")
+        self._insert_entity("has_alpha", "alpha only text")
+        self._insert_entity("has_beta", "beta only text")
+
+        rows, used_or_fallback = _run_fts_search(
+            self.conn,
+            "alpha beta",
+            ["e.status != 'archived'"],
+            [],
+            10,
+            0,
+            return_fallback_flag=True,
+            or_only=True,
+        )
+        self.assertEqual({row[0] for row in rows}, {"both", "has_alpha", "has_beta"})
+        self.assertTrue(used_or_fallback)
+
+        rows = _run_fts_search(self.conn, "alpha beta", ["e.status != 'archived'"], [], 10, 0)
+        self.assertEqual({row[0] for row in rows}, {"both"})
+
 
 class TestSearchMemoryModeStrictSeam(unittest.TestCase):
     """Controlled-seam integration tests -- patches _run_fts_search/semantic_search so the pool
