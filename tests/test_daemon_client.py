@@ -795,6 +795,100 @@ class TestIntermediaryMain(unittest.TestCase):
             client._intermediary_main(["client.py", "--spawn-detached"])
 
 
+@unittest.skipIf(client.sys.platform == "win32", "Cross-process stamps require fcntl")
+class TestSpawnStamp(unittest.TestCase):
+    db_path: str = ""
+    stamp_path: str = ""
+
+    def setUp(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.db_path = os.path.join(temp_dir.name, "test.db")
+        directory_patch = patch.object(
+            client.discovery, "_discovery_dir", return_value=temp_dir.name
+        )
+        directory_patch.start()
+        self.addCleanup(directory_patch.stop)
+        clock_patch = patch.object(client.time, "time", return_value=1000.0)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        last_spawn_patch = patch.object(client, "_last_spawn_at", None)
+        last_spawn_patch.start()
+        self.addCleanup(last_spawn_patch.stop)
+        self.stamp_path = client.discovery.spawn_stamp_path(
+            client.discovery.daemon_key(self.db_path)
+        )
+
+    def test_missing_stamp_claims_slot_and_records_time(self):
+        self.assertTrue(client._claim_spawn_slot(self.db_path))
+        with open(self.stamp_path, encoding="utf-8") as stamp:
+            self.assertEqual(float(stamp.read()), 1000.0)
+
+    def test_fresh_stamp_refuses_second_claim(self):
+        self.assertTrue(client._claim_spawn_slot(self.db_path))
+        self.assertFalse(client._claim_spawn_slot(self.db_path))
+
+    def test_stale_stamp_claims_slot_and_rewrites_time(self):
+        with open(self.stamp_path, "w", encoding="utf-8") as stamp:
+            stamp.write("900.0")
+        self.assertTrue(client._claim_spawn_slot(self.db_path))
+        with open(self.stamp_path, encoding="utf-8") as stamp:
+            self.assertEqual(float(stamp.read()), 1000.0)
+        self.assertFalse(client._claim_spawn_slot(self.db_path))
+
+    def test_future_stamp_does_not_prevent_spawn(self):
+        with open(self.stamp_path, "w", encoding="utf-8") as stamp:
+            stamp.write("1100.0")
+        self.assertTrue(client._claim_spawn_slot(self.db_path))
+        self.assertFalse(client._claim_spawn_slot(self.db_path))
+
+    def test_garbage_stamp_does_not_prevent_spawn(self):
+        with open(self.stamp_path, "w", encoding="utf-8") as stamp:
+            stamp.write("invalid timestamp")
+        self.assertTrue(client._claim_spawn_slot(self.db_path))
+        self.assertFalse(client._claim_spawn_slot(self.db_path))
+
+    def test_unwritable_stamp_fails_open_with_warning(self):
+        with (
+            patch.object(client.os, "open", side_effect=OSError("stamp unavailable")),
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            self.assertTrue(client._claim_spawn_slot(self.db_path))
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("stamp unavailable", logs.output[0])
+
+    def test_missing_fcntl_fails_open_with_warning(self):
+        with (
+            patch.dict("sys.modules", {"fcntl": None}),
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            self.assertTrue(client._claim_spawn_slot(self.db_path))
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("fcntl", logs.output[0])
+
+    def test_refused_claim_does_not_spawn_or_delay_next_attempt(self):
+        with (
+            patch.object(client, "_claim_spawn_slot", side_effect=[False, True]),
+            patch.object(client.time, "monotonic", side_effect=[100.0, 101.0]),
+            patch.object(client, "_spawn_daemon_subprocess") as spawn,
+        ):
+            self.assertFalse(client._spawn_if_due(self.db_path))
+            self.assertIsNone(client._last_spawn_at)
+            spawn.assert_not_called()
+            self.assertTrue(client._spawn_if_due(self.db_path))
+        spawn.assert_called_once_with(self.db_path)
+
+    def test_allowed_claim_spawns_and_retains_process_throttle(self):
+        with (
+            patch.object(client, "_claim_spawn_slot", return_value=True),
+            patch.object(client.time, "monotonic", return_value=100.0),
+            patch.object(client, "_spawn_daemon_subprocess") as spawn,
+        ):
+            self.assertTrue(client._spawn_if_due(self.db_path))
+            self.assertFalse(client._spawn_if_due(self.db_path))
+        spawn.assert_called_once_with(self.db_path)
+
+
 class _StartupClock:
     def __init__(self):
         self.now = 0.0
@@ -820,6 +914,9 @@ class TestColdStartWait(unittest.TestCase):
         last_spawn_patch = patch.object(client, "_last_spawn_at", None, create=True)
         last_spawn_patch.start()
         self.addCleanup(last_spawn_patch.stop)
+        claim_patch = patch.object(client, "_claim_spawn_slot", return_value=True)
+        claim_patch.start()
+        self.addCleanup(claim_patch.stop)
         classify_patch = patch.object(client, "_classify_startup_failure", return_value="no owner")
         classify_patch.start()
         self.addCleanup(classify_patch.stop)

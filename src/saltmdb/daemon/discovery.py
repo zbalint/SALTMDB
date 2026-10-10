@@ -60,6 +60,10 @@ def discovery_path(key: str) -> str:
     return os.path.join(_discovery_dir(), f"daemon_{key}.json")
 
 
+def spawn_stamp_path(key: str) -> str:
+    return os.path.join(_discovery_dir(), f"spawn_{key}.stamp")
+
+
 def read(key: str) -> dict[str, Any] | None:
     """Best-effort read of the discovery file. Returns None if missing, unreadable, or malformed
     -- callers treat that identically to "no daemon known yet", never as an error."""

@@ -96,12 +96,56 @@ def adopt_current_session(session: "SessionConnection") -> None:
     _current_session = session
 
 
+def _claim_spawn_slot(db_path: str) -> bool:
+    """Claim the cross-process spawn slot for this database, failing open on stamp errors."""
+    try:
+        import fcntl
+    except ImportError as exc:
+        # shortcut: no cross-process throttle on win32 (no fcntl); use msvcrt.locking if Windows
+        # spawn storms matter.
+        logger.warning("Spawn stamp locking unavailable; allowing spawn: %s", exc)
+        return True
+
+    fd = -1
+    try:
+        canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+        key = discovery.daemon_key(canonical_db_path)
+        stamp_path = discovery.spawn_stamp_path(key)
+        fd = os.open(stamp_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _ = os.lseek(fd, 0, os.SEEK_SET)
+        raw_stamp = os.read(fd, 128)
+        try:
+            previous = float(raw_stamp.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            previous = None
+        now = time.time()
+        if previous is not None and 0 <= now - previous < DAEMON_SPAWN_MIN_INTERVAL_S:
+            return False
+        payload = repr(now).encode("utf-8")
+        os.ftruncate(fd, 0)
+        _ = os.lseek(fd, 0, os.SEEK_SET)
+        _ = os.write(fd, payload)
+        return True
+    except OSError as exc:
+        logger.warning("Spawn stamp operation failed; allowing spawn: %s", exc)
+        return True
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError as exc:
+                logger.warning("Spawn stamp descriptor close failed: %s", exc)
+
+
 def _spawn_if_due(db_path: str) -> bool:
     """Spawn at most once per configured interval in this adapter process."""
     global _last_spawn_at
     now = time.monotonic()
     with _spawn_lock:
         if _last_spawn_at is not None and now - _last_spawn_at < DAEMON_SPAWN_MIN_INTERVAL_S:
+            return False
+        if not _claim_spawn_slot(db_path):
             return False
         _last_spawn_at = now
         _spawn_daemon_subprocess(db_path)
