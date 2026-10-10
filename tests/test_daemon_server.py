@@ -15,6 +15,7 @@ dedicated test coverage at all -- only a manual smoke test. Two layers here:
 """
 
 import os
+import re
 import sqlite3
 import shutil
 import signal
@@ -801,6 +802,19 @@ class TestDaemonSignalShutdown(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(discovery_file), "discovery file not removed on clean shutdown"
             )
+
+            output = proc.stdout.read().decode("utf-8", errors="replace")
+            phases = re.search(
+                r"Daemon startup phases: election_s=(\d+\.\d{3}) init_db_s=(\d+\.\d{3}) "
+                r"recovery_s=(\d+\.\d{3}) listeners_s=(\d+\.\d{3}) total_s=(\d+\.\d{3})",
+                output,
+            )
+            if phases is None:
+                self.fail(f"daemon did not log startup phases:\n{output}")
+            values = [float(value) for value in phases.groups()]
+            for value in values:
+                self.assertGreaterEqual(value, 0)
+            self.assertGreaterEqual(values[-1], sum(values[:-1]) - 0.01)
         finally:
             if proc.poll() is None:
                 proc.kill()

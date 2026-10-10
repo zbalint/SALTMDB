@@ -848,6 +848,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         args.foreground,
         startup_lag_s,
     )
+    t0 = time.monotonic()
 
     for _blas_var in (
         "OPENBLAS_NUM_THREADS",
@@ -893,6 +894,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     try:
         probe_sock.bind(("127.0.0.1", p_port))
         probe_sock.listen(config.DAEMON_IDENTIFY_MAX_CONCURRENT)
+        t_bound = time.monotonic()
     except OSError as e:
         logger.error("Failed to bind probe port %d: %s", p_port, e)
         probe_sock.close()
@@ -911,6 +913,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     # Step 4: the bootstrap connection is the only writer before the coordinator.
     conn = init_db(db_path)
     conn.close()
+    t_db = time.monotonic()
     try:
         from saltmdb.domain.services.embedding_service import (
             EmbedJobScheduler,
@@ -991,6 +994,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
         state.embedding_scheduler = EmbedJobScheduler(state.coordinator)
         state.embedding_scheduler.start()
+        t_recovery = time.monotonic()
     except Exception as e:
         logger.exception("Startup durable embedding recovery failed: %s", e)
         if state.coordinator:
@@ -1051,6 +1055,16 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         service_port,
         e_port,
         p_port,
+    )
+    t_ready = time.monotonic()
+    logger.info(
+        "Daemon startup phases: election_s=%.3f init_db_s=%.3f recovery_s=%.3f "
+        "listeners_s=%.3f total_s=%.3f",
+        t_bound - t0,
+        t_db - t_bound,
+        t_recovery - t_db,
+        t_ready - t_recovery,
+        t_ready - t0,
     )
     if sys.platform == "win32":
         _log_windows_job_diagnostics()
