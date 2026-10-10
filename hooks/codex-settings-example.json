@@ -51,6 +51,11 @@
               "hook_output": true
             },
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python ~/.codex/hooks/saltmdb-stop-related-memories.py",
+            "timeout": 15
           }
         ]
       }

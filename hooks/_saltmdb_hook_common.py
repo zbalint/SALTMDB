@@ -277,6 +277,25 @@ def clear_state(*state_files: Path) -> None:
             pass
 
 
+def resolve_cli() -> str | None:
+    """Locate the saltmdb-cli executable, most explicit first: (1) the ``SALTMDB_CLI_PATH`` env
+    var when that file exists, for a hook subprocess whose PATH lacks the install's bin dir;
+    (2) ``saltmdb-cli`` on PATH; (3) the legacy ``~/.mcp/SALTMDB/.venv/bin/saltmdb-cli`` as a
+    last resort. Same precedence as ``_resolve_cli`` in saltmdb-session-start-bootstrap.py, which
+    still keeps its own copy; a follow-up moves the bootstrap onto this one."""
+    import os
+    import shutil
+
+    override = os.environ.get("SALTMDB_CLI_PATH")
+    if override and Path(override).is_file():
+        return override
+    on_path = shutil.which("saltmdb-cli")
+    if on_path:
+        return on_path
+    legacy = Path.home() / ".mcp" / "SALTMDB" / ".venv" / "bin" / "saltmdb-cli"
+    return str(legacy) if legacy.is_file() else None
+
+
 def run_quiet(cmd: list[str], timeout_secs: int) -> bool:
     try:
         proc = subprocess.run(

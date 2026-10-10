@@ -111,6 +111,42 @@ that the hook and the adapter see the same `COPILOT_LOADER_PID`, or the same par
 perform one successful `store_memory` and confirm a `trace_memory_links` row through `get_trace`
 or `search_traces(entity_id=...)`. A failed link is non-fatal for the calling hook.
 
+## Answer-side related memories (experimental, opt-in)
+
+[`saltmdb-stop-related-memories.py`](saltmdb-stop-related-memories.py) runs at `Stop` after the
+agent has written its answer. It passes the reply (`last_assistant_message`) to the read-only
+`saltmdb-cli related-memories` and, when memories turn up that the agent has not seen this
+session, blocks the stop once and lists up to three memory ids with their titles, so the agent can
+read them with `get_memory` and amend the answer, or reply in one line that none applies.
+
+- **Off by default.** It acts only when `SALTMDB_RELATED_MEMORIES_HOOK=1`; only exactly `1` enables
+  it, and every other value (including `0`) disables it. `SALTMDB_RELATED_MEMORIES_MIN_SCORE` sets
+  the relevance threshold (default `4.0`, a placeholder until the BL-028 calibration; a value that
+  is not a number is ignored and logged). Set both in the harness settings `env` block or the shell:
+  a hook inherits the harness environment, not the MCP server's.
+- **Caps and guard order.** The three loop guards run before reply presence/length checks, so even a
+  short or missing continuation reply clears pending state. Replies under 200 characters are
+  skipped. At most one prompt per turn (the Stop right after a block is treated as the agent's
+  answer to it), at most three prompts per session, at most three memories per prompt, and an id is
+  never listed twice in a session. Ids the transcript already mentions are skipped; a bare all-digit
+  8-hex token (usually a date) is ignored, while the 8-character prefix of a full UUID always
+  counts. That scan is best effort.
+- **Latency.** It adds the CLI's run time to the end of a long reply: the CLI stops itself after
+  4 s and the hook gives up after 6 s.
+- **Requirements.** A SALTMDB version with `saltmdb-cli related-memories`, found the same way as
+  the session-start bootstrap finds the CLI (`SALTMDB_CLI_PATH`, `PATH`, the legacy venv path).
+  No CLI, no running daemon or no loaded models make the hook a silent no-op: it never starts a
+  daemon and always exits 0. Silent exits are logged once per reason per session to
+  `~/.saltmdb/hooks/related-memories.log` (truncated past 100 KB).
+- **Scope.** `SALTMDB_AGENT_ID` reaches the CLI only when the harness sets it in the hook's
+  environment; without it, only shared-scope memories can surface.
+- **Codex.** The Codex example registers it too, as experimental: the Codex example had no command
+  hook before, and the Codex `Stop` payload and transcript fields are unverified. Without a
+  transcript the hook relies on its own record of listed ids.
+- **Known interaction.** A Stop block is stored in the transcript as a user-role line, and the
+  self-critique gate counts it as a new user prompt. That can re-arm the gate's Stage 1 inside
+  its own per-session cap.
+
 ## Naming convention
 
 `saltmdb-<lifecycle-event>-<purpose>[-<harness>].py`, where `<lifecycle-event>` is one of
@@ -142,6 +178,7 @@ every body is fully shared).
 | [`saltmdb-stop-critique-gate.py`](saltmdb-stop-critique-gate.py) | `Stop` / `agentStop` | Two-stage gate: (1) mandatory self-reflection before closing a turn that touched files/commands — the questions come from an optional `stop-critique-questions.json` next to the script (`{"questions": [...]}`), falling back to two built-in defaults if it is missing or malformed; (2) requires that reflection to become a `store_memory` call or an explicit "no durable lesson" acknowledgment — otherwise a genuine finding just evaporates. Stage 1 is capped per session at a randomized 1–4 distinct episodes (rolled once per session id; retrying an unanswered prompt spends no budget), after which the gate goes quiet; Stage 2 is never capped. |
 | [`saltmdb-stop-trace-capture.py`](saltmdb-stop-trace-capture.py) | `agentStop` / `sessionEnd` (Copilot CLI only) | Trace capture for Copilot, which has no native `mcp_tool` hook entry: parses the session transcript and sends each interaction to the daemon (see "Conversation trace provenance"). Silent no-op unless the adapter has published its session file; always exits 0. |
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
+| [`saltmdb-stop-related-memories.py`](saltmdb-stop-related-memories.py) | `Stop` (Claude Code; Codex experimental) | Experimental and off by default: lists up to three related memories the agent has not seen after it answers, through `saltmdb-cli related-memories`. See "Answer-side related memories". |
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
 | [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code native; standalone/manual fallback for Codex and harnesses without a native agent hook; absent from Antigravity/Copilot examples) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first) since a bare script has no MCP tool context of its own. |
 | [`saltmdb-skill-review-sweep.py`](saltmdb-skill-review-sweep.py) | Manual / cron only (no lifecycle event) | Mining and diagnosis sweep for skill/hook improvements. Shells out to `claude -p` or `codex exec` to perform a 5-step telemetry review (mine, diagnose, pair-check, propose, gate). Never auto-applies file edits; outputs proposals as gated memories for human review. |

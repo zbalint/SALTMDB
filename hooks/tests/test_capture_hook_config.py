@@ -93,7 +93,7 @@ class TestCaptureHookConfig(unittest.TestCase):
             after_commands = [
                 hook for group in after for hook in group["hooks"] if hook.get("type") == "command"
             ]
-            self.assertEqual(after_commands, before_commands)
+            self.assertEqual(after_commands[: len(before_commands)], before_commands)
             self.assertEqual(capture_count, 1 if event in {"PostToolUse", "Stop"} else 0)
 
 

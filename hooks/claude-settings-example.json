@@ -114,6 +114,11 @@
               "final_assistant_message": "${last_assistant_message}"
             },
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/saltmdb-stop-related-memories.py",
+            "timeout": 15
           }
         ]
       }
