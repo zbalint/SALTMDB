@@ -209,3 +209,23 @@ any appended Stop command entry (D9) makes it fail while the change is uncommitt
 - A1.3. Pre-lock check for the amendment: `rg -n "claude-settings-example|codex-settings-example"`
   over `tests/` and `hooks/tests/` finds this test file and the new T8 only; the Codex example has
   no equivalent baseline test.
+
+## Amendment 2 (2026-10-10)
+
+From the tester's review of the first implementation, verified by the architect against the script.
+
+- A2.1. D3 order, stated: the three guards run before D2's reply checks, because the agent's short
+  "no related memory applies" answer must clear `pending_continuation`. The D2 checks (missing
+  field, under 200 characters) come after the guards.
+- A2.2. D3 guard 1 (`stop_hook_active` true) also clears `pending_continuation` and saves the
+  state before it exits. Reason: that Stop is the agent's answer to this hook's block, and a flag
+  left set would swallow the next turn's Stop. T3 gains a chain case where the continuation
+  carries `stop_hook_active` true, followed by a new long reply with a new matching row that fires.
+- A2.3. D6 token rule: a bare 8-hex token that is all digits is not a seen token (it is more
+  likely a date); the 8-character prefix of every full UUID found in the transcript always counts.
+  T4's date case stands. About 2% of ids have an all-digit prefix and are suppressed only through
+  a full UUID in the transcript or `shown_ids`.
+- A2.4. D4: values of `SALTMDB_RELATED_MEMORIES_HOOK` other than exactly `1` disable the hook;
+  the README says so.
+- A2.5. D9: both example entries use the same interpreter word as the README's other hook entries,
+  `python`; the Codex entry changes from `python3` to `python`.
