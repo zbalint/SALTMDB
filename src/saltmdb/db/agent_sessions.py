@@ -155,8 +155,14 @@ def get_recent_sessions_for_cwd(
     limit: int = 10,
     *,
     with_content: str | None = None,
+    ended: bool | None = None,
 ) -> list[dict]:
-    """Return up to ``limit`` recent sessions for this cwd, newest first.
+    """Return up to ``limit`` recent sessions for this cwd.
+
+    ``ended=None`` orders all matching sessions by ``started_at`` descending.
+    ``ended=True`` selects ended sessions and orders by ``ended_at`` descending, then
+    ``session_id`` descending. ``ended=False`` selects running sessions and orders by
+    ``COALESCE(last_activity_at, started_at)`` descending, then ``session_id`` descending.
 
     ``with_content`` may be ``"memories"`` to select sessions that created or touched
     a non-archived memory, or ``"traces"`` to select sessions with a conversation
@@ -170,14 +176,23 @@ def get_recent_sessions_for_cwd(
     params: list[str | int] = [cwd]
     if with_content is not None:
         where += f" AND {_CONTENT_PREDICATES[with_content]}"
+    if ended is True:
+        where += " AND s.ended_at IS NOT NULL"
+        order_by = "s.ended_at DESC, s.session_id DESC"
+    elif ended is False:
+        where += " AND s.ended_at IS NULL"
+        order_by = "COALESCE(s.last_activity_at, s.started_at) DESC, s.session_id DESC"
+    else:
+        order_by = "s.started_at DESC"
     params.append(limit)
 
     cursor = conn.execute(
         f"""
-        SELECT s.session_id, s.started_at, s.agent_id, s.ended_at, s.ended_reason
+        SELECT s.session_id, s.started_at, s.agent_id, s.ended_at, s.ended_reason,
+               s.last_activity_at
         FROM _agent_sessions AS s
         {where}
-        ORDER BY s.started_at DESC
+        ORDER BY {order_by}
         LIMIT ?
         """,
         tuple(params),
@@ -189,6 +204,7 @@ def get_recent_sessions_for_cwd(
             "agent_id": row[2],
             "ended_at": row[3],
             "ended_reason": row[4],
+            "last_activity_at": row[5],
         }
         for row in cursor.fetchall()
     ]

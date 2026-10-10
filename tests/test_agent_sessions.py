@@ -334,6 +334,60 @@ class TestAgentSessions(unittest.TestCase):
             ["session-newest", "session-mid", "session-old"],
         )
 
+    def test_recent_ended_sessions_follow_end_time_not_start_time(self):
+        cwd = "/project"
+        record_session(self.conn, "started-first", cwd, "2024-01-01T08:00:00+00:00")
+        record_session(self.conn, "started-last", cwd, "2024-01-01T09:00:00+00:00")
+        record_session(self.conn, "running", cwd, "2024-01-01T12:00:00+00:00")
+        close_session(self.conn, "started-first", "2024-01-01T11:00:00+00:00")
+        close_session(self.conn, "started-last", "2024-01-01T10:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, ended=True)
+
+        self.assertEqual([row["session_id"] for row in result], ["started-first", "started-last"])
+
+    def test_recent_ended_sessions_break_equal_end_times_by_session_id(self):
+        cwd = "/project"
+        record_session(self.conn, "session-z", cwd, "2024-01-01T08:00:00+00:00")
+        record_session(self.conn, "session-a", cwd, "2024-01-01T09:00:00+00:00")
+        close_session(self.conn, "session-z", "2024-01-01T10:00:00.123+00:00")
+        close_session(self.conn, "session-a", "2024-01-01T10:00:00.123+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, ended=True)
+
+        self.assertEqual([row["session_id"] for row in result], ["session-z", "session-a"])
+
+    def test_recent_running_sessions_follow_activity_with_start_fallback_and_ties(self):
+        cwd = "/project"
+        for session_id, started in (
+            ("active-z", "2024-01-01T08:00:00+00:00"),
+            ("active-a", "2024-01-01T09:00:00+00:00"),
+            ("fallback", "2024-01-01T11:00:00+00:00"),
+            ("ended", "2024-01-01T13:00:00+00:00"),
+        ):
+            record_session(self.conn, session_id, cwd, started)
+        touch_session(self.conn, "active-z", "2024-01-01T12:00:00+00:00")
+        touch_session(self.conn, "active-a", "2024-01-01T12:00:00+00:00")
+        close_session(self.conn, "ended", "2024-01-01T14:00:00+00:00")
+        self.conn.execute(
+            "UPDATE _agent_sessions SET last_activity_at = NULL WHERE session_id = ?",
+            ("fallback",),
+        )
+
+        result = get_recent_sessions_for_cwd(self.conn, cwd, ended=False)
+
+        self.assertEqual(
+            [row["session_id"] for row in result], ["active-z", "active-a", "fallback"]
+        )
+
+    def test_recent_sessions_return_last_activity_at(self):
+        record_session(self.conn, "active", "/project", "2024-01-01T08:00:00+00:00")
+        touch_session(self.conn, "active", "2024-01-01T12:00:00+00:00")
+
+        result = get_recent_sessions_for_cwd(self.conn, "/project")
+
+        self.assertEqual(result[0]["last_activity_at"], "2024-01-01T12:00:00+00:00")
+
     def test_get_recent_sessions_respects_limit(self):
         """get_recent_sessions_for_cwd caps the number of rows returned at `limit`."""
         cwd = "/home/user/project"
