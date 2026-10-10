@@ -12,7 +12,12 @@ try:
 except ImportError:
     sqlite_vec = None
 
-from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS, EMBEDDING_BATCH_SIZE
+from saltmdb.config import (
+    CHUNK_SIZE_CHARS,
+    CHUNK_OVERLAP_CHARS,
+    EMBEDDING_BATCH_SIZE,
+    ONNX_ENABLE_CPU_MEM_ARENA,
+)
 from saltmdb.utils.chunking import chunk_text
 
 logger = logging.getLogger(__name__)
@@ -667,6 +672,7 @@ def get_model():
                             model_name="BAAI/bge-small-en-v1.5",
                             cache_dir=os.path.dirname(local_model_dir),
                             local_files_only=True,
+                            enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                         )
                     except Exception as e:
                         logger.warning(
@@ -674,13 +680,19 @@ def get_model():
                             local_model_dir,
                             e,
                         )
-                        _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                        _model = TextEmbedding(
+                            model_name="BAAI/bge-small-en-v1.5",
+                            enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
+                        )
                 else:
                     logger.info(
                         "Bundled model not present or invalid at %s. Falling back to online model load.",
                         local_model_dir,
                     )
-                    _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                    _model = TextEmbedding(
+                        model_name="BAAI/bge-small-en-v1.5",
+                        enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
+                    )
     return _model
 
 

@@ -200,6 +200,7 @@ class TestBundledModel(unittest.TestCase):
             model_name=reranker_service._BUNDLED_MODEL_NAME,
             cache_dir=reranker_service._BUNDLED_MODEL_CACHE_DIR,
             local_files_only=True,
+            enable_cpu_mem_arena=False,
         )
 
     def test_get_model_falls_back_to_online_when_bundle_invalid(self):
@@ -210,7 +211,10 @@ class TestBundledModel(unittest.TestCase):
             mock_ctor.return_value = MagicMock()
             reranker_service.get_model(reranker_service._BUNDLED_MODEL_NAME)
 
-        mock_ctor.assert_called_once_with(model_name=reranker_service._BUNDLED_MODEL_NAME)
+        mock_ctor.assert_called_once_with(
+            model_name=reranker_service._BUNDLED_MODEL_NAME,
+            enable_cpu_mem_arena=False,
+        )
 
     def test_get_model_falls_back_to_online_when_bundled_load_raises(self):
         with (
@@ -223,7 +227,10 @@ class TestBundledModel(unittest.TestCase):
         self.assertEqual(mock_ctor.call_count, 2)
         # Second (fallback) call must be the plain online-load shape, no cache_dir/local_files_only.
         _args, kwargs = mock_ctor.call_args_list[1]
-        self.assertEqual(kwargs, {"model_name": reranker_service._BUNDLED_MODEL_NAME})
+        self.assertEqual(
+            kwargs,
+            {"model_name": reranker_service._BUNDLED_MODEL_NAME, "enable_cpu_mem_arena": False},
+        )
 
     def test_get_model_non_bundled_name_never_touches_bundle_logic(self):
         with (
@@ -234,7 +241,9 @@ class TestBundledModel(unittest.TestCase):
             reranker_service.get_model("BAAI/bge-reranker-base")
 
         mock_valid.assert_not_called()
-        mock_ctor.assert_called_once_with(model_name="BAAI/bge-reranker-base")
+        mock_ctor.assert_called_once_with(
+            model_name="BAAI/bge-reranker-base", enable_cpu_mem_arena=False
+        )
 
 
 class TestGetModelLazySingleton(unittest.TestCase):

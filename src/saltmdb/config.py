@@ -145,6 +145,13 @@ CHUNK_OVERLAP_CHARS = 200
 # 32-item batching this constant now applies in production). Chunking the call site fixes the
 # actual buffer-size excess rather than requiring a memory ceiling to merely fail safely.
 EMBEDDING_BATCH_SIZE = 32
+# ONNX Runtime's CPU memory arena keeps every buffer it has ever needed and keeps growing with each
+# new batch, so the long-lived daemon only ever ratcheted its RSS up (about 1.5 GB after two 32-document
+# batches and a rerank, against about 0.7-0.8 GB without it). Disabling it costs some throughput on large
+# background embedding batches; query embedding and rerank latency are unchanged within noise.
+# shortcut: arena off for both models; set True only if measured background embedding throughput
+# becomes a problem.
+ONNX_ENABLE_CPU_MEM_ARENA = False
 
 # Cross-chunk topic scoring (search_memory's mode="strict" relevance-gate evidence, see
 # src/saltmdb/domain/services/memory_service/search_primitives.py:_score_topics_with_fallback --

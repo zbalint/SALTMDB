@@ -117,6 +117,7 @@ def get_model(model_name: str):
         with _model_lock:
             if _model is None or _model_name != model_name:
                 from fastembed.rerank.cross_encoder import TextCrossEncoder
+                from saltmdb.config import ONNX_ENABLE_CPU_MEM_ARENA
 
                 if model_name == _BUNDLED_MODEL_NAME and _is_valid_bundled_model():
                     logger.info(
@@ -128,6 +129,7 @@ def get_model(model_name: str):
                             model_name=model_name,
                             cache_dir=_BUNDLED_MODEL_CACHE_DIR,
                             local_files_only=True,
+                            enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                         )
                     except Exception as e:
                         logger.warning(
@@ -136,9 +138,15 @@ def get_model(model_name: str):
                             _BUNDLED_MODEL_CACHE_DIR,
                             e,
                         )
-                        _model = TextCrossEncoder(model_name=model_name)
+                        _model = TextCrossEncoder(
+                            model_name=model_name,
+                            enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
+                        )
                 else:
-                    _model = TextCrossEncoder(model_name=model_name)
+                    _model = TextCrossEncoder(
+                        model_name=model_name,
+                        enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
+                    )
                 _model_name = model_name
     return _model
 

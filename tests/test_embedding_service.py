@@ -2,10 +2,11 @@ import unittest
 import os
 import tempfile
 import shutil
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from saltmdb.domain.services import embedding_service
 from saltmdb.domain.services.embedding_service import (
     _is_valid_local_model,
     embed_text,
@@ -189,6 +190,51 @@ class TestComputeEntityChunkEmbeddings(unittest.TestCase):
         self.assertGreater(len(batch_sizes), 1, "content should require more than one batch")
         self.assertTrue(all(n <= EMBEDDING_BATCH_SIZE for n in batch_sizes))
         self.assertEqual(sum(batch_sizes), len(rows))
+
+
+class TestGetModelArenaOption(unittest.TestCase):
+    saved_model: object | None = None
+
+    def setUp(self):
+        self.saved_model = embedding_service._model
+        embedding_service._model = None
+
+    def tearDown(self):
+        embedding_service._model = self.saved_model
+
+    def test_get_model_uses_bundled_model_with_arena_disabled(self):
+        with (
+            patch.object(embedding_service, "_is_valid_local_model", return_value=True),
+            patch("fastembed.TextEmbedding") as mock_ctor,
+        ):
+            embedding_service.get_model()
+
+        mock_ctor.assert_called_once()
+        self.assertIs(mock_ctor.call_args.kwargs.get("enable_cpu_mem_arena"), False)
+        self.assertIs(mock_ctor.call_args.kwargs["local_files_only"], True)
+
+    def test_get_model_falls_back_to_online_when_bundle_invalid(self):
+        with (
+            patch.object(embedding_service, "_is_valid_local_model", return_value=False),
+            patch("fastembed.TextEmbedding") as mock_ctor,
+        ):
+            embedding_service.get_model()
+
+        mock_ctor.assert_called_once_with(
+            model_name="BAAI/bge-small-en-v1.5", enable_cpu_mem_arena=False
+        )
+
+    def test_get_model_falls_back_to_online_when_bundled_load_raises(self):
+        with (
+            patch.object(embedding_service, "_is_valid_local_model", return_value=True),
+            patch("fastembed.TextEmbedding") as mock_ctor,
+        ):
+            mock_ctor.side_effect = [RuntimeError("corrupt bundle"), MagicMock()]
+            embedding_service.get_model()
+
+        self.assertEqual(mock_ctor.call_count, 2)
+        for constructor_call in mock_ctor.call_args_list:
+            self.assertIs(constructor_call.kwargs.get("enable_cpu_mem_arena"), False)
 
 
 if __name__ == "__main__":
