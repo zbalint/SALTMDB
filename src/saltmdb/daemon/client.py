@@ -42,6 +42,10 @@ class DaemonStartupError(Exception):
     """Raised when ensure_daemon_running() cannot establish a daemon connection."""
 
 
+class DaemonNotRunning(Exception):
+    """Raised when a caller explicitly requests no daemon spawn and none answers."""
+
+
 class DaemonStartingError(DaemonStartupError):
     """Raised when a matching daemon owner is alive but has not become reachable yet."""
 
@@ -556,6 +560,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
     params: dict[str, Any],
     _retry: bool = True,
     *,
+    spawn: bool = True,
     _session: "SessionConnection | None" = None,
     _caller_agent_session_id: str | None = None,
     _caller_agent_session_capability: str | None = None,
@@ -572,6 +577,8 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
        DAEMON_CONNECTION_LOST_DURING_WRITE-shaped message for write tools (mcp/tools.py's
        _backend_or_raise().call() classifies by protocol.WRITE_TOOLS/READ_TOOLS and decides
        whether to retry transparently or surface the structured result -- see tools.py).
+    When `spawn=False`, discovery only uses `reachable_daemon_info`; no retry path may spawn or
+    re-enter `ensure_daemon_running`.
     """
     # Adapter-bound calls hold the session state lock from refresh through metadata snapshot and
     # the complete one-shot RPC.  This prevents close() or a concurrent reconnect from replacing
@@ -581,7 +588,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
         _session._state_lock = threading.RLock()
     session_lock = _session._state_lock if _session is not None else nullcontext()
     with session_lock:
-        if _session is not None:
+        if spawn and _session is not None:
             _session.ensure_fresh(db_path)
             if _caller_agent_session_id == _session._agent_session_id:
                 # Always overwrite the envelope from the post-refresh snapshot.  A recursive
@@ -594,11 +601,13 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                     params.pop("caller_agent_session_capability", None)
                 else:
                     params["caller_agent_session_capability"] = current_capability
-        elif _current_session is not None:
+        elif spawn and _current_session is not None:
             _current_session.ensure_fresh(db_path)
         # Refresh discovery after ensure_fresh(): a reconnect may have replaced the daemon token
         # and service port.  Sending with the pre-refresh snapshot would use stale auth.
-        info = ensure_daemon_running(db_path)
+        info = ensure_daemon_running(db_path) if spawn else reachable_daemon_info(db_path)
+        if info is None:
+            raise DaemonNotRunning(f"No reachable SALTMDB daemon for {db_path}")
 
         try:
             with socket.create_connection(
@@ -612,6 +621,8 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                 except (OSError, protocol.FrameError) as e:
                     raise _MidCallFailure(str(e)) from e
         except (ConnectionRefusedError, TimeoutError, OSError) as e:
+            if not spawn:
+                raise DaemonNotRunning(str(e)) from e
             if not _retry:
                 raise DaemonRpcError("CONNECT_FAILED", str(e)) from e
             return call_method(
@@ -619,6 +630,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                 method,
                 params,
                 _retry=False,
+                spawn=spawn,
                 _session=_session,
                 _caller_agent_session_id=_caller_agent_session_id,
                 _caller_agent_session_capability=_caller_agent_session_capability,
@@ -629,6 +641,10 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
         if not response.get("ok"):
             error = response.get("error") or {}
             code = error.get("code", protocol.INTERNAL_ERROR)
+            if not spawn:
+                if code == protocol.DAEMON_SHUTTING_DOWN:
+                    raise DaemonNotRunning(error.get("message", "daemon is shutting down"))
+                raise DaemonRpcError(code, error.get("message", ""))
             if _retry and code in (
                 protocol.DAEMON_SHUTTING_DOWN,
                 protocol.AUTH_FAILED,
@@ -648,6 +664,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                     method,
                     params,
                     _retry=False,
+                    spawn=spawn,
                     _session=_session,
                     _caller_agent_session_id=_caller_agent_session_id,
                     _caller_agent_session_capability=_caller_agent_session_capability,
@@ -666,10 +683,14 @@ def call(
     tool_name: str,
     kwargs: dict[str, Any],
     *,
+    spawn: bool = True,
     caller_agent_session_id: str | None = None,
     caller_agent_session_capability: str | None = None,
 ) -> Any:
-    """Call one daemon tool, with optional adapter-only session metadata."""
+    """Call one daemon tool, with optional adapter-only session metadata.
+
+    `spawn=False` requires an already reachable daemon and never retries by spawning one.
+    """
     with startup_budget():
         params: dict[str, Any] = {"tool": tool_name, "kwargs": kwargs}
         if caller_agent_session_id is not None:
@@ -687,6 +708,7 @@ def call(
             db_path,
             "tool_call",
             params,
+            spawn=spawn,
             _session=session,
             _caller_agent_session_id=caller_agent_session_id,
             _caller_agent_session_capability=caller_agent_session_capability,

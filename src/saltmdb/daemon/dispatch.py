@@ -557,6 +557,25 @@ def _dispatch_get_last_session_digest(**kw):
     return session_digest_service.render_session_digest(conn, kw["cwd"], kw.get("max_chars"))
 
 
+def _dispatch_find_related_memories(**kw):
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+    from saltmdb.domain.services import related_memory_service
+
+    db_path = get_db_path()
+    conn = get_connection(db_path)
+    return related_memory_service.find_related_memories(
+        conn,
+        db_path,
+        kw["text"],
+        limit=kw.get("limit"),
+        min_score=kw.get("min_score"),
+        exclude_ids=kw.get("exclude_ids"),
+        agent_id=kw.get("agent_id"),
+        with_all=kw.get("with_all", False),
+    )
+
+
 def _dispatch_get_lineage(**kw):
     try:
         entity_id = _required_str(kw, "entity_id")
@@ -689,6 +708,7 @@ DISPATCH_TABLE = {
     "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
     "get_last_session_digest": _dispatch_get_last_session_digest,
+    "find_related_memories": _dispatch_find_related_memories,
     "capture_trace_start": lambda **kw: trace_service.capture_trace_start(**kw),
     "capture_trace_memory_link": lambda **kw: trace_service.capture_trace_memory_link(**kw),
     "capture_trace_complete": lambda **kw: trace_service.capture_trace_complete(**kw),

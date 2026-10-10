@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 
 
 def cmd_bootstrap_digest(args):
@@ -52,6 +53,63 @@ def cmd_session_digest(args):
         if isinstance(digest, str)
         else "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>"
     )
+    return 0
+
+
+def cmd_related_memories(args):
+    from saltmdb.config import get_db_path
+    from saltmdb.daemon import client as daemon_client
+
+    db_path = args.db_path or get_db_path()
+    if not os.path.exists(db_path):
+        return 0
+
+    text = sys.stdin.read(100000)
+    raw_agent_id = os.environ.get("SALTMDB_AGENT_ID", "").strip()
+    agent_id = raw_agent_id or None
+    raw_exclude_ids = getattr(args, "exclude_ids", "") or ""
+    exclude_ids = [item.strip() for item in raw_exclude_ids.split(",") if item.strip()]
+    kwargs = {
+        "text": text,
+        "limit": None if args.json else args.limit,
+        "min_score": None if args.json else args.min_score,
+        "exclude_ids": exclude_ids,
+        "agent_id": agent_id,
+        "with_all": args.json,
+    }
+    outcome: dict[str, object] = {}
+
+    def worker():
+        try:
+            outcome["result"] = daemon_client.call(
+                db_path, "find_related_memories", kwargs, spawn=False
+            )
+        except Exception as exc:  # noqa: BLE001 -- CLI is explicitly best-effort.
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(max(args.timeout_ms, 0) / 1000)
+    if thread.is_alive():
+        print("# SALTMDB related-memories timed out", file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
+    if "error" in outcome:
+        print(f"# SALTMDB related-memories error: {outcome['error']}", file=sys.stderr)
+        return 0
+    results = outcome.get("result")
+    if not isinstance(results, list):
+        results = []
+    if args.json:
+        print(json.dumps(results))
+        return 0
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).replace("\t", " ").replace("\n", " ").replace("\r", " ")
+        print(f"{row.get('id', '')}\t{title[:150]}")
     return 0
 
 
@@ -314,6 +372,8 @@ def cmd_daemon_uninstall_service(args):
 
 
 def build_parser():
+    from saltmdb import config
+
     p = argparse.ArgumentParser(
         prog="saltmdb-cli",
         description="SALTMDB CLI (read-only data commands plus daemon lifecycle).",
@@ -332,6 +392,17 @@ def build_parser():
         help="Print the last session's memory index for this directory (session-start hook).",
     )
     s.set_defaults(func=cmd_session_digest)
+
+    r = sub.add_parser(
+        "related-memories",
+        help="Print memories related to text read from stdin (read-only; never starts a daemon).",
+    )
+    r.add_argument("--limit", type=int, default=config.RELATED_MEMORIES_DEFAULT_LIMIT)
+    r.add_argument("--min-score", type=float, default=config.RELATED_MEMORIES_MIN_SCORE)
+    r.add_argument("--exclude-ids", default="")
+    r.add_argument("--timeout-ms", type=int, default=4000)
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(func=cmd_related_memories)
 
     e = sub.add_parser(
         "export-corpus-snapshot",
@@ -394,13 +465,13 @@ def main():
         sys.exit(args.func(args) or 0)
     except Exception as e:
         print(f"# SALTMDB CLI error: {e}", file=sys.stderr)
-        # bootstrap-digest and session-digest are consumed by a SessionStart hook that treats
-        # stdout as best-effort context and must never fail the session merely because SALTMDB
-        # itself errored -- these commands alone are swallowed to exit 0 (matching pre-Phase-7
-        # behavior exactly). Every other subcommand is either a human-run dev tool
-        # (export-corpus-snapshot) or feeds a scheduled-maintenance hook (orphans, corpus-health)
-        # that needs a real nonzero exit code to detect failure, so those propagate genuinely.
-        sys.exit(0 if args.command in ("bootstrap-digest", "session-digest") else 1)
+        # bootstrap-digest, session-digest, and related-memories are best-effort read-only
+        # entrypoints consumed by hooks or answer-side checks; they must never fail the caller.
+        # Other subcommands propagate a nonzero status so human and maintenance invocations can
+        # detect failure.
+        sys.exit(
+            0 if args.command in ("bootstrap-digest", "session-digest", "related-memories") else 1
+        )
 
 
 if __name__ == "__main__":

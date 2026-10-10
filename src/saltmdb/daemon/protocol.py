@@ -56,6 +56,9 @@ READ_TOOLS = frozenset(
         # Internal-only (no public MCP tool): returns the last session in a directory for bootstrap
         # context. Read-only -- classified here so the RPC mid-call-failure contract retries it.
         "get_last_session_digest",
+        # Internal-only (no public MCP tool): answer-side related-memory lookup. Read-only and
+        # deliberately does not start a daemon from the CLI client.
+        "find_related_memories",
     }
 )
 

@@ -17,7 +17,7 @@ import logging
 import math
 import os
 import threading
-from typing import Any, Protocol
+from typing import Any, Protocol, overload
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +160,28 @@ def get_last_score_diagnostics() -> dict[str, Any]:
     return dict(getattr(_score_diagnostics, "value", {}))
 
 
+@overload
+def score_pairs(
+    query: str,
+    candidates: list[str],
+    *,
+    candidate_cap: int | None = None,
+    text_cap_chars: int | None = None,
+    model_name: str | None = None,
+) -> list[float] | None: ...
+
+
+@overload
+def score_pairs(*args: Any, **kwargs: Any) -> list[float] | None: ...
+
+
 def score_pairs(  # noqa: PLR0911
     query: str,
     candidates: list[str],
     *,
     candidate_cap: int | None = None,
     text_cap_chars: int | None = None,
+    model_name: str | None = None,
 ) -> list[float] | None:
     """Returns per-candidate raw cross-encoder logits, index-aligned with `candidates`, or None
     on ANY of: disabled (no/unsupported SALTMDB_RERANKER_MODEL), empty candidates, a runner
@@ -173,6 +189,9 @@ def score_pairs(  # noqa: PLR0911
     output -- caller MUST treat None as "no signal, fall back to whatever ordering/evidence would
     exist without this stage," never as all-zero scores (a zero score is a real, meaningful
     low-relevance signal; None is "this stage didn't run at all").
+
+    When `model_name` is provided, it bypasses the deployment gate and explicitly selects that
+    model; when omitted, the existing environment-controlled behavior is unchanged.
 
     Truncates each candidate to CROSS_ENCODER_MAX_CHARS chars AND the query to
     CROSS_ENCODER_MAX_QUERY_CHARS chars before scoring -- an uncapped query would be concatenated
@@ -202,7 +221,7 @@ def score_pairs(  # noqa: PLR0911
             "requested_candidates": len(candidates),
             "candidate_cap": cap,
             "text_cap_chars": text_cap,
-            "model": get_reranker_model_name(),
+            "model": model_name if model_name is not None else get_reranker_model_name(),
             "reason": None,
         }
     )
@@ -223,21 +242,25 @@ def score_pairs(  # noqa: PLR0911
     if not candidates:
         _score_diagnostics.value["reason"] = "empty_candidates"
         return None
-    if not is_cross_encoder_enabled():
+    if model_name is None and not is_cross_encoder_enabled():
         _score_diagnostics.value["reason"] = "disabled_or_unsupported_model"
         return None
 
-    model_name = get_reranker_model_name()
-    if model_name is None:
+    effective_model_name = model_name
+    if effective_model_name is None:
+        effective_model_name = get_reranker_model_name()
+    if effective_model_name is None:
         _score_diagnostics.value["reason"] = "disabled_or_unsupported_model"
         return None
+    # shortcut: explicit overrides can alternate the singleton cache with the deployment model;
+    # add a keyed cache only if measured mixed-model throughput makes this material.
     capped_query = (query or "")[:CROSS_ENCODER_MAX_QUERY_CHARS]
     capped = [c[:text_cap] for c in candidates[:cap]]
     try:
-        model = get_model(model_name)
+        model = get_model(effective_model_name)
         scores = list(model.rerank(capped_query, capped))
     except Exception as e:
-        logger.warning("Cross-encoder reranking failed (model=%s): %s", model_name, e)
+        logger.warning("Cross-encoder reranking failed (model=%s): %s", effective_model_name, e)
         _score_diagnostics.value["reason"] = "runner_failure"
         _score_diagnostics.value["error"] = str(e)
         return None
@@ -254,7 +277,7 @@ def score_pairs(  # noqa: PLR0911
         logger.warning(
             "Cross-encoder reranking returned malformed output (model=%s, expected %d scores, "
             "got %r); falling back.",
-            model_name,
+            effective_model_name,
             len(capped),
             scores,
         )

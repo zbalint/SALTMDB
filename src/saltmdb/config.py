@@ -134,6 +134,22 @@ DEDUP_FTS_MAX_TERMS = 40
 # labeled/calibrated value -- revisit with real labels before treating this as final.
 DEDUP_CROSS_ENCODER_THRESHOLD = 4.0
 
+# Related-memory CLI candidate pool per answer segment.
+RELATED_MEMORIES_MAX_SEGMENTS = 4
+# Minimum normalized characters needed for a retrieval segment.
+RELATED_MEMORIES_MIN_SEGMENT_CHARS = 40
+# Maximum distinct candidates retained for each segment.
+RELATED_MEMORIES_POOL_PER_SEGMENT = 10
+# Maximum OR-only FTS candidates contributed per segment.
+RELATED_MEMORIES_FTS_SHARE = 5
+# Maximum semantic neighbours requested for one related-memory segment.
+RELATED_MEMORIES_SEMANTIC_MAX_REQUEST = 50
+# Default number of related memories printed by the text CLI.
+RELATED_MEMORIES_DEFAULT_LIMIT = 3
+# Uncalibrated placeholder threshold copied from the dedup threshold.
+# shortcut: calibrate with the replay harness before any hook uses this value.
+RELATED_MEMORIES_MIN_SCORE = 4.0
+
 # Sliding-window chunking for chunk-level embeddings (entity_chunk_embeddings).
 # Empirically settled across 3 benchmark rounds (see scripts/benchmarking/) -- do not re-tune
 # without new benchmark evidence.

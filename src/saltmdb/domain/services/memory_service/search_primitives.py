@@ -22,6 +22,7 @@ from saltmdb.config import (
     RELEVANCE_PREVIEW_MERGE_GAP_CHARS,
 )
 from saltmdb.db.connection import get_connection, close_connection
+from saltmdb.utils.text import sanitize_fts_query
 
 from ._shared import logger
 
@@ -67,6 +68,20 @@ STOP_WORDS = {
     "these",
     "those",
 }
+
+
+def build_fts_terms(text: str, max_terms: int) -> list[str]:
+    """Prepare bounded, case-insensitive unique FTS terms for OR/AND retrieval."""
+    raw_terms = sanitize_fts_query(text).split()
+    kept_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for term in raw_terms:
+        normalized_term = term.lower()
+        if normalized_term in STOP_WORDS or normalized_term in seen_terms:
+            continue
+        seen_terms.add(normalized_term)
+        kept_terms.append(term)
+    return (kept_terms or raw_terms)[:max_terms]
 
 
 def _run_fts_search(

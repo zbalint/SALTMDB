@@ -1313,5 +1313,99 @@ class TestColdStartWait(unittest.TestCase):
         client._current_session = None
 
 
+class TestCallWithoutDaemonSpawn(unittest.TestCase):
+    def test_refused_connection_raises_daemon_not_running_without_spawning(self):
+        with (
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                return_value={"service_port": 1, "auth_token": "token"},
+            ),
+            patch.object(client, "ensure_daemon_running") as ensure,
+            patch.object(client.socket, "create_connection", side_effect=ConnectionRefusedError()),
+        ):
+            with self.assertRaises(client.DaemonNotRunning):
+                client.call("/tmp/saltmdb-test.db", "search_tags", {}, spawn=False)
+        ensure.assert_not_called()
+
+    def test_shutting_down_response_raises_daemon_not_running_without_retrying(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with (
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                return_value={"service_port": 1, "auth_token": "token"},
+            ),
+            patch.object(client, "ensure_daemon_running") as ensure,
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_error_response(
+                    "request", protocol.DAEMON_SHUTTING_DOWN, "draining"
+                ),
+            ),
+        ):
+            with self.assertRaises(client.DaemonNotRunning):
+                client.call("/tmp/saltmdb-test.db", "search_tags", {}, spawn=False)
+        ensure.assert_not_called()
+
+    def test_spawn_false_does_not_refresh_an_existing_session(self):
+        session = MagicMock()
+        session._state_lock = threading.RLock()
+        with (
+            patch.object(
+                client,
+                "reachable_daemon_info",
+                return_value={"service_port": 1, "auth_token": "token"},
+            ),
+            patch.object(client, "ensure_daemon_running") as ensure,
+            patch.object(client.socket, "create_connection", side_effect=ConnectionRefusedError()),
+        ):
+            with self.assertRaises(client.DaemonNotRunning):
+                client.call_method(
+                    "/tmp/saltmdb-test.db",
+                    "search_tags",
+                    {},
+                    spawn=False,
+                    _session=session,
+                )
+        session.ensure_fresh.assert_not_called()
+        ensure.assert_not_called()
+
+    def test_spawn_false_auth_errors_do_not_recurse_or_reconnect(self):
+        for code in (protocol.AUTH_FAILED, protocol.CALLER_SESSION_INVALID):
+            with self.subTest(code=code):
+                fake_sock = MagicMock()
+                fake_sock.__enter__.return_value = fake_sock
+                session = MagicMock()
+                session._state_lock = threading.RLock()
+                response = protocol.build_error_response("request", code, "rejected")
+                with (
+                    patch.object(
+                        client,
+                        "reachable_daemon_info",
+                        return_value={"service_port": 1, "auth_token": "token"},
+                    ),
+                    patch.object(client, "ensure_daemon_running") as ensure,
+                    patch.object(client.socket, "create_connection", return_value=fake_sock),
+                    patch.object(client.protocol, "recv_frame", return_value=response),
+                    patch.object(client, "call_method", wraps=client.call_method) as wrapped,
+                ):
+                    with self.assertRaises(client.DaemonRpcError) as raised:
+                        client.call_method(
+                            "/tmp/saltmdb-test.db",
+                            "search_tags",
+                            {},
+                            spawn=False,
+                            _session=session,
+                        )
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(wrapped.call_count, 1)
+                session.force_reconnect.assert_not_called()
+                ensure.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

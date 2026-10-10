@@ -71,8 +71,6 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
             fts_where_clauses.append("(e.context_id IS NULL OR e.context_id = ?)")
             params.append(context_id)
 
-        from saltmdb.utils.text import sanitize_fts_query
-
         input_text = f"{title or ''} {content or ''}"
         duplicates = []
 
@@ -80,17 +78,7 @@ def check_duplicate_memories(  # noqa: C901, PLR0912, PLR0915
         # bounded scalar fallback as an explicitly degraded path.
         fts_candidates = []
         fts_error = False
-        search_terms = sanitize_fts_query(input_text)
-        raw_terms = search_terms.split()
-        kept_terms = []
-        seen_terms = set()
-        for term in raw_terms:
-            normalized_term = term.lower()
-            if normalized_term in search_primitives.STOP_WORDS or normalized_term in seen_terms:
-                continue
-            seen_terms.add(normalized_term)
-            kept_terms.append(term)
-        capped_terms = (kept_terms or raw_terms)[:DEDUP_FTS_MAX_TERMS]
+        capped_terms = search_primitives.build_fts_terms(input_text, DEDUP_FTS_MAX_TERMS)
         if capped_terms:
             try:
                 fts_rows = cast(
