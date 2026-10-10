@@ -96,3 +96,17 @@ code is installed and the daemon restarted.
 - Content search of `Environment=SALTMDB_DB_PATH` and `SALTMDB_DAEMON_SPAWNED_AT` in `src` and `tests`: the unit text is pinned only
   in `tests/test_daemon_service.py` L65 and the env keys only in `tests/test_daemon_client.py` L737 and L749.
 - Consultant pre-lock review done: spawn paths, pinned tests, the unit-install caveat and the latency evidence were added from it.
+
+## Amendment 1 (2026-10-10, architect, adjudicating the developer's BLOCKED on the unit-text test)
+
+Section 4 asked to update the whole-text snapshot `test_render_unit_exact_text` for D3. The developer's working rules discourage
+re-pinning whole-text snapshots. Adjudication: the unit file is a contract read by systemd, so every directive it pins today must
+stay pinned; the snapshot may be kept or replaced, but coverage may not shrink. Either of these is acceptable, developer's choice:
+
+1. Keep the test and change only its expected string by the one new line `Environment=MALLOC_ARENA_MAX=2` directly after the
+   `Environment=SALTMDB_DB_PATH=...` line (the minimal edit, as section 4 says); or
+2. Replace the single whole-text assertion with assertions that parse the rendered text into sections and directives and check
+   every directive of the current text: `Description`, `StartLimitIntervalSec=0`, `Type=simple`, both `Environment` lines in that
+   order, `ExecStart` with `--foreground`, `Restart=always`, `RestartSec=30`, `WantedBy=default.target`, and the section order.
+
+Nothing else in the spec changes. The spawn-env tests stay as written in section 4.
