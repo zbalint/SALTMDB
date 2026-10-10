@@ -107,3 +107,28 @@ def test_main_skips_session_digest_section_when_run_cli_returns_none(capsys):
     with patch.object(bootstrap, "run_cli", return_value=None):
         bootstrap.main()
     assert "saltmdb-last-session-digest" not in capsys.readouterr().out
+
+
+def test_bootstrap_text_skips_session_digest_on_compact():
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+    calls = []
+
+    def fake_run_cli(*args):
+        calls.append(args[0])
+        return "<digest>" if args[0] == "bootstrap-digest" else "<handover>"
+
+    with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
+        text = bootstrap.bootstrap_text("compact")
+    assert "session-digest" not in calls
+    assert "<handover>" not in text
+
+
+def test_bootstrap_text_keeps_session_digest_on_startup_and_without_source():
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+
+    def fake_run_cli(*args):
+        return "<digest>" if args[0] == "bootstrap-digest" else "<handover>"
+
+    for source in ("startup", None):
+        with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
+            assert "<handover>" in bootstrap.bootstrap_text(source)

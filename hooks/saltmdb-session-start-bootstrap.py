@@ -54,13 +54,15 @@ def run_cli(*args: str) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def bootstrap_text() -> str:
+def bootstrap_text(source: str | None = None) -> str:
     sections: list[str] = []
     digest = run_cli("bootstrap-digest")
     if digest:
         sections.append(digest.strip())
 
-    session_digest = run_cli("session-digest")
+    # The last-session handover is large and the session already holds it from startup; a
+    # compaction only needs the core digest back, in case the built-in summarizer dropped it.
+    session_digest = None if source == "compact" else run_cli("session-digest")
     if session_digest:
         sections.append(session_digest.strip())
 
@@ -99,7 +101,7 @@ def main() -> None:
     except (json.JSONDecodeError, OSError):
         payload = {}
 
-    text = bootstrap_text()
+    text = bootstrap_text(payload.get("source"))
     if not text:
         return
     if payload.get("conversationId"):
