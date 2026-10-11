@@ -169,10 +169,10 @@ answer is really "read your own loaded instructions."
 ### Phase C — Distill and correct (at task acceptance, and at wrap-up)
 Events are the task's working notes: unsearchable by meaning, unlinked, never superseded.
 Memories plus git (spec, commits, backlog) are the durable record, and memory is the layer that
-crosses projects and harnesses. Distill when a task's work is accepted (for a delegated task the
-architect does it right after committing the accepted implementation, before resetting the
-developer or starting the next spec) and also corrects the memories the task proved stale that
-nobody fixed yet, not only when a session ends.
+crosses projects and harnesses. Distill, and correct the memories the task proved stale that nobody
+fixed yet, when a task's work is accepted (for a delegated task the architect does it right after
+committing the accepted implementation, before resetting the developer or starting the next
+spec), not only when a session ends.
 1. Query the task's own event log (`get_events(context_id=...)` or
    `get_events(agent_id=<configured SALTMDB_AGENT_ID>)`) for anything that outlives the task:
    lessons, root causes, decisions with their reasons, rejected alternatives. A lesson that would
@@ -180,8 +180,8 @@ nobody fixed yet, not only when a session ends.
    backlog row or event already records it; repo docs hold that repo's own contract and to-do list.
 2. Synthesize new permanent facts/rules/progress into `store_memory`.
 3. Link dependent/resolving relationships via `manage_relation`.
-4. **Correct stale memories on read.** Any time, not only during distillation: when a primary source (git, a file, a live tool call)
-   contradicts a memory you read in full with `get_memory` (a search preview is not enough), fix
+4. **Correct stale memories on read.** Any time, not only during distillation: when a primary source (git, a file, a live
+   tool call) contradicts a memory you read in full with `get_memory` (a search preview is not enough), fix
    it in the same turn: `revise_memory` when it was recorded wrong, `supersede_memory` when the
    fact changed. For an inactive memory read its named successor first; with none, store a
    correction and link it with `manage_relation(predicate="corrects")` (see Phase D step 4).
