@@ -54,6 +54,7 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 
 | Id | Type | Title | Closed by |
 |---|---|---|---|
+| BL-037 | perf | Explicit `threads=` for the cross-encoder (withdrawn) | Withdrawn 2026-10-11, no code. The planned 2x gain (0.87 s to 0.42 s per 10 pairs) was a loaded-host artifact; on a quiet 4-vCPU host the default (0.40-0.44 s) equals `threads=4` (0.41-0.48 s), scores identical. Cross-encoder cost is linear per pair (about 40 ms); batching saves at most about 13%; fewer or shorter pairs would change scores and are not wanted. Spec `docs/specs/SPEC-CROSS-ENCODER-THREADS.md` stays as the record. |
 | BL-025 | feature | Read-only `saltmdb-cli related-memories` (text on stdin, related memories out) | ecf3ea7 (spec `docs/specs/SPEC-RELATED-MEMORIES-CLI.md`); live install at 3d7f0ea has it since 2026-10-11 (deployed by the owner) |
 | BL-027 | feature | `saltmdb-cli snapshot`: a sanctioned database copy made by the daemon | 7782002 (spec `docs/specs/SPEC-DB-SNAPSHOT-CLI.md`); deployed in the live install at 3d7f0ea; used for the BL-028 run |
 | BL-028 | feature | Replay harness for the answer-side memory hook: rewind a snapshot to each reply's time, score, label, calibrate the threshold | aa744d5 (spec `docs/specs/SPEC-RELATED-MEMORIES-REPLAY.md`); calibration run 2026-10-11 on 200 replies, result in cb3c543 (spec amendment 3): threshold 4.0, precision 0.54, 0.7 bar not met |
