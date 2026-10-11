@@ -305,3 +305,65 @@ constructions in `tests/test_daemon_server.py` (L51, L583, L849), `tests/test_ag
 (L200), `tests/test_viewer_operations.py` (L35), `tests/test_viewer_rework_contracts.py` (L157), and the
 direct `reconcile_*` calls in `tests/test_embedding_jobs.py` (L62),
 `tests/test_embedding_job_reconciliation.py` (L27), `tests/test_retrieval_text.py` (L255).
+
+## Amendment 1 (2026-10-11)
+
+Contradiction resolved: section 0 scopes `server.py`'s startup block and D1-D9 say nothing about signal
+handling, but moving the recovery off the startup path exposed an existing-suite failure.
+`TestDaemonSignalShutdown::test_sigterm_triggers_clean_shutdown_without_deadlock` waits only for the
+discovery file and then sends SIGTERM twice. The daemon now publishes the discovery file sooner than the
+later `signal.signal` calls, so the default SIGTERM action terminated it (exit -15).
+
+- **D12.** Before the discovery file is written, `main()` installs a temporary SIGINT/SIGTERM handler
+  that only sets an `Event`. That same `Event` becomes `shutdown_requested`, so a signal that arrives
+  before the shutdown watcher exists makes the watcher run `_shutdown_sequence` exactly once when it
+  starts (`Event.set()` is idempotent). The existing handlers installed later replace the temporary one
+  and are unchanged. A signal before the temporary handler is installed keeps its previous behaviour.
+- Scope: `src/saltmdb/daemon/server.py` only, inside the startup block already in scope.
+- Not part of the spec and reverted: the `: float` annotation on `_DaemonState._started_at` (unrelated
+  to this change; no failing check needs it).
+
+## Amendment 2 (2026-10-11)
+
+Contradiction resolved: D6 has the recovery thread take an in-flight lease before
+`start_initial_grace_period()`. `_start_grace_timer` (`server.py` L214-223) never cancels an existing
+timer, so the sequence acquire lease, initial timer A, release lease (`_release_inflight` arms timer B)
+leaves two live timers while `_shutdown_timer` points only at B. `_grace_fire` re-checks sessions and
+in-flight work under the lock, so a stray timer cannot shut down a busy daemon, but the idle exit can
+come up to 30 s earlier than the grace period after recovery, a hello cancels only B, and a firing A
+overwrites `_shutdown_timer` with `None` while a newer timer is live.
+
+- **D13.** `_start_grace_timer` cancels the timer in `self._shutdown_timer`, if any, before it arms
+  the new one, so at most one grace timer is live. No other lifecycle behaviour changes.
+- Scope: `src/saltmdb/daemon/server.py` (`_start_grace_timer` only) and
+  `tests/test_startup_embedding_recovery.py`.
+- Test 10 (written failing first): a non-foreground `_DaemonState` (construct it as
+  `tests/test_daemon_server.py` L51 does): `_acquire_inflight()`, `start_initial_grace_period()`
+  (timer A), `_release_inflight()` (timer B). Assert `A is not B`, `A.finished.is_set()` (cancelled) and
+  `B.finished.is_set()` is false; cancel B in `finally`. Use a long `DAEMON_SHUTDOWN_GRACE_PERIOD_S`
+  patch so nothing fires during the test.
+- Acceptance: `uv run pytest tests/test_startup_embedding_recovery.py -q` (ten tests), `./verify` fresh.
+
+## Amendment 3 (2026-10-11)
+
+Contradiction resolved: acceptance 1 requires the two daemon-subprocess tests (4, 7 and 8 in section 4
+shapes) to pass, but `test_daemon_skips_full_recovery_on_clean_database` failed once in the architect's
+fresh `./verify` (1 failed, 2211 passed) and in 1 of 12 focused reruns, while the developer's own gate
+passed. The test waits for the `Signal handlers registered:` log line and then sends SIGTERM. The signal
+can arrive while the main thread is still inside that log write to stderr. `_request_shutdown` runs on
+the main thread and calls `logger.info(...)` before `shutdown_requested.set()` (`server.py` L1130-1141);
+the reentrant stderr write raised `RuntimeError: reentrant call inside <_io.BufferedWriter
+name='<stderr>'>` out of the handler, `set()` never ran, the shutdown request was lost and the daemon
+did not exit within 15 s. The ordering is in the baseline; the new test timing makes it reachable, and a
+real SIGTERM (for example from a service manager) can hit it too.
+
+- **D14.** `_request_shutdown` reads `already_set = shutdown_requested.is_set()`, then calls
+  `shutdown_requested.set()`, then logs the same `Shutdown requested: trigger_args=%r already_set=%s
+  (pid=%d)` line using `already_set`. The log text and the handler's other behaviour do not change. The
+  temporary startup handler (D12) already only sets the event.
+- Scope: `src/saltmdb/daemon/server.py` (`_request_shutdown` only). No test file change is required; the
+  daemon tests are the check.
+- Acceptance: `./verify` fresh, and 60 consecutive runs of
+  `uv run pytest -q tests/test_startup_embedding_recovery.py::test_daemon_skips_full_recovery_on_clean_database tests/test_startup_embedding_recovery.py::test_daemon_ready_precedes_gapped_database_recovery`
+  with zero failures. The race is timing dependent, so this is statistical evidence (unfixed rate was
+  about 1 in 12); report the run count and failures.

@@ -3,9 +3,9 @@ import logging
 import hashlib
 import sqlite3
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Callable, Literal, Protocol, TypeVar, cast
 
 try:
     import sqlite_vec
@@ -27,6 +27,17 @@ EMBEDDING_RETRY_DELAYS_S = (1, 5, 30, 120, 600)
 EMBEDDING_LEASE_S = 120
 RETRIEVAL_EMBEDDING_RETRY_DELAYS_S = EMBEDDING_RETRY_DELAYS_S
 RETRIEVAL_EMBEDDING_LEASE_S = EMBEDDING_LEASE_S
+_T = TypeVar("_T")
+
+
+class _Coordinator(Protocol):
+    def submit(
+        self,
+        label: str,
+        fn: Callable[[sqlite3.Connection], _T],
+        *,
+        priority: Literal["background"],
+    ) -> _T | Future[_T]: ...
 
 
 def entity_source_hash(title: str, content: str) -> str:
@@ -259,6 +270,101 @@ def reconcile_retrieval_embedding_jobs(
     for entity_id, text, text_hash in rows:
         enqueue_retrieval_embedding_job_for_entity(conn, entity_id, text, text_hash, force=False)
     return [row[0] for row in rows]
+
+
+EMBEDDING_RECOVERY_GAP_SQL = """
+SELECT COUNT(*)
+FROM (
+    SELECT e.id
+    FROM entities e
+    WHERE e.status != 'archived'
+      AND e.content_hash IS NOT NULL
+      AND e.content_hash != ''
+      AND NOT EXISTS (
+          SELECT 1
+          FROM embedding_jobs j
+          WHERE j.entity_id = e.id
+            AND j.job_kind = 'chunk'
+            AND j.source_hash = e.content_hash
+      )
+    UNION
+    SELECT e.id
+    FROM entities e
+    WHERE e.status != 'archived'
+      AND e.content_hash IS NOT NULL
+      AND e.content_hash != ''
+      AND NOT EXISTS (
+          SELECT 1
+          FROM embedding_jobs j
+          WHERE j.entity_id = e.id
+            AND j.job_kind = 'entity'
+      )
+    UNION
+    SELECT e.id
+    FROM entities e
+    WHERE e.status != 'archived'
+      AND e.retrieval_text_hash IS NOT NULL
+      AND e.retrieval_text_hash != ''
+      AND NOT EXISTS (
+          SELECT 1
+          FROM retrieval_embedding_jobs r
+          WHERE r.entity_id = e.id
+            AND r.source_hash = e.retrieval_text_hash
+      )
+)
+"""
+
+
+def embedding_recovery_gap_count(conn: sqlite3.Connection) -> int:
+    """Count active entities missing any current durable embedding job."""
+    row = conn.execute(EMBEDDING_RECOVERY_GAP_SQL).fetchone()
+    return int(row[0])
+
+
+def reconcile_all_embedding_jobs(
+    coordinator: _Coordinator, *, stop: threading.Event | None = None, page_size: int = 100
+) -> tuple[int, int]:
+    """Repair durable entity and retrieval-text jobs page by page through the coordinator."""
+    entities = 0
+    after_id: str | None = None
+    while True:
+        if stop is not None and stop.is_set():
+            return entities, 0
+
+        page = cast(
+            list[str],
+            coordinator.submit(
+                "reconcile_embedding_jobs",
+                lambda conn: reconcile_embedding_jobs(conn, limit=page_size, after_id=after_id),
+                priority="background",
+            ),
+        )
+        if not page:
+            break
+        entities += len(page)
+        after_id = page[-1]
+
+    retrieval_rows = 0
+    retrieval_after_id: str | None = None
+    while True:
+        if stop is not None and stop.is_set():
+            return entities, retrieval_rows
+
+        page = cast(
+            list[str],
+            coordinator.submit(
+                "reconcile_retrieval_embedding_jobs",
+                lambda conn: reconcile_retrieval_embedding_jobs(
+                    conn, limit=page_size, after_id=retrieval_after_id
+                ),
+                priority="background",
+            ),
+        )
+        if not page:
+            break
+        retrieval_rows += len(page)
+        retrieval_after_id = page[-1]
+    return entities, retrieval_rows
 
 
 class EmbedJobScheduler:

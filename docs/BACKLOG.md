@@ -53,6 +53,7 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-040 | feature | Viewer "Tools" tab: run the read-only MCP tools through the real adapter | open | Owner request 2026-10-11: a way for users to test the exposed MCP tools when debugging. Spec `docs/specs/SPEC-VIEWER-TOOL-TESTER.md` (locked, consultant-reviewed); read-only tools, fixed `viewer` identity, GET endpoints with cross-site guards. Not assigned yet: the developer's weekly quota was at 99% when the spec was committed. |
 | BL-041 | feature | Viewer Tools tab follow-ups | open | Write tools on a scratch database, copy-as-curl or MCP JSON snippet, call history. After BL-040. |
 | BL-039 | feature | Correction counts and active-memory freshness in `corpus-health` | implemented | `saltmdb-cli corpus-health` now reports `corrections` (revises, supersedes, corrects, new memories, by week, 365-day cap) and `freshness` (share of active memories updated in 30 days). Measured on the 2026-10-10 snapshot copy, 30 days: 258 corrections, 1018 new memories, freshness 0.382; 0.14 s steady state. Needs deploy to the live install. Spec `docs/specs/SPEC-CORPUS-HEALTH-CORRECTIONS.md`. |
+| BL-042 | perf | Startup embedding recovery blocked daemon readiness and grew with the database | implemented | Recovery now runs after readiness behind a canary and the manual backfill covers both embedding job families. |
 
 ## Closed
 

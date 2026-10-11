@@ -69,6 +69,7 @@ class _DaemonState:
         self._started_at = time.monotonic()
         self.coordinator: DbWriteCoordinator | None = None
         self.embedding_scheduler: "EmbedJobScheduler | None" = None
+        self.embedding_recovery_stop: threading.Event = threading.Event()
 
     def viewer_snapshot(self) -> dict[str, Any]:
         """Return the daemon-owned fields safe to expose to the local Viewer."""
@@ -211,6 +212,8 @@ class _DaemonState:
             logger.warning("Agent-session activity update failed", exc_info=True)
 
     def _start_grace_timer(self) -> None:
+        if self._shutdown_timer is not None:
+            self._shutdown_timer.cancel()
         logger.info(
             "Starting %.0fs shutdown grace timer (pid=%d)",
             config.DAEMON_SHUTDOWN_GRACE_PERIOD_S,
@@ -592,33 +595,81 @@ class _DaemonState:
         return protocol.build_ok_response(request_id, {"path": path})
 
     def _handle_run_backfill(self, request_id: str | None) -> dict[str, Any]:
-        """Trigger a full chunk-embedding backfill pass over all active entities."""
-        from saltmdb.domain.services.embedding_service import reconcile_embedding_jobs
+        """Trigger a full embedding backfill pass over all active entities."""
+        from saltmdb.domain.services.embedding_service import reconcile_all_embedding_jobs
 
         if self.coordinator is None:
             raise RuntimeError("database writer unavailable")
-        after_id: str | None = None
-        total = 0
-        while True:
-            # submit() with wait=True (default) always returns T directly, never Future[T].
-            def _reconcile(conn, cursor=after_id) -> list[str]:
-                return reconcile_embedding_jobs(conn, limit=100, after_id=cursor)
-
-            ids = cast(
-                list[str],
-                self.coordinator.submit(
-                    "run_backfill_chunk_embeddings_now",
-                    _reconcile,
-                    priority="background",
-                ),
-            )
-            if not ids:
-                break
-            total += len(ids)
-            after_id = ids[-1]
+        entities, retrieval = reconcile_all_embedding_jobs(self.coordinator)
         return protocol.build_ok_response(
-            request_id, f"{total} entities queued for durable embedding."
+            request_id,
+            f"{entities} entities queued for durable embedding ({retrieval} retrieval-text rows).",
         )
+
+
+def _run_embedding_recovery(state: _DaemonState) -> None:
+    """Run the canary-gated durable embedding recovery after readiness."""
+    started_at = time.monotonic()
+    try:
+        coordinator = state.coordinator
+        if coordinator is None:
+            logger.error("Embedding recovery skipped: database writer unavailable")
+            return
+
+        from saltmdb.domain.services.embedding_service import (
+            embedding_recovery_gap_count,
+            reconcile_all_embedding_jobs,
+        )
+
+        # shortcut: the canary holds the writer lane for the length of the count; move it to a
+        # read connection if the snapshot measurement in section 6 shows it taking more than 1 s.
+        gaps = cast(
+            int,
+            coordinator.submit(
+                "embedding_recovery_canary",
+                embedding_recovery_gap_count,
+                priority="background",
+            ),
+        )
+        if gaps == 0:
+            logger.info("Embedding recovery: no job gaps found; full scan skipped")
+            return
+
+        logger.info("Embedding recovery: %d entities with job gaps; running full scan", gaps)
+        entities, retrieval = reconcile_all_embedding_jobs(
+            coordinator, stop=state.embedding_recovery_stop
+        )
+        logger.info(
+            "Reconciled durable embedding jobs for %d active entities (%d retrieval-text rows).",
+            entities,
+            retrieval,
+        )
+        if state.embedding_recovery_stop.is_set():
+            return
+
+        remaining = cast(
+            int,
+            coordinator.submit(
+                "embedding_recovery_canary",
+                embedding_recovery_gap_count,
+                priority="background",
+            ),
+        )
+        if remaining:
+            logger.warning(
+                "Embedding recovery: %d entities still have job gaps after the full scan",
+                remaining,
+            )
+        logger.info("Embedding recovery finished in %.3f s", time.monotonic() - started_at)
+    except CoordinatorUsageError as exc:
+        if str(exc) == "DAEMON_SHUTTING_DOWN":
+            logger.debug("Embedding recovery stopped during daemon shutdown")
+        else:
+            logger.exception("Embedding recovery failed: %s", exc)
+    except Exception:
+        logger.exception("Embedding recovery failed")
+    finally:
+        state._release_inflight()
 
 
 class _ThreadingRpcServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -934,62 +985,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     conn.close()
     t_db = time.monotonic()
     try:
-        from saltmdb.domain.services.embedding_service import (
-            EmbedJobScheduler,
-            reconcile_embedding_jobs,
-            reconcile_retrieval_embedding_jobs,
-        )
+        from saltmdb.domain.services.embedding_service import EmbedJobScheduler
 
         state.coordinator = DbWriteCoordinator(db_path)
         state.coordinator.start()
         from saltmdb.db.connection import enable_daemon_connection_boundary
 
         enable_daemon_connection_boundary()
-        # One deliberate, conservative recovery generation for every active
-        # legacy row.  Each page is a bounded background transaction.
-        after_id = None
-        reconciled = 0
-        while True:
-
-            def _reconcile_page(c, cursor=after_id) -> list[str]:
-                return reconcile_embedding_jobs(c, limit=100, after_id=cursor)
-
-            page = cast(
-                list[str],
-                state.coordinator.submit(
-                    "reconcile_embedding_jobs",
-                    _reconcile_page,
-                    priority="background",
-                ),
-            )
-            if not page:
-                break
-            reconciled += len(page)
-            after_id = page[-1]
-        retrieval_after_id = None
-        retrieval_reconciled = 0
-        while True:
-
-            def _reconcile_retrieval_page(c, cursor=retrieval_after_id) -> list[str]:
-                return reconcile_retrieval_embedding_jobs(c, limit=100, after_id=cursor)
-
-            page = cast(
-                list[str],
-                state.coordinator.submit(
-                    "reconcile_retrieval_embedding_jobs",
-                    _reconcile_retrieval_page,
-                    priority="background",
-                ),
-            )
-            if not page:
-                break
-            retrieval_reconciled += len(page)
-            retrieval_after_id = page[-1]
-        logger.info(
-            "Reconciled durable embedding jobs for %d active entities (%d retrieval-text rows).",
-            reconciled,
-            retrieval_reconciled,
-        )
 
         # Close out any session an unclean prior daemon death left with ended_at still NULL --
         # this daemon has accepted zero hellos yet, so every such row is guaranteed orphaned
@@ -1062,6 +1064,14 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         state.viewer_port = viewer_port  # daemon-authoritative for the viewer_status RPC (Codex
         # round-1 finding: saltmdb-viewer must report the daemon's own state, never its own
         # client-local env, since the two can legitimately differ).
+    startup_shutdown_requested = threading.Event()
+
+    def _startup_signal_handler(*_args) -> None:
+        startup_shutdown_requested.set()
+
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _startup_signal_handler)
+    signal.signal(signal.SIGINT, _startup_signal_handler)
 
     # Step 7: generate the auth token and publish the discovery file -- the final startup step,
     # so nothing is ever advertised as ready until every other listener has already bound.
@@ -1086,6 +1096,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         t_ready - t0,
     )
     logger.info("Process memory (daemon ready): %s", format_process_memory())
+    if state._acquire_inflight():
+        threading.Thread(
+            target=_run_embedding_recovery,
+            args=(state,),
+            daemon=True,
+            name="saltmdb-embedding-recovery",
+        ).start()
+    else:
+        logger.debug("Embedding recovery not started: daemon is already draining")
     if sys.platform == "win32":
         _log_windows_job_diagnostics()
 
@@ -1106,20 +1125,21 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     # free: Event.set() is idempotent and .wait() only ever unblocks the watcher once, so
     # concurrent triggers (e.g. a grace-period fire racing a SIGTERM) can never run
     # _shutdown_sequence() more than once.
-    shutdown_requested = threading.Event()
+    shutdown_requested = startup_shutdown_requested
 
     def _request_shutdown(*args) -> None:
         # `args` distinguishes the caller: (signum, frame) when invoked as a signal.signal
         # handler, empty when invoked as the grace-timer callback or the KeyboardInterrupt
         # fallback below -- durable evidence of *why* shutdown was requested, for the Windows
         # daemon-death investigation (SALTMDB memories 9d613a10 et al.).
+        already_set = shutdown_requested.is_set()
+        shutdown_requested.set()
         logger.info(
             "Shutdown requested: trigger_args=%r already_set=%s (pid=%d)",
             args,
-            shutdown_requested.is_set(),
+            already_set,
             os.getpid(),
         )
-        shutdown_requested.set()
 
     # Construct before the watcher thread starts: the watcher closes over this object to stop it
     # during shutdown, so it must be bound even if a signal lands immediately at startup.
@@ -1184,6 +1204,7 @@ def _shutdown_sequence(
     brief overlap between an outgoing daemon and its successor safe)."""
     logger.info("Shutdown sequence starting (pid=%d)", os.getpid())
     state.begin_draining()
+    state.embedding_recovery_stop.set()
 
     if state.embedding_scheduler is not None:
         state.embedding_scheduler.stop()
