@@ -242,6 +242,80 @@ def search_memory_called_flag_path(session_id: str) -> Path:
     return state_dir() / f"search-memory-called-{session_id}.flag"
 
 
+def digest_pending_path(session_id: str) -> Path:
+    """Shared marker for saltmdb-session-start-bootstrap.py and
+    saltmdb-prompt-submit-digest-retry.py."""
+    return state_dir() / f"digest-pending-{session_id}.json"
+
+
+def read_digest_pending(path: Path) -> dict[str, object] | None:
+    """Read pending parts, ignoring unreadable or malformed markers."""
+    try:
+        marker = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(marker, dict):
+        return None
+    missing = marker.get("missing")
+    if not isinstance(missing, list) or not all(isinstance(part, str) for part in missing):
+        return None
+    return marker
+
+
+def write_digest_pending(
+    path: Path, missing: list[str], attempts: int = 0, running_since: float | None = None
+) -> None:
+    """Best-effort persistence before slow work or after partial delivery."""
+    try:
+        path.write_text(
+            json.dumps({"missing": missing, "attempts": attempts, "running_since": running_since})
+        )
+    except OSError:
+        return
+
+
+def run_cli_bounded(cli: str | None, args: tuple[str, ...], remaining_s: float) -> str | None:
+    """Run one CLI command within the caller's remaining monotonic budget."""
+    if not cli:
+        return None
+    limit = min(10, remaining_s)
+    if limit < 1.0:
+        return None
+    try:
+        result = subprocess.run(
+            [cli, *args], capture_output=True, text=True, timeout=limit, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+HOOK_OUTPUT_MAX_CHARS = 9800
+
+
+def cap_hook_output(text: str, cli: str | None) -> str:
+    """Keep plain stdout below the harness's context-preview threshold."""
+    if len(text) <= HOOK_OUTPUT_MAX_CHARS:
+        return text
+    command = cli or "saltmdb-cli"
+    notice = (
+        "\nThe output was cut to fit the harness's 10,000-character limit; full text is available with "
+        f"{command} bootstrap-digest and {command} session-digest."
+    )
+    if len(notice) > HOOK_OUTPUT_MAX_CHARS:
+        fixed = (
+            "\nThe output was cut to fit the harness's 10,000-character limit; full text is available with "
+            " bootstrap-digest and  session-digest."
+        )
+        command_limit = max((HOOK_OUTPUT_MAX_CHARS - len(fixed)) // 2, 0)
+        command = command[:command_limit]
+        notice = (
+            "\nThe output was cut to fit the harness's 10,000-character limit; full text is available with "
+            f"{command} bootstrap-digest and {command} session-digest."
+        )
+    return text[: HOOK_OUTPUT_MAX_CHARS - len(notice)] + notice
+
+
 def prune_stale_state(glob_pattern: str, max_age_days: int = 2) -> None:
     """Best-effort cleanup of stale per-session state files older than max_age_days."""
     import time

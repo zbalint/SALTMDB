@@ -85,8 +85,9 @@ the agent obeying it, and it is lost whenever the hook is killed).
      `attempts = 0` and `running_since = time.time()`, before computing the text.
   2. Compute the text (D6 notice included) and write it to stdout, then flush.
   3. `fetched` = the `expected` parts that returned non-empty output. Re-read the marker and the
-     `.claimed` file (D8) as they are now, take the union of their `missing` lists in the order of
-     step 1, and rewrite the marker with `missing = [p for p in that union if p not in fetched]`,
+     `.claimed` file (D8) as they are now, take the union of `pending_before` and their `missing`
+     lists in the order of step 1, and rewrite the marker with
+     `missing = [p for p in that union if p not in fetched]`,
      `attempts = 0`, `running_since = null`; remove the marker instead when that list is empty. The
      re-read keeps a retry hook's failure write (a retry running past the grace of D7) from being
      overwritten; the remaining window is a few milliseconds and can at worst duplicate a part,
@@ -139,12 +140,13 @@ the agent obeying it, and it is lost whenever the hook is killed).
 - D11. Registration in this repo: the Claude example gets one more `UserPromptSubmit` group
   (matcher `*`, one `command` hook, timeout 15). The existing capture group is not edited. The
   Codex, Antigravity, Copilot and OMP registrations and the live configs are out of scope.
-- D12. Output cap and section order. `HOOK_OUTPUT_MAX_CHARS = 9500` in `_saltmdb_hook_common.py` and
+- D12. Output cap and section order. `HOOK_OUTPUT_MAX_CHARS = 9800` (the bound for the whole output, notice included) in `_saltmdb_hook_common.py` and
   a shared function `cap_hook_output(text: str, cli: str | None) -> str` that returns `text`
-  unchanged when `len(text) <= HOOK_OUTPUT_MAX_CHARS`, otherwise the first `HOOK_OUTPUT_MAX_CHARS`
-  characters followed by one notice line (not counted in the 9,500, at most 300 characters) saying
-  the output was cut to fit the harness's 10,000-character limit and that the full text is available
-  with `{cli or "saltmdb-cli"} bootstrap-digest` and `{cli or "saltmdb-cli"} session-digest`.
+  unchanged when `len(text) <= HOOK_OUTPUT_MAX_CHARS`, otherwise the first
+  `HOOK_OUTPUT_MAX_CHARS - len(notice)` characters followed by one notice line, so the result is never
+  longer than `HOOK_OUTPUT_MAX_CHARS` whatever the length of the CLI path. The notice says the output
+  was cut to fit the harness's 10,000-character limit and that the full text is available with
+  `{cli or "saltmdb-cli"} bootstrap-digest` and `{cli or "saltmdb-cli"} session-digest`.
   The bootstrap hook's section order becomes: core digest (or the pending notice), the overdue-core
   notice, then the session digest, so the cut falls in the long handover and never in the notice
   that warns about the `store_memory` hard block (the CLI calls keep their current order and budget
@@ -170,7 +172,7 @@ Add after `search_memory_called_flag_path` (L226-242):
   `limit < 1.0`; `subprocess.run([cli, *args], capture_output=True, text=True, timeout=limit,
   check=False)`; `None` on `OSError` or `subprocess.TimeoutExpired`; stdout when the return code is
   0, else `None`. The module already imports `subprocess`.
-- `HOOK_OUTPUT_MAX_CHARS = 9500` and `cap_hook_output(text, cli)` as in D12.
+- `HOOK_OUTPUT_MAX_CHARS = 9800` and `cap_hook_output(text, cli)` as in D12.
 
 Reuse `state_dir`, `clear_state`, `prune_stale_state`, `get_session_id`, `read_stdin_json`.
 
@@ -215,7 +217,7 @@ Add, after the existing `UserPromptSubmit` group, a second group:
 
 Add a table row for the new script (near L182, same columns as its siblings), change the bootstrap
 row's last sentence (it uses a 10 s overall budget, records a pending marker, and caps its output at
-9,500 characters because Claude Code replaces hook output over 10,000 characters with a preview), and
+9,800 characters because Claude Code replaces hook output over 10,000 characters with a preview), and
 fix the Claude Code row of the first table (L172), which lists the events the example registers and
 lacks `UserPromptSubmit`.
 
@@ -294,3 +296,21 @@ Run from the main checkout; the pre-implementation baseline is in section 0.
 5. `git status --short` lists only the files in the section 0 scope; `git diff` shows no change to
    the pre-existing capture hooks in the example settings.
 6. The retry script is executable (`test -x hooks/saltmdb-prompt-submit-digest-retry.py`).
+
+## Amendment 1 (2026-10-11, architect review of the first implementation)
+
+Evidence: the tester's probe (message m_1356) measured 9,836 characters of output with a 119-character
+CLI path, because the notice embeds the path twice and D12 counted it outside the cap; the architect's
+diff review found that the implementation of D4 step 3 also folds `pending_before` into the union.
+
+- A1.1. D12 is amended in place: `HOOK_OUTPUT_MAX_CHARS` is 9800 and bounds the whole output, notice
+  included; the text is cut to `HOOK_OUTPUT_MAX_CHARS - len(notice)` characters. Sections 3.1 and 3.5
+  and test 13 follow (test 13 already asserts at most 9,800; add a case with a 300-character fake CLI
+  path asserting the same bound, and update the README sentence and the BL-043 text to 9,800).
+- A1.2. D4 step 3 stands as implemented: the union is of `pending_before`, the marker's `missing` and
+  the `.claimed` file's `missing`, minus `fetched`. This never loses a part when the marker and the
+  claimed file are both gone, and can at worst deliver a part twice. The earlier wording ("union of
+  their `missing` lists") is replaced by this one.
+- A1.3. Accepted as is, no change: an empty `session-digest` (a directory with no earlier session) is
+  treated as undelivered and retried by up to three prompts, one bounded call each; the retry hook
+  leaves an unreadable marker in place until the daily prune or the next SessionStart.

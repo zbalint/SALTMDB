@@ -96,6 +96,29 @@ class TestCaptureHookConfig(unittest.TestCase):
             self.assertEqual(after_commands[: len(before_commands)], before_commands)
             self.assertEqual(capture_count, 1 if event in {"PostToolUse", "Stop"} else 0)
 
+    def test_retry_hook_is_registered_only_for_claude(self):
+        claude = self._settings("claude-settings-example.json")
+        retry_hooks = [
+            hook
+            for group in claude["hooks"]["UserPromptSubmit"]
+            for hook in group["hooks"]
+            if hook.get("type") == "command"
+            and "saltmdb-prompt-submit-digest-retry.py" in hook.get("command", "")
+        ]
+        self.assertEqual(len(retry_hooks), 1)
+        self.assertEqual(retry_hooks[0]["timeout"], 15)
+
+        codex = self._settings("codex-settings-example.json")
+        codex_retry_hooks = [
+            hook
+            for groups in codex["hooks"].values()
+            for group in groups
+            for hook in group["hooks"]
+            if hook.get("type") == "command"
+            and "saltmdb-prompt-submit-digest-retry.py" in hook.get("command", "")
+        ]
+        self.assertEqual(codex_retry_hooks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

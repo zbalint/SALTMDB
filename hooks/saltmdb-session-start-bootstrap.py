@@ -14,16 +14,26 @@ of bash for this whole hook family keeps the parsing dependency-free and robust.
 """
 
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 START = time.monotonic()
-BUDGET_S = 13.0
+BUDGET_S = 10.0
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _saltmdb_hook_common import resolve_cli  # noqa: E402
+from _saltmdb_hook_common import (  # noqa: E402
+    HOOK_OUTPUT_MAX_CHARS,
+    cap_hook_output,
+    clear_state,
+    digest_pending_path,
+    get_session_id,
+    prune_stale_state,
+    read_digest_pending,
+    resolve_cli,
+    run_cli_bounded,
+    write_digest_pending,
+)
 
 CLI = resolve_cli()
 
@@ -35,67 +45,79 @@ def remaining() -> float:
 def run_cli(*args: str) -> str | None:
     if not CLI:
         return None
-    limit = min(10, remaining())
-    if limit < 1.0:
-        return None
-    try:
-        result = subprocess.run(
-            [CLI, *args], capture_output=True, text=True, timeout=limit, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout if result.returncode == 0 else None
+    return run_cli_bounded(CLI, args, remaining())
 
 
-def bootstrap_text(source: str | None = None) -> str:
+def bootstrap_text(source: str | None = None, missing: list[str] | None = None) -> str:
     sections: list[str] = []
     digest = run_cli("bootstrap-digest")
     if digest:
-        sections.append(digest.strip())
-    elif CLI:
-        sections.append(
-            "\n".join(
+        core_section = digest.strip()
+    else:
+        core_section = ""
+        if CLI:
+            if missing is not None:
+                missing.append("bootstrap-digest")
+            core_section = "\n".join(
                 [
                     "<saltmdb-digest-pending>",
-                    "The bootstrap digest could not be fetched in time (the SALTMDB daemon is probably still starting).",
-                    f"Run {CLI} bootstrap-digest with Bash now and read the result before continuing.",
+                    (
+                        "If no <saltmdb-digest> block has appeared by your first reply, run "
+                        f"{CLI} bootstrap-digest with Bash and read the result before continuing."
+                    ),
                     "</saltmdb-digest-pending>",
                 ]
             )
-        )
+
     # The last-session handover is large and the session already holds it from startup; a
     # compaction only needs the core digest back, in case the built-in summarizer dropped it.
     session_digest = None if source == "compact" else run_cli("session-digest")
+    session_section = ""
     if session_digest:
-        sections.append(session_digest.strip())
+        session_section = session_digest.strip()
+    elif not session_digest and source != "compact" and CLI and missing is not None:
+        missing.append("session-digest")
 
     health_raw = run_cli("corpus-health")
-    if not health_raw:
-        return "\n\n".join(section for section in sections if section)
-    try:
-        health = json.loads(health_raw)
-    except json.JSONDecodeError:
-        return "\n\n".join(section for section in sections if section)
+    overdue_section = ""
+    if health_raw:
+        try:
+            health = json.loads(health_raw)
+        except json.JSONDecodeError:
+            health = {}
+        overdue = health.get("overdue_core_reviews", {})
+        count = overdue.get("count", 0)
+        if count:
+            titles = [e.get("title", "") for e in overdue.get("entries", [])[:5] if e.get("title")]
+            overdue_section = "\n".join(
+                [
+                    "<saltmdb-overdue-core-notice>",
+                    f"{count} active core memory review(s) are overdue (core_review_after elapsed).",
+                    *(f"- {title}" for title in titles),
+                    (
+                        "store_memory/manage_relation/consolidate_memories will hard-block until these are "
+                        "reviewed via review_core_memory (outcome='demote' or 'archive'). Handle this before "
+                        "it blocks unrelated work."
+                    ),
+                    "</saltmdb-overdue-core-notice>",
+                ]
+            )
 
-    overdue = health.get("overdue_core_reviews", {})
-    count = overdue.get("count", 0)
-    if not count:
-        return "\n\n".join(section for section in sections if section)
+    sections.extend(
+        section for section in (core_section, overdue_section, session_section) if section
+    )
+    return "\n\n".join(sections)
 
-    titles = [e.get("title", "") for e in overdue.get("entries", [])[:5] if e.get("title")]
-    notice = [
-        "<saltmdb-overdue-core-notice>",
-        f"{count} active core memory review(s) are overdue (core_review_after elapsed).",
-        *(f"- {title}" for title in titles),
-        (
-            "store_memory/manage_relation/consolidate_memories will hard-block until these are "
-            "reviewed via review_core_memory (outcome='demote' or 'archive'). Handle this before "
-            "it blocks unrelated work."
-        ),
-        "</saltmdb-overdue-core-notice>",
+
+def _pending_parts(expected: list[str], marker: dict[str, object] | None) -> list[str]:
+    previous = marker.get("missing", []) if marker else []
+    if not isinstance(previous, list):
+        previous = []
+    return [
+        part
+        for part in ("bootstrap-digest", "session-digest")
+        if part in expected or part in previous
     ]
-    sections.append("\n".join(notice))
-    return "\n\n".join(section for section in sections if section)
 
 
 def main() -> None:
@@ -104,16 +126,47 @@ def main() -> None:
     except (json.JSONDecodeError, OSError):
         payload = {}
 
-    text = bootstrap_text(payload.get("source"))
-    if not text:
+    session_id = get_session_id(payload)
+    pending_path = digest_pending_path(session_id) if session_id and CLI else None
+    expected = ["bootstrap-digest"]
+    if payload.get("source") != "compact":
+        expected.append("session-digest")
+
+    if pending_path is not None:
+        prune_stale_state("digest-pending-*", max_age_days=1)
+        pending_before = _pending_parts(expected, read_digest_pending(pending_path))
+        write_digest_pending(pending_path, pending_before, attempts=0, running_since=time.time())
+
+    missing: list[str] = []
+    text = bootstrap_text(payload.get("source"), missing)
+    if text:
+        if payload.get("conversationId"):
+            json.dump({"injectSteps": [{"ephemeralMessage": text}]}, sys.stdout)
+            print()
+        else:
+            output = cap_hook_output(text, CLI)
+            sys.stdout.write(output)
+            if not output.endswith("\n") and len(output) < HOOK_OUTPUT_MAX_CHARS:
+                print()
+    sys.stdout.flush()
+
+    if pending_path is None:
         return
-    if payload.get("conversationId"):
-        json.dump({"injectSteps": [{"ephemeralMessage": text}]}, sys.stdout)
-        print()
-        return
-    sys.stdout.write(text)
-    if not text.endswith("\n"):
-        print()
+
+    claimed_path = Path(f"{pending_path}.claimed")
+    current = read_digest_pending(pending_path)
+    claimed = read_digest_pending(claimed_path)
+    union = _pending_parts(pending_before, current)
+    union = _pending_parts(union, claimed)
+    fetched = [part for part in expected if part not in missing]
+    remaining_parts = [part for part in union if part not in fetched]
+    if remaining_parts:
+        # shortcut: the retry hook can race this final reconciliation by a few milliseconds;
+        # retaining the union prevents that failure write from being lost.
+        write_digest_pending(pending_path, remaining_parts, attempts=0, running_since=None)
+        clear_state(claimed_path)
+    else:
+        clear_state(pending_path, claimed_path)
 
 
 if __name__ == "__main__":
