@@ -128,3 +128,28 @@ kept and updated, not deleted.
   (`config.CROSS_ENCODER_THREADS == max(1, min(os.cpu_count() or 1, 4))` for the real
   `os.cpu_count()`); the recorder-based constructor test is dropped as redundant.
 - Section 8.5 diff-stat list includes `tests/test_reranker_service.py`.
+
+## Amendment 2 (2026-10-11)
+
+Causal review of the two BLOCKED cycles: amendment 1 repeated the same mistake as the original
+spec, prescribing tests from the changed code outward instead of from the developer's binding test
+policy (no mock-echo, forwarding or incidental-default tests; delete rather than re-pin). The
+formula-equality test and the exact-kwargs re-pinning both fall under it. The thread count is a
+speed knob with no consumer-visible behaviour besides timing, so its evidence is the isolated
+timing and score preservation of section 8.4, not a unit test. This amendment supersedes
+amendment 1's test items and section 4.
+
+- No new test file: `tests/test_reranker_threads.py` is NOT created; section 0 scope drops it.
+- `tests/test_reranker_service.py` (scope from amendment 1 stays, limited to the same four tests):
+  rewrite the four tests so they assert only the behaviour each is named for, not the full
+  constructor kwargs: bundled valid -> `cache_dir` is the bundled cache dir and `local_files_only`
+  is true; bundle invalid or bundled load raising -> the online construction has neither `cache_dir`
+  nor `local_files_only` (the raising case still asserts two construction attempts); non-bundled
+  name -> bundle validation is never consulted and `model_name` is the requested name. Read the
+  kwargs from `mock_ctor.call_args`, assert on those keys only, so adding `threads` neither breaks
+  nor is pinned by them. Redundant assertions beyond those are deleted.
+- Section 8.2 becomes: the four rewritten tests pass before and after the production change (they
+  are behaviour-preserving); there is no red-first item for this slice. Section 8.4 (timing and
+  score equality on an isolated script, idle host) is the acceptance evidence for the change itself.
+- Section 8.5 diff-stat lists `config.py`, `reranker_service.py`, `tests/test_reranker_service.py`,
+  `docs/BACKLOG.md`.
