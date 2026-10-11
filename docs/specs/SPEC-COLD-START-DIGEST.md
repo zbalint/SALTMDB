@@ -202,3 +202,8 @@ Default `./verify`. Do not start parallel full runs.
   (`hooks/saltmdb-session-start-bootstrap.py`); harness limit 15 s is from the ~/.agents hook
   config as reported by the owner's side, not verified here.
 - No consultant pass (consultant peer detached); locked on the gate alone.
+
+## Amendment 1 (2026-10-11)
+
+Section 0 "Scope (may edit)" omitted `hooks/README.md`, which section 5 requires editing. The
+scope now includes `hooks/README.md` (the single sentence in section 5 only). Nothing else changes.
