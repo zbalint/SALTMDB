@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 from difflib import SequenceMatcher
 from datetime import datetime, UTC
-from typing import Literal
+from typing import Any, Literal
 
 from saltmdb.config import get_db_path, MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
@@ -570,6 +570,23 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
     return entity_id, bool(existing)
 
 
+def _near_duplicate_warning(duplicate_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    return warning(
+        "NEAR_DUPLICATE",
+        "Memory stored; review duplicate_candidates and use supersede_memory for one "
+        "replacement, consolidate_memories to merge several, or manage_relation to "
+        "link them if related but not redundant.",
+        {
+            "duplicate_candidates": duplicate_candidates,
+            "guidance": {
+                "single": "supersede_memory",
+                "several": "consolidate_memories",
+                "related_not_redundant": "manage_relation",
+            },
+        },
+    )
+
+
 def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     content: str = None,
     tags: list = None,
@@ -596,6 +613,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     core_exit_condition: str | None = None,
     core_review_after: str | None = None,
     detail_memory_ids: list | None = None,
+    probe_sink: list[dict[str, Any]] | None = None,
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
@@ -848,22 +866,34 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # Near duplicates are warnings, never a write gate.  Keep this probe after persistence so
         # callers receive the candidate IDs alongside the newly-created memory even when they do
         # not follow the guidance.
-        duplicate_candidates: list[dict] = []
+        duplicate_candidates: list[dict[str, Any]] = []
         if not was_existing:
-            from .duplicates import check_duplicate_memories
+            if probe_sink is not None:
+                probe_sink.append(
+                    {
+                        "title": title,
+                        "content": redacted_content,
+                        "agent_id": agent_id,
+                        "tags": tags,
+                        "context_id": context_id,
+                        "exclude_ids": [entity_id_out],
+                        "db_path": db_path or get_db_path(),
+                    }
+                )
+            else:
+                from .duplicates import check_duplicate_memories
 
-            duplicate_result = check_duplicate_memories(
-                title=title,
-                content=redacted_content,
-                agent_id=agent_id,
-                tags=tags,
-                context_id=context_id,
-                exclude_ids=[entity_id_out],
-                db_connection=conn,
-                db_path=db_path,
-            )
-            duplicate_candidates = duplicate_result.get("potential_duplicates") or []
-
+                duplicate_result = check_duplicate_memories(
+                    title=title,
+                    content=redacted_content,
+                    agent_id=agent_id,
+                    tags=tags,
+                    context_id=context_id,
+                    exclude_ids=[entity_id_out],
+                    db_connection=conn,
+                    db_path=db_path,
+                )
+                duplicate_candidates = duplicate_result.get("potential_duplicates") or []
         effective_tags, tag_near_misses = _effective_tag_report(conn, entity_id_out, tags)
         response_warnings = [
             warning(
@@ -882,22 +912,7 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
             for item in tag_near_misses
         )
         if duplicate_candidates:
-            response_warnings.append(
-                warning(
-                    "NEAR_DUPLICATE",
-                    "Memory stored; review duplicate_candidates and use supersede_memory for one "
-                    "replacement, consolidate_memories to merge several, or manage_relation to "
-                    "link them if related but not redundant.",
-                    {
-                        "duplicate_candidates": duplicate_candidates,
-                        "guidance": {
-                            "single": "supersede_memory",
-                            "several": "consolidate_memories",
-                            "related_not_redundant": "manage_relation",
-                        },
-                    },
-                )
-            )
+            response_warnings.append(_near_duplicate_warning(duplicate_candidates))
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
@@ -928,3 +943,23 @@ def store_memory(  # noqa: C901, PLR0911, PLR0912, PLR0915
     finally:
         if should_close:
             close_connection(conn)
+
+
+def apply_duplicate_probe(envelope: dict[str, Any], request: dict[str, Any]) -> None:
+    from .duplicates import check_duplicate_memories
+
+    duplicate_result = check_duplicate_memories(
+        title=request["title"],
+        content=request["content"],
+        agent_id=request["agent_id"],
+        tags=request["tags"],
+        context_id=request["context_id"],
+        exclude_ids=request["exclude_ids"],
+        db_connection=None,
+        db_path=request["db_path"],
+    )
+    duplicate_candidates = duplicate_result.get("potential_duplicates") or []
+    if "error" in duplicate_result or not duplicate_candidates:
+        return
+    envelope["data"]["duplicate_candidates"] = duplicate_candidates
+    envelope["warnings"].append(_near_duplicate_warning(duplicate_candidates))

@@ -275,6 +275,7 @@ def _dispatch_store_memory(**kw):
         core_exit_condition=kw.get("core_exit_condition"),
         core_review_after=kw.get("core_review_after"),
         detail_memory_ids=kw.get("detail_memory_ids"),
+        probe_sink=kw.get("probe_sink"),
     )
 
 
@@ -738,10 +739,33 @@ MUTATING_TOOLS = frozenset(
 )
 
 
-def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
+def _dispatch_tool_inner(tool: str, kwargs: dict[str, Any], coordinator):
     fn = DISPATCH_TABLE[tool]
     if tool in MUTATING_TOOLS:
-        if tool in {"store_memory", "log_event", "manage_relation"}:
+        if tool == "store_memory":
+            sink: list[dict[str, Any]] = []
+            store_kwargs: dict[str, Any] = {
+                **kwargs,
+                "coordinator": coordinator,
+                "probe_sink": sink,
+            }
+
+            def store_job(_conn):
+                sink.clear()
+                return fn(**store_kwargs)
+
+            result = coordinator.submit(
+                f"tool:{tool}",
+                store_job,
+                priority="foreground",
+            )
+            if sink and isinstance(result, dict) and result.get("status") == "ok":
+                try:
+                    memory_service.apply_duplicate_probe(result, sink[0])
+                except Exception:
+                    logger.warning("Deferred store_memory duplicate probe failed", exc_info=True)
+            return result
+        if tool in {"log_event", "manage_relation"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
     if tool in {"search_traces", "get_trace"}:
@@ -749,7 +773,7 @@ def _dispatch_tool_inner(tool: str, kwargs: dict, coordinator):
     return fn(**kwargs)
 
 
-def dispatch_tool(tool: str, kwargs: dict, coordinator):
+def dispatch_tool(tool: str, kwargs: dict[str, Any], coordinator):
     """Invoke one normalized tool with the daemon's single-writer boundary.
 
     Wrapped with best-effort usage telemetry (agent API redesign plan §5.9): timing and outcome

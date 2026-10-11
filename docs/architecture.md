@@ -105,6 +105,7 @@ When storing new knowledge, agents can optionally specify a custom `title`. If o
 6. **Tier 4 — Structural Scoring (advisory `quality_score`, never blocking):** Base score 0.50; +0.15 for headers, +0.10 for lists, +0.15 for MSDI ≥ 0.35, −0.15 for MSDI < 0.10 on large (>80 word) text, −0.10 for untyped code blocks, −0.10 for non-hierarchical headers. Score clamped to `[0.0, 1.0]` — purely informational.
 
 `auto_format_markdown` runs as an idempotent pre-pass: normalizes line endings, annotates untyped code fences with language identifiers (Python/SQL/JSON/JavaScript heuristics), collapses 3+ consecutive blank lines.
+In the daemon, the near-duplicate probe runs after the store transaction commits on the request thread, not on the writer thread.
 
 ### 4. Security & Redaction Middleware
 Before any database writes occur, the text is evaluated by a regex-based scrubbing pipeline:

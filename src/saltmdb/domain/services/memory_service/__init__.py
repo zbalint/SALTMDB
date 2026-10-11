@@ -46,7 +46,12 @@ from .tags import (
     search_tags,
     _TAG_NAME_RE,
 )
-from .write import store_memory, _resolve_existing_entity_id, _store_raw_entity
+from .write import (
+    apply_duplicate_probe,
+    store_memory,
+    _resolve_existing_entity_id,
+    _store_raw_entity,
+)
 from .search_primitives import (
     STOP_WORDS,
     semantic_search,
@@ -110,6 +115,7 @@ __all__ = [
     "search_tags",
     "_TAG_NAME_RE",
     "store_memory",
+    "apply_duplicate_probe",
     "_resolve_existing_entity_id",
     "_store_raw_entity",
     "STOP_WORDS",
