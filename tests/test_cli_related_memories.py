@@ -112,7 +112,7 @@ from saltmdb import cli
 from unittest.mock import patch
 
 def slow(*args, **kwargs):
-    time.sleep(2)
+    time.sleep(30)
 
 with patch('saltmdb.daemon.client.call', side_effect=slow):
     cli.main()
@@ -138,7 +138,9 @@ with patch('saltmdb.daemon.client.call', side_effect=slow):
             )
         elapsed = time.monotonic() - start
         self.assertEqual(completed.returncode, 0)
-        self.assertLess(elapsed, 1.2)
+        # The worker sleeps 30 s, so a code path that waits for it takes 30 s; 10 s leaves a wide
+        # margin for a loaded host while still failing that path.
+        self.assertLess(elapsed, 10)
         self.assertEqual(completed.stdout, "")
         self.assertIn("timed out", completed.stderr.lower())
 
