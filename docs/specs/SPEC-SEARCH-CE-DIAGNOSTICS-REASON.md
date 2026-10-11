@@ -12,7 +12,7 @@ LOCKED 2026-10-11.
   the test at L350-370).
 - Scope (may edit):
   - `src/saltmdb/domain/services/memory_service/orchestrator.py` (L176-185, L595-662, L746-748)
-  - `tests/test_search_accuracy_stage2.py` (new tests only)
+  - `tests/test_search_accuracy_stage2.py` (new tests, plus the one added assertion in section 4 item 5)
 - Does not touch: `reranker_service.py`, `scripts/benchmarking/run_evaluation_matrix.py`, the MCP
   tool descriptions, the `candidates[]` diagnostics.
 - Hand-off rule: the developer leaves the diff uncommitted, unstaged and unmerged for review.
@@ -125,3 +125,13 @@ needs those reasons opens a new backlog item.
   appears (`rg "if ranked_pool_"` on this spec shows only the section 3.1 warning not to add one).
 - No second consultant pass: the only reviewer finding class was fixed and the consultant waived a
   re-review (m_1284).
+
+## Amendment 1 (2026-10-11)
+
+Resolves a contradiction between section 0 ("`tests/test_search_accuracy_stage2.py` (new tests only)")
+and section 4 item 5 (add one assertion to the existing executed-run test at L350). Section 4 item 5
+governs: the file's scope is new tests plus exactly that one added `assertNotIn("forced", ...)`
+assertion in `test_cross_encoder_scores_are_recorded_in_pool_order`. No existing assertion in that or
+any other test is changed or removed. Re-read after the change: section 0 scope now reads "new tests
+and the one added assertion in section 4 item 5"; no other section mentions the "new tests only"
+wording (`rg "new tests only"` on this spec shows only this amendment).
