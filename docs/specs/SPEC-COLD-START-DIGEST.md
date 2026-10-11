@@ -207,3 +207,36 @@ Default `./verify`. Do not start parallel full runs.
 
 Section 0 "Scope (may edit)" omitted `hooks/README.md`, which section 5 requires editing. The
 scope now includes `hooks/README.md` (the single sentence in section 5 only). Nothing else changes.
+
+## Amendment 2 (2026-10-11)
+
+Evidence (developer, same cold copy): after the index change `init_db` is still 2.4-3.0 s cold. The
+profiler attributes 1.24 s to the `relations` dedupe `DELETE` and 0.83 s to the
+`idx_relations_unique_edge` drop/create, both run on every start. Section 7 listed them as out of
+scope on a measurement (0.05-0.6 s) that did not hold; the target in section 8.4 cannot be met
+without them. They move into scope; the BL-035 follow-up keeps only the interpreter/import lag and
+BL-032.
+
+Changes (supersede the sections named):
+
+- Section 0 scope: `src/saltmdb/db/schema.py` also covers the `relations` dedupe block and the
+  `idx_relations_unique_edge` block (the two consecutive `try` blocks around them).
+- Section 3.1 addition (D7): before those two blocks read
+  `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_relations_unique_edge'`.
+  If a row exists and its `sql`, with all whitespace runs collapsed to one space, equals
+  `CREATE UNIQUE INDEX idx_relations_unique_edge ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL`,
+  skip BOTH the dedupe `DELETE` and the drop/create (the partial unique index proves there are no
+  duplicate active edges). Otherwise run both blocks unchanged. Keep the `try/except
+  sqlite3.OperationalError` posture and the explanatory comments (add one line naming this guard).
+- Section 4 addition: a test that (a) on a fresh `init_db` DB the index exists with the exact sql
+  above, (b) a second `init_db` run issues no `DELETE FROM relations` and no `DROP INDEX` (statement
+  trace via `set_trace_callback`), (c) a DB where the index is missing or has the old non-partial
+  definition is migrated to the exact definition, with duplicate active edges collapsed first.
+- Section 7: delete the first bullet's mention of the `relations` dedupe and the unique-index
+  rebuild.
+- Section 8.4 replaced: cold `init_db` (database, WAL and SHM evicted, fresh `python -I` process)
+  under 1.5 s on the same copy, the three entity backfills each at most 0.25 s, and the relations
+  guard at most 0.1 s. Report the numbers of three consecutive evicted runs. If `init_db` is still
+  over 1.5 s with these met, report the profile instead of widening scope; the architect decides.
+- Section 8.3 baseline: a `./verify` that hit the tool time limit before the pytest summary is
+  recorded as "no exit-0 baseline"; the final `./verify` exit 0 with counts is the gate.
