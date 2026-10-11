@@ -163,15 +163,30 @@ answer is really "read your own loaded instructions."
    action. Looping past a second consecutive failure without a plan change is the failure mode
    this rule exists to catch.
 3. The moment an issue resolves or a rule gets established, `store_memory` it immediately — don't
-   rely on carrying it in conversation context until some later "wrap-up" moment that may not
-   come.
+   rely on carrying it in conversation context until some later distillation moment that may not
+   come (Phase C).
 
-### Phase C — Session wrap-up (commit & link)
-1. Query this session's own event log (`get_events(context_id=...)` or
-   `get_events(agent_id=<configured SALTMDB_AGENT_ID>)`) for anything durable that only exists there.
+### Phase C — Distill and correct (at task acceptance, and at wrap-up)
+Events are the task's working notes: unsearchable by meaning, unlinked, never superseded.
+Memories plus git (spec, commits, backlog) are the durable record, and memory is the layer that
+crosses projects and harnesses. Distill when a task's work is accepted (for a delegated task the
+architect does it right after committing the accepted implementation, before resetting the
+developer or starting the next spec) and also corrects the memories the task proved stale that
+nobody fixed yet, not only when a session ends.
+1. Query the task's own event log (`get_events(context_id=...)` or
+   `get_events(agent_id=<configured SALTMDB_AGENT_ID>)`) for anything that outlives the task:
+   lessons, root causes, decisions with their reasons, rejected alternatives. A lesson that would
+   help an agent on another project or in another harness becomes a memory even when a spec,
+   backlog row or event already records it; repo docs hold that repo's own contract and to-do list.
 2. Synthesize new permanent facts/rules/progress into `store_memory`.
 3. Link dependent/resolving relationships via `manage_relation`.
-4. **Retrieval-outcome telemetry** (pairs with the `saltmdb-stop-retrieval-outcome-gate.py` hook
+4. **Correct stale memories on read.** Any time, not only during distillation: when a primary source (git, a file, a live tool call)
+   contradicts a memory you read in full with `get_memory` (a search preview is not enough), fix
+   it in the same turn: `revise_memory` when it was recorded wrong, `supersede_memory` when the
+   fact changed. For an inactive memory read its named successor first; with none, store a
+   correction and link it with `manage_relation(predicate="corrects")` (see Phase D step 4).
+   If memories conflict with each other, or you are still unsure, stop and ask rather than guess.
+5. **Retrieval-outcome telemetry** (pairs with the `saltmdb-stop-retrieval-outcome-gate.py` hook
    in `hooks/`, if installed): after acting on `search_memory` results, call
    `log_event(event_type="retrieval_outcome", content="<memory_id>: used|irrelevant|insufficient
    -- <why>")`. This is the only mechanism turning "I watched it work over many sessions"
