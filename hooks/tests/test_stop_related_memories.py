@@ -487,9 +487,9 @@ class TestExamples(unittest.TestCase):
 
 
 class TestCritiqueGateInteraction(HookCase):
-    """T9: documents the CURRENT critique-gate behaviour (not a fix). A Stop block is stored as a
-    user-role line; the critique gate counts it as a new user prompt, which resets its episode and
-    re-arms Stage 1 inside its own per-session cap."""
+    """T9: Stop-hook feedback lines are not new user prompts. They leave the original prompt as
+    the turn boundary, so retries of the same critique episode do not consume another session-fire
+    slot."""
 
     GATE = HOOKS_DIR / "saltmdb-stop-critique-gate.py"
 
@@ -542,18 +542,61 @@ class TestCritiqueGateInteraction(HookCase):
         fires = int((state / f"stop-critique-{session}.session_fires").read_text())
         return output, fires
 
-    def test_related_feedback_line_rearms_critique_stage_one(self):
+    def test_feedback_lines_do_not_rearm_critique_stage_one(self):
         gate = _load("saltmdb_stop_critique_gate_for_t9", self.GATE)
         with_line = self._transcript(True)
-        self.assertEqual(gate.find_last_user_line(with_line), 4)
+        self.assertEqual(gate.find_last_user_line(with_line), 1)
 
         output, fires = self._run_gate(with_line, "with-related")
         self.assertIn("saltmdb-stop-critique-prompt", output["reason"])
-        self.assertEqual(fires, 2, "the feedback line opened a new Stage-1 episode")
+        self.assertEqual(fires, 1, "the feedback line retried the same Stage-1 episode")
 
         output, fires = self._run_gate(self._transcript(False), "without-related")
         self.assertIn("saltmdb-stop-critique-prompt", output["reason"])
-        self.assertEqual(fires, 1, "without it the same episode is retried")
+        self.assertEqual(fires, 1, "without related feedback the same episode is retried")
+
+    def test_plain_later_user_prompt_remains_a_new_turn(self):
+        gate = _load("saltmdb_stop_critique_gate_plain_user", self.GATE)
+        path = self.root / "t9-plain-later-user.jsonl"
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "please do the thing"}},
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "Stop hook feedback:\n<!-- saltmdb-stop-critique-prompt --> answer",
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "please continue; saltmdb is just a word here",
+                },
+            },
+        ]
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+        self.assertEqual(gate.find_last_user_line(str(path)), 3)
+
+    def test_all_saltmdb_prompt_sentinels_are_feedback(self):
+        gate = _load("saltmdb_stop_critique_gate_all_sentinels", self.GATE)
+        sentinels = (
+            "saltmdb-stop-critique-prompt",
+            "saltmdb-stop-critique-stage2-prompt",
+            "saltmdb-retrieval-outcome-prompt",
+            "saltmdb-related-memories-prompt",
+        )
+        lines = [{"type": "user", "message": {"role": "user", "content": "please do the thing"}}]
+        lines.extend(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": f"<!-- {sentinel} --> feedback"},
+            }
+            for sentinel in sentinels
+        )
+        path = self.root / "t9-all-sentinels.jsonl"
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+        self.assertEqual(gate.find_last_user_line(str(path)), 1)
 
 
 class TestResolveCli(unittest.TestCase):

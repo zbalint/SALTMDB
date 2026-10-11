@@ -77,6 +77,10 @@ USER_TURN_PATTERN = re.compile(r'"type"\s*:\s*"user"')
 # the turn-boundary scan below doesn't collapse to "since the last tool call" instead of "since
 # the last real user prompt" (see memory 74a3b9a2 for the confirmed live bug this caused).
 TOOL_RESULT_ECHO_PATTERN = re.compile(r'"tool_use_id"|"tool_call_id"')
+# Reserved Stop-hook feedback lines are transcript user-role records, not new human prompts.
+STOP_HOOK_FEEDBACK_PATTERN = re.compile(
+    r"Stop hook feedback:|<!--\s*saltmdb-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-prompt\s*-->"
+)
 
 
 def emit_block(data: dict, reason: str) -> None:
@@ -131,7 +135,11 @@ def find_last_user_line(transcript_path: str) -> int | None:
         return None
     last = None
     for i, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
-        if USER_TURN_PATTERN.search(line) and not TOOL_RESULT_ECHO_PATTERN.search(line):
+        if (
+            USER_TURN_PATTERN.search(line)
+            and not TOOL_RESULT_ECHO_PATTERN.search(line)
+            and not STOP_HOOK_FEEDBACK_PATTERN.search(line)
+        ):
             last = i
     return last
 
