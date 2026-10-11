@@ -364,3 +364,36 @@ no parallel full runs.
    and the old CLI rejects `--max-chars`): `saltmdb-cli session-digest --max-chars 8000` in this
    repository prints at most 8,000 characters and one `<session` or `<session-stub` tag per
    cohort member.
+
+## Amendment 1 (2026-10-12): D10 starting cap must account for the markup
+
+Trigger: developer BLOCKED on D10 against acceptance 3a. Verified by the architect against
+`_render_handover` (`remaining = max_chars`: the water-filling cap divides the budget over message text
+only, ignoring the tag markup of about 2,300 characters for five sessions). With the 3a fixture
+(9,000 budget, a 6,000-character first response, four 1,500-character responses) the unamended D10
+starts at a cap near 2,244 that cuts only the first response, overshoots by about the markup size, and
+`ceil(overflow / cut)` with one cut message then drives that one cap below 300, so the algorithm
+reports "exhausted" and stubs the first-ended member, contradicting 3a.
+
+Change (replaces D10 step 1's last sentence and step 3; steps 2, 4 and 5 and the `fit` subroutine are
+unchanged):
+
+- A1.1. Measure the markup first. `M0` is `len(handover)` rendered with every message body replaced by
+  the empty string (all shown messages present, no truncation markers and no "Truncated" hints, because
+  nothing is cut), using the same session list as the final render.
+- A1.2. The starting cap is the existing water-filling cap applied to `T = H - M0` (over the same
+  message lengths, with prompts already limited to `USER_MESSAGE_HEAD_CHARS`). If `T <= 0`, treat the
+  starting call as "exhausted" without rendering.
+- A1.3. `fit` then runs from that cap. Its loop only has to absorb the truncation markers and hints
+  (about 130 characters per cut message), so `ceil(overflow / cut)` stays small.
+- A1.4. Expected result for acceptance 3a (architect's arithmetic, not a measured value): index about
+  640, `H` about 8,359, `M0` about 2,300, `T` about 6,050, five prompts at 120 leave about 5,450 for five
+  final messages, so the starting cap is about 1,090 and all five final messages are cut; the loop
+  lowers it by about 130; every session renders as text, the first-ended member's final message keeps
+  its first 80 characters, and no stub is used. The developer's test asserts these outcomes, not the
+  intermediate numbers.
+- A1.5. Section 10 item 3e is unchanged. The acceptance-3a text "first 80 characters ... as text" stays.
+
+Gate re-run for this amendment: the only values touched are the D10 step 1 sentence and step 3; a grep
+for "water-filling cap over `H`" shows the two places (D10 step 1 and step 3) that this amendment
+overrides, and the implementation follows A1.2 in both.
