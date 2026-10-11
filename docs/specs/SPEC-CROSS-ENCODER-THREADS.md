@@ -108,3 +108,23 @@ Default `./verify`; no parallel full runs.
 - Contention result is a limit: under two busy processes `threads=4` matched the default (0.888 s
   vs 0.872 s), so the gain only shows on an idle host; no regression was measured.
 - No consultant pass; locked on the gate alone.
+
+## Amendment 1 (2026-10-11)
+
+Pre-lock miss: four existing tests in `tests/test_reranker_service.py` (`test_get_model_uses_bundled_cache_dir_for_bundled_model_name`,
+`test_get_model_falls_back_to_online_when_bundle_invalid`,
+`test_get_model_falls_back_to_online_when_bundled_load_raises`,
+`test_get_model_non_bundled_name_never_touches_bundle_logic`) assert the exact `TextCrossEncoder`
+keyword arguments without `threads`, so D2 and a green `./verify` cannot both hold. Those
+assertions pin the constructor contract (which model, which cache, offline or online), so they are
+kept and updated, not deleted.
+
+- Section 0 scope adds `tests/test_reranker_service.py`, limited to those four tests.
+- Change: in each of the four expected-kwargs assertions add `threads=CROSS_ENCODER_THREADS`
+  (import it from `saltmdb.config` at the top of the test file in the file's existing import style).
+  Nothing else in that file changes.
+- Section 4 replaced: the four updated tests are the constructor check (red first: they fail until
+  `get_model` passes `threads`). `tests/test_reranker_threads.py` keeps only the formula test
+  (`config.CROSS_ENCODER_THREADS == max(1, min(os.cpu_count() or 1, 4))` for the real
+  `os.cpu_count()`); the recorder-based constructor test is dropped as redundant.
+- Section 8.5 diff-stat list includes `tests/test_reranker_service.py`.
