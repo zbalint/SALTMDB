@@ -540,7 +540,12 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # Backfill embedding_status = 'archived' for any archived entities
         try:
             conn.execute(
-                "UPDATE entities SET embedding_status = 'archived' WHERE status = 'archived' AND (embedding_status != 'archived' OR embedding_status IS NULL);"
+                "CREATE INDEX IF NOT EXISTS idx_entities_archived_embedding_pending ON entities(id) "
+                "WHERE status = 'archived' AND embedding_status IS NOT 'archived'"
+            )
+            conn.execute(
+                "UPDATE entities INDEXED BY idx_entities_archived_embedding_pending SET embedding_status = 'archived' "
+                "WHERE status = 'archived' AND embedding_status IS NOT 'archived';"
             )
         except sqlite3.OperationalError:
             pass
@@ -556,8 +561,13 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # steady state: matches zero rows once every entity has a hash, since store_memory sets
         # content_hash on every write from this point on.
         try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entities_hash_missing ON entities(id) "
+                "WHERE content_hash IS NULL OR content_hash = ''"
+            )
             for _eid, _content in conn.execute(
-                "SELECT id, full_content FROM entities WHERE content_hash IS NULL OR content_hash = ''"
+                "SELECT id, full_content FROM entities INDEXED BY idx_entities_hash_missing "
+                "WHERE content_hash IS NULL OR content_hash = ''"
             ).fetchall():
                 conn.execute(
                     "UPDATE entities SET content_hash = ? WHERE id = ?",
@@ -570,7 +580,12 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # column for compatibility, but no longer written/read by application code past this backfill)
         try:
             conn.execute(
-                "UPDATE entities SET context_id = project_id WHERE context_id IS NULL AND project_id IS NOT NULL;"
+                "CREATE INDEX IF NOT EXISTS idx_entities_context_backfill ON entities(id) "
+                "WHERE context_id IS NULL AND project_id IS NOT NULL"
+            )
+            conn.execute(
+                "UPDATE entities INDEXED BY idx_entities_context_backfill SET context_id = project_id "
+                "WHERE context_id IS NULL AND project_id IS NOT NULL;"
             )
         except sqlite3.OperationalError:
             pass
@@ -759,33 +774,54 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # later recreated, invalidated again). The original unscoped DELETE would silently drop
         # one of those on the very next startup, violating §1.4 (information is never lost) --
         # caught via test_predicate_migration.py's post-migration idempotency check.
+        # Guard both relation-maintenance blocks with the exact partial index definition: when
+        # sqlite_master proves the index is current, its uniqueness guarantee makes both scans
+        # unnecessary on every subsequent startup.
+        relation_index_row = None
         try:
-            conn.execute("""
-                DELETE FROM relations
-                WHERE valid_to IS NULL
-                  AND rowid NOT IN (
-                    SELECT MIN(rowid) FROM relations
-                    WHERE valid_to IS NULL
-                    GROUP BY source_id, target_id, predicate
-                );
-            """)
+            relation_index_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                ("idx_relations_unique_edge",),
+            ).fetchone()
         except sqlite3.OperationalError as e:
-            logger.warning("Relations dedup backfill skipped/failed: %s", e)
+            logger.warning("Relations index definition lookup skipped/failed: %s", e)
+        relation_index_sql = relation_index_row[0] if relation_index_row else None
+        expected_relation_index_sql = (
+            "CREATE UNIQUE INDEX idx_relations_unique_edge "
+            "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
+        )
+        relation_index_is_current = (
+            " ".join((relation_index_sql or "").split()) == expected_relation_index_sql
+        )
 
-        # Schema migration (alpha.57 / Schema Version 10): the UNIQUE index on relations must become
-        # a PARTIAL index (WHERE valid_to IS NULL) now that commit_consolidation starts populating
-        # valid_to via expire-then-insert repointing. SQLite has no ALTER INDEX, and CREATE UNIQUE
-        # INDEX IF NOT EXISTS is a silent no-op against an already-existing same-named index even when
-        # its definition differs -- so this must unconditionally DROP + recreate to actually replace
-        # the old (Quick Wins round) non-partial index. Idempotent: cheap no-op once already migrated.
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_relations_unique_edge")
-            conn.execute(
-                "CREATE UNIQUE INDEX idx_relations_unique_edge "
-                "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
-            )
-        except sqlite3.OperationalError as e:
-            logger.warning("Relations partial unique index migration skipped/failed: %s", e)
+        if not relation_index_is_current:
+            try:
+                conn.execute("""
+                    DELETE FROM relations
+                    WHERE valid_to IS NULL
+                      AND rowid NOT IN (
+                        SELECT MIN(rowid) FROM relations
+                        WHERE valid_to IS NULL
+                        GROUP BY source_id, target_id, predicate
+                    );
+                """)
+            except sqlite3.OperationalError as e:
+                logger.warning("Relations dedup backfill skipped/failed: %s", e)
+
+            # Schema migration (alpha.57 / Schema Version 10): the UNIQUE index on relations must become
+            # a PARTIAL index (WHERE valid_to IS NULL) now that commit_consolidation starts populating
+            # valid_to via expire-then-insert repointing. SQLite has no ALTER INDEX, and CREATE UNIQUE
+            # INDEX IF NOT EXISTS is a silent no-op against an already-existing same-named index even when
+            # its definition differs -- so this must unconditionally DROP + recreate to actually replace
+            # the old (Quick Wins round) non-partial index. Idempotent: cheap no-op once already migrated.
+            try:
+                conn.execute("DROP INDEX IF EXISTS idx_relations_unique_edge")
+                conn.execute(
+                    "CREATE UNIQUE INDEX idx_relations_unique_edge "
+                    "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
+                )
+            except sqlite3.OperationalError as e:
+                logger.warning("Relations partial unique index migration skipped/failed: %s", e)
 
         # Schema migration (alpha.60 / Schema Version 12): bi-temporal event/world-time axis for
         # relations, independent of valid_from/valid_to (system/transaction time, consolidation-only).

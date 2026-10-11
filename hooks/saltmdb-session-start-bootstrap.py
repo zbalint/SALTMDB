@@ -18,7 +18,11 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+START = time.monotonic()
+BUDGET_S = 13.0
 
 
 def _resolve_cli() -> str | None:
@@ -42,12 +46,19 @@ def _resolve_cli() -> str | None:
 CLI = _resolve_cli()
 
 
+def remaining() -> float:
+    return BUDGET_S - (time.monotonic() - START)
+
+
 def run_cli(*args: str) -> str | None:
     if not CLI:
         return None
+    limit = min(10, remaining())
+    if limit < 1.0:
+        return None
     try:
         result = subprocess.run(
-            [CLI, *args], capture_output=True, text=True, timeout=10, check=False
+            [CLI, *args], capture_output=True, text=True, timeout=limit, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -59,7 +70,17 @@ def bootstrap_text(source: str | None = None) -> str:
     digest = run_cli("bootstrap-digest")
     if digest:
         sections.append(digest.strip())
-
+    elif CLI:
+        sections.append(
+            "\n".join(
+                [
+                    "<saltmdb-digest-pending>",
+                    "The bootstrap digest could not be fetched in time (the SALTMDB daemon is probably still starting).",
+                    f"Run {CLI} bootstrap-digest with Bash now and read the result before continuing.",
+                    "</saltmdb-digest-pending>",
+                ]
+            )
+        )
     # The last-session handover is large and the session already holds it from startup; a
     # compaction only needs the core digest back, in case the built-in summarizer dropped it.
     session_digest = None if source == "compact" else run_cli("session-digest")

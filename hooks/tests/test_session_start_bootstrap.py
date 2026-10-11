@@ -11,6 +11,7 @@ last-resort fallback only.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -132,3 +133,61 @@ def test_bootstrap_text_keeps_session_digest_on_startup_and_without_source():
     for source in ("startup", None):
         with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
             assert "<handover>" in bootstrap.bootstrap_text(source)
+
+
+def test_bootstrap_text_pending_notice_keeps_session_digest_when_bootstrap_times_out():
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+    setattr(bootstrap, "CLI", "/opt/saltmdb/bin/saltmdb-cli")
+
+    def fake_subprocess_run(command, **kwargs):
+        if command[-1] == "bootstrap-digest":
+            raise subprocess.TimeoutExpired(command, timeout=10)
+        if command[-1] == "session-digest":
+            return type("Result", (), {"returncode": 0, "stdout": "<session-digest>"})()
+        return type("Result", (), {"returncode": 1, "stdout": ""})()
+
+    with patch("subprocess.run", side_effect=fake_subprocess_run):
+        text = bootstrap.bootstrap_text()
+
+    assert "<session-digest>" in text
+    assert "<saltmdb-digest-pending>" in text
+    assert "/opt/saltmdb/bin/saltmdb-cli bootstrap-digest" in text
+
+
+def test_bootstrap_text_skips_health_when_budget_is_below_spawn_threshold():
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+    setattr(bootstrap, "CLI", "/opt/saltmdb/bin/saltmdb-cli")
+    calls = []
+
+    def fake_subprocess_run(command, **kwargs):
+        calls.append(command[-1])
+        return type("Result", (), {"returncode": 0, "stdout": f"<{command[-1]}>"})()
+
+    with (
+        patch.object(bootstrap, "remaining", side_effect=[10.0, 5.0, 0.5], create=True),
+        patch("subprocess.run", side_effect=fake_subprocess_run),
+    ):
+        text = bootstrap.bootstrap_text()
+
+    assert calls == ["bootstrap-digest", "session-digest"]
+    assert "<bootstrap-digest>" in text
+    assert "<session-digest>" in text
+
+
+def test_run_cli_uses_remaining_budget_as_subprocess_timeout():
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+    setattr(bootstrap, "CLI", "/opt/saltmdb/bin/saltmdb-cli")
+    timeouts = []
+
+    def fake_subprocess_run(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return type("Result", (), {"returncode": 0, "stdout": "ok"})()
+
+    with (
+        patch.object(bootstrap, "remaining", side_effect=[20.0, 4.0], create=True),
+        patch("subprocess.run", side_effect=fake_subprocess_run),
+    ):
+        assert bootstrap.run_cli("first") == "ok"
+        assert bootstrap.run_cli("second") == "ok"
+
+    assert timeouts == [10, 4.0]
