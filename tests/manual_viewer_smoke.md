@@ -91,6 +91,15 @@ Run this with at least two agent sessions active (for example one Claude and one
 2. In **System Health**, confirm warnings appear when embeddings have failed (or the text **No warnings** otherwise), and that uptime, version, WAL/SHM size, SQLite pages, free pages, vector availability, and the latest snapshot (or **No snapshot has been written yet.**) are shown.
 3. In **Diagnostics**, load the projection. Tab to a point and press Enter and Space: each must open the memory detail, and Space must not scroll the page. If more than 500 embeddings are ready, confirm the sampling note appears.
 
+## Tools
+
+1. Open **Tools**. Confirm the fixed banner says calls run as agent `viewer` and the list shows 24 tools from the real MCP adapter.
+2. Select **search_tags**, leave the JSON argument skeleton as `{}`, and activate **Run**. Confirm the result panel shows a duration, `is_error` is false, and the returned text is visible.
+3. Select **store_memory** (or another write tool). Confirm the tool remains listed with its schema, but **Run** is disabled with the text **write tool, disabled in this version**.
+4. Select a tool and use Back/Forward or edit the URL hash between `#tools` and `#tools/search_tags`; confirm the selected tool is restored without leaving the Tools view.
+
+5. After an adapter timeout, idle close, or viewer shutdown, inspect **Agent Sessions**: each adapter start has one `agent_id=viewer` row, and a restart may produce a successor row. The default idle plus daemon shutdown windows can retain/redeploy state for up to 330 seconds.
+
 ## Keyboard, focus, and refresh
 
 1. Open **Events**, focus a **View details** button, and wait 30 seconds. The table must not be replaced under the focused control. Move focus out of the view and confirm auto-refresh resumes.

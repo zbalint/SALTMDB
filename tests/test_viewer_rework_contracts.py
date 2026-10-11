@@ -113,6 +113,7 @@ class TestViewerReworkContracts(unittest.TestCase):
             ("operations", "nav-item", "System Health"),
             ("tags", "nav-item", "Tags"),
             ("diagnostics", "nav-item", "Diagnostics"),
+            ("tools", "nav-item", "Tools"),
         )
         for view, class_name, label in expected_navigation:
             self.assertIn(

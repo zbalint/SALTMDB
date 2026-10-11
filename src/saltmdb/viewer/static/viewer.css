@@ -55,6 +55,15 @@ main > header { display: flex; gap: 1rem; justify-content: space-between; align-
 .toolbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin-bottom: 1.2rem; padding: .85rem; border: 1px solid var(--line); border-radius: 12px; background: #101a2d99; }
 .explorer-toolbar input:first-child { flex: 1 1 15rem; }
 .field { display: grid; gap: .23rem; }.field-label { color: var(--muted); font-size: .72rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em; }.checkbox-field { display: flex; align-items: center; gap: .4rem; }.checkbox-field input { width: 1rem; min-width: 1rem; height: 1rem; margin: 0; flex: 0 0 1rem; }
+.tools-layout { display: grid; grid-template-columns: minmax(16rem, .8fr) minmax(20rem, 1.2fr); gap: 1rem; }
+.tool-list { display: grid; gap: .6rem; }
+.tool-card { display: grid; gap: .4rem; }
+.tool-heading { display: flex; gap: .65rem; align-items: center; justify-content: space-between; }
+.tool-form { display: grid; gap: .8rem; }
+.tool-form textarea { width: 100%; min-height: 11rem; resize: vertical; color: var(--text); background: #0d1527; border: 1px solid var(--line); border-radius: 8px; padding: .65rem; font: .86rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tool-form button:disabled { opacity: .55; cursor: not-allowed; }
+.tool-result { display: grid; gap: .5rem; }
+.tool-result pre { max-height: 24rem; overflow: auto; margin: 0; padding: .8rem; border: 1px solid var(--line); border-radius: 8px; background: #090f1b; white-space: pre-wrap; overflow-wrap: anywhere; }
 .primary { color: #07101f; border-color: var(--accent-strong); background: var(--accent-strong); font-weight: 700; }.primary:hover { background: #d2ddff; border-color: #d2ddff; }
 .table-wrap { width: 100%; margin-bottom: 1.6rem; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }th, td { padding: .75rem .85rem; text-align: left; vertical-align: top; border-bottom: 1px solid #25334c; }tr:last-child td { border-bottom: 0; }th { color: var(--muted); font-size: .73rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }tbody tr:hover { background: #1f2d472e; }

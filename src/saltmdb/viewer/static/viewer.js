@@ -4,7 +4,7 @@
   const state = {
     view: 'overview', renderController: null, detailController: null, poller: null, feedTimer: null, feedActiveOnly: true, feedSession: '',
     explorerPreset: {}, explorerPage: 1, explorerMode: 'browse', hybridQuery: '', hybridSessionId: '', relationRoot: '', modalInvoker: null,
-    focusRelationshipInput: false, skipModalFocusRestore: false,
+    focusRelationshipInput: false, skipModalFocusRestore: false, tools: [], toolName: '',
     sessionsPage: 1, sessionsPreset: {}, sessionDetailId: '', qualityPage: 1, qualityPreset: {}, eventsPage: 1, eventsPreset: {}, relationOptions: {},
   };
   const view = document.querySelector('#view');
@@ -21,7 +21,7 @@
   const names = {
     overview: 'Overview', feed: 'Live feed', explorer: 'Memories', events: 'Events', sessions: 'Agent Sessions',
     relationships: 'Memory Map', quality: 'Memory Quality', operations: 'System Health',
-    tags: 'Tags', diagnostics: 'Diagnostics',
+    tags: 'Tags', diagnostics: 'Diagnostics', tools: 'Tools',
   };
 
   const node = (tag, text, className) => {
@@ -51,6 +51,20 @@
       if (err.name !== 'AbortError') connection('offline', 'Viewer unavailable');
       throw err;
     }
+  };
+  const toolApi = async (path, controller = state.renderController) => {
+    const response = await fetch(path, {
+      signal: controller?.signal,
+      headers: { 'X-SALTMDB-Tool-Tester': '1' },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    connection('online', 'Viewer connected');
+    return data;
   };
   const showError = (err) => {
     view.replaceChildren(node('p', err.message || String(err), 'error'));
@@ -702,6 +716,82 @@
     await list(state.qualityPage);
   };
 
+  const toolSkeletonValue = (schema) => {
+    switch (schema?.type) {
+      case 'string': return 'string';
+      case 'number':
+      case 'integer': return 0;
+      case 'boolean': return false;
+      case 'array': return [];
+      case 'object': return {};
+      default: return null;
+    }
+  };
+  const toolSkeleton = (schema) => Object.fromEntries(
+    (schema?.required || []).map(name => [name, toolSkeletonValue(schema.properties?.[name])]),
+  );
+  const prettyToolResult = (text) => {
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch (_) { return text; }
+  };
+  const tools = async () => {
+    const data = await toolApi('/api/tools');
+    state.tools = data.tools || [];
+    const banner = node('p', 'Calls run as agent `viewer`. Read tools can update access bookkeeping.', 'notice');
+    const list = node('div', undefined, 'tool-list');
+    state.tools.forEach(tool => {
+      const card = node('article', undefined, 'card tool-card');
+      const heading = node('div', undefined, 'tool-heading');
+      heading.append(button(tool.name, 'row-button', () => {
+        state.toolName = tool.name; syncLocation(); render();
+      }), statusBadge(tool.access));
+      card.append(heading, node('p', tool.description || 'No description.', 'muted'));
+      list.append(card);
+    });
+    const selected = state.tools.find(tool => tool.name === state.toolName);
+    const editor = node('section', undefined, 'card tool-editor');
+    editor.append(section('Run a tool', selected ? selected.description : 'Select a tool from the list.'));
+    if (selected) {
+      const label = node('label', undefined, 'field');
+      label.append(node('span', 'Arguments (JSON object)', 'field-label'));
+      const textarea = document.createElement('textarea');
+      textarea.value = JSON.stringify(toolSkeleton(selected.input_schema), null, 2);
+      textarea.setAttribute('aria-label', `Arguments for ${selected.name}`);
+      label.append(textarea);
+      const runLabel = selected.enabled ? 'Run' : 'write tool, disabled in this version';
+      const run = button(runLabel, selected.enabled ? 'primary' : '', undefined, 'submit');
+      run.disabled = !selected.enabled;
+      if (!selected.enabled) run.title = 'write tool, disabled in this version';
+      const resultPanel = node('div', undefined, 'tool-result');
+      const form = node('form', undefined, 'tool-form');
+      form.append(label, run, resultPanel);
+      form.addEventListener('submit', guarded(async event => {
+        event.preventDefault();
+        let argumentsValue;
+        try { argumentsValue = JSON.parse(textarea.value); } catch (_) {
+          resultPanel.replaceChildren(statusBadge('HTTP error'), node('pre', 'Arguments must be valid JSON.'));
+          return;
+        }
+        if (!argumentsValue || Array.isArray(argumentsValue) || typeof argumentsValue !== 'object') {
+          resultPanel.replaceChildren(statusBadge('HTTP error'), node('pre', 'Arguments must be a JSON object.'));
+          return;
+        }
+        setBusy(form, true);
+        try {
+          const result = await toolApi(`/api/tools/call?name=${encodeURIComponent(selected.name)}&arguments=${encodeURIComponent(JSON.stringify(argumentsValue))}`);
+          const statusLabel = result.is_error ? 'tool error' : 'ok';
+          resultPanel.replaceChildren(statusBadge(statusLabel), node('span', `${result.duration_ms} ms`, 'muted'), node('pre', prettyToolResult(result.result_text)));
+        } catch (err) {
+          resultPanel.replaceChildren(statusBadge('HTTP error'), node('pre', err.message || String(err)));
+        } finally { setBusy(form, false); }
+      }));
+      editor.append(form);
+    }
+    const layout = node('div', undefined, 'tools-layout');
+    layout.append(node('section', undefined, 'tool-catalog'), editor);
+    layout.firstChild.append(section('Available tools', `${state.tools.length} tools exposed by the real MCP adapter.`), list);
+    view.replaceChildren(section('MCP tool tester', 'Inspect the adapter schemas and exercise read tools without changing viewer state.'), banner, layout);
+  };
+
   const formatDuration = (seconds) => {
     const total = Math.floor(Number(seconds));
     if (!Number.isFinite(total) || total < 0) return '—';
@@ -834,6 +924,7 @@
   const presetKeys = { explorer: 'explorerPreset', events: 'eventsPreset', sessions: 'sessionsPreset', quality: 'qualityPreset' };
   const pageKeys = { explorer: 'explorerPage', events: 'eventsPage', sessions: 'sessionsPage', quality: 'qualityPage' };
   const encodeViewState = () => {
+    if (state.view === 'tools') return `tools${state.toolName ? `/${encodeURIComponent(state.toolName)}` : ''}`;
     const params = new URLSearchParams({ view: state.view });
     Object.entries(state[presetKeys[state.view]] || {}).forEach(([key, value]) => params.set(`f.${key}`, value));
     if (state[pageKeys[state.view]] > 1) params.set('page', String(state[pageKeys[state.view]]));
@@ -842,10 +933,16 @@
     return params.toString();
   };
   const applyViewState = (hash) => {
-    const params = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+    const raw = String(hash || '').replace(/^#/, '');
+    if (raw === 'tools' || raw.startsWith('tools/')) {
+      state.view = 'tools';
+      state.toolName = raw.startsWith('tools/') ? decodeURIComponent(raw.slice(6)) : '';
+      return true;
+    }
+    const params = new URLSearchParams(raw);
     const requested = params.get('view');
     if (!requested || !Object.prototype.hasOwnProperty.call(names, requested)) return false;
-    state.view = requested;
+    state.view = requested; state.toolName = '';
     if (Object.prototype.hasOwnProperty.call(presetKeys, requested)) {
       const preset = {}; params.forEach((value, key) => { if (key.startsWith('f.')) preset[key.slice(2)] = value; });
       state[presetKeys[requested]] = preset;
@@ -857,16 +954,16 @@
   };
   const syncLocation = () => {
     const next = `#${encodeViewState()}`;
-    const navKey = [state.view, state.view === 'sessions' ? state.sessionDetailId : '', state.view === 'relationships' ? state.relationRoot : ''].join('|');
+    const navKey = [state.view, state.view === 'sessions' ? state.sessionDetailId : '', state.view === 'relationships' ? state.relationRoot : '', state.view === 'tools' ? state.toolName : ''].join('|');
     if (location.hash !== next) {
-      // Moving to another view/session/root is a navigation (back button returns); filter and page tweaks replace in place.
+      // Moving to another view/session/root/tool is a navigation (back button returns); filter and page tweaks replace in place.
       if (state.navKey !== undefined && state.navKey !== navKey) history.pushState(null, '', next);
       else history.replaceState(null, '', next);
     }
     state.navKey = navKey;
   };
 
-  const loaders = { overview, feed, explorer, events, sessions, relationships, quality, operations, tags, diagnostics };
+  const loaders = { overview, feed, explorer, events, sessions, relationships, quality, operations, tags, diagnostics, tools };
   const render = async () => {
     clearInterval(state.feedTimer); state.renderController?.abort(); state.renderController = new AbortController(); title.textContent = names[state.view];
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -885,7 +982,7 @@
       if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render();
     }, 10000);
   };
-  document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
+  document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; state.toolName = ''; setNotice(''); render(); }));
   document.querySelector('#refresh').addEventListener('click', render);
   document.querySelector('#close-detail').addEventListener('click', () => dialog.close());
   document.querySelector('#close-event-detail').addEventListener('click', () => eventDialog.close());
@@ -905,6 +1002,8 @@
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render(); });
   window.addEventListener('beforeunload', () => { clearInterval(state.poller); clearInterval(state.feedTimer); state.renderController?.abort(); state.detailController?.abort(); });
-  window.addEventListener('popstate', () => { if (applyViewState(location.hash)) render(); });
+  const restoreHashView = () => { if (applyViewState(location.hash)) render(); };
+  window.addEventListener('popstate', restoreHashView);
+  window.addEventListener('hashchange', restoreHashView);
   connection('checking', 'Checking connection…'); applyViewState(location.hash); render(); schedule();
 })();

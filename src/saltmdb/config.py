@@ -95,6 +95,12 @@ def is_viewer_enabled() -> bool:
     return val not in ("0", "false", "no", "off")
 
 
+def get_viewer_tools_enabled() -> bool:
+    """Check SALTMDB_VIEWER_TOOLS_ENABLED; tool testing is enabled by default."""
+    val = os.environ.get("SALTMDB_VIEWER_TOOLS_ENABLED", "true").strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
 def is_trace_capture_enabled() -> bool:
     """Check SALTMDB_TRACE_CAPTURE_ENABLED; trace capture is disabled by default."""
     val = os.environ.get("SALTMDB_TRACE_CAPTURE_ENABLED", "false").strip().lower()
