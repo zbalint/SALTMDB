@@ -157,7 +157,7 @@ class TestFires(HookCase):
         self.assertEqual(call["stdin"], LONG_REPLY)
         self.assertEqual(
             call["args"],
-            ["related-memories", "--limit", "6", "--min-score", "4.0", "--timeout-ms", "4000"],
+            ["related-memories", "--limit", "6", "--min-score", "4.0", "--timeout-ms", "10000"],
         )
 
     def test_agent_id_reaches_the_cli_unchanged(self):

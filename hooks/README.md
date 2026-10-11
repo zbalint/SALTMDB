@@ -121,8 +121,13 @@ read them with `get_memory` and amend the answer, or reply in one line that none
 
 - **Off by default.** It acts only when `SALTMDB_RELATED_MEMORIES_HOOK=1`; only exactly `1` enables
   it, and every other value (including `0`) disables it. `SALTMDB_RELATED_MEMORIES_MIN_SCORE` sets
-  the relevance threshold (default `4.0`, a placeholder until the BL-028 calibration; a value that
-  is not a number is ignored and logged). Set both in the harness settings `env` block or the shell:
+  the relevance threshold (default `4.0`; a value that is not a number is ignored and logged). A
+  BL-028 replay on 200 real replies, labelled by an agent judge, found that 4.0 blocks about 11% of
+  replies with precision about 0.5 (roughly half the listed titles apply) and about 3% of replies
+  blocked with no relevant memory listed. No threshold reached the 0.7 precision bar or the 3 s p95
+  latency bar in the replay spec, and no known-positive file was used, so that bar went untested.
+  That is why the hook stays opt-in and experimental: expect some noise, and raise the threshold
+  if it nags. Set both in the harness settings `env` block or the shell:
   a hook inherits the harness environment, not the MCP server's.
 - **Caps and guard order.** The three loop guards run before reply presence/length checks, so even a
   short or missing continuation reply clears pending state. Replies under 200 characters are
@@ -132,7 +137,10 @@ read them with `get_memory` and amend the answer, or reply in one line that none
   8-hex token (usually a date) is ignored, while the 8-character prefix of a full UUID always
   counts. That scan is best effort.
 - **Latency.** It adds the CLI's run time to the end of a long reply: the CLI stops itself after
-  4 s and the hook gives up after 6 s.
+  10 s and the hook gives up after 12 s, under the 15 s Stop timeout in the example files. The
+  cost is one cross-encoder pass per reply segment (up to four), about 0.7 s each when warm; the
+  replay measured p50 3.2 s and p95 8.7 s over 200 real replies. The first call after a daemon start also loads the
+  models and can be slow; a call that times out is a silent no-op.
 - **Requirements.** A SALTMDB version with `saltmdb-cli related-memories`, found the same way as
   the session-start bootstrap finds the CLI (`SALTMDB_CLI_PATH`, `PATH`, the legacy venv path).
   No CLI, no running daemon or no loaded models make the hook a silent no-op: it never starts a

@@ -229,3 +229,44 @@ From the tester's review of the first implementation, verified by the architect 
   the README says so.
 - A2.5. D9: both example entries use the same interpreter word as the README's other hook entries,
   `python`; the Codex entry changes from `python3` to `python`.
+
+## Amendment 3 (2026-10-11)
+
+From the BL-028 calibration run and the latency measurement; both verified by the architect against
+the replay output (200 replies, snapshot of 2026-10-10, agent-judge labels, tester accepted by the
+`analyze` command) and by timing the service stages.
+
+- A3.1. D5 timeouts change: the CLI call passes `--timeout-ms 10000` and the subprocess timeout is
+  12 s (was 4000 and 6 s). Reason: the service costs one cross-encoder pass per segment, up to four
+  segments, and the replay measured p50 3.2 s, p90 7.2 s, p95 8.7 s, max 17.7 s over 200 real replies of one to
+  four segments; the old 4 s limit
+  would have timed out on about half of real replies. 12 s stays under the 15 s Stop timeout in
+  the example files (D9). T1's expected CLI arguments change to `--timeout-ms 10000`.
+- A3.2. The default threshold stays `4.0`, now with evidence instead of a placeholder. Replay,
+  top three per reply: threshold 4.0 blocks 11.5% of replies, precision 0.54 (partly counts half),
+  false-block rate 3.0% (the harness counts a block that lists no relevant row), 18 of the 161
+  relevant-labelled candidates surfaced. Threshold 5.0: 6.5% blocked, precision 0.58, false-block
+  2.5%, 9 found. Threshold 3.5: 15% blocked, precision 0.50, false-block 4.5%. Replay `analyze`
+  gives lowest passing threshold `none`: no setting reached the 0.7 precision bar in
+  `SPEC-RELATED-MEMORIES-REPLAY.md`, the 3 s p95 latency bar was missed (p95 8.7 s over 199 replies),
+  and the known-positives bar was untested because no known-positive file was passed. The hook
+  therefore ships opt-in and experimental, as D4 already says. The two-segment and two-row figures
+  in A3.3 and the p90 and maximum latency in A3.1 were computed by the architect from
+  `candidates.jsonl` and the labels, not by `analyze`. The hook constant carries a `shortcut:` comment naming this
+  and the trigger to revisit; the `src/saltmdb/config.py` comment records the numbers.
+- A3.3. Rejected, with the measured reason: scoring only the last two segments halves the latency
+  but finds 8 relevant candidates at 4.0 instead of 18. Listing two rows instead of three raises
+  precision from 0.54 to 0.62 at the same recall; not adopted now because it ripples through D6,
+  T1, T5 and the README for a small gain. It is the first lever if users report noise.
+- A3.4. Observed false-positive pattern: replies that are developer completion reports match other
+  completion-report memories by form (the shared "uncommitted, review pending" wording) and score
+  above 4.0 on a different task. A threshold cannot separate these; logged as BL-033.
+- A3.5. Scope for this amendment: `hooks/saltmdb-stop-related-memories.py` (two constants and
+  comments), `hooks/tests/test_stop_related_memories.py` (the one expected argument),
+  `hooks/README.md`, a comment in `src/saltmdb/config.py`, `docs/BACKLOG.md`. No behaviour change
+  in `src/`.
+- A3.6. Label caveats, for whoever reruns this: the judge read the title and the first 100-200
+  characters of each memory, which can understate relevance that sits late in the body; about 10 to
+  15 candidates were the reply's own durable memory and were labelled relevant, which inflates
+  precision a little. The two effects pull in opposite directions; the 0.54 figure is a rough
+  estimate, not a measurement to two decimals.

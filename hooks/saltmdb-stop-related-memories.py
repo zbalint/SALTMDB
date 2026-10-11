@@ -30,14 +30,17 @@ import unicodedata
 from pathlib import Path
 
 DEFAULT_ENABLED = False
-# shortcut: placeholder tuned for near-duplicates; replace with the BL-028 calibration
+# BL-028 replay, 200 replies: 4.0 blocks 11.5% of replies at precision 0.54 and a 3% false-block rate.
+# shortcut: misses the 0.7 precision and 3 s p95 bars in the replay spec, so the hook stays opt-in;
+# raise the threshold or cap the listed rows if users report noise.
 DEFAULT_MIN_SCORE = 4.0
 MIN_REPLY_CHARS = 200
 MAX_PROMPTS_PER_SESSION = 3
 MAX_LISTED = 3
 CLI_LIMIT = 6
-CLI_TIMEOUT_MS = 4000
-SUBPROCESS_TIMEOUT_S = 6
+# The replay measured p95 8.7 s over 200 real replies; 15 s is the Stop hook limit in the examples.
+CLI_TIMEOUT_MS = 10000
+SUBPROCESS_TIMEOUT_S = 12
 PENDING_MAX_AGE_S = 600
 TITLE_MAX_CHARS = 100
 LOG_MAX_BYTES = 100_000

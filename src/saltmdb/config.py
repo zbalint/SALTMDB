@@ -146,8 +146,10 @@ RELATED_MEMORIES_FTS_SHARE = 5
 RELATED_MEMORIES_SEMANTIC_MAX_REQUEST = 50
 # Default number of related memories printed by the text CLI.
 RELATED_MEMORIES_DEFAULT_LIMIT = 3
-# Uncalibrated placeholder threshold copied from the dedup threshold.
-# shortcut: calibrate with the replay harness before any hook uses this value.
+# Calibrated with the BL-028 replay on 200 real replies (2026-10-11, labels by an agent judge):
+# 4.0 blocks 11.5% of replies, precision 0.54 (partly counts half), false-block rate 3% (a block
+# listing no relevant memory). No threshold met the 0.7 precision bar in SPEC-RELATED-MEMORIES-REPLAY,
+# so the hook stays opt-in.
 RELATED_MEMORIES_MIN_SCORE = 4.0
 
 # Sliding-window chunking for chunk-level embeddings (entity_chunk_embeddings).
