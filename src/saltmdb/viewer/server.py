@@ -4,8 +4,6 @@ import logging
 import threading
 from typing import Any
 
-from saltmdb.viewer.tool_runner import ToolRunner
-
 logger = logging.getLogger(__name__)
 
 
@@ -29,13 +27,8 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     request_timeout = 15
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.tool_runner = ToolRunner(lambda: self.viewer_gateway.db_path)
         self._connection_slots = threading.BoundedSemaphore(self.max_connections)
         super().__init__(*args, **kwargs)
-
-    def server_close(self) -> None:
-        self.tool_runner.close()
-        super().server_close()
 
     def get_request(self):
         connection, client_address = super().get_request()

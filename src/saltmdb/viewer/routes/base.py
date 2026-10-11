@@ -127,10 +127,6 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_events(query)
         elif path == "/api/feed":
             self.get_feed(query)
-        elif path == "/api/tools":
-            self.get_tools()
-        elif path == "/api/tools/call":
-            self.get_tool_call(query)
         elif path == "/api/tags":
             self.get_tags()
         elif path == "/api/sessions":
