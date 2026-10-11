@@ -210,6 +210,94 @@ def cmd_orphans(args):
     return 1 if "error" in result else 0
 
 
+def _corpus_correction_data(conn, days: int, now) -> dict[str, object]:
+    from datetime import UTC, datetime, timedelta
+
+    correction_counts = {"revises": 0, "supersedes": 0, "corrects": 0}
+    correction_by_week = []
+    memories_created = 0
+    unparsed_rows = 0
+    if days > 0:
+        correction_cutoff = now - timedelta(days=min(days, 365))
+        first_week = correction_cutoff.date() - timedelta(days=correction_cutoff.weekday())
+        current_week = now.date() - timedelta(days=now.weekday())
+        week_starts = []
+        week = first_week
+        while week <= current_week:
+            week_starts.append(week)
+            week += timedelta(days=7)
+        corrections_by_week = {week: 0 for week in week_starts}
+        memories_by_week = {week: 0 for week in week_starts}
+        correction_since = correction_cutoff.isoformat()
+
+        relation_rows = conn.execute(
+            "SELECT predicate, created_at FROM relations "
+            "WHERE predicate IN ('revises', 'supersedes', 'corrects') AND created_at >= ?",
+            (correction_since,),
+        ).fetchall()
+        for predicate, created_at in relation_rows:
+            try:
+                parsed = datetime.fromisoformat(created_at)
+            except (TypeError, ValueError):
+                unparsed_rows += 1
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            else:
+                parsed = parsed.astimezone(UTC)
+            week = parsed.date() - timedelta(days=parsed.weekday())
+            if week not in corrections_by_week:
+                unparsed_rows += 1
+                continue
+            correction_counts[predicate] += 1
+            corrections_by_week[week] += 1
+
+        entity_rows = conn.execute(
+            "SELECT created_at FROM entities WHERE created_at >= ?", (correction_since,)
+        ).fetchall()
+        for (created_at,) in entity_rows:
+            try:
+                parsed = datetime.fromisoformat(created_at)
+            except (TypeError, ValueError):
+                unparsed_rows += 1
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            else:
+                parsed = parsed.astimezone(UTC)
+            week = parsed.date() - timedelta(days=parsed.weekday())
+            if week not in memories_by_week:
+                unparsed_rows += 1
+                continue
+            memories_created += 1
+            memories_by_week[week] += 1
+
+        correction_by_week = [
+            {
+                "week_start": week.isoformat(),
+                "corrections": corrections_by_week[week],
+                "memories_created": memories_by_week[week],
+            }
+            for week in week_starts
+        ]
+
+    return {
+        "note": (
+            "revisions and supersessions create new entities, so those entities are included "
+            "in memories_created; the effective correction window is capped at 365 days; rows "
+            "outside the window's weeks are counted in unparsed_rows"
+        ),
+        "window_days": days,
+        "revises": correction_counts["revises"],
+        "supersedes": correction_counts["supersedes"],
+        "corrects": correction_counts["corrects"],
+        "total": sum(correction_counts.values()),
+        "memories_created": memories_created,
+        "by_week": correction_by_week,
+        "unparsed_rows": unparsed_rows,
+    }
+
+
 def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
     """Assembles the corpus-health report body from existing, already-populated tables/services
     -- no new persisted state, no new subsystem. Every signal here already exists for exactly
@@ -263,7 +351,8 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
     # format ("... " with a space separator, no offset) -- comparing the two as strings would
     # silently never filter anything (a space sorts before 'T', so a SQLite-format cutoff is
     # lexicographically "less than" every stored row regardless of the actual dates).
-    telemetry_since = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    now = datetime.now(UTC)
+    telemetry_since = (now - timedelta(days=days)).isoformat()
     telemetry_total = conn.execute(
         "SELECT COUNT(*) FROM tool_call_telemetry WHERE timestamp >= ?", (telemetry_since,)
     ).fetchone()[0]
@@ -287,6 +376,25 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
     flagged_stale_count = conn.execute(
         "SELECT COUNT(*) FROM entities WHERE status != 'archived' AND json_extract(metadata, '$.drift_flag') IS NOT NULL"
     ).fetchone()[0]
+
+    corrections = _corpus_correction_data(conn, days, now)
+    freshness_since = (now - timedelta(days=30)).isoformat()
+    freshness_active = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE status != 'archived'"
+    ).fetchone()[0]
+    freshness_updated = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE status != 'archived' AND updated_at >= ?",
+        (freshness_since,),
+    ).fetchone()[0]
+    freshness_share = round(freshness_updated / freshness_active, 3) if freshness_active else None
+
+    freshness = {
+        "note": "updated_at changes on write and revise, not on read",
+        "window_days": 30,
+        "active": freshness_active,
+        "updated_in_window": freshness_updated,
+        "share": freshness_share,
+    }
 
     return {
         "entities": {
@@ -332,6 +440,8 @@ def _corpus_health_data(conn, days: int, telemetry_limit: int) -> dict:
             if avg_latency_row[0] is not None
             else None,
         },
+        "corrections": corrections,
+        "freshness": freshness,
     }
 
 

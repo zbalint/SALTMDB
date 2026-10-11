@@ -400,6 +400,176 @@ class TestCorpusHealthCli(unittest.TestCase):
             report2["telemetry"]["total_calls"], 0, "days=0 must exclude rows just inserted 'now'"
         )
 
+    def test_corrections_count_history_in_bounded_windows(self):
+        from datetime import timedelta
+
+        with self.subTest(corpus="empty"):
+            rc, report = self._run()
+            self.assertEqual(rc, 0)
+            corrections = report["corrections"]
+            self.assertEqual(corrections["total"], 0)
+            self.assertEqual(corrections["memories_created"], 0)
+            self.assertEqual(corrections["unparsed_rows"], 0)
+            self.assertTrue(1 <= len(corrections["by_week"]) <= 2)
+            self.assertTrue(
+                all(
+                    week["corrections"] == 0 and week["memories_created"] == 0
+                    for week in corrections["by_week"]
+                )
+            )
+            self.assertEqual(report["freshness"]["active"], 0)
+            self.assertIsNone(report["freshness"]["share"])
+
+        now = datetime.now(UTC)
+        a = self._mk_entity("Revision", status="archived")
+        b = self._mk_entity("Supersession")
+        old = self._mk_entity("Outside bounded history")
+        malformed = self._mk_entity("Malformed creation timestamp")
+        for entity_id, created_at in (
+            (a, (now - timedelta(days=1)).isoformat()),
+            (b, (now - timedelta(days=2)).isoformat()),
+            (old, (now - timedelta(days=400)).isoformat()),
+            (malformed, "unparseable"),
+        ):
+            self.conn.execute(
+                "UPDATE entities SET created_at = ? WHERE id = ?", (created_at, entity_id)
+            )
+        for source, target, predicate, created_at, valid_to in (
+            (a, b, "revises", (now - timedelta(days=1)).isoformat(), None),
+            (a, b, "supersedes", (now - timedelta(days=2)).isoformat(), now.isoformat()),
+            (a, b, "corrects", (now - timedelta(days=20)).isoformat(), None),
+            (old, a, "corrects", (now - timedelta(days=400)).isoformat(), None),
+            (b, a, "corrects", "unparseable", None),
+            (b, a, "related_to", (now - timedelta(days=1)).isoformat(), None),
+        ):
+            self.conn.execute(
+                "INSERT INTO relations (id, source_id, target_id, predicate, created_at, "
+                "valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    source,
+                    target,
+                    predicate,
+                    created_at,
+                    now.isoformat(),
+                    valid_to,
+                ),
+            )
+        self.conn.commit()
+
+        for days, expected in (
+            (7, (1, 1, 0, 2, 2, 2)),
+            (30, (1, 1, 1, 3, 2, 2)),
+            (0, (0, 0, 0, 0, 0, 0)),
+            (-7, (0, 0, 0, 0, 0, 0)),
+            (400, (1, 1, 1, 3, 2, 2)),
+        ):
+            with self.subTest(days=days):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=days))
+                self.assertEqual(rc, 0)
+                corrections = json.loads(buf.getvalue())["corrections"]
+                self.assertEqual(corrections["window_days"], days)
+                self.assertEqual(
+                    tuple(
+                        corrections[key]
+                        for key in (
+                            "revises",
+                            "supersedes",
+                            "corrects",
+                            "total",
+                            "memories_created",
+                            "unparsed_rows",
+                        )
+                    ),
+                    expected,
+                )
+                weeks = corrections["by_week"]
+                self.assertEqual(sum(week["corrections"] for week in weeks), expected[3])
+                self.assertEqual(sum(week["memories_created"] for week in weeks), expected[4])
+                if days <= 0:
+                    self.assertEqual(weeks, [])
+                else:
+                    starts = [datetime.fromisoformat(week["week_start"]) for week in weeks]
+                    self.assertTrue(all(start.weekday() == 0 for start in starts))
+                    self.assertEqual(starts, sorted(starts))
+                    self.assertTrue(
+                        all(
+                            right - left == timedelta(days=7)
+                            for left, right in zip(starts, starts[1:])
+                        )
+                    )
+                    self.assertLessEqual(len(weeks), 54)
+
+    def test_future_rows_outside_week_buckets_are_unparsed(self):
+        from datetime import timedelta
+
+        now = datetime.now(UTC)
+        source = self._mk_entity("Future correction source")
+        target = self._mk_entity("Future correction target")
+        old_at = (now - timedelta(days=8)).isoformat()
+        for entity_id in (source, target):
+            self.conn.execute(
+                "UPDATE entities SET created_at = ? WHERE id = ?", (old_at, entity_id)
+            )
+        future_entity = self._mk_entity("Future entity")
+        future_at = (now + timedelta(days=7)).isoformat()
+        self.conn.execute(
+            "UPDATE entities SET created_at = ? WHERE id = ?", (future_at, future_entity)
+        )
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, "
+            "valid_from, valid_to) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                source,
+                target,
+                "corrects",
+                future_at,
+                now.isoformat(),
+                None,
+            ),
+        )
+        self.conn.commit()
+
+        rc, report = self._run()
+        self.assertEqual(rc, 0)
+        corrections = report["corrections"]
+        self.assertEqual(corrections["total"], 0)
+        self.assertEqual(corrections["unparsed_rows"], 2)
+        self.assertEqual(corrections["memories_created"], 0)
+        self.assertEqual(sum(week["corrections"] for week in corrections["by_week"]), 0)
+        self.assertEqual(sum(week["memories_created"] for week in corrections["by_week"]), 0)
+
+    def test_freshness_uses_fixed_30_day_window_and_excludes_archived(self):
+        from datetime import timedelta
+
+        now = datetime.now(UTC)
+        for title, age in (
+            ("Updated Yesterday", 1),
+            ("Updated Last Month", 40),
+            ("Updated Long Ago", 50),
+            ("Archived Yesterday", 1),
+        ):
+            status = "archived" if title.startswith("Archived") else "raw"
+            entity_id = self._mk_entity(title, status=status)
+            self.conn.execute(
+                "UPDATE entities SET updated_at = ? WHERE id = ?",
+                ((now - timedelta(days=age)).isoformat(), entity_id),
+            )
+        self.conn.commit()
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=0))
+        self.assertEqual(rc, 0)
+        freshness = json.loads(buf.getvalue())["freshness"]
+        self.assertEqual(freshness["window_days"], 30)
+        self.assertEqual(freshness["active"], 3)
+        self.assertEqual(freshness["updated_in_window"], 1)
+        self.assertEqual(freshness["share"], 0.333)
+
 
 class TestSnapshotCli(unittest.TestCase):
     """SPEC-DB-SNAPSHOT-CLI T8: `saltmdb-cli snapshot` through main(); the daemon call is patched."""
