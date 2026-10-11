@@ -281,8 +281,7 @@ def resolve_cli() -> str | None:
     """Locate the saltmdb-cli executable, most explicit first: (1) the ``SALTMDB_CLI_PATH`` env
     var when that file exists, for a hook subprocess whose PATH lacks the install's bin dir;
     (2) ``saltmdb-cli`` on PATH; (3) the legacy ``~/.mcp/SALTMDB/.venv/bin/saltmdb-cli`` as a
-    last resort. Same precedence as ``_resolve_cli`` in saltmdb-session-start-bootstrap.py, which
-    still keeps its own copy; a follow-up moves the bootstrap onto this one."""
+    last resort. The session-start bootstrap hook uses this function too."""
     import os
     import shutil
 

@@ -14,8 +14,6 @@ of bash for this whole hook family keeps the parsing dependency-free and robust.
 """
 
 import json
-import os
-import shutil
 import subprocess
 import sys
 import time
@@ -24,26 +22,10 @@ from pathlib import Path
 START = time.monotonic()
 BUDGET_S = 13.0
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _saltmdb_hook_common import resolve_cli  # noqa: E402
 
-def _resolve_cli() -> str | None:
-    """Locate the saltmdb-cli executable without assuming any one install layout -- SALTMDB can be
-    installed anywhere (a venv the user chose, pipx, a global install), not just the
-    ``~/.mcp/SALTMDB`` layout this project's own maintainer happens to use. Precedence, most
-    explicit first: (1) ``SALTMDB_CLI_PATH`` env var, for a hook subprocess whose PATH doesn't
-    carry the real install's bin dir; (2) ``saltmdb-cli`` on PATH, the normal case for a pip/pipx
-    install; (3) the legacy ``~/.mcp/SALTMDB/.venv/bin/saltmdb-cli`` default, kept only as a
-    last-resort fallback for that one specific layout -- never the primary strategy."""
-    override = os.environ.get("SALTMDB_CLI_PATH")
-    if override and Path(override).is_file():
-        return override
-    on_path = shutil.which("saltmdb-cli")
-    if on_path:
-        return on_path
-    legacy = Path.home() / ".mcp" / "SALTMDB" / ".venv" / "bin" / "saltmdb-cli"
-    return str(legacy) if legacy.is_file() else None
-
-
-CLI = _resolve_cli()
+CLI = resolve_cli()
 
 
 def remaining() -> float:
