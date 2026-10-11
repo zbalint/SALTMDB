@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from saltmdb.config import get_db_path, LIBRARIAN_TRIGGER_COOLDOWN_S
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
 from saltmdb.domain.services.memory_service import normalize_tag_name
+from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
 
@@ -290,3 +291,4 @@ def _run_librarian_maintenance(conn) -> None:
         logger.info("Librarian PRAGMA optimize=0x10002 completed.")
     except Exception as e:
         logger.warning("Librarian PRAGMA optimize failed: %s", e)
+    logger.info("Process memory (librarian pass): %s", format_process_memory())

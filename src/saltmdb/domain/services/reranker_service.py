@@ -18,6 +18,7 @@ import math
 import os
 import threading
 from typing import Any, Protocol, overload
+from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ def get_model(model_name: str):
                         enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                     )
                 _model_name = model_name
+                logger.info("Process memory (reranker model loaded): %s", format_process_memory())
     return _model
 
 

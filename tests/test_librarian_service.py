@@ -2,8 +2,10 @@ import unittest
 import tempfile
 import os
 import shutil
+from unittest.mock import MagicMock
 
 from saltmdb.db.schema import init_db
+from saltmdb.domain.services import librarian_service
 from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation, bulk_commit_consolidation
 
@@ -13,6 +15,18 @@ class TestLibrarianService(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.conn = init_db(self.db_path)
+
+    def test_maintenance_logs_process_memory_after_optimize(self):
+        conn = MagicMock()
+        with self.assertLogs("saltmdb.domain.services.librarian_service", "INFO") as logs:
+            librarian_service._run_librarian_maintenance(conn)
+
+        memory_records = [
+            record
+            for record in logs.records
+            if record.getMessage().startswith("Process memory (librarian pass): rss_mb=")
+        ]
+        self.assertEqual(len(memory_records), 1)
 
     def tearDown(self):
         self.conn.close()

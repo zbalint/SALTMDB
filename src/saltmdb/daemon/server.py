@@ -30,6 +30,7 @@ from saltmdb.daemon.db_write_coordinator import DbWriteCoordinator
 from saltmdb.daemon.db_write_coordinator import CoordinatorUsageError
 from saltmdb.daemon.embed_stall_monitor import EmbedStallMonitor
 from saltmdb.db.schema import init_db
+from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
 
@@ -1084,6 +1085,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         t_ready - t_recovery,
         t_ready - t0,
     )
+    logger.info("Process memory (daemon ready): %s", format_process_memory())
     if sys.platform == "win32":
         _log_windows_job_diagnostics()
 
@@ -1228,6 +1230,7 @@ def _shutdown_sequence(
     except OSError:
         pass
 
+    logger.info("Process memory (daemon shutdown): %s", format_process_memory())
     logger.info("SALTMDB daemon shutdown complete.")
     logger.info(
         "About to call os._exit(0) now (pid=%d) -- this is the last line this process will ever log.",

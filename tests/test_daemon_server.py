@@ -815,6 +815,14 @@ class TestDaemonSignalShutdown(unittest.TestCase):
             for value in values:
                 self.assertGreaterEqual(value, 0)
             self.assertGreaterEqual(values[-1], sum(values[:-1]) - 0.01)
+            self.assertRegex(
+                output,
+                r"Process memory \(daemon ready\): rss_mb=\d+\.\d peak_rss_mb=\d+\.\d",
+            )
+            self.assertRegex(
+                output,
+                r"Process memory \(daemon shutdown\): rss_mb=\d+\.\d peak_rss_mb=\d+\.\d",
+            )
         finally:
             if proc.poll() is None:
                 proc.kill()

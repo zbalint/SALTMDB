@@ -204,6 +204,7 @@ class TestGetModelArenaOption(unittest.TestCase):
 
     def test_get_model_uses_bundled_model_with_arena_disabled(self):
         with (
+            self.assertLogs("saltmdb.domain.services.embedding_service", "INFO") as logs,
             patch.object(embedding_service, "_is_valid_local_model", return_value=True),
             patch("fastembed.TextEmbedding") as mock_ctor,
         ):
@@ -212,6 +213,12 @@ class TestGetModelArenaOption(unittest.TestCase):
         mock_ctor.assert_called_once()
         self.assertIs(mock_ctor.call_args.kwargs.get("enable_cpu_mem_arena"), False)
         self.assertIs(mock_ctor.call_args.kwargs["local_files_only"], True)
+        memory_records = [
+            record
+            for record in logs.records
+            if record.getMessage().startswith("Process memory (embedding model loaded): rss_mb=")
+        ]
+        self.assertEqual(len(memory_records), 1)
 
     def test_get_model_falls_back_to_online_when_bundle_invalid(self):
         with (

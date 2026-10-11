@@ -190,6 +190,7 @@ class TestBundledModel(unittest.TestCase):
 
     def test_get_model_uses_bundled_cache_dir_for_bundled_model_name(self):
         with (
+            self.assertLogs("saltmdb.domain.services.reranker_service", "INFO") as logs,
             patch.object(reranker_service, "_is_valid_bundled_model", return_value=True),
             patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as mock_ctor,
         ):
@@ -202,6 +203,12 @@ class TestBundledModel(unittest.TestCase):
             local_files_only=True,
             enable_cpu_mem_arena=False,
         )
+        memory_records = [
+            record
+            for record in logs.records
+            if record.getMessage().startswith("Process memory (reranker model loaded): rss_mb=")
+        ]
+        self.assertEqual(len(memory_records), 1)
 
     def test_get_model_falls_back_to_online_when_bundle_invalid(self):
         with (

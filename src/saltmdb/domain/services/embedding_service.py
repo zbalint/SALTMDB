@@ -19,6 +19,7 @@ from saltmdb.config import (
     ONNX_ENABLE_CPU_MEM_ARENA,
 )
 from saltmdb.utils.chunking import chunk_text
+from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
 
@@ -693,6 +694,7 @@ def get_model():
                         model_name="BAAI/bge-small-en-v1.5",
                         enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                     )
+                logger.info("Process memory (embedding model loaded): %s", format_process_memory())
     return _model
 
 
