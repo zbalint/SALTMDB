@@ -176,7 +176,6 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         },
         "cross_encoder": {
             "requested": True,
-            "forced": True,
             "candidate_cap": ce_candidate_cap,
             "text_cap_chars": ce_text_cap,
             "executed": False,
@@ -609,7 +608,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             from saltmdb.domain.services import reranker_service
 
                             ce_scores = None
-                            if reranker_service.is_cross_encoder_enabled():
+                            cross_encoder_enabled = reranker_service.is_cross_encoder_enabled()
+                            if cross_encoder_enabled:
                                 # Skip the batch fetch entirely when disabled/misconfigured --
                                 # score_pairs would return None anyway, no point paying for the
                                 # SQL round-trip first. Cap the pool to CROSS_ENCODER_MAX_CANDIDATES
@@ -657,9 +657,11 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                                 diagnostics["cross_encoder"]["execution_count"] = (
                                     diagnostics["cross_encoder"].get("execution_count", 0) + 1
                                 )
-                            else:
+                            elif cross_encoder_enabled:
                                 ce_diagnostics = reranker_service.get_last_score_diagnostics()
                                 diagnostics["cross_encoder"].update(ce_diagnostics)
+                            else:
+                                diagnostics["cross_encoder"]["reason"] = "cross_encoder_disabled"
                             # ce_scores is None (disabled/unsupported model/runner failure/
                             # malformed output): ranked_pool_ is left exactly as it was before this
                             # block -- deterministic fallback to current behavior, no widening.
@@ -745,6 +747,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                             ]
                     else:
                         ranked_pool_ = []
+                        diagnostics["cross_encoder"]["reason"] = "no_candidates"
                         superseded_ids_ = set()
 
                     # Both raw channels returned fewer rows than requested -> the underlying

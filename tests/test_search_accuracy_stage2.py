@@ -362,6 +362,7 @@ class TestSearchRankingDiagnostics(_DbFixture):
                 db_path=self.db_path,
             )
         assert isinstance(result, dict)
+        self.assertNotIn("forced", result["diagnostics"]["cross_encoder"])
         candidates = result["diagnostics"]["candidates"]
         self.assertEqual(
             [candidate["cross_encoder_score"] for candidate in candidates],
@@ -371,6 +372,63 @@ class TestSearchRankingDiagnostics(_DbFixture):
             [candidate["pool_rank"] for candidate in candidates],
             list(range(len(candidates))),
         )
+
+    def test_disabled_cross_encoder_reports_reason_without_forced_key(self):
+        reranker_service._set_score_diagnostics({})
+        self.addCleanup(reranker_service._set_score_diagnostics, {})
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        self.assertEqual({row["id"] for row in result["results"]}, {"alpha", "beta", "gamma"})
+        cross_encoder = result["diagnostics"]["cross_encoder"]
+        self.assertIs(cross_encoder["executed"], False)
+        self.assertEqual(cross_encoder["reason"], "cross_encoder_disabled")
+        self.assertNotIn("forced", cross_encoder)
+
+    def test_disabled_cross_encoder_ignores_stale_score_diagnostics(self):
+        reranker_service._set_score_diagnostics({"executed": True, "reason": "runner_failure"})
+        self.addCleanup(reranker_service._set_score_diagnostics, {})
+        result = search_memory(
+            query_keywords="diagnosticquery",
+            limit=10,
+            return_diagnostics=True,
+            db_connection=self.conn,
+            db_path=self.db_path,
+        )
+        assert isinstance(result, dict)
+        cross_encoder = result["diagnostics"]["cross_encoder"]
+        self.assertIs(cross_encoder["executed"], False)
+        self.assertEqual(cross_encoder["reason"], "cross_encoder_disabled")
+        self.assertEqual(cross_encoder["execution_count"], 0)
+
+    def test_enabled_cross_encoder_preserves_fresh_failure_reason(self):
+        def malformed_scores(*_args: object, **_kwargs: object) -> None:
+            reranker_service._set_score_diagnostics(
+                {"executed": False, "reason": "malformed_output"}
+            )
+
+        self.addCleanup(reranker_service._set_score_diagnostics, {})
+        with (
+            patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+            patch.object(reranker_service, "score_pairs", side_effect=malformed_scores),
+        ):
+            result = search_memory(
+                query_keywords="diagnosticquery",
+                limit=10,
+                return_diagnostics=True,
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+        assert isinstance(result, dict)
+        cross_encoder = result["diagnostics"]["cross_encoder"]
+        self.assertIs(cross_encoder["executed"], False)
+        self.assertEqual(cross_encoder["reason"], "malformed_output")
+        self.assertNotIn("forced", cross_encoder)
 
     def test_strict_diagnostics_include_every_returned_id(self):
         result = search_memory(
@@ -417,6 +475,30 @@ class TestSearchRankingDiagnostics(_DbFixture):
         }
         self.assertIsInstance(by_id["new"]["final_rank"], int)
         self.assertIsNone(by_id["old"]["final_rank"])
+
+
+class TestEmptySearchRankingDiagnostics(_DbFixture):
+    def test_empty_fused_pool_reports_no_candidates(self):
+        reranker_service._set_score_diagnostics({"executed": True, "reason": "runner_failure"})
+        self.addCleanup(reranker_service._set_score_diagnostics, {})
+        with (
+            patch.object(embedding_service, "embed_text", return_value=_axis(0)),
+            patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        ):
+            result = search_memory(
+                query_keywords="diagnosticquery",
+                limit=10,
+                return_diagnostics=True,
+                db_connection=self.conn,
+                db_path=self.db_path,
+            )
+        assert isinstance(result, dict)
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["diagnostics"]["candidate_pool_size"], 0)
+        cross_encoder = result["diagnostics"]["cross_encoder"]
+        self.assertIs(cross_encoder["executed"], False)
+        self.assertEqual(cross_encoder["reason"], "no_candidates")
+        self.assertNotIn("forced", cross_encoder)
 
 
 class TestCrossEncoderControls(_DbFixture):
