@@ -8,7 +8,8 @@ from saltmdb.db.schema import init_db
 from saltmdb.domain.services import trace_service
 
 _OMP_CHECK = "CHECK(harness IN ('codex','claude_code','omp'))"
-_CURRENT_CHECK = "CHECK(harness IN ('codex','claude_code','omp','copilot'))"
+_COPILOT_CHECK = "CHECK(harness IN ('codex','claude_code','omp','copilot'))"
+_CURRENT_CHECK = "CHECK(harness IN ('codex','claude_code','omp','copilot','hermes'))"
 
 
 def _table_sql(conn) -> str:
@@ -25,6 +26,19 @@ def _make_omp_era(conn) -> None:
         "UPDATE sqlite_master SET sql=replace(sql, ?, ?) "
         "WHERE type='table' AND name='conversation_traces'",
         (_CURRENT_CHECK, _OMP_CHECK),
+    )
+    conn.execute(f"PRAGMA schema_version={version + 1}")
+    conn.execute("PRAGMA writable_schema=OFF")
+
+
+def _make_copilot_era(conn) -> None:
+    """Put conversation_traces back to its pre-hermes (copilot-era) CHECK."""
+    version = conn.execute("PRAGMA schema_version").fetchone()[0]
+    conn.execute("PRAGMA writable_schema=ON")
+    conn.execute(
+        "UPDATE sqlite_master SET sql=replace(sql, ?, ?) "
+        "WHERE type='table' AND name='conversation_traces'",
+        (_CURRENT_CHECK, _COPILOT_CHECK),
     )
     conn.execute(f"PRAGMA schema_version={version + 1}")
     conn.execute("PRAGMA writable_schema=OFF")
@@ -65,6 +79,25 @@ class TestCopilotHarness(unittest.TestCase):
         conn = init_db(self.db_path)
         self.assertIn(_CURRENT_CHECK, _table_sql(conn))
         self.assertEqual(self._start(conn)["status"], "ok")
+        self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        conn.close()
+
+    def test_copilot_era_database_accepts_hermes_after_migration(self):
+        conn = init_db(self.db_path)
+        _make_copilot_era(conn)
+        conn.close()
+        conn = init_db(self.db_path)
+        self.assertIn(_CURRENT_CHECK, _table_sql(conn))
+        result = trace_service.capture_trace_start(
+            agent_session_id="adapter-session",
+            agent_id="hermes",
+            harness="hermes",
+            harness_session_id="hermes-session",
+            harness_turn_id="turn-1",
+            user_prompt="hello",
+            db_connection=conn,
+        )
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         conn.close()
 
