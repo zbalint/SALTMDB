@@ -397,3 +397,14 @@ unchanged):
 Gate re-run for this amendment: the only values touched are the D10 step 1 sentence and step 3; a grep
 for "water-filling cap over `H`" shows the two places (D10 step 1 and step 3) that this amendment
 overrides, and the implementation follows A1.2 in both.
+
+## Amendment 2 (2026-10-12): D8 "+N more" is one line per group
+
+Trigger: architect review of the implementation. D8 says further lines are replaced by "one line"
+`- (+N more not shown)`; the implementation (and its test at `tests/test_session_digest_service.py`
+around L915) emits one such line after the created group and one after the touched group, each with
+its own count. Ruling: the per-group lines are accepted as the governing behavior. They tell the reader
+which group was cut, and the cost is one short line. D8 and acceptance 3d are read as "one `(+N more
+not shown)` line for each group that has omitted entries"; when the index is trimmed for budget the
+counts stay per group. In stub mode (D7) the single trailing line carries the combined count, as
+implemented. No other decision changes.
