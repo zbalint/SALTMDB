@@ -170,13 +170,16 @@ _TRACE_HARNESS_CHECKS_OLD = (
     "CHECK(harness IN ('codex','claude_code'))",
     "CHECK(harness IN ('codex','claude_code','omp'))",
     "CHECK(harness IN ('codex','claude_code','omp','copilot'))",
+    "CHECK(harness IN ('codex','claude_code','omp','copilot','hermes'))",
 )
-_TRACE_HARNESS_CHECK_NEW = "CHECK(harness IN ('codex','claude_code','omp','copilot','hermes'))"
+_TRACE_HARNESS_CHECK_NEW = (
+    "CHECK(harness IN ('codex','claude_code','omp','copilot','hermes','opencode'))"
+)
 
 
 def _allow_trace_harnesses(conn) -> None:
     """Widen the ``conversation_traces.harness`` CHECK of an existing database to the current set
-    (``omp``, ``copilot`` and ``hermes`` were each added after the original ``codex``/``claude_code`` pair).
+    (``omp``, ``copilot``, ``hermes`` and ``opencode`` were each added after the original ``codex``/``claude_code`` pair).
 
     SQLite cannot alter a CHECK, and rebuilding the table is not an option: ``trace_memory_links``
     and ``trace_turn_messages`` reference it ``ON DELETE CASCADE`` with foreign keys enabled, so
@@ -699,7 +702,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             id TEXT PRIMARY KEY,
             agent_session_id TEXT NOT NULL,
             agent_id TEXT NOT NULL,
-            harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code','omp','copilot','hermes')),
+            harness TEXT NOT NULL CHECK(harness IN ('codex','claude_code','omp','copilot','hermes','opencode')),
             harness_session_id TEXT NOT NULL,
             harness_turn_id TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('pending','completed','incomplete')),
