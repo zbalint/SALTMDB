@@ -555,7 +555,9 @@ def _dispatch_get_last_session_digest(**kw):
     from saltmdb.domain.services import session_digest_service
 
     conn = get_connection(get_db_path())
-    return session_digest_service.render_session_digest(conn, kw["cwd"], kw.get("max_chars"))
+    return session_digest_service.render_session_digest(
+        conn, kw["cwd"], kw.get("max_chars"), before=kw.get("before")
+    )
 
 
 def _dispatch_find_related_memories(**kw):

@@ -152,9 +152,9 @@ def test_bootstrap_text_pending_notice_keeps_session_digest_when_bootstrap_times
     setattr(bootstrap, "CLI", "/opt/saltmdb/bin/saltmdb-cli")
 
     def fake_subprocess_run(command, **kwargs):
-        if command[-1] == "bootstrap-digest":
+        if command[1] == "bootstrap-digest":
             raise subprocess.TimeoutExpired(command, timeout=10)
-        if command[-1] == "session-digest":
+        if command[1] == "session-digest":
             return type("Result", (), {"returncode": 0, "stdout": "<session-digest>"})()
         return type("Result", (), {"returncode": 1, "stdout": ""})()
 
@@ -172,8 +172,8 @@ def test_bootstrap_text_skips_health_when_budget_is_below_spawn_threshold():
     calls = []
 
     def fake_subprocess_run(command, **kwargs):
-        calls.append(command[-1])
-        return type("Result", (), {"returncode": 0, "stdout": f"<{command[-1]}>"})()
+        calls.append(command[1])
+        return type("Result", (), {"returncode": 0, "stdout": f"<{command[1]}>"})()
 
     with (
         patch.object(bootstrap, "remaining", side_effect=[10.0, 5.0, 0.5], create=True),

@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Merged, case-insensitive read-only tool-name vocabulary (union of Claude Code/Antigravity/
@@ -263,13 +264,18 @@ def read_digest_pending(path: Path) -> dict[str, object] | None:
 
 
 def write_digest_pending(
-    path: Path, missing: list[str], attempts: int = 0, running_since: float | None = None
+    path: Path,
+    missing: list[str],
+    attempts: int = 0,
+    running_since: float | None = None,
+    started_at: float | None = None,
 ) -> None:
     """Best-effort persistence before slow work or after partial delivery."""
+    marker = {"missing": missing, "attempts": attempts, "running_since": running_since}
+    if started_at is not None:
+        marker["started_at"] = started_at
     try:
-        path.write_text(
-            json.dumps({"missing": missing, "attempts": attempts, "running_since": running_since})
-        )
+        path.write_text(json.dumps(marker))
     except OSError:
         return
 
@@ -291,6 +297,36 @@ def run_cli_bounded(cli: str | None, args: tuple[str, ...], remaining_s: float) 
 
 
 HOOK_OUTPUT_MAX_CHARS = 9800
+COHORT_SLACK_S = 60
+OVERDUE_RESERVE_CHARS = 1400
+NOTICE_RESERVE_CHARS = 450
+SESSION_DIGEST_MIN_BUDGET = 3500
+
+
+def session_digest_args(
+    core_len: int, overdue_reserve: int, started_at: float | None, *, capped: bool = True
+) -> tuple[str, ...]:
+    budget = max(
+        HOOK_OUTPUT_MAX_CHARS
+        - core_len
+        - overdue_reserve
+        - (NOTICE_RESERVE_CHARS if capped else 0)
+        - 4,
+        SESSION_DIGEST_MIN_BUDGET,
+    )
+    args: list[str] = ["session-digest"]
+    if capped:
+        args.extend(["--max-chars", str(budget)])
+    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+        try:
+            before = datetime.fromtimestamp(started_at - COHORT_SLACK_S, UTC).isoformat(
+                timespec="microseconds"
+            )
+        except (OverflowError, OSError, ValueError):
+            pass
+        else:
+            args.extend(["--before", before])
+    return tuple(args)
 
 
 def cap_hook_output(text: str, cli: str | None) -> str:

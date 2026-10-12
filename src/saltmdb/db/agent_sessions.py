@@ -147,6 +147,9 @@ _CONTENT_PREDICATES: dict[str, str] = {
         )
     """,
 }
+_CONTENT_PREDICATES["any"] = (
+    f"({_CONTENT_PREDICATES['memories']} OR {_CONTENT_PREDICATES['traces']})"
+)
 
 
 def get_recent_sessions_for_cwd(
@@ -156,7 +159,8 @@ def get_recent_sessions_for_cwd(
     *,
     with_content: str | None = None,
     ended: bool | None = None,
-) -> list[dict]:
+    before: str | None = None,
+) -> list[dict[str, object]]:
     """Return up to ``limit`` recent sessions for this cwd.
 
     ``ended=None`` orders all matching sessions by ``started_at`` descending.
@@ -164,18 +168,21 @@ def get_recent_sessions_for_cwd(
     ``session_id`` descending. ``ended=False`` selects running sessions and orders by
     ``COALESCE(last_activity_at, started_at)`` descending, then ``session_id`` descending.
 
-    ``with_content`` may be ``"memories"`` to select sessions that created or touched
-    a non-archived memory, or ``"traces"`` to select sessions with a conversation
-    trace. ``None`` returns all sessions. The memory-filtered lookup is used by
-    ``session_digest_service.render_last_session_digest``.
+    ``with_content`` may be ``"memories"`` for sessions that created or touched a
+    non-archived memory, ``"traces"`` for sessions with a conversation trace, or ``"any"``
+    for either kind of content. ``None`` returns all sessions. When ``before`` is supplied,
+    only sessions whose ``started_at`` is strictly earlier are returned.
     """
     if with_content is not None and with_content not in _CONTENT_PREDICATES:
-        raise ValueError("with_content must be one of: memories, traces")
+        raise ValueError("with_content must be one of: memories, traces, any")
 
     where = "WHERE s.cwd = ?"
     params: list[str | int] = [cwd]
     if with_content is not None:
         where += f" AND {_CONTENT_PREDICATES[with_content]}"
+    if before is not None:
+        where += " AND s.started_at < ?"
+        params.append(before)
     if ended is True:
         where += " AND s.ended_at IS NOT NULL"
         order_by = "s.ended_at DESC, s.session_id DESC"
@@ -189,7 +196,10 @@ def get_recent_sessions_for_cwd(
     cursor = conn.execute(
         f"""
         SELECT s.session_id, s.started_at, s.agent_id, s.ended_at, s.ended_reason,
-               s.last_activity_at
+               s.last_activity_at,
+               (SELECT MAX(COALESCE(t.updated_at, t.created_at))
+                FROM conversation_traces t
+                WHERE t.agent_session_id = s.session_id) AS last_trace_at
         FROM _agent_sessions AS s
         {where}
         ORDER BY {order_by}
@@ -205,6 +215,7 @@ def get_recent_sessions_for_cwd(
             "ended_at": row[3],
             "ended_reason": row[4],
             "last_activity_at": row[5],
+            "last_trace_at": row[6],
         }
         for row in cursor.fetchall()
     ]

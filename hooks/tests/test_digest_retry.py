@@ -44,9 +44,9 @@ def test_session_marker_exists_before_first_cli_call(tmp_path):
     marker = _marker(tmp_path)
     observed: list[dict] = []
 
-    def fake_run_cli(part):
+    def fake_run_cli(*args):
         observed.append(json.loads(marker.read_text()))
-        return {"bootstrap-digest": "<boot>", "session-digest": "<session>"}.get(part)
+        return {"bootstrap-digest": "<boot>", "session-digest": "<session>"}.get(args[0])
 
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
         with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
@@ -60,7 +60,7 @@ def test_session_all_parts_returned_removes_marker_and_prints(capsys, tmp_path):
     bootstrap.CLI = "/fake-cli"
     values = {"bootstrap-digest": "<boot>", "session-digest": "<session>", "corpus-health": ""}
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
-        with patch.object(bootstrap, "run_cli", side_effect=lambda part: values[part]):
+        with patch.object(bootstrap, "run_cli", side_effect=lambda *args: values[args[0]]):
             bootstrap.main()
     assert "<boot>" in capsys.readouterr().out
     assert not _marker(tmp_path).exists()
@@ -71,10 +71,15 @@ def test_session_partial_fetch_keeps_empty_bootstrap(tmp_path):
     bootstrap.CLI = "/fake-cli"
     values = {"bootstrap-digest": "", "session-digest": "<session>", "corpus-health": ""}
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
-        with patch.object(bootstrap, "run_cli", side_effect=lambda part: values[part]):
+        with patch.object(bootstrap, "run_cli", side_effect=lambda *args: values[args[0]]):
             bootstrap.main()
     pending = json.loads(_marker(tmp_path).read_text())
-    assert pending == {"missing": ["bootstrap-digest"], "attempts": 0, "running_since": None}
+    assert isinstance(pending["started_at"], (int, float))
+    assert {key: value for key, value in pending.items() if key != "started_at"} == {
+        "missing": ["bootstrap-digest"],
+        "attempts": 0,
+        "running_since": None,
+    }
 
 
 def test_session_empty_session_part_stays_pending(tmp_path):
@@ -82,7 +87,7 @@ def test_session_empty_session_part_stays_pending(tmp_path):
     bootstrap.CLI = "/fake-cli"
     values = {"bootstrap-digest": "<boot>", "session-digest": "", "corpus-health": ""}
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
-        with patch.object(bootstrap, "run_cli", side_effect=lambda part: values[part]):
+        with patch.object(bootstrap, "run_cli", side_effect=lambda *args: values[args[0]]):
             bootstrap.main()
     assert json.loads(_marker(tmp_path).read_text())["missing"] == ["session-digest"]
 
@@ -94,9 +99,9 @@ def test_compact_session_preserves_previous_session_part(tmp_path):
     common.write_digest_pending(marker, ["bootstrap-digest", "session-digest"])
     calls: list[str] = []
 
-    def fake_run_cli(part):
-        calls.append(part)
-        return {"bootstrap-digest": "<boot>", "corpus-health": ""}[part]
+    def fake_run_cli(*args):
+        calls.append(args[0])
+        return {"bootstrap-digest": "<boot>", "corpus-health": ""}[args[0]]
 
     with (
         patch.object(Path, "home", return_value=tmp_path),
@@ -231,13 +236,14 @@ def test_bounded_runner_honors_minimum_and_ten_second_cap():
 
 def test_output_cap_and_section_order(capsys, tmp_path):
     bootstrap = _bootstrap()
-    bootstrap.CLI = "/fake-cli"
+    long_cli = "/" + "x" * 299
+    bootstrap.CLI = long_cli
     session = "x" * 25_000
     health = json.dumps({"overdue_core_reviews": {"count": 1, "entries": [{"title": "Core"}]}})
 
-    def fake_run_cli(part):
+    def fake_run_cli(*args):
         return {"bootstrap-digest": "<core>", "session-digest": session, "corpus-health": health}[
-            part
+            args[0]
         ]
 
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
@@ -249,8 +255,8 @@ def test_output_cap_and_section_order(capsys, tmp_path):
     assert "<saltmdb-overdue-core-notice>" in output
     assert output.index("<saltmdb-overdue-core-notice>") < output.index("Core")
     assert "bootstrap-digest" in output and "session-digest" in output
+    assert output.endswith(f"{long_cli} bootstrap-digest and {long_cli} session-digest.")
     assert common.cap_hook_output("x" * 9000, "/fake-cli") == "x" * 9000
-    long_cli = "/" + "x" * 299
     capped_long_path = common.cap_hook_output("x" * 25_000, long_cli)
     assert len(capped_long_path) <= 9800
     assert capped_long_path.endswith(f"{long_cli} bootstrap-digest and {long_cli} session-digest.")
@@ -259,17 +265,18 @@ def test_output_cap_and_section_order(capsys, tmp_path):
 def test_retry_output_cap(capsys, tmp_path):
     retry = _retry()
     marker = _marker(tmp_path)
+    long_cli = "/" + "x" * 299
     common.write_digest_pending(marker, ["bootstrap-digest", "session-digest"])
     with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
         with (
-            patch.object(retry, "resolve_cli", return_value="/fake-cli"),
+            patch.object(retry, "resolve_cli", return_value=long_cli),
             patch.object(retry, "run_cli_bounded", return_value="y" * 6000),
         ):
             retry.main()
     output = capsys.readouterr().out
     assert len(output) <= 9800
     assert output.startswith("y")
-    assert output.endswith("bootstrap-digest and /fake-cli session-digest.")
+    assert output.endswith(f"{long_cli} bootstrap-digest and {long_cli} session-digest.")
 
 
 def test_retry_running_grace_skips_young_marker_and_processes_old(tmp_path, capsys):
@@ -327,7 +334,8 @@ def test_session_reconciliation_keeps_retry_write(tmp_path):
     bootstrap.CLI = "/fake-cli"
     marker = _marker(tmp_path)
 
-    def fake_run_cli(part):
+    def fake_run_cli(*args):
+        part = args[0]
         if part == "bootstrap-digest":
             common.write_digest_pending(marker, ["bootstrap-digest"], running_since=None)
             return ""
@@ -339,3 +347,92 @@ def test_session_reconciliation_keeps_retry_write(tmp_path):
         with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
             bootstrap.main()
     assert json.loads(marker.read_text())["missing"] == ["bootstrap-digest"]
+
+
+def test_hooks_forward_budget_and_started_at_cutoff(tmp_path):
+    bootstrap = _bootstrap()
+    bootstrap.CLI = "/fake-cli"
+    setattr(bootstrap, "STARTED_AT", 1_700_000_060.0)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_cli(*args):
+        calls.append(tuple(args))
+        return {"bootstrap-digest": "<core>", "session-digest": "<session>", "corpus-health": ""}[
+            args[0]
+        ]
+
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with patch.object(bootstrap, "run_cli", side_effect=fake_run_cli):
+            bootstrap.main()
+    session_call = next(args for args in calls if args[0] == "session-digest")
+    assert "--max-chars" in session_call
+    assert "--before" in session_call
+    assert session_call[session_call.index("--before") + 1].endswith("+00:00")
+
+
+def test_retry_marker_without_started_at_omits_before(tmp_path):
+    retry = _retry()
+    marker = _marker(tmp_path)
+    common.write_digest_pending(marker, ["session-digest"])
+    calls: list[tuple[str, ...]] = []
+
+    def runner(_cli, args, _remaining):
+        calls.append(tuple(args))
+        return "<session>"
+
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with (
+            patch.object(retry, "resolve_cli", return_value="/fake-cli"),
+            patch.object(retry, "run_cli_bounded", side_effect=runner),
+        ):
+            retry.main()
+    assert calls == [("session-digest", "--max-chars", "9346")]
+
+
+def test_retry_passes_marker_started_at_to_before_cutoff(tmp_path):
+    retry = _retry()
+    marker = _marker(tmp_path)
+    common.write_digest_pending(
+        marker, ["bootstrap-digest", "session-digest"], started_at=1_700_000_060.0
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def runner(_cli, args, _remaining):
+        calls.append(tuple(args))
+        return "<part>"
+
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with (
+            patch.object(retry, "resolve_cli", return_value="/fake-cli"),
+            patch.object(retry, "run_cli_bounded", side_effect=runner),
+        ):
+            retry.main()
+    assert calls[0] == ("bootstrap-digest",)
+    assert calls[1][0] == "session-digest"
+    assert "--before" in calls[1]
+
+
+def test_retry_caps_large_session_output_and_forwards_cutoff(tmp_path, capsys):
+    retry = _retry()
+    marker = _marker(tmp_path)
+    common.write_digest_pending(marker, ["session-digest"], started_at=1_700_000_060.0)
+    calls: list[tuple[str, ...]] = []
+
+    def runner(_cli, args, _remaining):
+        calls.append(tuple(args))
+        return "x" * 25_000
+
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with (
+            patch.object(retry, "resolve_cli", return_value="/" + "x" * 299),
+            patch.object(retry, "run_cli_bounded", side_effect=runner),
+        ):
+            retry.main()
+    output = capsys.readouterr().out
+    assert len(output) <= 9_800
+    assert output.endswith(
+        "/" + "x" * 299 + " bootstrap-digest and /" + "x" * 299 + " session-digest."
+    )
+    assert calls[0][0] == "session-digest"
+    assert "--max-chars" in calls[0]
+    assert "--before" in calls[0]

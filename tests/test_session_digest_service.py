@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from saltmdb.db.schema import init_db
 from saltmdb.db import agent_sessions
@@ -53,6 +53,13 @@ class TestSessionDigestService(unittest.TestCase):
                 last_touched_session_id,
             ),
         )
+        self.conn.commit()
+        for session_id in {agent_session_id, last_touched_session_id} - {None}:
+            self.conn.execute(
+                "UPDATE _agent_sessions SET ended_at = started_at, ended_reason = 'goodbye' "
+                "WHERE session_id = ? AND ended_at IS NULL",
+                (session_id,),
+            )
         self.conn.commit()
         return entity_id
 
@@ -148,6 +155,12 @@ class TestSessionDigestService(unittest.TestCase):
             scope, status, title, memory_type, full_content, valid_from, agent_session_id)
             VALUES (?, ?, ?, ?, ?, 'shared', 'raw', ?, 'fact', 'body', ?, ?)""",
             (entity_id_2, now, now, now, "owner2", "Bob's Memory", now, session_id),
+        )
+        self.conn.commit()
+        self.conn.execute(
+            "UPDATE _agent_sessions SET ended_at = started_at, ended_reason = 'goodbye' "
+            "WHERE session_id = ?",
+            (session_id,),
         )
         self.conn.commit()
 
@@ -302,8 +315,23 @@ class TestSessionHandover(unittest.TestCase):
         )
         self.conn.commit()
 
-    def _digest(self, max_chars=None, *, now=None):
-        kwargs = {} if now is None else {"now": now}
+    def _memory(self, memory_id, session_id, title, *, touched_by=None):
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """INSERT INTO entities
+               (id, created_at, updated_at, last_accessed_at, agent_id, scope, status, title,
+                memory_type, full_content, valid_from, agent_session_id, last_touched_session_id)
+               VALUES (?, ?, ?, ?, 'claude', 'shared', 'raw', ?, 'fact', 'body', ?, ?, ?)""",
+            (memory_id, now, now, now, title, now, session_id, touched_by),
+        )
+        self.conn.commit()
+
+    def _digest(self, max_chars=None, *, before=None, now=None):
+        kwargs = {}
+        if before is not None:
+            kwargs["before"] = before
+        if now is not None:
+            kwargs["now"] = now
         return session_digest_service.render_session_digest(
             self.conn, self.CWD, max_chars, **kwargs
         )
@@ -368,13 +396,13 @@ class TestSessionHandover(unittest.TestCase):
         self.assertIn("still running", digest)
         self.assertNotIn("no captured response", digest)
 
-    def test_three_newest_ended_sessions_form_floor_and_skip_traceless(self):
+    def test_cohort_has_no_minimum_floor_and_skips_traceless(self):
         for i in range(1, 7):
             self._session(f"s{i}", f"2024-01-01T{6 + i:02d}:00:00+00:00", ended="goodbye")
-            if i < 6:
+            if i == 5:
                 self._trace(f"s{i}", f"t{i}", f"q-s{i}", f"a-s{i}", "2024-01-01T13:01:00+00:00")
 
-        self.assertEqual(self._handover_ids(self._digest()), ["s5", "s4", "s3"])
+        self.assertEqual(self._handover_ids(self._digest()), ["s5"])
 
     def test_window_is_inclusive_and_anchored_to_newest_end_not_chained(self):
         for session_id, ended_at in (
@@ -390,7 +418,7 @@ class TestSessionHandover(unittest.TestCase):
             )
             self._trace(session_id, session_id, "question", "answer", ended_at)
 
-        self.assertEqual(self._handover_ids(self._digest()), ["E1", "E2", "E3", "E4"])
+        self.assertEqual(self._handover_ids(self._digest()), ["E1", "E2", "E3", "E4", "E5", "E6"])
 
     def test_window_caps_eight_nearby_ends_at_six_newest(self):
         for i in range(1, 9):
@@ -398,7 +426,10 @@ class TestSessionHandover(unittest.TestCase):
             self._session(f"E{i}", "2024-01-01T08:00:00+00:00", ended="goodbye", ended_at=ended_at)
             self._trace(f"E{i}", f"t{i}", "question", "answer", ended_at)
 
-        self.assertEqual(self._handover_ids(self._digest()), ["E1", "E2", "E3", "E4", "E5", "E6"])
+        self.assertEqual(
+            self._handover_ids(self._digest()),
+            ["E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"],
+        )
 
     def test_equal_millisecond_ends_follow_session_id_not_start_time(self):
         for session_id, started_at in (
@@ -431,7 +462,8 @@ class TestSessionHandover(unittest.TestCase):
             self._trace(session_id, session_id, "question", "answer", "2024-01-01T12:01:00+00:00")
 
         self.assertEqual(
-            self._handover_ids(self._digest()), ["bad-floor", "anchor", "floor", "boundary"]
+            self._handover_ids(self._digest()),
+            ["outside", "floor", "boundary", "bad-window", "bad-floor", "anchor"],
         )
 
     def test_naive_end_times_are_treated_as_utc(self):
@@ -447,7 +479,7 @@ class TestSessionHandover(unittest.TestCase):
             )
             self._trace(session_id, session_id, "question", "answer", ended_at)
 
-        self.assertEqual(self._handover_ids(self._digest()), ["E1", "E2", "E3", "E4"])
+        self.assertEqual(self._handover_ids(self._digest()), ["E1", "E2", "E3", "E4", "E5"])
 
     def test_running_recent_activity_follows_ended_group_and_excludes_stale(self):
         self._session("ended", "2024-01-01T08:00:00+00:00", ended="goodbye")
@@ -455,18 +487,22 @@ class TestSessionHandover(unittest.TestCase):
         self._session("stale", "2024-01-01T10:00:00+00:00")
         agent_sessions.touch_session(self.conn, "recent", "2024-01-02T11:00:00+00:00")
         agent_sessions.touch_session(self.conn, "stale", "2024-01-01T11:00:00+00:00")
-        for session_id in ("ended", "recent", "stale"):
-            self._trace(session_id, session_id, "question", "answer", "2024-01-02T11:01:00+00:00")
+        self._trace("ended", "ended", "question", "answer", "2024-01-02T11:01:00+00:00")
+        self._trace("recent", "recent", "question", "answer", "2024-01-02T11:01:00+00:00")
+        self._trace("stale", "stale", "question", "answer", "2024-01-01T11:01:00+00:00")
 
         digest = self._digest(now=datetime(2024, 1, 2, 12, tzinfo=UTC))
 
-        self.assertEqual(self._handover_ids(digest), ["ended", "recent"])
+        self.assertEqual(self._handover_ids(digest), ["recent", "ended"])
         self.assertIn('<session id="recent" agent_id="claude" state="running"', digest)
 
     def test_running_selection_filters_ineligible_rows_before_applying_cap(self):
-        for session_id in ("malformed", "future", "eligible"):
-            self._session(session_id, "2024-01-01T09:00:00+00:00")
-            self._trace(session_id, session_id, "question", "answer", "2024-01-02T11:01:00+00:00")
+        self._session("malformed", "2024-01-01T09:00:00+00:00")
+        self._session("future", "2024-01-01T09:00:00+00:00")
+        self._session("eligible", "2024-01-01T09:00:00+00:00")
+        self._trace("malformed", "malformed", "question", "answer", "2024-01-01T11:01:00+00:00")
+        self._trace("future", "future", "question", "answer", "2024-01-02T11:01:00+00:00")
+        self._trace("eligible", "eligible", "question", "answer", "2024-01-02T11:01:00+00:00")
         self.conn.execute(
             "UPDATE _agent_sessions SET last_activity_at = ? WHERE session_id = ?",
             ("not-a-timestamp", "malformed"),
@@ -485,7 +521,7 @@ class TestSessionHandover(unittest.TestCase):
 
         self.assertEqual(self._handover_ids(digest), ["eligible"])
 
-    def test_running_nonempty_activity_does_not_fall_back_to_started_at(self):
+    def test_running_trace_is_used_when_activity_is_empty(self):
         self._session("empty-activity", "2024-01-02T11:00:00+00:00")
         self._trace("empty-activity", "empty", "question", "answer", "2024-01-02T11:01:00+00:00")
         self.conn.execute(
@@ -496,7 +532,7 @@ class TestSessionHandover(unittest.TestCase):
 
         digest = self._digest(now=datetime(2024, 1, 2, 12, tzinfo=UTC))
 
-        self.assertEqual(self._handover_ids(digest), [])
+        self.assertEqual(self._handover_ids(digest), ["empty-activity"])
 
     def test_running_cap_is_independent_of_three_ended_sessions(self):
         for i in range(1, 4):
@@ -513,7 +549,10 @@ class TestSessionHandover(unittest.TestCase):
 
         digest = self._digest(now=datetime(2024, 1, 2, 12, tzinfo=UTC))
 
-        self.assertEqual(self._handover_ids(digest), ["E3", "E2", "E1", "R3", "R2"])
+        self.assertEqual(
+            self._handover_ids(digest),
+            ["R3", "R2", "R1", "E3", "E2", "E1"],
+        )
 
     def test_running_age_boundary_and_null_activity_fallback(self):
         for session_id, started_at in (
@@ -548,10 +587,10 @@ class TestSessionHandover(unittest.TestCase):
         self.assertEqual(
             tags,
             [
-                '<session id="ended" agent_id="claude" state="ended" '
-                'started_at="2024-01-01T08:00:00+00:00" ended_at="2024-01-01T10:00:00+00:00">',
                 '<session id="running" agent_id="claude" state="running" '
                 'started_at="2024-01-01T09:00:00+00:00">',
+                '<session id="ended" agent_id="claude" state="ended" '
+                'started_at="2024-01-01T08:00:00+00:00" ended_at="2024-01-01T10:00:00+00:00">',
             ],
         )
 
@@ -560,34 +599,37 @@ class TestSessionHandover(unittest.TestCase):
         self._trace("s1", "t1", "p" * 100, "a" * 5000, "2024-01-01T10:01:00+00:00")
         self._mid_turn("trace-t1", ["m" * 100])
 
-        digest = self._digest(max_chars=1000)
+        digest = self._digest(max_chars=2000)
 
         self.assertIn('<user-message truncated="false">\n' + "p" * 100 + "\n", digest)
         self.assertIn('<mid-turn-message n="1" truncated="false">\n' + "m" * 100 + "\n", digest)
         self.assertIn('<assistant-message truncated="true">', digest)
-        self.assertIn("[... 4200 chars truncated ...]", digest)
+        self.assertIn("[... 4180 chars truncated ...]", digest)
 
     def test_pending_response_does_not_consume_water_filling_budget(self):
         self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
         self._trace("s1", "t1", "p" * 1000, None, "2024-01-01T10:01:00+00:00", "pending")
+        self._mid_turn("trace-t1", ["m" * 100])
 
-        digest = self._digest(max_chars=800)
+        digest = self._digest(max_chars=1400)
 
-        self.assertIn("[... 200 chars truncated ...]", digest)
+        self.assertNotIn('<session-stub id="s1"', digest)
+        self.assertIn('<mid-turn-message n="1" truncated="false">\n' + "m" * 100 + "\n", digest)
+        self.assertIn("[... 880 chars truncated ...]", digest)
         self.assertNotIn("<assistant-message", digest)
 
     def test_truncation_keeps_head_and_tail_and_hints_trace_id(self):
         self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
         long_answer = "HEAD" + "m" * 5000 + "TAIL"
         self._trace("s1", "t1", "short", long_answer, "2024-01-01T10:01:00+00:00")
-        digest = self._digest(max_chars=400)  # Water-filling leaves 395 chars for the answer.
+        digest = self._digest(max_chars=2000)
         self.assertIn("HEAD", digest)
         self.assertIn("TAIL", digest)
-        self.assertIn("chars truncated", digest)
+        self.assertIn("[... 3929 chars truncated ...]", digest)
         self.assertIn('<assistant-message truncated="true">', digest)
         self.assertIn('<user-message truncated="false">', digest)
         self.assertIn("get_trace(trace_id='trace-t1')", digest)
-        self.assertLess(len(digest), 2500)
+        self.assertLessEqual(len(digest), 2000)
 
     def _mid_turn(self, trace_id, texts):
         for seq, text in enumerate(texts, start=1):
@@ -691,6 +733,225 @@ class TestSessionHandover(unittest.TestCase):
         self._trace("s1", "t1", "q", "a", "2024-01-01T10:01:00+00:00")
         with patch.dict(os.environ, {"SALTMDB_HANDOVER_MAX_CHARS": "0"}):
             self.assertNotIn("saltmdb-session-handover", self._digest())
+
+    def test_team_fixture_preserves_all_members_and_first_long_response(self):
+        base = datetime(2024, 1, 1, 8, tzinfo=UTC)
+        first_response_marker = "FIRST-ENDED-MARKER"
+        memory_ids = []
+        for index in range(5):
+            session_id = f"team-{index}"
+            started = (base + timedelta(milliseconds=index * 20)).isoformat()
+            ended = (base + timedelta(seconds=4 + index * 3)).isoformat()
+            self._session(session_id, started, ended="goodbye", ended_at=ended)
+            memory_id = f"memory-{index}"
+            memory_ids.append(memory_id)
+            self._memory(memory_id, session_id, f"Team Memory {index}")
+            response = first_response_marker + "x" * 5982 if index == 0 else "y" * 1500
+            self._trace(session_id, f"team-{index}", "team prompt", response, ended)
+        digest = self._digest(9000)
+        self.assertLessEqual(len(digest), 9000)
+        for memory_id in memory_ids:
+            self.assertIn(memory_id, digest)
+        self.assertEqual(digest.count("<session id="), 5)
+        self.assertIn(first_response_marker + "x" * 62, digest)
+
+    def test_one_hop_cohort_includes_crashed_start_sibling_without_older_team(self):
+        self._session(
+            "old",
+            "2024-01-01T06:00:00+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T07:00:00+00:00",
+        )
+        self._trace("old", "old", "old", "old", "2024-01-01T07:00:00+00:00")
+        self._session(
+            "A", "2024-01-01T08:00:00+00:00", ended="goodbye", ended_at="2024-01-01T17:05:00+00:00"
+        )
+        self._session(
+            "D", "2024-01-01T09:00:00+00:00", ended="goodbye", ended_at="2024-01-01T17:00:00+00:00"
+        )
+        self._session(
+            "T",
+            "2024-01-01T09:00:00.100000+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T17:00:10+00:00",
+        )
+        self._session(
+            "C",
+            "2024-01-01T09:00:00.100000+00:00",
+            ended="orphaned",
+            ended_at="2024-01-01T10:58:00+00:00",
+        )
+        for session_id, stamp in (
+            ("A", "2024-01-01T17:05:00+00:00"),
+            ("D", "2024-01-01T17:00:00+00:00"),
+            ("T", "2024-01-01T17:00:10+00:00"),
+            ("C", "2024-01-01T11:00:00+00:00"),
+        ):
+            self._trace(session_id, session_id, session_id, session_id, stamp)
+        self.assertEqual(self._handover_ids(self._digest()), ["A", "T", "D", "C"])
+
+    def test_effective_end_uses_newest_trace_after_crash(self):
+        self._session(
+            "anchor",
+            "2024-01-01T08:00:00+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T17:00:00+00:00",
+        )
+        self._session(
+            "crashed",
+            "2024-01-01T09:00:00+00:00",
+            ended="orphaned",
+            ended_at="2024-01-01T09:00:01+00:00",
+        )
+        self._trace("anchor", "anchor", "q", "a", "2024-01-01T17:00:00+00:00")
+        self._trace("crashed", "crashed", "q", "a", "2024-01-01T16:00:00+00:00")
+        self.assertEqual(self._handover_ids(self._digest()), ["anchor", "crashed"])
+
+    def test_running_anchor_is_used_only_when_no_ended_candidate_exists(self):
+        self._session(
+            "ended",
+            "2024-01-01T08:00:00+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T10:00:00+00:00",
+        )
+        self._session("running", "2024-01-01T09:00:00+00:00")
+        self._trace("ended", "ended", "q", "a", "2024-01-01T10:00:00+00:00")
+        self._trace("running", "running", "q", "a", "2024-01-01T11:00:00+00:00")
+        digest = self._digest(
+            before="2024-01-01T10:00:00.000000+00:00",
+            now=datetime(2024, 1, 1, 12, tzinfo=UTC),
+        )
+        self.assertEqual(self._handover_ids(digest), ["running", "ended"])
+        self._session("only-running", "2024-01-01T11:00:00+00:00")
+        self._trace("only-running", "only-running", "q", "a", "2024-01-01T11:01:00+00:00")
+        self.assertIn(
+            "only-running",
+            self._handover_ids(
+                self._digest(
+                    before="2024-01-01T12:00:00.000000+00:00",
+                    now=datetime(2024, 1, 1, 12, tzinfo=UTC),
+                )
+            ),
+        )
+
+    def test_running_only_cohort_anchors_latest_running_session(self):
+        self._session("running-a", "2024-01-01T10:00:00.000000+00:00")
+        self._session("running-b", "2024-01-01T10:00:00.100000+00:00")
+        self._trace("running-a", "running-a", "q", "a", "2024-01-01T11:00:00.000000+00:00")
+        self._trace("running-b", "running-b", "q", "a", "2024-01-01T11:01:00.000000+00:00")
+        self.assertEqual(
+            self._handover_ids(
+                self._digest(
+                    before="2024-01-01T11:00:00.000000+00:00",
+                    now=datetime(2024, 1, 1, 12, tzinfo=UTC),
+                )
+            ),
+            ["running-b", "running-a"],
+        )
+
+    def test_no_floor_keeps_single_previous_session(self):
+        self._session(
+            "older",
+            "2024-01-01T06:00:00+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T06:05:00+00:00",
+        )
+        self._session(
+            "previous",
+            "2024-01-01T10:00:00+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T10:05:00+00:00",
+        )
+        self._trace("older", "older", "q", "a", "2024-01-01T06:05:00+00:00")
+        self._trace("previous", "previous", "q", "a", "2024-01-01T10:05:00+00:00")
+        self.assertEqual(self._handover_ids(self._digest()), ["previous"])
+
+    def test_before_excludes_current_team_from_index_and_handover(self):
+        self._session(
+            "previous",
+            "2024-01-01T08:00:00.000000+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T08:30:00.000000+00:00",
+        )
+        self._memory("previous-memory", "previous", "Previous")
+        self._trace("previous", "previous", "q", "a", "2024-01-01T08:30:00.000000+00:00")
+        self._session(
+            "current",
+            "2024-01-01T09:00:00.000000+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T09:30:00.000000+00:00",
+        )
+        self._memory("current-memory", "current", "Current")
+        self._trace("current", "current", "q", "a", "2024-01-01T09:30:00.000000+00:00")
+        digest = session_digest_service.render_session_digest(
+            self.conn,
+            self.CWD,
+            9000,
+            before="2024-01-01T09:00:00.000000+00:00",
+        )
+        self.assertIn("previous-memory", digest)
+        self.assertNotIn("current-memory", digest)
+        self.assertIn('<session id="previous"', digest)
+        self.assertNotIn('<session id="current"', digest)
+
+    def test_index_deduplicates_and_caps_created_and_touched_groups(self):
+        self._session(
+            "A", "2024-01-01T08:00:00+00:00", ended="goodbye", ended_at="2024-01-01T09:00:00+00:00"
+        )
+        self._session(
+            "B",
+            "2024-01-01T08:00:00.100000+00:00",
+            ended="goodbye",
+            ended_at="2024-01-01T09:00:10+00:00",
+        )
+        self._memory("shared-memory", "A", "Shared", touched_by="B")
+        for index in range(19):
+            self._memory(f"created-{index}", "A", f"Created {index}")
+        for index in range(8):
+            self._memory(f"touched-{index}", "outside", f"Touched {index}", touched_by="B")
+        self.conn.execute(
+            "UPDATE entities SET updated_at = ? WHERE id = 'shared-memory'",
+            ("9999-01-01T00:00:00.000000+00:00",),
+        )
+        self.conn.commit()
+        digest = session_digest_service.render_session_digest(self.conn, self.CWD, 0)
+        self.assertEqual(digest.count("(by claude#"), 20)
+        self.assertIn("- (+5 more not shown)", digest)
+        self.assertIn("- (+3 more not shown)", digest)
+        self.assertEqual(digest.count("(by claude#A)"), 15)
+        self.assertEqual(digest.count("(by claude#B)"), 5)
+        self.assertEqual(digest.count("shared-memory"), 1)
+
+    def test_budget_degradation_stubs_oldest_traces_and_bounds_output(self):
+        session_ids = []
+        base = datetime(2024, 1, 1, 10, tzinfo=UTC)
+        for index in range(8):
+            session_id = f"0192d7e0-0000-7000-8000-{index:012d}"
+            stamp = (base + timedelta(seconds=index, microseconds=index)).isoformat(
+                timespec="microseconds"
+            )
+            session_ids.append(session_id)
+            self._session(session_id, stamp, ended="goodbye", ended_at=stamp)
+            self._trace(session_id, session_id, "q" * 500, "a" * 5000, stamp)
+        digest = self._digest(3500)
+        self.assertLessEqual(len(digest), 3500)
+        stub_ids = [
+            line.split('id="', 1)[1].split('"', 1)[0]
+            for line in digest.splitlines()
+            if line.startswith("<session-stub ")
+        ]
+        self.assertEqual(len(stub_ids), 6)
+        self.assertEqual(set(stub_ids), set(session_ids[: len(stub_ids)]))
+        rendered_ids = [
+            line.split('id="', 1)[1].split('"', 1)[0]
+            for line in digest.splitlines()
+            if line.startswith("<session id=")
+        ]
+        self.assertEqual(set(stub_ids) | set(rendered_ids), set(session_ids))
+        if len(stub_ids) < len(session_ids):
+            self.assertIn(session_ids[-1], rendered_ids)
+        tiny = self._digest(1)
+        self.assertEqual(tiny.count("<session-stub "), 8)
 
 
 class TestHandoverMaxCharsConfig(unittest.TestCase):

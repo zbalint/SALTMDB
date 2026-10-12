@@ -24,6 +24,7 @@ BUDGET_S = 10.0
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _saltmdb_hook_common import (  # noqa: E402
     HOOK_OUTPUT_MAX_CHARS,
+    OVERDUE_RESERVE_CHARS,
     cap_hook_output,
     clear_state,
     digest_pending_path,
@@ -32,10 +33,12 @@ from _saltmdb_hook_common import (  # noqa: E402
     read_digest_pending,
     resolve_cli,
     run_cli_bounded,
+    session_digest_args,
     write_digest_pending,
 )
 
 CLI = resolve_cli()
+STARTED_AT = time.time()
 
 
 def remaining() -> float:
@@ -48,7 +51,12 @@ def run_cli(*args: str) -> str | None:
     return run_cli_bounded(CLI, args, remaining())
 
 
-def bootstrap_text(source: str | None = None, missing: list[str] | None = None) -> str:
+def bootstrap_text(
+    source: str | None = None,
+    missing: list[str] | None = None,
+    *,
+    capped: bool = True,
+) -> str:
     sections: list[str] = []
     digest = run_cli("bootstrap-digest")
     if digest:
@@ -71,7 +79,15 @@ def bootstrap_text(source: str | None = None, missing: list[str] | None = None) 
 
     # The last-session handover is large and the session already holds it from startup; a
     # compaction only needs the core digest back, in case the built-in summarizer dropped it.
-    session_digest = None if source == "compact" else run_cli("session-digest")
+    session_digest = (
+        None
+        if source == "compact"
+        else run_cli(
+            *session_digest_args(
+                len(core_section), OVERDUE_RESERVE_CHARS, STARTED_AT, capped=capped
+            )
+        )
+    )
     session_section = ""
     if session_digest:
         session_section = session_digest.strip()
@@ -135,10 +151,16 @@ def main() -> None:
     if pending_path is not None:
         prune_stale_state("digest-pending-*", max_age_days=1)
         pending_before = _pending_parts(expected, read_digest_pending(pending_path))
-        write_digest_pending(pending_path, pending_before, attempts=0, running_since=time.time())
+        write_digest_pending(
+            pending_path,
+            pending_before,
+            attempts=0,
+            running_since=time.time(),
+            started_at=STARTED_AT,
+        )
 
     missing: list[str] = []
-    text = bootstrap_text(payload.get("source"), missing)
+    text = bootstrap_text(payload.get("source"), missing, capped=not payload.get("conversationId"))
     if text:
         if payload.get("conversationId"):
             json.dump({"injectSteps": [{"ephemeralMessage": text}]}, sys.stdout)
@@ -163,7 +185,13 @@ def main() -> None:
     if remaining_parts:
         # shortcut: the retry hook can race this final reconciliation by a few milliseconds;
         # retaining the union prevents that failure write from being lost.
-        write_digest_pending(pending_path, remaining_parts, attempts=0, running_since=None)
+        write_digest_pending(
+            pending_path,
+            remaining_parts,
+            attempts=0,
+            running_since=None,
+            started_at=STARTED_AT,
+        )
         clear_state(claimed_path)
     else:
         clear_state(pending_path, claimed_path)

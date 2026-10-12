@@ -20,8 +20,10 @@ from saltmdb.db.schema import init_db
 
 
 class _Args:
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, max_chars=None, before=None):
         self.db_path = db_path
+        self.max_chars = max_chars
+        self.before = before
 
 
 class TestBootstrapDigestCli(unittest.TestCase):
@@ -120,6 +122,54 @@ class TestSessionDigestCli(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("<saltmdb-last-session-digest>", buf.getvalue())
 
+    def test_max_chars_and_before_are_forwarded_normalized(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            args = _Args(db_path=tmp.name, max_chars=12000, before="2026-10-12T14:34:56+02:00")
+            with (
+                patch("saltmdb.config.get_handover_max_chars", return_value=40000),
+                patch("saltmdb.daemon.client.call", return_value="<digest>") as mock_call,
+            ):
+                rc = cmd_session_digest(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            mock_call.call_args.args[2],
+            {
+                "cwd": os.path.realpath(os.getcwd()),
+                "max_chars": 12000,
+                "before": "2026-10-12T12:34:56.000000+00:00",
+            },
+        )
+
+    def test_invalid_before_warns_and_is_ignored(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            args = _Args(db_path=tmp.name, max_chars=None, before="not-a-timestamp")
+            err = io.StringIO()
+            with (
+                patch("saltmdb.config.get_handover_max_chars", return_value=40000),
+                patch("saltmdb.daemon.client.call", return_value="<digest>") as mock_call,
+                redirect_stderr(err),
+            ):
+                rc = cmd_session_digest(args)
+        self.assertEqual(rc, 0)
+        self.assertIn("Ignoring invalid --before", err.getvalue())
+        self.assertNotIn("before", mock_call.call_args.args[2])
+
+    def test_max_chars_is_limited_by_environment_and_zero_disables_handover(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            args = _Args(db_path=tmp.name, max_chars=8000, before=None)
+            with (
+                patch("saltmdb.config.get_handover_max_chars", return_value=5000),
+                patch("saltmdb.daemon.client.call", return_value="<digest>") as limited,
+            ):
+                cmd_session_digest(args)
+            with (
+                patch("saltmdb.config.get_handover_max_chars", return_value=0),
+                patch("saltmdb.daemon.client.call", return_value="<digest>") as zero,
+            ):
+                cmd_session_digest(args)
+        self.assertEqual(limited.call_args.args[2]["max_chars"], 5000)
+        self.assertEqual(zero.call_args.args[2]["max_chars"], 0)
+
 
 class TestBuildParser(unittest.TestCase):
     def test_bootstrap_digest_subcommand_has_no_legacy_flags(self):
@@ -135,6 +185,13 @@ class TestBuildParser(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["--db-path", "/tmp/custom.db", "bootstrap-digest"])
         self.assertEqual(args.db_path, "/tmp/custom.db")
+
+    def test_session_digest_budget_and_before_options(self):
+        args = build_parser().parse_args(
+            ["session-digest", "--max-chars", "1234", "--before", "2026-10-12T00:00:00"]
+        )
+        self.assertEqual(args.max_chars, 1234)
+        self.assertEqual(args.before, "2026-10-12T00:00:00")
 
     def test_export_corpus_snapshot_subcommand_has_no_owner_argument(self):
         parser = build_parser()

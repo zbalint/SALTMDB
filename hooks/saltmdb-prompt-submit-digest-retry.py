@@ -30,6 +30,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     read_stdin_json,
     resolve_cli,
     run_cli_bounded,
+    session_digest_args,
     state_dir,
     write_digest_pending,
 )
@@ -104,15 +105,30 @@ def _claim_ready(pending_path: Path, claimed_path: Path) -> dict[str, object] | 
     return read_digest_pending(claimed_path)
 
 
-def _fetch_parts(cli: str, missing: list[str]) -> tuple[list[str], list[str]]:
+def _fetch_parts(
+    cli: str, missing: list[str], started_at: object = None
+) -> tuple[list[str], list[str]]:
     fetched: list[str] = []
     output: list[str] = []
+    core_len = 0
+    valid_started_at = (
+        float(started_at)
+        if isinstance(started_at, (int, float)) and not isinstance(started_at, bool)
+        else None
+    )
     for part in missing:
-        result = run_cli_bounded(cli, (part,), BUDGET_S - (time.monotonic() - START))
+        args = (
+            (part,)
+            if part == "bootstrap-digest"
+            else session_digest_args(core_len, 0, valid_started_at)
+        )
+        result = run_cli_bounded(cli, args, BUDGET_S - (time.monotonic() - START))
         if not result:
             break
         fetched.append(part)
         output.append(result.strip())
+        if part == "bootstrap-digest":
+            core_len = len(result.strip())
     return fetched, output
 
 
@@ -129,9 +145,19 @@ def _finish_claim(
         if not isinstance(attempts, int):
             attempts = 0
         next_attempts = attempts + 1
+        raw_started_at = marker.get("started_at")
+        started_at = (
+            float(raw_started_at)
+            if isinstance(raw_started_at, (int, float)) and not isinstance(raw_started_at, bool)
+            else None
+        )
         if next_attempts < MAX_RETRY_ATTEMPTS:
             write_digest_pending(
-                pending_path, remaining, attempts=next_attempts, running_since=None
+                pending_path,
+                remaining,
+                attempts=next_attempts,
+                running_since=None,
+                started_at=started_at,
             )
     _unlink(claimed_path)
 
@@ -160,7 +186,7 @@ def main() -> None:
         _unlink(claimed_path)
         return
 
-    fetched, output = _fetch_parts(cli, missing)
+    fetched, output = _fetch_parts(cli, missing, marker.get("started_at"))
     if output:
         text = cap_hook_output("\n\n".join(output), cli)
         sys.stdout.write(text)

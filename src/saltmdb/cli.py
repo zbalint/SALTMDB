@@ -30,6 +30,8 @@ def cmd_bootstrap_digest(args):
 
 
 def cmd_session_digest(args):
+    from datetime import UTC, datetime
+
     from saltmdb.config import get_db_path, get_handover_max_chars
     from saltmdb.daemon import client as daemon_client
 
@@ -38,12 +40,30 @@ def cmd_session_digest(args):
         return 0
 
     cwd = os.path.realpath(os.getcwd())
-    # Read here, not in the daemon: the hook's environment is what the user configures.
-    max_chars = get_handover_max_chars()
+    env_budget = get_handover_max_chars()
+    requested_budget = getattr(args, "max_chars", None)
+    if env_budget == 0:
+        max_chars = 0
+    elif requested_budget is None:
+        max_chars = env_budget
+    else:
+        max_chars = min(requested_budget, env_budget)
+    before = getattr(args, "before", None)
+    normalized_before = None
+    if before is not None:
+        try:
+            parsed_before = datetime.fromisoformat(before)
+        except ValueError:
+            print(f"# Warning: Ignoring invalid --before timestamp: {before}", file=sys.stderr)
+        else:
+            if parsed_before.tzinfo is None:
+                parsed_before = parsed_before.replace(tzinfo=UTC)
+            normalized_before = parsed_before.astimezone(UTC).isoformat(timespec="microseconds")
+    params = {"cwd": cwd, "max_chars": max_chars}
+    if normalized_before is not None:
+        params["before"] = normalized_before
     try:
-        digest = daemon_client.call(
-            db_path, "get_last_session_digest", {"cwd": cwd, "max_chars": max_chars}
-        )
+        digest = daemon_client.call(db_path, "get_last_session_digest", params)
     except Exception as e:
         print(f"# Warning: Failed to fetch last-session digest: {e}", file=sys.stderr)
         return 0
@@ -524,6 +544,8 @@ def build_parser():
         "session-digest",
         help="Print the last session's memory index for this directory (session-start hook).",
     )
+    s.add_argument("--max-chars", type=int, default=None)
+    s.add_argument("--before", default=None)
     s.set_defaults(func=cmd_session_digest)
 
     r = sub.add_parser(

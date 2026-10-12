@@ -484,6 +484,42 @@ class TestAgentSessions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "memories.*traces"):
             get_recent_sessions_for_cwd(self.conn, cwd, with_content="events")
 
+    def test_recent_any_content_before_and_last_trace_completion(self):
+        cwd = "/project"
+        for session_id, hour in (
+            ("memory", 8),
+            ("trace", 9),
+            ("boundary", 10),
+            ("later", 11),
+            ("archived", 7),
+        ):
+            record_session(self.conn, session_id, cwd, f"2024-01-01T{hour:02d}:00:00.000000+00:00")
+        self._mk_entity("memory-only", agent_session_id="memory")
+        self._mk_entity("archived-only", agent_session_id="archived", status="archived")
+        for session_id in ("trace", "boundary", "later"):
+            self._mk_trace(f"trace-{session_id}", session_id)
+        self.conn.execute(
+            "UPDATE conversation_traces SET updated_at = ? WHERE id = ?",
+            ("2024-01-01T17:00:00.000000+00:00", "trace-trace"),
+        )
+        rows = get_recent_sessions_for_cwd(
+            self.conn, cwd, with_content="any", before="2024-01-01T10:00:00.000000+00:00"
+        )
+        self.assertEqual([row["session_id"] for row in rows], ["trace", "memory"])
+        self.assertEqual(rows[0]["last_trace_at"], "2024-01-01T17:00:00.000000+00:00")
+        self.assertIsNone(rows[1]["last_trace_at"])
+        self.assertEqual(
+            [
+                row["session_id"]
+                for row in get_recent_sessions_for_cwd(self.conn, cwd, with_content="any")
+            ],
+            ["later", "boundary", "trace", "memory"],
+        )
+        with self.assertRaisesRegex(
+            ValueError, "^with_content must be one of: memories, traces, any$"
+        ):
+            get_recent_sessions_for_cwd(self.conn, cwd, with_content="events")
+
     def test_memories_query_uses_both_session_indexes(self):
         predicate = agent_sessions._CONTENT_PREDICATES["memories"]
         plan = self.conn.execute(
