@@ -41,6 +41,7 @@ import random
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _saltmdb_hook_common import (  # noqa: E402
@@ -83,7 +84,7 @@ STOP_HOOK_FEEDBACK_PATTERN = re.compile(
 )
 
 
-def emit_block(data: dict, reason: str) -> None:
+def emit_block(data: dict[str, Any], reason: str) -> None:
     emit(stop_block_payload(data, reason))
     sys.exit(0)
 
@@ -144,14 +145,7 @@ def find_last_user_line(transcript_path: str) -> int | None:
     return last
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915 -- Stage 1/Stage 2 episode state machine kept inline
-    data = read_stdin_json()
-    transcript_path = get_field(data, "transcript_path", "transcriptPath")
-    session_id = get_session_id(data) or "unknown"
-
-    if not transcript_path or not Path(transcript_path).is_file():
-        sys.exit(0)
-
+def _state_paths(session_id: str) -> tuple[Path, Path, Path, Path]:
     prune_stale_state("stop-critique-*.count")
     prune_stale_state("stop-critique-*.stage2")
     prune_stale_state("stop-critique-*.session_fires")
@@ -160,63 +154,70 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915 -- Stage 1/Stage 2 episode s
     stage2_state = state_dir() / f"stop-critique-{session_id}.stage2"
     session_fires_state = state_dir() / f"stop-critique-{session_id}.session_fires"
     session_cap_state = state_dir() / f"stop-critique-{session_id}.session_cap"
+    return count_state, stage2_state, session_fires_state, session_cap_state
 
-    last_user_line = find_last_user_line(transcript_path)
-    last_prompt_line = find_last_line_matching(transcript_path, PROMPT_SENTINEL)
-    last_stage2_prompt_line = find_last_line_matching(transcript_path, STAGE2_PROMPT_SENTINEL)
 
+def _segment(transcript_path: str, last_user_line: int | None, last_prompt_line: int | None) -> str:
     if last_prompt_line is not None:
         window_start = last_prompt_line + 1
     elif last_user_line is not None:
         window_start = last_user_line
     else:
         window_start = None
-
-    segment = (
+    return (
         read_transcript_from_line(transcript_path, window_start)
         if window_start is not None
         else read_transcript_from_line(transcript_path, max(1, _line_count(transcript_path) - 400))
     )
 
-    # New user turn since our last prompt: reset both stages, fall through to the Stage 1 check.
-    if last_user_line is not None and (
-        last_prompt_line is None or last_user_line > last_prompt_line
-    ):
-        clear_state(count_state, stage2_state)
 
+def _run_stage1(
+    data: dict[str, Any],
+    segment: str,
+    last_prompt_line: int | None,
+    count_state: Path,
+    session_fires_state: Path,
+    session_cap_state: Path,
+) -> None:
     # Stage 1: check whether an already-issued prompt was answered BEFORE gating on whether a
     # risky tool call is present in this same segment -- the reply containing the marker is
     # often pure text with no further tool call, so requiring both in the same window would
     # silently pass the gate without ever detecting the answer.
     stage1_satisfied = last_prompt_line is not None and MARKER in segment
-
-    if not stage1_satisfied:
-        if not RISKY_TOOL_NAMES.search(segment):
+    if stage1_satisfied:
+        return
+    if not RISKY_TOOL_NAMES.search(segment):
+        sys.exit(0)
+    count = read_count(count_state)
+    if count >= 2:
+        clear_state(count_state)
+        sys.exit(0)
+    # Cap check only on a genuinely new episode (count 0 -> 1) -- a retry of one still-
+    # unanswered episode (count 1 -> 2) must not consume additional session budget.
+    if count == 0:
+        cap = get_or_roll_session_cap(session_cap_state)
+        fires_so_far = read_count(session_fires_state)
+        if fires_so_far >= cap:
             sys.exit(0)
-        count = read_count(count_state)
-        if count >= 2:
-            clear_state(count_state)
-            sys.exit(0)
-        # Cap check only on a genuinely new episode (count 0 -> 1) -- a retry of one still-
-        # unanswered episode (count 1 -> 2) must not consume additional session budget.
-        if count == 0:
-            cap = get_or_roll_session_cap(session_cap_state)
-            fires_so_far = read_count(session_fires_state)
-            if fires_so_far >= cap:
-                sys.exit(0)
-            write_count(session_fires_state, fires_so_far + 1)
-        write_count(count_state, count + 1)
-        emit_block(data, build_stage1_reason(load_questions()))
+        write_count(session_fires_state, fires_so_far + 1)
+    write_count(count_state, count + 1)
+    emit_block(data, build_stage1_reason(load_questions()))
 
+
+def _run_stage2(
+    data: dict[str, Any],
+    transcript_path: str,
+    marker_line: int | None,
+    last_stage2_prompt_line: int | None,
+    count_state: Path,
+    stage2_state: Path,
+) -> None:
     # Stage 1 satisfied. Stage 2: did the reflection turn into a stored memory, or an explicit
     # opt-out?
-    marker_line = find_last_line_matching(transcript_path, MARKER)
     after_marker = read_transcript_from_line(transcript_path, marker_line) if marker_line else ""
-
     if STORE_MEMORY_PATTERN.search(after_marker) or NO_LESSON_SENTINEL in after_marker:
         clear_state(count_state, stage2_state)
         sys.exit(0)
-
     # Already asked once for stage 2 in this window and still nothing -- let it go rather than
     # loop.
     if (
@@ -226,13 +227,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915 -- Stage 1/Stage 2 episode s
     ):
         clear_state(count_state, stage2_state)
         sys.exit(0)
-
     stage2_count = read_count(stage2_state)
     if stage2_count >= 1:
         clear_state(stage2_state)
         sys.exit(0)
     write_count(stage2_state, 1)
-
     emit_block(
         data,
         f"<!-- {STAGE2_PROMPT_SENTINEL} --> You just answered the self-critique questions. If "
@@ -240,6 +239,37 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915 -- Stage 1/Stage 2 episode s
         "remembering, a constraint you didn't know before), call store_memory for it now -- a "
         "reflection that isn't captured just evaporates. If nothing durable came out of it, say "
         f"so explicitly by including the exact line <!-- {NO_LESSON_SENTINEL} --> in your reply.",
+    )
+
+
+def main() -> None:
+    data = read_stdin_json()
+    transcript_path = get_field(data, "transcript_path", "transcriptPath")
+    session_id = get_session_id(data) or "unknown"
+    if not transcript_path or not Path(transcript_path).is_file():
+        sys.exit(0)
+
+    count_state, stage2_state, session_fires_state, session_cap_state = _state_paths(session_id)
+    last_user_line = find_last_user_line(transcript_path)
+    last_prompt_line = find_last_line_matching(transcript_path, PROMPT_SENTINEL)
+    last_stage2_prompt_line = find_last_line_matching(transcript_path, STAGE2_PROMPT_SENTINEL)
+    segment = _segment(transcript_path, last_user_line, last_prompt_line)
+    # New user turn since our last prompt: reset both stages, fall through to the Stage 1 check.
+    if last_user_line is not None and (
+        last_prompt_line is None or last_user_line > last_prompt_line
+    ):
+        clear_state(count_state, stage2_state)
+    _run_stage1(
+        data, segment, last_prompt_line, count_state, session_fires_state, session_cap_state
+    )
+    marker_line = find_last_line_matching(transcript_path, MARKER)
+    _run_stage2(
+        data,
+        transcript_path,
+        marker_line,
+        last_stage2_prompt_line,
+        count_state,
+        stage2_state,
     )
 
 

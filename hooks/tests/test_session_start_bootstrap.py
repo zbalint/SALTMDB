@@ -11,6 +11,7 @@ last-resort fallback only.
 from __future__ import annotations
 
 import importlib.util
+import io
 import inspect
 import subprocess
 import sys
@@ -184,6 +185,21 @@ def test_bootstrap_text_skips_health_when_budget_is_below_spawn_threshold():
     assert calls == ["bootstrap-digest", "session-digest"]
     assert "<bootstrap-digest>" in text
     assert "<session-digest>" in text
+
+
+def test_main_emits_antigravity_json_shape(capsys, tmp_path):
+    bootstrap = _load_module("saltmdb-session-start-bootstrap")
+
+    def fake_run_cli(*args):
+        return "<digest>" if args[0] == "bootstrap-digest" else None
+
+    with (
+        patch.object(bootstrap, "run_cli", side_effect=fake_run_cli),
+        patch.object(Path, "home", return_value=tmp_path),
+        patch("sys.stdin", io.StringIO('{"conversationId":"conversation-1"}')),
+    ):
+        bootstrap.main()
+    assert capsys.readouterr().out == '{"injectSteps": [{"ephemeralMessage": "<digest>"}]}\n'
 
 
 def test_run_cli_uses_remaining_budget_as_subprocess_timeout():

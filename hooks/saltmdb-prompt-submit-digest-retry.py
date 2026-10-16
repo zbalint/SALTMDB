@@ -68,39 +68,40 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def _recover_stale_claim(pending_path: Path, claimed_path: Path) -> dict[str, object] | None:
+    try:
+        claimed_age = time.time() - claimed_path.stat().st_mtime
+    except OSError:
+        return None
+    if claimed_age < CLAIM_STALE_S:
+        return None
+    # shortcut: a compact SessionStart can recreate the marker in the same few
+    # milliseconds; stale-claim recovery may overwrite that marker before it is
+    # claimed below.
+    try:
+        os.replace(claimed_path, pending_path)
+    except OSError:
+        return None
+    return read_digest_pending(pending_path)
+
+
 def _claim_ready(pending_path: Path, claimed_path: Path) -> dict[str, object] | None:
     marker = read_digest_pending(pending_path)
-    ready = marker is not None
     if marker is not None:
         running_since = marker.get("running_since")
         if (
             isinstance(running_since, (int, float))
             and time.time() - running_since < RUNNING_GRACE_S
         ):
-            ready = False
+            return None
     elif claimed_path.is_file():
-        try:
-            claimed_age = time.time() - claimed_path.stat().st_mtime
-        except OSError:
-            ready = False
-        else:
-            if claimed_age >= CLAIM_STALE_S:
-                # shortcut: a compact SessionStart can recreate the marker in the same few
-                # milliseconds; stale-claim recovery may overwrite that marker before it is
-                # claimed below.
-                try:
-                    os.replace(claimed_path, pending_path)
-                except OSError:
-                    ready = False
-                else:
-                    marker = read_digest_pending(pending_path)
-                    ready = marker is not None
-            else:
-                ready = False
+        marker = _recover_stale_claim(pending_path, claimed_path)
+        if marker is None:
+            return None
     else:
-        ready = False
+        return None
 
-    if not ready or not _claim_marker(pending_path, claimed_path):
+    if not _claim_marker(pending_path, claimed_path):
         return None
     return read_digest_pending(claimed_path)
 

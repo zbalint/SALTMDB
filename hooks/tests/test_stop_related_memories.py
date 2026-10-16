@@ -8,6 +8,7 @@ lines. No live daemon, database or installed hook directory is touched.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -653,6 +654,100 @@ class TestLog(HookCase):
         text = self.log_text()
         self.assertLess(len(text), hook.LOG_MAX_BYTES)
         self.assertIn("short-reply", text)
+
+
+class _BytesStdin:
+    def __init__(self, text):
+        self.buffer = io.BytesIO(text.encode("utf-8"))
+
+
+def _run_main_in_process(payload, *, env, cli="/fake-cli", stdout=""):
+    output = io.StringIO()
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("sys.stdin", _BytesStdin(payload)),
+        patch("sys.stdout", output),
+        patch.object(hook, "resolve_cli", return_value=cli),
+        patch.object(hook, "_run_cli", return_value=stdout),
+        patch.object(hook, "read_transcript_full", return_value=""),
+    ):
+        hook.main()
+    return output.getvalue()
+
+
+def test_main_in_process_guard_order_and_silent_exits(tmp_path):
+    payload = json.dumps({"session_id": "in-process", "last_assistant_message": LONG_REPLY})
+    assert (
+        _run_main_in_process(
+            payload, env={"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "0"}
+        )
+        == ""
+    )
+
+    for data in ("", "{bad", "[]"):
+        assert (
+            _run_main_in_process(
+                data, env={"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "1"}
+            )
+            == ""
+        )
+
+    active = json.dumps(
+        {"session_id": "in-process", "stop_hook_active": True, "last_assistant_message": LONG_REPLY}
+    )
+    assert (
+        _run_main_in_process(
+            active, env={"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "1"}
+        )
+        == ""
+    )
+
+    missing = json.dumps({"session_id": "in-process"})
+    assert (
+        _run_main_in_process(
+            missing, env={"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "1"}
+        )
+        == ""
+    )
+
+    short = json.dumps({"session_id": "in-process", "last_assistant_message": "short"})
+    assert (
+        _run_main_in_process(
+            short, env={"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "1"}
+        )
+        == ""
+    )
+
+
+def test_main_in_process_cli_and_seen_row_paths(tmp_path):
+    base_env = {"HOME": str(tmp_path), "SALTMDB_RELATED_MEMORIES_HOOK": "1"}
+    payload = json.dumps({"session_id": "in-process", "last_assistant_message": LONG_REPLY})
+    assert _run_main_in_process(payload, env=base_env, cli=None) == ""
+    assert _run_main_in_process(payload, env=base_env, stdout="") == ""
+
+    row = f"{uid(8)}\tFresh\n"
+    fresh_payload = json.dumps(
+        {"session_id": "fresh-in-process", "last_assistant_message": LONG_REPLY}
+    )
+    fresh_output = _run_main_in_process(fresh_payload, env=base_env, stdout=row)
+    fresh_result = json.loads(fresh_output)
+    assert fresh_result["decision"] == "block"
+    state_path = tmp_path / ".saltmdb/hooks/.state/related-memories-fresh-in-process.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["prompts"] == 1
+    assert state["pending_continuation"] is True
+
+    transcript = json.dumps({"session_id": "in-process", "last_assistant_message": LONG_REPLY})
+    with (
+        patch.dict(os.environ, base_env, clear=True),
+        patch("sys.stdin", _BytesStdin(transcript)),
+        patch("sys.stdout", io.StringIO()) as output,
+        patch.object(hook, "resolve_cli", return_value="/fake-cli"),
+        patch.object(hook, "_run_cli", return_value=row),
+        patch.object(hook, "read_transcript_full", return_value=uid(8)),
+    ):
+        hook.main()
+        assert output.getvalue() == ""
 
 
 if __name__ == "__main__":

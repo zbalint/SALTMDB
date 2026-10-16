@@ -65,37 +65,53 @@ def _write_of(tool_name, complete_data):
     return (tool_name, entity_id) if entity_id else None
 
 
+def _get_interaction(iid, order, by_id):
+    if iid not in by_id:
+        by_id[iid] = _new_interaction(iid)
+        order.append(iid)
+    return by_id[iid]
+
+
+def _record_message(data, kind, iid, order, by_id):
+    if kind == "user.message" and iid:
+        _get_interaction(iid, order, by_id)["messages"].append(data.get("content", ""))
+    elif kind == "assistant.message" and iid:
+        entry = _get_interaction(iid, order, by_id)
+        if data.get("content") and not data.get("toolRequests"):
+            entry["final"] = data["content"]
+
+
+def _record_tool(data, kind, iid, order, by_id, started):
+    if kind == "tool.execution_start":
+        started[data.get("toolCallId")] = data.get("mcpToolName")
+    elif kind == "tool.execution_complete" and iid and data.get("success"):
+        write = _write_of(started.get(data.get("toolCallId")), data)
+        if write:
+            _get_interaction(iid, order, by_id)["writes"].append(write)
+
+
+def _record_event(event, order, by_id, started):
+    data = event.get("data") if isinstance(event, dict) else None
+    if not isinstance(data, dict):
+        return
+    kind, iid = event.get("type"), data.get("interactionId")
+    if kind in ("user.message", "assistant.message"):
+        _record_message(data, kind, iid, order, by_id)
+    elif kind in ("tool.execution_start", "tool.execution_complete"):
+        _record_tool(data, kind, iid, order, by_id, started)
+
+
 def parse_interactions(lines):
     """Group a Copilot events.jsonl into one dict per user prompt (``interactionId``)."""
     order, by_id, started = [], {}, {}
-
-    def get(iid):
-        if iid not in by_id:
-            by_id[iid] = _new_interaction(iid)
-            order.append(iid)
-        return by_id[iid]
-
     for line in lines:
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        data = event.get("data") if isinstance(event, dict) else None
-        if not isinstance(data, dict):
+        if not isinstance(event, dict):
             continue
-        kind, iid = event.get("type"), data.get("interactionId")
-        if kind == "user.message" and iid:
-            get(iid)["messages"].append(data.get("content", ""))
-        elif kind == "assistant.message" and iid:
-            entry = get(iid)
-            if data.get("content") and not data.get("toolRequests"):
-                entry["final"] = data["content"]
-        elif kind == "tool.execution_start":
-            started[data.get("toolCallId")] = data.get("mcpToolName")
-        elif kind == "tool.execution_complete" and iid and data.get("success"):
-            write = _write_of(started.get(data.get("toolCallId")), data)
-            if write:
-                get(iid)["writes"].append(write)
+        _record_event(event, order, by_id, started)
     return [by_id[i] for i in order if by_id[i]["messages"]]
 
 

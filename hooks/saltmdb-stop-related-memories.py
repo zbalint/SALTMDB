@@ -28,6 +28,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 DEFAULT_ENABLED = False
 # BL-028 replay, 200 replies: 4.0 blocks 11.5% of replies at precision 0.54 and a 3% false-block rate.
@@ -129,7 +130,12 @@ class _Session:
         self.session_id = safe
         prune_stale_state("related-memories-*.json")
         self.path = state_dir() / f"related-memories-{safe}.json"
-        self.data = {"prompts": 0, "pending_continuation": False, "shown_ids": [], "logged": []}
+        self.data: dict[str, Any] = {
+            "prompts": 0,
+            "pending_continuation": False,
+            "shown_ids": [],
+            "logged": [],
+        }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
@@ -204,71 +210,95 @@ def _run_cli(cli: str, reply: str, min_score: float, session: _Session) -> str:
     return proc.stdout.decode("utf-8", errors="replace")
 
 
-def main() -> None:  # noqa: C901, PLR0911 -- one guard per silent exit, in spec order
-    # D3 guards intentionally run before D2 reply presence/length checks.
-    if not is_enabled():
-        return
+def _read_payload() -> dict[str, Any] | None:
     raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     try:
-        data = json.loads(raw) if raw.strip() else {}
+        return json.loads(raw) if raw.strip() else {}
     except ValueError:
-        data = None
-    if not isinstance(data, dict) or not data:
-        _Session("unknown").log("empty-or-malformed-payload")
-        return
+        return None
 
-    session = _Session(get_session_id(data) or "unknown")
+
+def _state_guard(data: dict[str, Any], session: _Session) -> bool:
     state = session.data
     if data.get("stop_hook_active") is True:
         state["pending_continuation"] = False
         session.save()
         session.log("stop-hook-active")
-        return
+        return True
     if state.get("pending_continuation"):
         fresh = time.time() - float(state.get("pending_at") or 0) < PENDING_MAX_AGE_S
         state["pending_continuation"] = False
         session.save()
         if fresh:
             session.log("continuation")
-            return
+            return True
     if int(state.get("prompts") or 0) >= MAX_PROMPTS_PER_SESSION:
         session.log("session-cap")
-        return
+        return True
+    return False
 
-    if "last_assistant_message" not in data:
-        session.log("no-last-assistant-message", "keys=" + ",".join(sorted(map(str, data))))
-        return
-    reply = data.get("last_assistant_message")
-    if not isinstance(reply, str) or len(reply) < MIN_REPLY_CHARS:
-        session.log("short-reply")
-        return
 
-    min_score = _min_score(session)
-    cli = resolve_cli()
-    if not cli:
-        session.log("no-cli")
-        return
-    stdout = _run_cli(cli, reply, min_score, session)
-    if not stdout.strip():
-        session.log("no-rows")
-        return
-
-    seen = seen_tokens(read_transcript_full(get_field(data, "transcript_path", "transcriptPath")))
+def _fresh_rows(stdout: str, transcript: str, state: dict[str, Any]) -> list[tuple[str, str]]:
+    seen = seen_tokens(transcript)
     shown = set(state.get("shown_ids") or [])
-    fresh_rows = [
+    return [
         (memory_id, title)
         for memory_id, title in parse_rows(stdout)
         if memory_id[:8].lower() not in seen and memory_id not in shown
     ][:MAX_LISTED]
-    if not fresh_rows:
-        session.log("all-seen")
-        return
 
+
+def _record_block(session: _Session, rows: list[tuple[str, str]]) -> None:
+    state = session.data
     state["prompts"] = int(state.get("prompts") or 0) + 1
     state["pending_continuation"] = True
     state["pending_at"] = time.time()
-    state["shown_ids"] = [*(state.get("shown_ids") or []), *(row[0] for row in fresh_rows)]
+    state["shown_ids"] = [*(state.get("shown_ids") or []), *(row[0] for row in rows)]
     session.save()
+
+
+def _query_rows(data: dict[str, Any], session: _Session) -> str | None:
+    if "last_assistant_message" not in data:
+        session.log("no-last-assistant-message", "keys=" + ",".join(sorted(map(str, data))))
+        return None
+    reply = data.get("last_assistant_message")
+    if not isinstance(reply, str) or len(reply) < MIN_REPLY_CHARS:
+        session.log("short-reply")
+        return None
+    min_score = _min_score(session)
+    cli = resolve_cli()
+    if not cli:
+        session.log("no-cli")
+        return None
+    stdout = _run_cli(cli, reply, min_score, session)
+    if not stdout.strip():
+        session.log("no-rows")
+        return None
+    return stdout
+
+
+def main() -> None:
+    # D3 guards intentionally run before D2 reply presence/length checks.
+    if not is_enabled():
+        return
+    data = _read_payload()
+    if not isinstance(data, dict) or not data:
+        _Session("unknown").log("empty-or-malformed-payload")
+        return
+
+    session = _Session(get_session_id(data) or "unknown")
+    if _state_guard(data, session):
+        return
+    stdout = _query_rows(data, session)
+    if stdout is None:
+        return
+
+    transcript = read_transcript_full(get_field(data, "transcript_path", "transcriptPath"))
+    fresh_rows = _fresh_rows(stdout, transcript, session.data)
+    if not fresh_rows:
+        session.log("all-seen")
+        return
+    _record_block(session, fresh_rows)
     emit(stop_block_payload(data, format_reason(fresh_rows)))
 
 

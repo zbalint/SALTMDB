@@ -329,6 +329,45 @@ def test_retry_claim_stale_recovery_and_mtime_refresh(tmp_path):
     resolve.assert_not_called()
 
 
+def test_retry_claim_stale_stat_failure_skips_cli(tmp_path):
+    retry = _retry()
+    marker = _marker(tmp_path)
+    claimed_file = Path(f"{marker}.claimed")
+    common.write_digest_pending(claimed_file, ["bootstrap-digest"])
+    base_path = type(Path())
+
+    class FailingPath(base_path):
+        def is_file(self):
+            return True
+
+        def stat(self, *args, **kwargs):
+            raise OSError
+
+    claimed = FailingPath(claimed_file)
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with patch.object(retry, "resolve_cli") as resolve:
+            assert retry._claim_ready(marker, claimed) is None
+    resolve.assert_not_called()
+    assert claimed_file.exists()
+
+
+def test_retry_claim_stale_replacement_failure_skips_cli(tmp_path):
+    retry = _retry()
+    marker = _marker(tmp_path)
+    claimed = Path(f"{marker}.claimed")
+    common.write_digest_pending(claimed, ["bootstrap-digest"])
+    old = time.time() - 31
+    os.utime(claimed, (old, old))
+    with patch.object(Path, "home", return_value=tmp_path), _stdin({"session_id": "s"}):
+        with (
+            patch.object(retry.os, "replace", side_effect=OSError),
+            patch.object(retry, "resolve_cli") as resolve,
+        ):
+            retry.main()
+    resolve.assert_not_called()
+    assert claimed.exists()
+
+
 def test_session_reconciliation_keeps_retry_write(tmp_path):
     bootstrap = _bootstrap()
     bootstrap.CLI = "/fake-cli"
