@@ -46,54 +46,54 @@ _C1 = "call_5cFsCcSDfF8MfrWa8Z2W1CPN"
 _add(
     _C1,
     "explore/daemon-linux-windows",
-    dict(
-        query_keywords="daemon Linux Windows validation",
-        include_related=False,
-        limit=8,
-        mode="broad",
-    ),
+    {
+        "query_keywords": "daemon Linux Windows validation",
+        "include_related": False,
+        "limit": 8,
+        "mode": "broad",
+    },
 )
 _add(
     _C1,
     "explore/persistent-daemon-windows-compat+topic",
-    dict(
-        query_keywords="persistent daemon Windows compatibility",
-        include_related=False,
-        limit=8,
-        mode="broad",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": "persistent daemon Windows compatibility",
+        "include_related": False,
+        "limit": 8,
+        "mode": "broad",
+        "rerank_by_topic": True,
+    },
 )
 _add(
     _C1,
     "explore/avoid-live-db-dev-server+strict+topic",
-    dict(
-        query_keywords="how to ensure development server avoids live default database",
-        include_related=False,
-        limit=8,
-        mode="strict",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": "how to ensure development server avoids live default database",
+        "include_related": False,
+        "limit": 8,
+        "mode": "strict",
+        "rerank_by_topic": True,
+    },
 )
 _add(
     _C1,
     "explore/viewer-pid-isolation",
-    dict(
-        query_keywords="viewer pid file test isolation",
-        include_related=False,
-        limit=8,
-        mode="broad",
-    ),
+    {
+        "query_keywords": "viewer pid file test isolation",
+        "include_related": False,
+        "limit": 8,
+        "mode": "broad",
+    },
 )
 _add(
     _C1,
     "explore/negative-quantum-cooking+strict",
-    dict(
-        query_keywords="unrelated quantum entanglement cooking recipes",
-        include_related=False,
-        limit=8,
-        mode="strict",
-    ),
+    {
+        "query_keywords": "unrelated quantum entanglement cooking recipes",
+        "include_related": False,
+        "limit": 8,
+        "mode": "strict",
+    },
 )
 
 # --- call_9HrARuo2yo4wcMNyToC8zH9w: 6 cases, daemon-completion wording sweep ----------------
@@ -103,80 +103,80 @@ _DAEMON_OPWORD_Q = "new daemon based version works on Linux and Windows validati
 _add(
     _C2,
     "sweep/exact-completion",
-    dict(
-        query_keywords=_DAEMON_EXACT_Q,
-        include_related=False,
-        limit=5,
-        mode="broad",
-        rerank_by_topic=False,
-    ),
+    {
+        "query_keywords": _DAEMON_EXACT_Q,
+        "include_related": False,
+        "limit": 5,
+        "mode": "broad",
+        "rerank_by_topic": False,
+    },
 )
 _add(
     _C2,
     "sweep/exact-completion+topic",
-    dict(
-        query_keywords=_DAEMON_EXACT_Q,
-        include_related=False,
-        limit=5,
-        mode="broad",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": _DAEMON_EXACT_Q,
+        "include_related": False,
+        "limit": 5,
+        "mode": "broad",
+        "rerank_by_topic": True,
+    },
 )
 _add(
     _C2,
     "sweep/operational-wording",
-    dict(
-        query_keywords=_DAEMON_OPWORD_Q,
-        include_related=False,
-        limit=5,
-        mode="broad",
-        rerank_by_topic=False,
-    ),
+    {
+        "query_keywords": _DAEMON_OPWORD_Q,
+        "include_related": False,
+        "limit": 5,
+        "mode": "broad",
+        "rerank_by_topic": False,
+    },
 )
 _add(
     _C2,
     "sweep/operational-wording+strict+topic",
-    dict(
-        query_keywords=_DAEMON_OPWORD_Q,
-        include_related=False,
-        limit=5,
-        mode="strict",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": _DAEMON_OPWORD_Q,
+        "include_related": False,
+        "limit": 5,
+        "mode": "strict",
+        "rerank_by_topic": True,
+    },
 )
 _add(
     _C2,
     "sweep/boundary-question+strict+topic",
-    dict(
-        query_keywords="can Windows and WSL daemon processes share the same SALTMDB database file",
-        include_related=False,
-        limit=5,
-        mode="strict",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": "can Windows and WSL daemon processes share the same SALTMDB database file",
+        "include_related": False,
+        "limit": 5,
+        "mode": "strict",
+        "rerank_by_topic": True,
+    },
 )
 _add(
     _C2,
     "sweep/negative-sourdough+strict+topic",
-    dict(
-        query_keywords="How do I bake sourdough bread with a cast iron dutch oven",
-        include_related=False,
-        limit=5,
-        mode="strict",
-        rerank_by_topic=True,
-    ),
+    {
+        "query_keywords": "How do I bake sourdough bread with a cast iron dutch oven",
+        "include_related": False,
+        "limit": 5,
+        "mode": "strict",
+        "rerank_by_topic": True,
+    },
 )
 
 # --- call_eGidjigAGcHv27dzdmaoKncf: 1 broad meta-query --------------------------------------
 _add(
     "call_eGidjigAGcHv27dzdmaoKncf",
     "meta/precision-false-positives",
-    dict(
-        query_keywords="search precision false positives strict mode topic rerank evaluation",
-        include_related=False,
-        limit=8,
-        mode="broad",
-    ),
+    {
+        "query_keywords": "search precision false positives strict mode topic rerank evaluation",
+        "include_related": False,
+        "limit": 8,
+        "mode": "broad",
+    },
 )
 
 # --- call_CgVBRaGrfVgpgP1jgsXe3EvT: core 12-case x 4-mode evidence matrix (48 calls) --------
@@ -241,10 +241,10 @@ _MATRIX_CASES = [
     ),
 ]
 _MATRIX_MODES = [
-    ("broad_default", dict(mode="broad", rerank_by_topic=False)),
-    ("broad_topic", dict(mode="broad", rerank_by_topic=True)),
-    ("strict_default", dict(mode="strict", rerank_by_topic=False)),
-    ("strict_topic", dict(mode="strict", rerank_by_topic=True)),
+    ("broad_default", {"mode": "broad", "rerank_by_topic": False}),
+    ("broad_topic", {"mode": "broad", "rerank_by_topic": True}),
+    ("strict_default", {"mode": "strict", "rerank_by_topic": False}),
+    ("strict_topic", {"mode": "strict", "rerank_by_topic": True}),
 ]
 for _case_id, _kind, _expected, _q in _MATRIX_CASES:
     for _cfg_name, _cfg in _MATRIX_MODES:
@@ -280,10 +280,10 @@ _SUBSET_CASES = [
     ),
 ]
 _SUBSET_MODES = [
-    ("B", dict(mode="broad", rerank_by_topic=False)),
-    ("BT", dict(mode="broad", rerank_by_topic=True)),
-    ("S", dict(mode="strict", rerank_by_topic=False)),
-    ("ST", dict(mode="strict", rerank_by_topic=True)),
+    ("B", {"mode": "broad", "rerank_by_topic": False}),
+    ("BT", {"mode": "broad", "rerank_by_topic": True}),
+    ("S", {"mode": "strict", "rerank_by_topic": False}),
+    ("ST", {"mode": "strict", "rerank_by_topic": True}),
 ]
 for _case_id, _expected, _q in _SUBSET_CASES:
     for _cfg_name, _cfg in _SUBSET_MODES:
@@ -300,96 +300,96 @@ _BLOAT_Q = "live database 425MB bloat root cause investigation"
 _add(
     _C6,
     "variant/R1-bloat-no-flags",
-    dict(
-        query_keywords=_BLOAT_Q,
-        limit=8,
-        mode="broad",
-        rerank_by_topic=False,
-        prefer_durable_types=False,
-        demote_superseded=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": _BLOAT_Q,
+        "limit": 8,
+        "mode": "broad",
+        "rerank_by_topic": False,
+        "prefer_durable_types": False,
+        "demote_superseded": False,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/R2-bloat-flags-on",
-    dict(
-        query_keywords=_BLOAT_Q,
-        limit=8,
-        mode="broad",
-        rerank_by_topic=False,
-        prefer_durable_types=True,
-        demote_superseded=True,
-        include_related=False,
-    ),
+    {
+        "query_keywords": _BLOAT_Q,
+        "limit": 8,
+        "mode": "broad",
+        "rerank_by_topic": False,
+        "prefer_durable_types": True,
+        "demote_superseded": True,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/R3-bloat-history",
-    dict(
-        query_keywords=_BLOAT_Q,
-        limit=8,
-        mode="history",
-        rerank_by_topic=False,
-        prefer_durable_types=False,
-        demote_superseded=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": _BLOAT_Q,
+        "limit": 8,
+        "mode": "history",
+        "rerank_by_topic": False,
+        "prefer_durable_types": False,
+        "demote_superseded": False,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/R4-bloat-strict",
-    dict(
-        query_keywords=_BLOAT_Q,
-        limit=8,
-        mode="strict",
-        rerank_by_topic=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": _BLOAT_Q,
+        "limit": 8,
+        "mode": "strict",
+        "rerank_by_topic": False,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/I1-daemon-related-true",
-    dict(
-        query_keywords=_DAEMON_EXACT_Q,
-        limit=8,
-        mode="broad",
-        rerank_by_topic=False,
-        include_related=True,
-    ),
+    {
+        "query_keywords": _DAEMON_EXACT_Q,
+        "limit": 8,
+        "mode": "broad",
+        "rerank_by_topic": False,
+        "include_related": True,
+    },
 )
 _add(
     _C6,
     "variant/I2-daemon-related-false",
-    dict(
-        query_keywords=_DAEMON_EXACT_Q,
-        limit=8,
-        mode="broad",
-        rerank_by_topic=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": _DAEMON_EXACT_Q,
+        "limit": 8,
+        "mode": "broad",
+        "rerank_by_topic": False,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/N1-negative-kimchi+strict",
-    dict(
-        query_keywords="how do I make kimchi at home",
-        limit=8,
-        mode="strict",
-        rerank_by_topic=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": "how do I make kimchi at home",
+        "limit": 8,
+        "mode": "strict",
+        "rerank_by_topic": False,
+        "include_related": False,
+    },
 )
 _add(
     _C6,
     "variant/N2-negative-laplace+strict",
-    dict(
-        query_keywords="differential equations Laplace transform initial value problem",
-        limit=8,
-        mode="strict",
-        rerank_by_topic=False,
-        include_related=False,
-    ),
+    {
+        "query_keywords": "differential equations Laplace transform initial value problem",
+        "limit": 8,
+        "mode": "strict",
+        "rerank_by_topic": False,
+        "include_related": False,
+    },
 )
 
 # --- call_eciPBcbaubuzpXdSCC20TjXU: fetch_full entity lookups (not pipeline calls) ----------
