@@ -704,7 +704,7 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         # resolve_or_create_predicate's contract requires an open write transaction around it
         # (mirrors how store_relation actually invokes it).
         def _write(c):
-            return resolve_or_create_predicate(c, predicate_name, agent_id=agent_id)
+            return resolve_or_create_predicate(c, predicate_name)
 
         return write_transaction_retrying(self.conn, _write)
 

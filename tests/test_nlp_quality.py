@@ -146,6 +146,70 @@ class TestTextQualityGate(unittest.TestCase):
         self.assertIn("HAS_LIST", q_flags)
         self.assertEqual(c_hash, text.compute_content_hash(tech_markdown))
 
+    def test_validate_markdown_structure_list_item_whitespace_characterization(self):
+        long_newline_text = "\n" * 20000 + "- long words."
+        cases = (
+            (
+                "indented bullet",
+                "Context words.\n    - bullet words.",
+                {
+                    "is_valid": True,
+                    "header_count": 0,
+                    "has_header_skip": False,
+                    "untyped_blocks": 0,
+                    "msdi": 0.5,
+                },
+            ),
+            (
+                "non-newline whitespace prefixes",
+                "Context words.\n\r- bullet words.\n\f* star words.\n\xa0+ plus words.",
+                {
+                    "is_valid": True,
+                    "header_count": 0,
+                    "has_header_skip": False,
+                    "untyped_blocks": 0,
+                    "msdi": 0.75,
+                },
+            ),
+            (
+                "numbered item",
+                "Context words.\n1. numbered words.",
+                {
+                    "is_valid": True,
+                    "header_count": 0,
+                    "has_header_skip": False,
+                    "untyped_blocks": 0,
+                    "msdi": 0.4,
+                },
+            ),
+            (
+                "blank-line-separated list",
+                "Context words.\n- first words.\n\n- second words.",
+                {
+                    "is_valid": True,
+                    "header_count": 0,
+                    "has_header_skip": False,
+                    "untyped_blocks": 0,
+                    "msdi": 0.667,
+                },
+            ),
+            (
+                "long newline run",
+                long_newline_text,
+                {
+                    "is_valid": True,
+                    "header_count": 0,
+                    "has_header_skip": False,
+                    "untyped_blocks": 0,
+                    "msdi": 1.0,
+                },
+            ),
+        )
+        # MSDI is structural words / total words: 2/4, 6/8, 2/5, 4/6, and 2/2.
+        for name, input_text, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(nlp.validate_markdown_structure(input_text), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

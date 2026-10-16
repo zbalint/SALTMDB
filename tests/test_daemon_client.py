@@ -191,7 +191,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
             patch.object(session, "_close_transport_locked") as close,
             patch.object(session, "open"),
         ):
-            session.ensure_fresh(session.db_path)
+            session.ensure_fresh()
         close.assert_called_once_with()
 
     def test_open_raises_and_closes_socket_on_rejected_hello(self):
@@ -340,7 +340,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
         fake_sock.__enter__.return_value = fake_sock
         sent_requests = []
 
-        def refresh(_db_path):
+        def refresh():
             session._session_capability = "new-capability"
 
         with (
@@ -393,7 +393,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
             ]
         )
 
-        def refresh(_db_path):
+        def refresh():
             result = next(refresh_results)
             if result is not None:
                 raise result
@@ -491,7 +491,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
         sent_requests = []
         refreshed_capabilities = iter(("first-capability", "retry-capability"))
 
-        def refresh(_db_path):
+        def refresh():
             session._session_capability = next(refreshed_capabilities)
 
         with (
@@ -546,7 +546,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
         fake_sock.__enter__.return_value = fake_sock
         sent_requests = []
 
-        def fake_force_reconnect(_db_path):
+        def fake_force_reconnect():
             session._session_capability = "reconnected-capability"
 
         with (
@@ -607,7 +607,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
             ),
             patch.object(session, "open", side_effect=lambda: calls.append("open")),
         ):
-            session.force_reconnect(session.db_path)
+            session.force_reconnect()
         self.assertEqual(calls, ["close_transport", "open"])
 
     def test_close_reads_and_logs_failed_goodbye_ack(self):

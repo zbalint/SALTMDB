@@ -745,7 +745,6 @@ def supersede_memory(
 def _assemble_memory_record(
     conn,
     resolved_id: str,
-    entity_id: str,
     *,
     include_content: bool,
     include_lineage: bool,
@@ -907,7 +906,6 @@ def get_memory(
         data = _assemble_memory_record(
             conn,
             resolved_id,
-            entity_id,
             include_content=True,
             include_lineage=True,
             touch=True,
@@ -983,7 +981,6 @@ def inspect_memory(
         data = _assemble_memory_record(
             conn,
             resolved_id,
-            entity_id,
             include_content=False,
             include_lineage=True,
             touch=True,

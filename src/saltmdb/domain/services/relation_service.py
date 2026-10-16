@@ -52,7 +52,7 @@ def _normalize_predicate_name(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
 
 
-def resolve_or_create_predicate(conn, predicate_name: str, agent_id: str = None) -> str | None:
+def resolve_or_create_predicate(conn, predicate_name: str) -> str | None:
     """Closed-vocabulary predicate lookup (agent API redesign plan §5.8, Phase 6 item 25).
 
     INVERTED CONTRACT: this used to auto-create any unrecognized predicate; it now never writes
@@ -849,7 +849,6 @@ def analyze_dependencies(  # noqa: C901, PLR0912
             root_inspect = _assemble_memory_record(
                 conn,
                 root_id,
-                root_id,
                 include_content=False,
                 include_lineage=False,
                 touch=False,
@@ -885,7 +884,6 @@ def analyze_dependencies(  # noqa: C901, PLR0912
                 if include_inspect:
                     inspected = _assemble_memory_record(
                         conn,
-                        reached_id,
                         reached_id,
                         include_content=False,
                         include_lineage=False,

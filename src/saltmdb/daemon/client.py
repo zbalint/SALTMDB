@@ -204,7 +204,7 @@ def begin_lazy_start(session: "SessionConnection") -> None:
     thread.start()
 
 
-def _identify_probe(db_path: str, key: str) -> dict[str, Any] | None:
+def _identify_probe(key: str) -> dict[str, Any] | None:
     """Connects to the probe port (never the election/guard port) and asks "identify". Returns
     the parsed response dict, or None on any connection/framing failure (caller treats that as
     "nothing reachable there yet", not a hard error)."""
@@ -225,7 +225,7 @@ def _classify_startup_failure(db_path: str, key: str) -> str:
     """Bounded-window classification (§4/§7/§13): distinguishes a foreign non-SALTMDB occupant, a
     genuine different-DB election-port collision, or a daemon subprocess that simply exited, and
     returns a clear, actionable error message for each -- never a generic timeout message."""
-    info = _identify_probe(db_path, key)
+    info = _identify_probe(key)
     if info is None:
         log_tail = _read_daemon_log_tail(db_path)
         return (
@@ -447,7 +447,7 @@ def probe_owner(db_path: str) -> str | None:
     """Return a matching daemon's startup state from the lightweight identify probe."""
     canonical_db_path = discovery.resolve_canonical_db_path(db_path)
     key = discovery.daemon_key(canonical_db_path)
-    info = _identify_probe(canonical_db_path, key)
+    info = _identify_probe(key)
     if (
         isinstance(info, dict)
         and info.get("db_path") == canonical_db_path
@@ -589,7 +589,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
     session_lock = _session._state_lock if _session is not None else nullcontext()
     with session_lock:
         if spawn and _session is not None:
-            _session.ensure_fresh(db_path)
+            _session.ensure_fresh()
             if _caller_agent_session_id == _session._agent_session_id:
                 # Always overwrite the envelope from the post-refresh snapshot.  A recursive
                 # retry may have re-helloed and minted a new capability after the first request
@@ -602,7 +602,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                 else:
                     params["caller_agent_session_capability"] = current_capability
         elif spawn and _current_session is not None:
-            _current_session.ensure_fresh(db_path)
+            _current_session.ensure_fresh()
         # Refresh discovery after ensure_fresh(): a reconnect may have replaced the daemon token
         # and service port.  Sending with the pre-refresh snapshot would use stale auth.
         info = ensure_daemon_running(db_path) if spawn else reachable_daemon_info(db_path)
@@ -658,7 +658,7 @@ def call_method(  # noqa: C901, PLR0912 -- retry/auth/session-lock state machine
                 # comparison can never detect it on its own, and the retry below would otherwise
                 # resend the exact same stale capability forever. Force a real re-hello first.
                 if _session is not None and code == protocol.CALLER_SESSION_INVALID:
-                    _session.force_reconnect(db_path)
+                    _session.force_reconnect()
                 return call_method(
                     db_path,
                     method,
@@ -877,7 +877,7 @@ class SessionConnection:
             if _current_session is self:
                 _current_session = None
 
-    def ensure_fresh(self, db_path: str) -> None:
+    def ensure_fresh(self) -> None:
         """Cheap local comparison (re-reads the discovery file, no network) against the cached
         auth_token -- reconnects and re-hellos on mismatch (daemon restarted since our last hello,
         even if PID/port happen to coincide with the prior instance, round-2 fix)."""
@@ -904,14 +904,11 @@ class SessionConnection:
             # A daemon-token change is a transport reconnect, not the end of the logical agent
             # session.  Keep its ID/cwd/owner while discarding only stale transport state.
             self._close_transport_locked()
-            try:
-                self.open()
-            except Exception:
-                # Deliberately propagate: callers must not dispatch with stale authentication.
-                # The logical identity remains intact, so the next call can retry the refresh.
-                raise
+            # Failed refreshes deliberately propagate: callers must not dispatch with stale
+            # authentication. The logical identity stays intact so the next call can retry.
+            self.open()
 
-    def force_reconnect(self, db_path: str) -> None:
+    def force_reconnect(self) -> None:
         """Unconditionally close the transport and re-hello, bypassing ensure_fresh()'s cheap
         auth_token comparison entirely.
 

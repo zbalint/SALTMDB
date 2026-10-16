@@ -26,7 +26,7 @@ TITLE_MAX_LENGTH = 200
 
 
 def _retrieval_text_hash(value: str | None) -> str | None:
-    return hashlib.sha256((value or "").encode("utf-8")).hexdigest() if value else None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
 def normalize_retrieval_text(value: str) -> str | None:

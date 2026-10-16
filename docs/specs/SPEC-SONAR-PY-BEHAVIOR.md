@@ -82,3 +82,7 @@ Everything in D6. All other Sonar rules.
 ## 9. Pre-lock gate notes
 
 Claims verified by the consultant against `5a4e7ac` (line anchors, callers, regex behavior probes with `python3 -I`); see the assignment event. Scope list reconciled with the caller list in D4 and the grep in acceptance 3. Gate step 7: the six removals are named in D4, section 3 and section 0 identically.
+
+## Amendment 1 (2026-10-16)
+
+Resolves a contradiction found by the developer in D5: the list items are local to `nlp.validate_markdown_structure`, so no public seam returns the extracted lists and "literal expected lists" cannot be asserted. The D5 characterization test instead calls `nlp.validate_markdown_structure` and asserts the literal returned dict for each case (indented bullet, bullets prefixed by `\r`, `\f` and `\xa0`, a numbered item, a blank-line-separated list, and a very long run of newlines followed by a bullet). The `msdi` value of each case is derived by hand in the test comment, so each case changes `list_item_words`. The mutation check must make the `\r`/`\f`/`\xa0` case fail.

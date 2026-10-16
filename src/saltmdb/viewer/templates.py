@@ -20,7 +20,7 @@ def _asset_version(filename: str) -> str:
         return "0"
 
 
-def get_frontend_html(db_path: str = None) -> str:
+def get_frontend_html() -> str:
     """Return a CSP-compatible shell; all dynamic UI lives in local static assets."""
     css_version = _asset_version("viewer.css")
     js_version = _asset_version("viewer.js")

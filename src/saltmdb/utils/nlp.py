@@ -446,7 +446,7 @@ def validate_markdown_structure(text: str) -> dict:
 
     header_words = sum(len(re.findall(_WORD_TOKEN_RE, h[1])) for h in headers)
 
-    list_items = re.findall(r"^\s*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
+    list_items = re.findall(r"^[^\S\n]*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
     list_item_words = sum(len(re.findall(_WORD_TOKEN_RE, item)) for item in list_items)
 
     code_blocks = re.findall(r"```[\s\S]*?```", text)
