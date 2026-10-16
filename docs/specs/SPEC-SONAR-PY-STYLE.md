@@ -119,3 +119,11 @@ All other Sonar rules (S3776, S1172, S3516, S107, security rules, JavaScript, sc
 ## 9. Pre-lock gate notes
 
 Line anchors, S1515 call timing, S3358 purity, S117 call sites, S1192 literals and counts, and the S6353 and S7508 findings were checked against `5a4e7ac` in a consultant review; S7508 was dropped and S6353 given `re.ASCII` as a result. Scope list matches the table files (20). Gate step 7: the 35-row count appears in section 1 and the table identically.
+
+## Amendment 1 (2026-10-16)
+
+Resolves a contradiction found by the developer: D3's inline `if`/`elif`/`else` rewrite of the `invalidate_relation` error-code ternary raises that function's branch count to 13, and Ruff `PLR0912` allows 12. The two ternaries in `relation_service.py` (`store_relation` and `invalidate_relation`) are identical, so they become one module-level private function `_entity_ref_error_code(error_message)` with the `if`/`elif`/`else` body, called from both sites. It has two callers and adds no branch to either function. The section 0 limit "constant definitions or helper locals" is widened for this one function. No `noqa` is added.
+
+## Amendment 2 (2026-10-16)
+
+Resolves a contradiction found by the tester between D7a and D1: the invalid-key `ValueError` in `orchestrator.py` embeds `_METADATA_FILTER_KEY_RE.pattern`, which reaches the returned envelope. After the `\w` + `re.ASCII` change that text would read `^\w+$` instead of `^[A-Za-z0-9_]+$`. A separate module-level display constant `_METADATA_FILTER_KEY_PATTERN_TEXT = "^[A-Za-z0-9_]+$"` now feeds the message, so the message text is byte-identical to the unmodified code.

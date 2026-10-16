@@ -15,6 +15,9 @@ from saltmdb.config import (
     QG_OVERSIZED_PAYLOAD_THRESHOLD,
 )
 
+_WORD_TOKEN_RE = re.compile(r"\b\w+\b")
+
+
 STOP_WORDS = {
     "a",
     "about",
@@ -239,7 +242,7 @@ def calculate_shannon_entropy(text: str) -> float:
 
 def calculate_ttr(text: str) -> float:
     """Calculate Type-Token Ratio (Lexical Diversity) based on word tokens."""
-    words = re.findall(r"\b\w+\b", text.lower())
+    words = re.findall(_WORD_TOKEN_RE, text.lower())
     if not words:
         return 0.0
     unique_words = set(words)
@@ -257,7 +260,7 @@ def calculate_symbol_ratio(text: str) -> float:
 
 def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     """Calculate the ratio of duplicate word N-grams in text."""
-    words = re.findall(r"\b\w+\b", text.lower())
+    words = re.findall(_WORD_TOKEN_RE, text.lower())
     if len(words) < n:
         return 0.0
     ngrams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
@@ -438,16 +441,16 @@ def validate_markdown_structure(text: str) -> dict:
             untyped_blocks += 1
 
     # 4. MSDI (Markdown Structural Density Index) Calculation
-    words = re.findall(r"\b\w+\b", text)
+    words = re.findall(_WORD_TOKEN_RE, text)
     total_words = len(words)
 
-    header_words = sum(len(re.findall(r"\b\w+\b", h[1])) for h in headers)
+    header_words = sum(len(re.findall(_WORD_TOKEN_RE, h[1])) for h in headers)
 
     list_items = re.findall(r"^\s*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
-    list_item_words = sum(len(re.findall(r"\b\w+\b", item)) for item in list_items)
+    list_item_words = sum(len(re.findall(_WORD_TOKEN_RE, item)) for item in list_items)
 
     code_blocks = re.findall(r"```[\s\S]*?```", text)
-    code_block_words = sum(len(re.findall(r"\b\w+\b", cb)) for cb in code_blocks)
+    code_block_words = sum(len(re.findall(_WORD_TOKEN_RE, cb)) for cb in code_blocks)
 
     msdi = (
         (header_words + list_item_words + code_block_words) / total_words
@@ -565,7 +568,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:  # noqa: C
     if not md_res["is_valid"]:
         add_hard(md_res["error_flag"], md_res["reason"])
 
-    words = re.findall(r"\b\w+\b", text.lower())
+    words = re.findall(_WORD_TOKEN_RE, text.lower())
     entropy = calculate_shannon_entropy(text)
     extreme_loop = _is_extreme_generation_loop(text, words, entropy)
     if entropy < QG_MIN_ENTROPY:

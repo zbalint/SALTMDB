@@ -377,13 +377,12 @@ def _validate_page_request(
         raise CorpusSnapshotError(f"page_size must be between 1 and {MAX_PAGE_SIZE}")
     if cursor is not None and (not isinstance(cursor, str) or not cursor):
         raise CorpusSnapshotError("cursor must be a non-empty entity ID when supplied")
-    if snapshot_hash is not None:
-        if (
-            not isinstance(snapshot_hash, str)
-            or len(snapshot_hash) != 64
-            or any(char not in "0123456789abcdef" for char in snapshot_hash)
-        ):
-            raise CorpusSnapshotError("snapshot_hash must be a lowercase SHA-256")
+    if snapshot_hash is not None and (
+        not isinstance(snapshot_hash, str)
+        or len(snapshot_hash) != 64
+        or any(char not in "0123456789abcdef" for char in snapshot_hash)
+    ):
+        raise CorpusSnapshotError("snapshot_hash must be a lowercase SHA-256")
     if not isinstance(include_archived, bool):
         raise CorpusSnapshotError("include_archived must be boolean")
     return page_size, cursor, snapshot_hash, include_archived

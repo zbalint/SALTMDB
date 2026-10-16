@@ -53,7 +53,7 @@ class SALTMDBTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             self._connection_slots.release()
 
     def handle_error(self, request, client_address):
-        exc_type, exc_value, exc_tb = sys.exc_info()
+        exc_type, exc_value, _ = sys.exc_info()
         if exc_type in (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
             logger.debug(
                 "Client %s disconnected before request completed: %s", client_address, exc_value

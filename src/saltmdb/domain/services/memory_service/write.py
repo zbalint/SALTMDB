@@ -1,6 +1,7 @@
 """Write path (create/update) for memory_service: entity resolution and persistence."""
 
 import json
+from functools import partial
 import re
 import sqlite3
 import uuid
@@ -19,6 +20,8 @@ from saltmdb.domain.services import core_governance_service
 from . import tags as tag_ops
 from . import validation
 from ._shared import logger, RETRIEVAL_TEXT_UNSET
+
+_CORE_TAG = "#core"
 
 
 def _normalized_tag_key(tag_name: str) -> str:
@@ -40,11 +43,15 @@ def _effective_tag_report(
             """,
             (entity_id,),
         ).fetchall()
-        if row[0] != "#core"
+        if row[0] != _CORE_TAG
         or any(_normalized_tag_key(tag) == "core" for tag in (submitted_tags or []))
     ]
     effective_by_key = {_normalized_tag_key(tag): tag for tag in effective_tags}
     near_misses: list[dict] = []
+
+    def _tag_similarity(tag_name: str, submitted_key: str) -> float:
+        return SequenceMatcher(None, submitted_key, _normalized_tag_key(tag_name)).ratio()
+
     for submitted in submitted_tags or []:
         if not isinstance(submitted, str) or not submitted.strip():
             continue
@@ -53,7 +60,7 @@ def _effective_tag_report(
             continue
         candidate = max(
             effective_tags,
-            key=lambda tag: SequenceMatcher(None, submitted_key, _normalized_tag_key(tag)).ratio(),
+            key=partial(_tag_similarity, submitted_key=submitted_key),
             default=None,
         )
         if candidate is None:
@@ -148,7 +155,7 @@ def _legacy_update_guard(  # noqa: C901, PLR0912
                 "SELECT t.name FROM tags t JOIN entity_tags et ON et.tag_id = t.id WHERE et.entity_id = ?",
                 (resolved_entity_id,),
             ).fetchall()
-            if row[0].lower() != "#core"
+            if row[0].lower() != _CORE_TAG
         }
         if requested_tags != existing_tags:
             changes.append("tags")
@@ -535,7 +542,7 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:  # noqa: C901, 
         "SELECT is_core FROM entities WHERE id = ?", (entity_id,)
     ).fetchone()
     resolved_is_core = bool(resolved_row[0]) if resolved_row else False
-    core_tag_id = tag_ops.resolve_or_create_tag(conn, "#core", agent_id=agent_id)
+    core_tag_id = tag_ops.resolve_or_create_tag(conn, _CORE_TAG, agent_id=agent_id)
     if core_tag_id:
         if resolved_is_core:
             conn.execute(

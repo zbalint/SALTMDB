@@ -13,6 +13,9 @@ from saltmdb.config import (
 )
 
 logger = logging.getLogger(__name__)
+_PRAGMA_BUSY_TIMEOUT = "PRAGMA busy_timeout=5000;"
+_PRAGMA_FOREIGN_KEYS = "PRAGMA foreign_keys=ON;"
+
 
 # Set only by DbWriteCoordinator's writer thread.  It is deliberately a
 # ContextVar rather than a process global so request/model threads can never
@@ -70,21 +73,21 @@ def open_read_connection(db_path: str) -> sqlite3.Connection:
     uri = Path(db_path).resolve().as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=5.0)
     conn.execute("PRAGMA query_only=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute(_PRAGMA_BUSY_TIMEOUT)
+    conn.execute(_PRAGMA_FOREIGN_KEYS)
     return conn
 
 
 def open_writer_connection(db_path: str) -> sqlite3.Connection:
     """Open a writer connection for schema bootstrap or DbWriteCoordinator only."""
     conn = sqlite3.connect(db_path, timeout=20.0, isolation_level=None)
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute(_PRAGMA_BUSY_TIMEOUT)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA cache_size=-8000;")
     conn.execute("PRAGMA mmap_size=67108864;")
     conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute(_PRAGMA_FOREIGN_KEYS)
     # Explicit default (1000 pages / ~4MB); do not lower until WAL-page-count logging
     # (see close_connection) shows growth is actually a problem
     conn.execute("PRAGMA wal_autocheckpoint=1000;")
@@ -103,13 +106,13 @@ def get_connection(db_path: str) -> sqlite3.Connection:
     # outside coordinator scope; its historical cross-thread setting remains
     # for unit tests and standalone migration helpers.
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20.0, isolation_level=None)
-    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute(_PRAGMA_BUSY_TIMEOUT)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA cache_size=-8000;")
     conn.execute("PRAGMA mmap_size=67108864;")
     conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute(_PRAGMA_FOREIGN_KEYS)
     conn.execute("PRAGMA wal_autocheckpoint=1000;")
     return conn
 

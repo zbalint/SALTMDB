@@ -656,7 +656,7 @@ def _build_candidate_evidence(
     fts_rank = {row[0]: i for i, row in enumerate(fts_rows)}
     fts_bm25 = {row[0]: row[5] for row in fts_rows}
     semantic_rank = {eid: i for i, (eid, _dist) in enumerate(semantic_rows)}
-    semantic_distance = {eid: dist for eid, dist in semantic_rows}
+    semantic_distance = dict(semantic_rows)
     predecessor_grounded_map = predecessor_grounded_map or {}
     cross_encoder_scores_map = cross_encoder_scores_map or {}
 

@@ -12,6 +12,7 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+_HYBRID_SEARCH_UNAVAILABLE = "Hybrid search unavailable"
 
 
 class SearchMixin(ViewerHandlerProtocol):
@@ -46,14 +47,14 @@ class SearchMixin(ViewerHandlerProtocol):
             results = memory_service.search_memory(**search_kwargs)
             if not isinstance(results, list):
                 message = (
-                    results.get("error", "Hybrid search unavailable")
+                    results.get("error", _HYBRID_SEARCH_UNAVAILABLE)
                     if isinstance(results, dict)
                     else str(results)
                 )
-                raise RuntimeError(message or "Hybrid search unavailable")
+                raise RuntimeError(message or _HYBRID_SEARCH_UNAVAILABLE)
             self.send_json({"query": q, "mode": "broad", "results": results})
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
             logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Hybrid search unavailable"}, 503)
+            self.send_json({"error": _HYBRID_SEARCH_UNAVAILABLE}, 503)

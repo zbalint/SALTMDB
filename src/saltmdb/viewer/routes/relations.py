@@ -20,6 +20,9 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+_PREDICATE_FILTER_SQL = "r.predicate = ?"
+_VIEWER_HANDLER_ERROR_LOG = "SALTMDB Viewer handler error: %s"
+_INTERNAL_SERVER_ERROR = "Internal server error. Check viewer logs for details."
 
 
 class RelationsMixin(ViewerHandlerProtocol):
@@ -50,7 +53,7 @@ class RelationsMixin(ViewerHandlerProtocol):
                     "(COALESCE(e1.status, 'raw') != 'archived' AND COALESCE(e2.status, 'raw') != 'archived')"
                 )
             if predicate_filter:
-                where_clauses.append("r.predicate = ?")
+                where_clauses.append(_PREDICATE_FILTER_SQL)
                 params.append(predicate_filter)
             validity_sql, validity_params = active_relation_filter()
             where_clauses.append(validity_sql)
@@ -107,8 +110,8 @@ class RelationsMixin(ViewerHandlerProtocol):
                 }
             )
         except Exception as e:
-            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+            logger.error(_VIEWER_HANDLER_ERROR_LOG, e, exc_info=True)
+            self.send_json({"error": _INTERNAL_SERVER_ERROR}, 500)
         finally:
             if conn:
                 conn.close()
@@ -181,8 +184,8 @@ class RelationsMixin(ViewerHandlerProtocol):
                 }
             )
         except Exception as e:
-            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+            logger.error(_VIEWER_HANDLER_ERROR_LOG, e, exc_info=True)
+            self.send_json({"error": _INTERNAL_SERVER_ERROR}, 500)
         finally:
             if conn:
                 conn.close()
@@ -235,7 +238,7 @@ class RelationsMixin(ViewerHandlerProtocol):
                 clauses = [f"(r.source_id IN ({placeholders}) OR r.target_id IN ({placeholders}))"]
                 params = list(frontier) * 2
                 if predicate:
-                    clauses.append("r.predicate = ?")
+                    clauses.append(_PREDICATE_FILTER_SQL)
                     params.append(predicate)
                 validity_sql, validity_params = active_relation_filter(as_of)
                 clauses.append(validity_sql)
@@ -295,7 +298,7 @@ class RelationsMixin(ViewerHandlerProtocol):
             count_validity_sql, count_params = active_relation_filter(as_of)
             count_filters = [count_validity_sql]
             if predicate:
-                count_filters.append("r.predicate = ?")
+                count_filters.append(_PREDICATE_FILTER_SQL)
                 count_params.append(predicate)
             if not include_archived:
                 count_filters.append(
@@ -334,8 +337,8 @@ class RelationsMixin(ViewerHandlerProtocol):
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
-            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+            logger.error(_VIEWER_HANDLER_ERROR_LOG, e, exc_info=True)
+            self.send_json({"error": _INTERNAL_SERVER_ERROR}, 500)
         finally:
             if conn:
                 conn.close()
@@ -396,8 +399,8 @@ class RelationsMixin(ViewerHandlerProtocol):
         except ValueError as e:
             self.send_json({"error": str(e)}, 400)
         except Exception as e:
-            logger.error("SALTMDB Viewer handler error: %s", e, exc_info=True)
-            self.send_json({"error": "Internal server error. Check viewer logs for details."}, 500)
+            logger.error(_VIEWER_HANDLER_ERROR_LOG, e, exc_info=True)
+            self.send_json({"error": _INTERNAL_SERVER_ERROR}, 500)
         finally:
             if conn:
                 conn.close()

@@ -122,11 +122,12 @@ def install_service(
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as unit_file:
                 previous = unit_file.read()
-        changed = (
-            "unchanged"
-            if previous == unit
-            else ("updated" if previous is not None else "installed")
-        )
+        if previous == unit:
+            changed = "unchanged"
+        elif previous is not None:
+            changed = "updated"
+        else:
+            changed = "installed"
         if previous != unit:
             with open(path, "w", encoding="utf-8") as unit_file:
                 unit_file.write(unit)

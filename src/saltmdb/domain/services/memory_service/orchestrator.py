@@ -32,7 +32,8 @@ from ._shared import logger
 # metadata_filter keys are interpolated into a json_extract('$.<key>') SQL path -- only the
 # value is bound as a parameter, so the key itself must be allowlisted before interpolation
 # to prevent SQL predicate injection (e.g. a key like "safe') OR 1=1 OR json_extract(e.metadata, '$.safe").
-_METADATA_FILTER_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_METADATA_FILTER_KEY_RE = re.compile(r"^\w+$", re.ASCII)
+_METADATA_FILTER_KEY_PATTERN_TEXT = "^[A-Za-z0-9_]+$"
 
 
 def search_memory(  # noqa: C901, PLR0912, PLR0915
@@ -231,7 +232,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 if not _METADATA_FILTER_KEY_RE.match(mk):
                     raise ValueError(
                         f"metadata_filter key {mk!r} is invalid; keys must match "
-                        f"{_METADATA_FILTER_KEY_RE.pattern!r}"
+                        f"{_METADATA_FILTER_KEY_PATTERN_TEXT!r}"
                     )
                 where_clauses.append(f"json_extract(e.metadata, '$.{mk}') = ?")
                 params.append(str(mv))

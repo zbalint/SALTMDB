@@ -13,6 +13,7 @@ from saltmdb.utils.predicate_vocabulary import (
 )
 
 logger = logging.getLogger(__name__)
+_PRAGMA_USER_VERSION = "PRAGMA user_version"
 
 
 def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
@@ -1268,7 +1269,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # user_version at 0 and the sweep safely retries next startup; a completed sweep never
         # re-runs and never touches a future event again.
         try:
-            if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 1:
                 legacy_ids = [
                     r[0]
                     for r in conn.execute(
@@ -1302,7 +1303,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # as the Track A sweep above: a crash mid-migration leaves user_version at 1 and the
         # whole block safely retries next startup; a completed migration never re-runs.
         try:
-            if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 2:
                 from datetime import UTC, datetime
 
                 now = datetime.now(UTC).isoformat()
@@ -1324,7 +1325,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
             # Never leapfrog a failed prerequisite migration.  The earlier blocks deliberately
             # catch OperationalError so startup can continue; an exact gate is therefore needed
             # to prevent v3 from marking an unfinished v1/v2 database as fully migrated.
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 2:
+            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] == 2:
                 from datetime import UTC, datetime
 
                 now = datetime.now(UTC).isoformat()

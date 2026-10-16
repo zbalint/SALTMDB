@@ -26,6 +26,9 @@ from saltmdb.utils.text import sanitize_fts_query
 
 from ._shared import logger
 
+_SQL_AND = " AND "
+
+
 STOP_WORDS = {
     "a",
     "an",
@@ -233,7 +236,7 @@ def retrieval_vector_search(
             return []
         entity_ids = list({row[0] for row in rows})
         placeholders = ",".join("?" for _ in entity_ids)
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        where_sql = _SQL_AND.join(where_clauses) if where_clauses else "1=1"
         entity_rows = conn.execute(
             f"SELECT e.id,e.retrieval_text_hash,e.status FROM entities e "
             f"JOIN retrieval_embedding_jobs rj ON rj.entity_id=e.id "
@@ -289,7 +292,7 @@ def semantic_search(
         conn.enable_load_extension(False)
 
         query_vector = embedding_service.embed_query_text(query)
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        where_sql = _SQL_AND.join(where_clauses) if where_clauses else "1=1"
         # vec0's `MATCH ... AND k = N` is its KNN execution path.  Calling
         # vec_distance_cosine() in ORDER BY forces a full scan of every embedding and made
         # realistic frozen-corpus evaluation (and normal search at scale) effectively hang.
@@ -372,7 +375,7 @@ def chunk_candidate_search(
         entity_info: dict[str, tuple[str | None, str | None]] = {}
         if entity_ids:
             placeholders = ",".join("?" for _ in entity_ids)
-            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            where_sql = _SQL_AND.join(where_clauses) if where_clauses else "1=1"
             entity_rows = conn.execute(
                 f"SELECT e.id, e.content_hash, e.status FROM entities e "
                 f"WHERE e.id IN ({placeholders}) AND {where_sql}",

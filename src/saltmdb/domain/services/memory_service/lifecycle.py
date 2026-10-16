@@ -34,6 +34,8 @@ from ._shared import logger
 
 
 _MEMORY_TYPES = ("fact", "event", "procedure", "decision", "preference")
+_ENTITY_ID_MANDATORY = "entity_id is mandatory."
+_LAST_ACCESSED_UPDATE_SQL = "UPDATE entities SET last_accessed_at = ? WHERE id = ?"
 
 
 class _LifecycleRejected(Exception):
@@ -137,7 +139,7 @@ def _validate_replacement_inputs(  # noqa: PLR0911
 ) -> dict | None:
     """Validate all caller-controlled replacement fields before opening a write transaction."""
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
-        return _replacement_error("MISSING_ENTITY_ID", "entity_id is mandatory.", "entity_id")
+        return _replacement_error("MISSING_ENTITY_ID", _ENTITY_ID_MANDATORY, "entity_id")
     if not isinstance(title, str) or not title.strip():
         return _replacement_error(
             "MISSING_TITLE", "title is mandatory and cannot be empty.", "title"
@@ -794,7 +796,7 @@ def _assemble_memory_record(
         accessed_at = datetime.now(UTC).isoformat()
         try:
             conn.execute(
-                "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+                _LAST_ACCESSED_UPDATE_SQL,
                 (accessed_at, resolved_id),
             )
             if not is_coordinator_connection(conn):
@@ -871,9 +873,7 @@ def get_memory(
     do not accidentally disclose one of several matching memories.
     """
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
-        return rejected(
-            [envelope_error("MISSING_ENTITY_ID", "entity_id is mandatory.", "entity_id")]
-        )
+        return rejected([envelope_error("MISSING_ENTITY_ID", _ENTITY_ID_MANDATORY, "entity_id")])
 
     should_close = False
     conn = db_connection
@@ -949,9 +949,7 @@ def inspect_memory(
     the body after seeing the snippet calls get_memory next.
     """
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
-        return rejected(
-            [envelope_error("MISSING_ENTITY_ID", "entity_id is mandatory.", "entity_id")]
-        )
+        return rejected([envelope_error("MISSING_ENTITY_ID", _ENTITY_ID_MANDATORY, "entity_id")])
 
     should_close = False
     conn = db_connection
@@ -1032,7 +1030,7 @@ def update_memory_metadata(  # noqa: C901
 
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
         return rejected(
-            [envelope_error(error_codes.VALIDATION_ERROR, "entity_id is mandatory.", "entity_id")]
+            [envelope_error(error_codes.VALIDATION_ERROR, _ENTITY_ID_MANDATORY, "entity_id")]
         )
     if not isinstance(metadata, dict):
         return rejected(
@@ -1162,7 +1160,7 @@ def fetch_memory_chunk(  # noqa: C901, PLR0911
             return None
         if touch:
             now = datetime.now(UTC).isoformat()
-            conn.execute("UPDATE entities SET last_accessed_at = ? WHERE id = ?", (now, id_val))
+            conn.execute(_LAST_ACCESSED_UPDATE_SQL, (now, id_val))
             if not is_coordinator_connection(conn):
                 conn.commit()
         return row[2]
@@ -1213,7 +1211,7 @@ def touch_memory_access(entity_id: str, db_connection) -> None:
             target_id = prefix_id
     if target_id:
         db_connection.execute(
-            "UPDATE entities SET last_accessed_at = ? WHERE id = ?",
+            _LAST_ACCESSED_UPDATE_SQL,
             (datetime.now(UTC).isoformat(), target_id),
         )
 
@@ -1318,7 +1316,7 @@ def archive_memory(  # noqa: PLR0911
                 ]
             )
 
-        existing_agent_id, scope, status = row
+        existing_agent_id, _, status = row
         if status == "archived":
             return envelope_ok(
                 {"id": resolved_id, "message": f"Memory '{resolved_id}' is already archived."},

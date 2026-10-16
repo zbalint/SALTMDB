@@ -27,12 +27,14 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+_ENTITIES_API_PREFIX = "/api/entities/"
 
 
 class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtocol):
     """Zero-dependency HTTP Request Handler for the SALTMDB Dashboard Viewer."""
 
     def log_message(self, format, *args):
+        # Access logging is intentionally disabled; Viewer requests may contain memory content.
         pass
 
     def handle_one_request(self):
@@ -155,8 +157,10 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_quality(query)
         elif path == "/api/search":
             self.get_search(query)
-        elif path.startswith("/api/entities/") or path.startswith("/api/entity/"):
-            prefix = "/api/entities/" if path.startswith("/api/entities/") else "/api/entity/"
+        elif path.startswith(_ENTITIES_API_PREFIX) or path.startswith("/api/entity/"):
+            prefix = (
+                _ENTITIES_API_PREFIX if path.startswith(_ENTITIES_API_PREFIX) else "/api/entity/"
+            )
             raw_subpath = path[len(prefix) :]
             if raw_subpath.endswith("/lineage"):
                 eid = urllib.parse.unquote(raw_subpath[: -len("/lineage")])

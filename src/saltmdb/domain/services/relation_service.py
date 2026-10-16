@@ -38,6 +38,15 @@ from saltmdb.utils.predicate_vocabulary import AGENT_SELECTABLE_PREDICATES, clas
 logger = logging.getLogger(__name__)
 
 
+def _entity_ref_error_code(error_message: str) -> str:
+    if "AMBIGUOUS_ID_PREFIX" in error_message:
+        return "AMBIGUOUS_ID_PREFIX"
+    elif "UNKNOWN_ENTITY_ID" in error_message:
+        return "UNKNOWN_ENTITY_ID"
+    else:
+        return error_codes.VALIDATION_ERROR
+
+
 def _normalize_predicate_name(raw: str) -> str:
     """Shape-normalizes a predicate string (lowercase, non-alnum runs -> underscore, trimmed)."""
     return re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
@@ -215,13 +224,7 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
         error_message = (
             source_error or target_error or "Error: Could not resolve target entity IDs."
         )
-        error_code = (
-            "AMBIGUOUS_ID_PREFIX"
-            if "AMBIGUOUS_ID_PREFIX" in error_message
-            else "UNKNOWN_ENTITY_ID"
-            if "UNKNOWN_ENTITY_ID" in error_message
-            else error_codes.VALIDATION_ERROR
-        )
+        error_code = _entity_ref_error_code(error_message)
         return rejected([envelope_error(error_code, error_message)])
 
     if resolved_source == resolved_target:
@@ -616,13 +619,8 @@ def invalidate_relation(  # noqa: C901
         error_message = (
             source_error or target_error or "Error: Could not resolve target entity IDs."
         )
-        error_code = (
-            "AMBIGUOUS_ID_PREFIX"
-            if "AMBIGUOUS_ID_PREFIX" in error_message
-            else "UNKNOWN_ENTITY_ID"
-            if "UNKNOWN_ENTITY_ID" in error_message
-            else error_codes.VALIDATION_ERROR
-        )
+
+        error_code = _entity_ref_error_code(error_message)
         return rejected([envelope_error(error_code, error_message)])
 
     now = datetime.now(UTC).isoformat()

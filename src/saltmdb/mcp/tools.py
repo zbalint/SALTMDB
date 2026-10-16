@@ -225,6 +225,7 @@ class RpcBackend:
             if tool_name in _AGENT_ID_INJECTED_TOOLS:
                 kwargs = {**kwargs, "agent_id": _effective_agent_id()}
             elif tool_name in _AGENT_ID_PASSTHROUGH_TOOLS:
+                # Explicit no-op: passthrough tools retain their caller-supplied filter.
                 pass
             else:
                 kwargs = {key: value for key, value in kwargs.items() if key != "agent_id"}

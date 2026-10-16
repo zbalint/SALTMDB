@@ -33,6 +33,8 @@ from saltmdb.db.schema import init_db
 from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
+_DAEMON_SHUTTING_DOWN_MESSAGE = "daemon is shutting down"
+_DATABASE_WRITER_UNAVAILABLE_MESSAGE = "database writer unavailable"
 
 
 @dataclass
@@ -296,7 +298,7 @@ class _DaemonState:
         request_id: str | None = request.get("id")
         if self._draining:
             return protocol.build_error_response(
-                request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
+                request_id, protocol.DAEMON_SHUTTING_DOWN, _DAEMON_SHUTTING_DOWN_MESSAGE
             )
         token = request.get("token")
         if not (token and self.auth_token and hmac.compare_digest(token, self.auth_token)):
@@ -321,7 +323,7 @@ class _DaemonState:
 
         if not self._acquire_inflight():
             return protocol.build_error_response(
-                request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
+                request_id, protocol.DAEMON_SHUTTING_DOWN, _DAEMON_SHUTTING_DOWN_MESSAGE
             )
         try:
             if method == "tool_call":
@@ -374,7 +376,7 @@ class _DaemonState:
                         os.getpid(),
                     )
                     return protocol.build_error_response(
-                        request_id, protocol.DAEMON_SHUTTING_DOWN, "daemon is shutting down"
+                        request_id, protocol.DAEMON_SHUTTING_DOWN, _DAEMON_SHUTTING_DOWN_MESSAGE
                     )
                 self._sessions.add(session_id)
                 if self._shutdown_timer is not None:
@@ -430,7 +432,7 @@ class _DaemonState:
             elif params.get("agent_session_id"):
                 self.unregister_session(session_id)
                 return protocol.build_error_response(
-                    request_id, protocol.INTERNAL_ERROR, "database writer unavailable"
+                    request_id, protocol.INTERNAL_ERROR, _DATABASE_WRITER_UNAVAILABLE_MESSAGE
                 )
             result: dict[str, Any] = {"status": "ok"}
             if capability is not None:
@@ -535,7 +537,7 @@ class _DaemonState:
             )
         if self.coordinator is None:
             return protocol.build_error_response(
-                request_id, protocol.INTERNAL_ERROR, "database writer unavailable"
+                request_id, protocol.INTERNAL_ERROR, _DATABASE_WRITER_UNAVAILABLE_MESSAGE
             )
         kwargs = params.get("kwargs") or {}
         if not isinstance(kwargs, dict):
@@ -572,7 +574,7 @@ class _DaemonState:
         from saltmdb.domain.services import librarian_service
 
         if self.coordinator is None:
-            raise RuntimeError("database writer unavailable")
+            raise RuntimeError(_DATABASE_WRITER_UNAVAILABLE_MESSAGE)
         result = librarian_service.run_librarian_now(
             db_path=self.db_path, force=params.get("force", True), coordinator=self.coordinator
         )
@@ -599,7 +601,7 @@ class _DaemonState:
         from saltmdb.domain.services.embedding_service import reconcile_all_embedding_jobs
 
         if self.coordinator is None:
-            raise RuntimeError("database writer unavailable")
+            raise RuntimeError(_DATABASE_WRITER_UNAVAILABLE_MESSAGE)
         entities, retrieval = reconcile_all_embedding_jobs(self.coordinator)
         return protocol.build_ok_response(
             request_id,

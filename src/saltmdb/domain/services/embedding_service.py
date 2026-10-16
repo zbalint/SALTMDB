@@ -1,3 +1,4 @@
+from functools import partial
 import threading
 import logging
 import hashlib
@@ -22,6 +23,9 @@ from saltmdb.utils.chunking import chunk_text
 from saltmdb.utils.process_memory import format_process_memory
 
 logger = logging.getLogger(__name__)
+_RETRIEVAL_EMBEDDINGS_DELETE_SQL = "DELETE FROM retrieval_embeddings WHERE entity_id=?"
+_BGE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
 
 EMBEDDING_RETRY_DELAYS_S = (1, 5, 30, 120, 600)
 EMBEDDING_LEASE_S = 120
@@ -116,7 +120,7 @@ def cancel_retrieval_embedding_jobs_for_entity(
     )
     if clear_vector:
         try:
-            conn.execute("DELETE FROM retrieval_embeddings WHERE entity_id=?", (entity_id,))
+            conn.execute(_RETRIEVAL_EMBEDDINGS_DELETE_SQL, (entity_id,))
         except sqlite3.Error:
             # Vector support is optional at startup; the durable job state still records the
             # cancellation and ordinary FTS/browse paths remain usable.
@@ -169,7 +173,7 @@ def enqueue_retrieval_embedding_job_for_entity(
     # eagerly makes the no-stale-results guarantee immediate.
     if force or not preserved_succeeded:
         try:
-            conn.execute("DELETE FROM retrieval_embeddings WHERE entity_id=?", (entity_id,))
+            conn.execute(_RETRIEVAL_EMBEDDINGS_DELETE_SQL, (entity_id,))
         except sqlite3.Error:
             logger.debug("retrieval vector replacement cleanup unavailable for %s", entity_id)
     if force:
@@ -331,13 +335,12 @@ def reconcile_all_embedding_jobs(
         if stop is not None and stop.is_set():
             return entities, 0
 
+        reconcile_fn: Callable[[sqlite3.Connection], list[str]] = partial(
+            reconcile_embedding_jobs, limit=page_size, after_id=after_id
+        )
         page = cast(
             list[str],
-            coordinator.submit(
-                "reconcile_embedding_jobs",
-                lambda conn: reconcile_embedding_jobs(conn, limit=page_size, after_id=after_id),
-                priority="background",
-            ),
+            coordinator.submit("reconcile_embedding_jobs", reconcile_fn, priority="background"),
         )
         if not page:
             break
@@ -350,13 +353,14 @@ def reconcile_all_embedding_jobs(
         if stop is not None and stop.is_set():
             return entities, retrieval_rows
 
+        reconcile_retrieval_fn: Callable[[sqlite3.Connection], list[str]] = partial(
+            reconcile_retrieval_embedding_jobs, limit=page_size, after_id=retrieval_after_id
+        )
         page = cast(
             list[str],
             coordinator.submit(
                 "reconcile_retrieval_embedding_jobs",
-                lambda conn: reconcile_retrieval_embedding_jobs(
-                    conn, limit=page_size, after_id=retrieval_after_id
-                ),
+                reconcile_retrieval_fn,
                 priority="background",
             ),
         )
@@ -685,7 +689,7 @@ def _persist_retrieval_embedding_if_current(
         return
     if sqlite_vec is None:
         raise RuntimeError("sqlite_vec is unavailable for retrieval embedding persistence")
-    conn.execute("DELETE FROM retrieval_embeddings WHERE entity_id=?", (snapshot["entity_id"],))
+    conn.execute(_RETRIEVAL_EMBEDDINGS_DELETE_SQL, (snapshot["entity_id"],))
     conn.execute(
         "INSERT INTO retrieval_embeddings(entity_id,embedding,source_hash) VALUES (?,?,?)",
         (
@@ -776,7 +780,7 @@ def get_model():
                     logger.info("Loading bundled ONNX embedding model from %s", local_model_dir)
                     try:
                         _model = TextEmbedding(
-                            model_name="BAAI/bge-small-en-v1.5",
+                            model_name=_BGE_MODEL_NAME,
                             cache_dir=os.path.dirname(local_model_dir),
                             local_files_only=True,
                             enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
@@ -788,7 +792,7 @@ def get_model():
                             e,
                         )
                         _model = TextEmbedding(
-                            model_name="BAAI/bge-small-en-v1.5",
+                            model_name=_BGE_MODEL_NAME,
                             enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                         )
                 else:
@@ -797,7 +801,7 @@ def get_model():
                         local_model_dir,
                     )
                     _model = TextEmbedding(
-                        model_name="BAAI/bge-small-en-v1.5",
+                        model_name=_BGE_MODEL_NAME,
                         enable_cpu_mem_arena=ONNX_ENABLE_CPU_MEM_ARENA,
                     )
                 logger.info("Process memory (embedding model loaded): %s", format_process_memory())

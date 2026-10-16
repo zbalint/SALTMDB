@@ -34,23 +34,23 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
     """
     import numpy as np
 
-    def _gram_schmidt(A):
+    def _gram_schmidt(matrix):
         # Modified Gram-Schmidt using only elementwise multiply + sum, which
         # numpy evaluates with its own reduction loop rather than dispatching
         # to a BLAS/LAPACK routine. np.linalg.qr (LAPACK DGEQRF) was found to
         # still crash on Windows even with all other LAPACK/BLAS calls removed,
         # so orthonormalization here avoids BLAS entirely, not just LAPACK.
-        Qo = np.zeros_like(A)
-        for i in range(A.shape[1]):
-            v = A[:, i].copy()
+        orthonormal = np.zeros_like(matrix)
+        for i in range(matrix.shape[1]):
+            v = matrix[:, i].copy()
             for j in range(i):
-                v = v - np.sum(Qo[:, j] * v) * Qo[:, j]
+                v = v - np.sum(orthonormal[:, j] * v) * orthonormal[:, j]
             norm = np.sqrt(np.sum(v * v))
-            Qo[:, i] = v / norm if norm > 1e-10 else v
-        return Qo
+            orthonormal[:, i] = v / norm if norm > 1e-10 else v
+        return orthonormal
 
     rng = np.random.default_rng(seed)
-    n_samples, n_features = X.shape
+    _, n_features = X.shape
 
     # Random projection matrix: (n_features, n_components)
     Q = rng.standard_normal((n_features, n_components)).astype(X.dtype)
@@ -141,13 +141,13 @@ class ScatterplotMixin(ViewerHandlerProtocol):
 
             X = np.vstack(vectors)
             _checkpoint(f"np.vstack done, X.shape={X.shape}")
-            X_centered = X - np.mean(X, axis=0)
+            x_centered = X - np.mean(X, axis=0)
             _checkpoint("np.mean/centering done")
             # Randomized power-iteration PCA — avoids all LAPACK/BLAS heavy
             # routines (SVD, eigh, matmul on large matrices) that crash
             # OpenBLAS in windowless Windows processes.
             # Uses only small dot products; stable across all platforms.
-            coords_2d = _blas_free_pca(X_centered, n_components=2, n_iter=3, seed=42)
+            coords_2d = _blas_free_pca(x_centered, n_components=2, n_iter=3, seed=42)
             _checkpoint("_blas_free_pca done")
 
             points = []

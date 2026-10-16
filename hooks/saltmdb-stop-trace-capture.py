@@ -39,6 +39,7 @@ WRITTEN_ID_KEY = {
     "consolidate_memories": "entity_id",
 }
 RPC_TIMEOUT_SECS = 5
+_SALTMDB_DIR = ".saltmdb"
 
 
 def _new_interaction(interaction_id):
@@ -136,7 +137,7 @@ def _read_json(path):
 
 def _log(home, message):
     try:
-        path = home / ".saltmdb" / "hooks" / "trace-capture.log"
+        path = home / _SALTMDB_DIR / "hooks" / "trace-capture.log"
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
@@ -148,7 +149,7 @@ def _adapter(home, environ, ppid):
     loader = environ.get("COPILOT_LOADER_PID", "")
     keys = ([loader] if loader.isdigit() else []) + [str(ppid)]
     for key in keys:
-        info = _read_json(home / ".saltmdb" / f"copilot_adapter_{key}.json")
+        info = _read_json(home / _SALTMDB_DIR / f"copilot_adapter_{key}.json")
         if info and info.get("agent_session_id") and info.get("db_path"):
             return info
     return None
@@ -158,7 +159,7 @@ def _daemon(home, db_path):
     # Same key formula as daemon/discovery.py (daemon_key + resolve_canonical_db_path); a hook
     # cannot import saltmdb, so it is repeated here.
     key = hashlib.sha256(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:16]
-    info = _read_json(home / ".saltmdb" / f"daemon_{key}.json")
+    info = _read_json(home / _SALTMDB_DIR / f"daemon_{key}.json")
     if info and info.get("service_port") and info.get("auth_token"):
         return int(info["service_port"]), info["auth_token"]
     return None
