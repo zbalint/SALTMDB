@@ -152,9 +152,12 @@ Or install the git hook once via `uv run pre-commit install` to run the same che
 automatically on every commit (`.pre-commit-config.yaml`; the `pip-audit`/`deptry` steps are
 CI-only — network/full-env cost makes them a poor fit for every local commit). CI runs the same
 set in its `lint` job (`.github/workflows/python-tests.yml`) alongside the `test` job and a
-`hygiene` job (`scripts/prepush-fast.sh`: gitleaks, actionlint, zizmor). Nothing in GitHub blocks
-a push on a red job: the repository ruleset on `master` and `develop` only blocks deletion and
-force-push, and requires no status check or pull request.
+`hygiene` job (`scripts/prepush-fast.sh`: gitleaks, actionlint, zizmor).
+The `.github/dependabot.yml` file configures weekly Dependabot updates for GitHub Actions and
+locked Python dependencies targeting `develop`; Dependabot reads it only from the default branch,
+so it is inactive until the file is on `master`, and each update runs through the same CI jobs.
+Nothing in GitHub blocks a push on a red job: the repository ruleset on `master` and
+`develop` only blocks deletion and force-push, and requires no status check or pull request.
 
 **Known follow-up items** (found during 2026-07-31 tool adoption, deliberately not fixed as part
 of it — each needs its own reviewed change):

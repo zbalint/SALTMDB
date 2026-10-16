@@ -14,4 +14,4 @@ done
 gitleaks git --redact --no-banner .
 actionlint
 # Offline on purpose, so a local run (with or without GH_TOKEN exported) and CI check the same things.
-zizmor --no-progress --no-online-audits .github/workflows
+zizmor --no-progress --no-online-audits .github
