@@ -50,3 +50,8 @@ test_db/
 
 # Local a2amx team config (which sessions the owner runs for this repo); template is a2amx.toml.example.
 /a2amx.toml
+
+# Sonar and coverage reports
+.scannerwork/
+.coverage
+coverage.xml

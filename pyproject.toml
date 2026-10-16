@@ -32,7 +32,8 @@ dev = [
     "pip-audit>=2.9.0,<3.0.0",
     "deptry>=0.23.0,<0.24.0",
     "pre-commit>=4.0.0,<5.0.0",
-    "pytest>=8.0.0,<9.2.0"
+    "pytest>=8.0.0,<9.2.0",
+    "coverage[toml]>=7.6.0,<8.0.0"
 ]
 
 [project.urls]
@@ -101,3 +102,8 @@ pep621_dev_dependency_groups = ["dev"]
 
 [tool.deptry.package_module_name_map]
 python-igraph = "igraph"
+
+[tool.coverage.run]
+include = ["src/saltmdb/*", "hooks/*"]
+omit = ["hooks/tests/*"]
+relative_files = true

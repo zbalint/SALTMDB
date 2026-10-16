@@ -113,7 +113,7 @@ Every modification must pass the full repository verification gate before submis
 
 Adopted 2026-07-31 on top of the behavioral rules in §2.1, closing the tooling gap (no
 lint/type/security config existed in this repo before then).
-Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit]`/`[tool.deptry]`.
+Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit]`/`[tool.deptry]`/`[tool.coverage]`.
 
 * **`ruff check` / `ruff format`** — lint (`E`, `F`, `W`, `C90` complexity, `PLR` refactor
   metrics) and formatting. `E501` (line-too-long) is disabled: the formatter already wraps
@@ -138,6 +138,9 @@ Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit
 * **`deptry`** — unused/missing/transitive dependency detection. `numpy` was added as an
   explicit direct dependency (2026-07-31) after deptry caught it being imported directly
   (`memory_service.py`, cosine similarity) while only present transitively via `fastembed`.
+* **Coverage and SonarQube Cloud** — CI runs the full test suite under `coverage.py`, uploads the
+  resulting report with a SonarQube analysis, and does not block on the quality gate. Run
+  `scripts/prepush-sonar.sh` locally for the optional whole-suite check.
 
 Run the complete verification gate locally before pushing:
 ```bash
