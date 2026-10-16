@@ -178,6 +178,103 @@ class TestSessionConnectionOpen(unittest.TestCase):
         session._agent_id = None
         return session
 
+    def test_open_rejects_missing_capability_even_when_failed_socket_close_raises(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        sock = MagicMock()
+        sock.close.side_effect = OSError("close failed")
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(client.socket, "create_connection", return_value=sock),
+            patch.object(client.protocol, "send_frame"),
+            patch.object(client.protocol, "recv_frame", return_value={"ok": True}),
+        ):
+            with self.assertRaises(client.DaemonRpcError) as raised:
+                session.open()
+        self.assertEqual(raised.exception.code, protocol.INTERNAL_ERROR)
+        self.assertEqual(
+            str(raised.exception), "INTERNAL_ERROR: daemon hello omitted caller session capability"
+        )
+        self.assertIsNone(session._sock)
+        self.assertIsNone(session._auth_token)
+        sock.close.assert_called_once()
+
+    def test_open_retries_connection_failure_before_any_socket_exists(self):
+        session = self._blank_session()
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(
+                client.socket, "create_connection", side_effect=ConnectionRefusedError("offline")
+            ) as connect,
+        ):
+            with self.assertRaisesRegex(ConnectionRefusedError, "offline"):
+                session.open()
+        self.assertEqual(connect.call_count, 2)
+        self.assertIsNone(session._sock)
+
+    def test_rpc_transport_failures_distinguish_retry_from_mid_call_failure(self):
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        for failure, code, attempts in (
+            (ConnectionRefusedError("offline"), "CONNECT_FAILED", 2),
+            (None, "MID_CALL_FAILURE", 1),
+        ):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    client,
+                    "ensure_daemon_running",
+                    return_value={"service_port": 1, "auth_token": "tok"},
+                ),
+                patch.object(
+                    client.socket, "create_connection", side_effect=failure, return_value=sock
+                ) as connect,
+                patch.object(
+                    client.protocol, "send_frame", side_effect=protocol.FrameError("broken frame")
+                ),
+            ):
+                with self.assertRaises(client.DaemonRpcError) as raised:
+                    client.call_method("/tmp/characterization.db", "ping", {})
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(connect.call_count, attempts)
+                self.assertEqual(
+                    str(raised.exception), f"{code}: {'offline' if failure else 'broken frame'}"
+                )
+
+    def test_rpc_final_error_and_absent_discovery_are_not_retried(self):
+        with patch.object(client, "reachable_daemon_info", return_value=None):
+            with self.assertRaisesRegex(
+                client.DaemonNotRunning, "No reachable SALTMDB daemon for /tmp/characterization.db"
+            ):
+                client.call_method("/tmp/characterization.db", "ping", {}, spawn=False)
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(client.socket, "create_connection", return_value=sock) as connect,
+            patch.object(client.protocol, "send_frame"),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_error_response("x", protocol.INTERNAL_ERROR, "denied"),
+            ),
+        ):
+            with self.assertRaisesRegex(client.DaemonRpcError, "INTERNAL_ERROR: denied"):
+                client.call_method("/tmp/characterization.db", "ping", {})
+        connect.assert_called_once()
+
     def test_restart_reconnect_does_not_send_definitive_goodbye(self):
         session = self._blank_session()
         session._auth_token = "old-token"
@@ -275,7 +372,7 @@ class TestSessionConnectionOpen(unittest.TestCase):
             self.assertIsNotNone(session._sock)
             self.assertEqual(session._auth_token, "tok")
             self.assertIs(client._current_session, session)
-            session.close()
+            session.close(send_goodbye=False)
         finally:
             server.close()
 
@@ -1171,6 +1268,35 @@ class TestColdStartWait(unittest.TestCase):
         self.assertEqual(session.open.call_count, 0)
         self.assertEqual(sum("still pending" in message for message in logs.output), 1)
         self.assertTrue(any("exceeded 120 seconds" in message for message in logs.output))
+        client._current_session = None
+
+    def test_lazy_worker_does_not_open_replaced_session(self):
+        session = MagicMock(db_path=self.db_path)
+        with (
+            patch.object(client, "probe_owner", return_value="ready"),
+            patch.object(client, "ensure_daemon_running"),
+            patch.object(client.threading, "Thread") as thread,
+        ):
+            client.begin_lazy_start(session)
+            client._current_session = MagicMock()
+            thread.call_args.kwargs["target"]()
+        session.open.assert_not_called()
+
+    def test_lazy_worker_logs_hello_failure_without_retrying(self):
+        session = MagicMock(db_path=self.db_path)
+        session.open.side_effect = OSError("hello offline")
+        with (
+            patch.object(client, "probe_owner", return_value="ready"),
+            patch.object(client, "ensure_daemon_running"),
+            patch.object(client.threading, "Thread") as thread,
+            self.assertLogs(client.logger.name, level="WARNING") as logs,
+        ):
+            client.begin_lazy_start(session)
+            thread.call_args.kwargs["target"]()
+        session.open.assert_called_once()
+        self.assertEqual(
+            logs.output, ["WARNING:saltmdb.daemon.client:Lazy session hello failed: hello offline"]
+        )
         client._current_session = None
 
     def test_lazy_adoption_keeps_first_tool_call_attribution(self):

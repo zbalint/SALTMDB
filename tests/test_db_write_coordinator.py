@@ -5,7 +5,15 @@ import time
 import unittest
 from pathlib import Path
 
-from saltmdb.daemon.db_write_coordinator import CoordinatorUsageError, DbWriteCoordinator
+from concurrent.futures import Future
+from unittest.mock import patch
+
+from saltmdb.daemon import db_write_coordinator
+from saltmdb.daemon.db_write_coordinator import (
+    CoordinatorUsageError,
+    DbWriteCoordinator,
+    _Job,
+)
 
 
 class DbWriteCoordinatorTests(unittest.TestCase):
@@ -81,3 +89,54 @@ class DbWriteCoordinatorTests(unittest.TestCase):
         info = self.coordinator.telemetry()
         self.assertIn("writer_thread_id", info)
         self.assertEqual(info["queue_depth"], 0)
+
+    def test_run_writer_open_failure_drains_and_marks_not_started(self):
+        coordinator = DbWriteCoordinator(self.path)
+        with patch.object(
+            db_write_coordinator,
+            "open_writer_connection",
+            side_effect=RuntimeError("writer unavailable"),
+        ):
+            coordinator._run()
+        self.assertFalse(coordinator._started)
+        self.assertTrue(coordinator._stopping)
+
+    def test_run_stopping_and_cancelled_jobs_skip_execution(self):
+        stopping = DbWriteCoordinator(self.path)
+        stopping._stopping = True
+        with (
+            patch.object(db_write_coordinator, "open_writer_connection", return_value=object()),
+            patch.object(db_write_coordinator, "close_connection"),
+            patch.object(stopping, "_load_vector_extension"),
+        ):
+            stopping._run()
+        self.assertIsNone(stopping._conn)
+
+        cancelled = DbWriteCoordinator(self.path)
+        future: Future[None] = Future()
+        future.cancel()
+        executed = False
+
+        def cancelled_job(_conn: sqlite3.Connection) -> None:
+            nonlocal executed
+            executed = True
+
+        job = _Job("cancelled", cancelled_job, future, 0.0)
+        seen = False
+
+        def next_job(_foreground_run: int):
+            nonlocal seen
+            if not seen:
+                seen = True
+                return job, 0
+            cancelled._stopping = True
+            return None, 0
+
+        with (
+            patch.object(db_write_coordinator, "open_writer_connection", return_value=object()),
+            patch.object(db_write_coordinator, "close_connection"),
+            patch.object(cancelled, "_load_vector_extension"),
+            patch.object(cancelled, "_next_job", side_effect=next_job),
+        ):
+            cancelled._run()
+        self.assertFalse(executed)

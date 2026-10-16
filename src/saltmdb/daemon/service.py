@@ -214,6 +214,96 @@ def _systemd_unit_state(runner: Runner) -> ServiceResult | None:
     )
 
 
+def _start_timeout_result(canonical_db_path: str) -> ServiceResult:
+    tail = client._read_daemon_log_tail(canonical_db_path)
+    return ServiceResult(
+        1,
+        f"timed out waiting for daemon after {config.DAEMON_START_WAIT_S:g} s; "
+        f"see daemon.log\n{tail}",
+    )
+
+
+def _start_reachable_result(info: dict[str, Any], spawned: bool) -> ServiceResult:
+    if spawned:
+        return ServiceResult(
+            0, f"started: pid={info.get('daemon_pid')} port={info.get('service_port')}"
+        )
+    return ServiceResult(
+        0,
+        "already running: "
+        f"pid={info.get('daemon_pid')} port={info.get('service_port')} "
+        "(a daemon spawned by an agent exits 30 s after its last session; run stop, then "
+        "start, for a persistent one)",
+    )
+
+
+def _refresh_start_owner(
+    canonical_db_path: str,
+    owner: Any,
+    last_probe_at: float,
+    owner_misses: int,
+    now: float,
+) -> tuple[Any, float, int]:
+    if now - last_probe_at < config.DAEMON_OWNER_PROBE_INTERVAL_S:
+        return owner, last_probe_at, owner_misses
+    owner = client.probe_owner(canonical_db_path)
+    last_probe_at = now
+    owner_misses = owner_misses + 1 if owner is None else 0
+    return owner, last_probe_at, owner_misses
+
+
+def _spawn_started_daemon(
+    canonical_db_path: str, now: float
+) -> tuple[ServiceResult | None, bool, float | None, int]:
+    try:
+        # shortcut: private client seams (_spawn_daemon_process here, _read_daemon_log_tail
+        # above); make them public if a third caller appears.
+        client._spawn_daemon_process(canonical_db_path, persistent=True)
+    except OSError as exc:
+        return (
+            ServiceResult(1, f"failed to spawn persistent daemon: {exc}; see daemon.log"),
+            False,
+            None,
+            0,
+        )
+    return None, True, now, 0
+
+
+def _start_spawn_is_due(owner_misses: int, last_spawn_at: float | None, now: float) -> bool:
+    if owner_misses < config.DAEMON_OWNER_PROBE_MISSES:
+        return False
+    return last_spawn_at is None or now - last_spawn_at >= config.DAEMON_SPAWN_MIN_INTERVAL_S
+
+
+def _wait_for_started_daemon(canonical_db_path: str) -> ServiceResult:
+    started_at = time.monotonic()
+    owner = client.probe_owner(canonical_db_path)
+    owner_misses = 0 if owner is not None else 1
+    last_probe_at = started_at
+    last_spawn_at: float | None = None
+    spawned = False
+    deadline = started_at + config.DAEMON_START_WAIT_S
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _start_timeout_result(canonical_db_path)
+        time.sleep(min(config.DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
+        info = client.reachable_daemon_info(canonical_db_path)
+        if info is not None:
+            return _start_reachable_result(info, spawned)
+
+        now = time.monotonic()
+        owner, last_probe_at, owner_misses = _refresh_start_owner(
+            canonical_db_path, owner, last_probe_at, owner_misses, now
+        )
+        if not _start_spawn_is_due(owner_misses, last_spawn_at, now):
+            continue
+        result, spawned, last_spawn_at, owner_misses = _spawn_started_daemon(canonical_db_path, now)
+        if result is not None:
+            return result
+
+
 def start_daemon(db_path: str | None = None) -> ServiceResult:
     """Start a persistent daemon after waiting for any existing owner."""
     unsupported = _platform_guard()
@@ -229,61 +319,22 @@ def start_daemon(db_path: str | None = None) -> ServiceResult:
             "(a daemon spawned by an agent exits 30 s after its last session; run stop, then "
             "start, for a persistent one)",
         )
+    return _wait_for_started_daemon(canonical_db_path)
 
-    started_at = time.monotonic()
-    owner = client.probe_owner(canonical_db_path)
-    owner_misses = 0 if owner is not None else 1
-    last_probe_at = started_at
-    last_spawn_at: float | None = None
-    spawned = False
-    deadline = started_at + config.DAEMON_START_WAIT_S
 
+def _wait_for_stopped_daemon(pid: int) -> ServiceResult:
+    deadline = time.monotonic() + config.DAEMON_STOP_WAIT_S
     while True:
+        if "saltmdb.daemon.server" not in _read_proc_cmdline(pid):
+            return ServiceResult(0, "stopped")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            tail = client._read_daemon_log_tail(canonical_db_path)
             return ServiceResult(
                 1,
-                f"timed out waiting for daemon after {config.DAEMON_START_WAIT_S:g} s; "
-                f"see daemon.log\n{tail}",
+                f"daemon pid {pid} did not exit within {config.DAEMON_STOP_WAIT_S:g} s; "
+                "it may still be draining, see daemon.log",
             )
         time.sleep(min(config.DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
-        info = client.reachable_daemon_info(canonical_db_path)
-        if info is not None:
-            if spawned:
-                return ServiceResult(
-                    0, f"started: pid={info.get('daemon_pid')} port={info.get('service_port')}"
-                )
-            return ServiceResult(
-                0,
-                "already running: "
-                f"pid={info.get('daemon_pid')} port={info.get('service_port')} "
-                "(a daemon spawned by an agent exits 30 s after its last session; run stop, then "
-                "start, for a persistent one)",
-            )
-
-        now = time.monotonic()
-        if now - last_probe_at >= config.DAEMON_OWNER_PROBE_INTERVAL_S:
-            owner = client.probe_owner(canonical_db_path)
-            last_probe_at = now
-            if owner is None:
-                owner_misses += 1
-            else:
-                owner_misses = 0
-
-        if owner_misses < config.DAEMON_OWNER_PROBE_MISSES:
-            continue
-        if last_spawn_at is not None and now - last_spawn_at < config.DAEMON_SPAWN_MIN_INTERVAL_S:
-            continue
-        try:
-            # shortcut: private client seams (_spawn_daemon_process here, _read_daemon_log_tail
-            # above); make them public if a third caller appears.
-            client._spawn_daemon_process(canonical_db_path, persistent=True)
-        except OSError as exc:
-            return ServiceResult(1, f"failed to spawn persistent daemon: {exc}; see daemon.log")
-        spawned = True
-        last_spawn_at = now
-        owner_misses = 0
 
 
 def stop_daemon(  # noqa: PLR0911 -- each lifecycle refusal is reported directly
@@ -314,19 +365,7 @@ def stop_daemon(  # noqa: PLR0911 -- each lifecycle refusal is reported directly
     refusal = _signal_local_daemon(pid)
     if refusal is not None:
         return ServiceResult(1, refusal)
-
-    deadline = time.monotonic() + config.DAEMON_STOP_WAIT_S
-    while True:
-        if "saltmdb.daemon.server" not in _read_proc_cmdline(pid):
-            return ServiceResult(0, "stopped")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return ServiceResult(
-                1,
-                f"daemon pid {pid} did not exit within {config.DAEMON_STOP_WAIT_S:g} s; "
-                "it may still be draining, see daemon.log",
-            )
-        time.sleep(min(config.DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
+    return _wait_for_stopped_daemon(pid)
 
 
 def daemon_status(db_path: str | None = None) -> ServiceResult:

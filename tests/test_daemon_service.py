@@ -407,6 +407,24 @@ class TestDaemonService(unittest.TestCase):
             )
         )
 
+    def test_start_spawn_failure_reports_exact_error(self):
+        clock = _Clock()
+        with (
+            patch.object(service, "time", clock),
+            patch.object(service.client, "reachable_daemon_info", return_value=None),
+            patch.object(service.client, "probe_owner", return_value=None),
+            patch.object(
+                service.client, "_spawn_daemon_process", side_effect=OSError("spawn denied")
+            ),
+        ):
+            result = service.start_daemon(self.db_path)
+        self.assertEqual(
+            result,
+            service.ServiceResult(
+                1, "failed to spawn persistent daemon: spawn denied; see daemon.log"
+            ),
+        )
+
     def test_real_persistent_daemon_lifecycle(self):
         env = {"SALTMDB_VIEWER_ENABLED": "false"}
         canonical = discovery.resolve_canonical_db_path(self.db_path)

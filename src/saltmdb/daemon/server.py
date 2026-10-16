@@ -344,106 +344,119 @@ class _DaemonState:
         finally:
             self._release_inflight()
 
-    def _handle_session_method(  # noqa: PLR0911
+    def _record_agent_session(
+        self, request_id: str | None, session_id: int, params: dict[str, Any]
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        if not params.get("agent_session_id"):
+            return None, None
+        if self.coordinator is None:
+            self.unregister_session(session_id)
+            return None, protocol.build_error_response(
+                request_id, protocol.INTERNAL_ERROR, _DATABASE_WRITER_UNAVAILABLE_MESSAGE
+            )
+        try:
+            from saltmdb.db import agent_sessions
+            import datetime
+
+            cwd = params.get("cwd") or None
+
+            self.coordinator.submit(
+                "record_agent_session",
+                lambda conn: agent_sessions.record_session(
+                    conn,
+                    params["agent_session_id"],
+                    cwd,
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    params.get("agent_id"),
+                ),
+                priority="foreground",
+            )
+            capability = secrets.token_urlsafe(32)
+            with self._lock:
+                self._agent_sessions[session_id] = _AgentSession(
+                    params["agent_session_id"], capability
+                )
+            return capability, None
+        except Exception as exc:
+            self.unregister_session(session_id)
+            logger.exception("Failed to record agent session")
+            code = (
+                protocol.DAEMON_SHUTTING_DOWN
+                if str(exc) == protocol.DAEMON_SHUTTING_DOWN
+                or (
+                    isinstance(exc, CoordinatorUsageError)
+                    and getattr(exc, "code", None) == protocol.DAEMON_SHUTTING_DOWN
+                )
+                else protocol.INTERNAL_ERROR
+            )
+            return None, protocol.build_error_response(
+                request_id,
+                code,
+                f"failed to record agent session: {exc}",
+            )
+
+    def _handle_hello(
+        self, request_id: str | None, session_id: int, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        if "owner_id" in params:
+            return protocol.build_error_response(
+                request_id,
+                protocol.MALFORMED_REQUEST,
+                "hello parameter 'owner_id' was renamed 'agent_id'; "
+                "restart the MCP adapter on the current SALTMDB version",
+            )
+        logger.info(
+            "hello received: session_id=%d agent_session_id=%s cwd=%s (pid=%d)",
+            session_id,
+            params.get("agent_session_id"),
+            params.get("cwd"),
+            os.getpid(),
+        )
+        # Atomic with _grace_fire's own lock: closes the exact race where a hello is
+        # acknowledged "ok" to the caller in the gap before the session is actually
+        # registered, during which the grace timer could observe zero sessions and start
+        # draining a connection the caller just believes it successfully opened.
+        with self._lock:
+            if self._draining:
+                logger.info(
+                    "hello rejected: session_id=%d daemon already draining (pid=%d)",
+                    session_id,
+                    os.getpid(),
+                )
+                return protocol.build_error_response(
+                    request_id, protocol.DAEMON_SHUTTING_DOWN, _DAEMON_SHUTTING_DOWN_MESSAGE
+                )
+            self._sessions.add(session_id)
+            if self._shutdown_timer is not None:
+                self._shutdown_timer.cancel()
+                self._shutdown_timer = None
+                logger.info(
+                    "Grace timer cancelled: hello session_id=%d admitted (pid=%d)",
+                    session_id,
+                    os.getpid(),
+                )
+        # Registration is a foreground write: once hello succeeds, its provenance row exists.
+        capability, error_response = self._record_agent_session(request_id, session_id, params)
+        if error_response is not None:
+            return error_response
+        result: dict[str, Any] = {"status": "ok"}
+        if capability is not None:
+            result["caller_agent_session_capability"] = capability
+        logger.info(
+            "hello admitted: session_id=%d total_sessions=%d (pid=%d)",
+            session_id,
+            len(self._sessions),
+            os.getpid(),
+        )
+        return protocol.build_ok_response(request_id, result)
+
+    def _handle_session_method(
         self, method: str, request_id: str | None, session_id: int | None, params: dict[str, Any]
     ) -> dict[str, Any]:
         """Handle session-lifecycle (hello/goodbye/ping) and status methods.
         These never acquire the inflight counter -- they are exempt from the shutdown gate."""
         if method == "hello" and session_id is not None:
-            if "owner_id" in params:
-                return protocol.build_error_response(
-                    request_id,
-                    protocol.MALFORMED_REQUEST,
-                    "hello parameter 'owner_id' was renamed 'agent_id'; "
-                    "restart the MCP adapter on the current SALTMDB version",
-                )
-            logger.info(
-                "hello received: session_id=%d agent_session_id=%s cwd=%s (pid=%d)",
-                session_id,
-                params.get("agent_session_id"),
-                params.get("cwd"),
-                os.getpid(),
-            )
-            # Atomic with _grace_fire's own lock: closes the exact race where a hello is
-            # acknowledged "ok" to the caller in the gap before the session is actually
-            # registered, during which the grace timer could observe zero sessions and start
-            # draining a connection the caller just believes it successfully opened.
-            with self._lock:
-                if self._draining:
-                    logger.info(
-                        "hello rejected: session_id=%d daemon already draining (pid=%d)",
-                        session_id,
-                        os.getpid(),
-                    )
-                    return protocol.build_error_response(
-                        request_id, protocol.DAEMON_SHUTTING_DOWN, _DAEMON_SHUTTING_DOWN_MESSAGE
-                    )
-                self._sessions.add(session_id)
-                if self._shutdown_timer is not None:
-                    self._shutdown_timer.cancel()
-                    self._shutdown_timer = None
-                    logger.info(
-                        "Grace timer cancelled: hello session_id=%d admitted (pid=%d)",
-                        session_id,
-                        os.getpid(),
-                    )
-            # Registration is a foreground write: once hello succeeds, its provenance row exists.
-            capability: str | None = None
-            if params.get("agent_session_id") and self.coordinator is not None:
-                try:
-                    from saltmdb.db import agent_sessions
-                    import datetime
-
-                    cwd = params.get("cwd") or None
-
-                    self.coordinator.submit(
-                        "record_agent_session",
-                        lambda conn: agent_sessions.record_session(
-                            conn,
-                            params["agent_session_id"],
-                            cwd,
-                            datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                            params.get("agent_id"),
-                        ),
-                        priority="foreground",
-                    )
-                    capability = secrets.token_urlsafe(32)
-                    with self._lock:
-                        self._agent_sessions[session_id] = _AgentSession(
-                            params["agent_session_id"], capability
-                        )
-                except Exception as exc:
-                    self.unregister_session(session_id)
-                    logger.exception("Failed to record agent session")
-                    code = (
-                        protocol.DAEMON_SHUTTING_DOWN
-                        if str(exc) == protocol.DAEMON_SHUTTING_DOWN
-                        or (
-                            isinstance(exc, CoordinatorUsageError)
-                            and getattr(exc, "code", None) == protocol.DAEMON_SHUTTING_DOWN
-                        )
-                        else protocol.INTERNAL_ERROR
-                    )
-                    return protocol.build_error_response(
-                        request_id,
-                        code,
-                        f"failed to record agent session: {exc}",
-                    )
-            elif params.get("agent_session_id"):
-                self.unregister_session(session_id)
-                return protocol.build_error_response(
-                    request_id, protocol.INTERNAL_ERROR, _DATABASE_WRITER_UNAVAILABLE_MESSAGE
-                )
-            result: dict[str, Any] = {"status": "ok"}
-            if capability is not None:
-                result["caller_agent_session_capability"] = capability
-            logger.info(
-                "hello admitted: session_id=%d total_sessions=%d (pid=%d)",
-                session_id,
-                len(self._sessions),
-                os.getpid(),
-            )
-            return protocol.build_ok_response(request_id, result)
+            return self._handle_hello(request_id, session_id, params)
         if method == "goodbye" and session_id is not None:
             logger.info("goodbye received: session_id=%d (pid=%d)", session_id, os.getpid())
             # Marking closing is done before the session-loop persists ended_at and sends the

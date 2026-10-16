@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal, TypeVar
+from typing import Any, Callable, Generic, Literal, TypeVar
 
 import logging
 
@@ -239,6 +239,21 @@ class DbWriteCoordinator:
             self._active_transaction = False
             self._active_label = None
 
+    def _wait_for_job(self, foreground_run: int) -> tuple[_Job[Any] | None, int]:
+        while True:
+            # Durable background work is already represented in
+            # embedding_jobs; don't drain it during shutdown.
+            if self._stopping:
+                return None, foreground_run
+            job, foreground_run = self._next_job(foreground_run)
+            if job is not None:
+                return job, foreground_run
+            if self._stopping:
+                return None, foreground_run
+            with self._wakeup:
+                if self._foreground.empty() and self._background.empty() and not self._stopping:
+                    self._wakeup.wait()
+
     def _run(self) -> None:
         self._thread_id = threading.get_ident()
         try:
@@ -249,24 +264,11 @@ class DbWriteCoordinator:
             return
         try:
             self._load_vector_extension()
-            fg_run = 0
+            foreground_run = 0
             while True:
-                if self._stopping:
-                    # Durable background work is already represented in
-                    # embedding_jobs; don't drain it during shutdown.
-                    break
-                job, fg_run = self._next_job(fg_run)
+                job, foreground_run = self._wait_for_job(foreground_run)
                 if job is None:
-                    if self._stopping:
-                        break
-                    with self._wakeup:
-                        if (
-                            self._foreground.empty()
-                            and self._background.empty()
-                            and not self._stopping
-                        ):
-                            self._wakeup.wait()
-                    continue
+                    break
                 if job.future.cancelled():
                     continue
                 self._execute_job(job)

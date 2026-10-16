@@ -60,6 +60,42 @@ class TestDaemonStateConcurrency(unittest.TestCase):
         self.assertTrue(resp["ok"])
         self.assertIn(1, state._sessions)
 
+    def test_hello_rejects_renamed_owner_and_missing_writer(self):
+        for params, code, message in (
+            (
+                {"owner_id": "old"},
+                protocol.MALFORMED_REQUEST,
+                "hello parameter 'owner_id' was renamed 'agent_id'; restart the MCP adapter on the current SALTMDB version",
+            ),
+            (
+                {"agent_session_id": "logical"},
+                protocol.INTERNAL_ERROR,
+                "database writer unavailable",
+            ),
+        ):
+            with self.subTest(params=params):
+                state = self._state(foreground=True)
+                response = state.handle_request(
+                    protocol.build_request("hello", params, token="tok"), session_id=42
+                )
+                self.assertEqual(response["error"], {"code": code, "message": message})
+                self.assertNotIn(42, state._sessions)
+
+    def test_hello_cancels_existing_grace_timer(self):
+        state = self._state()
+        state.start_initial_grace_period()
+        timer = state._shutdown_timer
+        try:
+            response = state.handle_request(
+                protocol.build_request("hello", {}, token="tok"), session_id=42
+            )
+            self.assertTrue(response["ok"])
+            self.assertIsNone(state._shutdown_timer)
+            self.assertTrue(timer.finished.is_set())
+            self.assertIn(42, state._sessions)
+        finally:
+            timer.cancel()
+
     def test_agent_hello_records_owner_and_initial_activity_synchronously(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = init_db(os.path.join(tmp, "sessions.db"))
