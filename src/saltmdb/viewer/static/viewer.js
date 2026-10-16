@@ -73,7 +73,9 @@
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
       await navigator.clipboard.writeText(value);
       setNotice(`${label} copied to clipboard.`);
-    } catch (_) { setNotice(`Could not copy ${label.toLowerCase()}.`); }
+    } catch (_) { // Clipboard failures are intentionally reduced to a user-facing notice.
+      setNotice(`Could not copy ${label.toLowerCase()}.`);
+    }
   };
   const select = (label, options, value = '') => {
     const wrap = node('label', undefined, 'field');
@@ -147,7 +149,11 @@
     }).format(timestamp);
   };
   const timeCell = (value) => {
-    const cell = node('td', formatTimestamp(value)); if (value) cell.title = String(value); return cell;
+    const cell = node('td', formatTimestamp(value));
+    if (value) {
+      cell.title = String(value);
+    }
+    return cell;
   };
   const section = (heading, description) => {
     const header = node('div', undefined, 'section-heading');
@@ -215,8 +221,8 @@
       rawToggle.setAttribute('aria-pressed', 'false'); actions.append(rawToggle);
       detail.append(actions);
       const markdown = node('div', undefined, 'markdown');
-      const parsed = window.marked?.parse(data.full_content || '') || '';
-      markdown.innerHTML = window.DOMPurify.sanitize(parsed, {
+      const parsed = globalThis.marked?.parse(data.full_content || '') || '';
+      markdown.innerHTML = globalThis.DOMPurify.sanitize(parsed, {
         USE_PROFILES: { html: true }, FORBID_TAGS: ['style', 'svg', 'math'], FORBID_ATTR: ['style'],
       });
       detail.append(markdown, raw);
@@ -228,7 +234,7 @@
       const relationSummary = node('p', `${data.relations.outgoing_count} outgoing · ${data.relations.incoming_count} incoming relations`, 'muted');
       evidence.append(relationSummary, button('Explore relationship graph', '', () => {
         state.relationRoot = data.id; state.focusRelationshipInput = true;
-        state.skipModalFocusRestore = true; state.view = 'relationships'; dialog.close(); render();
+        state.skipModalFocusRestore = true; state.view = 'relationships'; dialog.close(); void render();
       }));
       detail.append(evidence);
       const provenance = node('section', undefined, 'evidence');
@@ -261,7 +267,7 @@
       const written = node('section', undefined, 'evidence'); written.append(section('Memories written in this turn'));
       const rows = data.linked_memories.map(link => {
         const row = node('tr'); const cell = node('td');
-        cell.append(button(link.title, 'row-button', () => { traceDialog.close(); openDetail(link.entity_id); }));
+        cell.append(button(link.title, 'row-button', () => { traceDialog.close(); void openDetail(link.entity_id); }));
         row.append(cell, node('td', link.write_operation)); return row;
       });
       written.append(renderTable(['Memory', 'Operation'], rows, 'No memory writes were linked to this turn.'));
@@ -293,12 +299,15 @@
     );
     const actions = node('div', undefined, 'overview-actions');
     const lifecycle = node('section', undefined, 'card action-card'); lifecycle.append(section('Memory lifecycle', 'Open a focused Memories view.'));
-    [['All memories', ''], ['Raw', 'raw'], ['Consolidated', 'consolidated'], ['Archived', 'archived']].forEach(([label, value]) => lifecycle.append(button(label, `filter-link ${value ? `status-${value}` : ''}`, () => {
-      state.explorerPreset = { status: value }; state.explorerPage = 1; state.view = 'explorer'; render();
-    })));
+    [['All memories', ''], ['Raw', 'raw'], ['Consolidated', 'consolidated'], ['Archived', 'archived']].forEach(([label, value]) => {
+      const className = value ? `filter-link status-${value}` : 'filter-link ';
+      lifecycle.append(button(label, className, () => {
+        state.explorerPreset = { status: value }; state.explorerPage = 1; state.view = 'explorer'; void render();
+      }));
+    });
     const sessions = node('section', undefined, 'card action-card'); sessions.append(section('Agent sessions', 'Inspect live and historical agent work.'));
     const activeSessions = button('Active sessions', 'filter-link status-active', () => {
-      state.sessionsPreset = { state: 'active' }; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();
+      state.sessionsPreset = { state: 'active' }; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; void render();
     });
     if (!data.agent_session_liveness_available) {
       activeSessions.disabled = true;
@@ -312,7 +321,7 @@
 
   const explorer = async () => {
     const mode = select('Explorer mode', [['browse', 'Browse / audit list'], ['hybrid', 'Hybrid search']], state.explorerMode);
-    mode.element.addEventListener('change', () => { state.explorerMode = mode.element.value; render(); });
+    mode.element.addEventListener('change', () => { state.explorerMode = mode.element.value; void render(); });
     const result = node('div');
     if (state.explorerMode === 'hybrid') {
       const form = node('form', undefined, 'toolbar explorer-toolbar');
@@ -398,7 +407,7 @@
     const content = node('pre', event.content || '—', 'raw-markdown'); eventDetail.append(section('Event content'), content);
     const actions = node('div', undefined, 'detail-actions');
     actions.append(button('Copy event ID', '', () => copyText(event.id, 'Event ID')));
-    if (event.context_id) actions.append(button('Browse this context', '', () => { state.explorerMode = 'browse'; state.explorerPreset = { context_id: event.context_id }; state.explorerPage = 1; state.view = 'explorer'; eventDialog.close(); render(); }));
+    if (event.context_id) actions.append(button('Browse this context', '', () => { state.explorerMode = 'browse'; state.explorerPreset = { context_id: event.context_id }; state.explorerPage = 1; state.view = 'explorer'; eventDialog.close(); void render(); }));
     eventDetail.append(actions); eventDialog._invoker = invoker; eventDialog.showModal();
   };
 
@@ -409,7 +418,7 @@
     const sessionField = inputField('Session ID', 'Agent session ID', state.eventsPreset.agent_session_id || '');
     const contextField = inputField('Context ID', 'Context or thread ID', state.eventsPreset.context_id || '');
     const textField = inputField('Text', 'Text within the event content', state.eventsPreset.q || '');
-    form.append(typeField.wrap, agentField.wrap, sessionField.wrap, contextField.wrap, textField.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.eventsPreset = {}; state.eventsPage = 1; render(); }));
+    form.append(typeField.wrap, agentField.wrap, sessionField.wrap, contextField.wrap, textField.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.eventsPreset = {}; state.eventsPage = 1; void render(); }));
     const result = node('div');
     const list = async (page = 1) => {
       setBusy(result, true);
@@ -435,7 +444,7 @@
     await list(state.eventsPage);
   };
 
-  const openSessionDetail = (sessionId) => { state.sessionDetailId = sessionId; render(); };
+  const openSessionDetail = (sessionId) => { state.sessionDetailId = sessionId; void render(); };
 
   const sessionRow = (item) => {
     const row = node('tr');
@@ -458,7 +467,7 @@
   };
 
   const sessionDetail = async (sessionId) => {
-    const back = button('← Back to Agent Sessions', '', () => { state.sessionDetailId = ''; render(); });
+    const back = button('← Back to Agent Sessions', '', () => { state.sessionDetailId = ''; void render(); });
     const result = node('div');
     view.replaceChildren(back, section(sessionId, 'Memories created or touched by this session, and its logged events.'), result);
     setBusy(result, true);
@@ -493,14 +502,20 @@
           state.sessionsPreset = { cwd: sessionData.cwd };
           state.sessionsPage = 1;
           state.sessionDetailId = '';
-          render();
+          void render();
         }));
       }
       const metadataSection = node('div');
       metadataSection.append(identity, metadata, metadataActions);
       const memoryRows = memoriesData.entities.map(entity => {
         const row = node('tr'); const lifecycleCell = node('td'); lifecycleCell.append(statusBadge(entity.status));
-        const roles = []; if (entity.agent_session_id === sessionId) roles.push('created'); if (entity.last_touched_session_id === sessionId) roles.push('touched');
+        const roles = [];
+        if (entity.agent_session_id === sessionId) {
+          roles.push('created');
+        }
+        if (entity.last_touched_session_id === sessionId) {
+          roles.push('touched');
+        }
         row.append(memoryCell(entity), lifecycleCell, node('td', roles.join(', ') || '—')); return row;
       });
       const memorySection = node('div');
@@ -547,7 +562,7 @@
     const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_from || ''); dateFrom.element.type = 'date';
     const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.sessionsPreset.date_to || ''); dateTo.element.type = 'date';
     const sortField = select('Sort', [['recent', 'Most recent activity'], ['oldest', 'Oldest activity'], ['started_desc', 'Started: newest'], ['started_asc', 'Started: oldest']], state.sessionsPreset.sort || 'recent');
-    const resetFilter = button('Reset filter', '', () => { state.sessionsPreset = {}; state.sessionsPage = 1; render(); });
+    const resetFilter = button('Reset filter', '', () => { state.sessionsPreset = {}; state.sessionsPage = 1; void render(); });
     form.append(prefixField.wrap, stateField.wrap, agentField.wrap, cwdField.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, sortField.wrap, button('Filter', 'primary', undefined, 'submit'), resetFilter);
     const result = node('div');
     const list = async (page = 1) => {
@@ -620,7 +635,7 @@
       const position = positions.get(item.id); const group = svgNode('g', { class: `graph-node status-${item.status}`, tabindex: '0', role: 'button', 'aria-label': `Open ${item.title || item.id}` });
       group.append(svgNode('circle', { cx: position.x, cy: position.y, r: 25 }));
       const label = svgNode('text', { x: position.x, y: position.y + 44, 'text-anchor': 'middle' }); label.textContent = (item.title || item.id).slice(0, 25); group.append(label);
-      group.addEventListener('click', () => openDetail(item.id)); group.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDetail(item.id); } }); nodeLayer.append(group);
+      group.addEventListener('click', () => void openDetail(item.id)); group.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openDetail(item.id); } }); nodeLayer.append(group);
     }); svg.append(nodeLayer); canvas.append(svg); return canvas;
   };
 
@@ -634,7 +649,10 @@
     const asOfField = inputField('As of (UTC)', 'YYYY-MM-DDTHH:MM', options.asOf || ''); asOfField.element.type = 'datetime-local';
     form.append(rootField.wrap, depthField.wrap, predicateField.wrap, archivedField.wrap, asOfField.wrap, button('Explore graph', 'primary', undefined, 'submit'));
     const load = async root => {
-      if (!root) return; setBusy(result, true);
+      if (!root) {
+        return;
+      }
+      setBusy(result, true);
       try {
       const chosen = state.relationOptions;
       const params = new URLSearchParams({ entity_id: root, depth: chosen.depth || '1' });
@@ -674,7 +692,7 @@
     const form = node('form', undefined, 'toolbar');
     const embedding = select('Embedding status', [['', 'Pending or failed'], ['pending', 'Pending'], ['failed', 'Failed'], ['ready', 'Ready']], state.qualityPreset.embedding_status || '');
     const qualityState = select('Quality status', [['', 'Any quality status'], ['WARN', 'Warn'], ['REJECT', 'Reject'], ['ACCEPT', 'Accept']], state.qualityPreset.quality_status || '');
-    form.append(embedding.wrap, qualityState.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.qualityPreset = {}; state.qualityPage = 1; render(); }));
+    form.append(embedding.wrap, qualityState.wrap, button('Apply filters', 'primary', undefined, 'submit'), button('Reset filters', '', () => { state.qualityPreset = {}; state.qualityPage = 1; void render(); }));
     const result = node('div');
     const list = async (page = 1) => {
       setBusy(result, true);
@@ -706,7 +724,9 @@
     const total = Math.floor(Number(seconds));
     if (!Number.isFinite(total) || total < 0) return '—';
     const days = Math.floor(total / 86400); const hours = Math.floor(total % 86400 / 3600); const minutes = Math.floor(total % 3600 / 60);
-    return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m ${total % 60}s`;
+    if (days) return `${days}d ${hours}h`;
+    if (hours) return `${hours}h ${minutes}m`;
+    return `${minutes}m ${total % 60}s`;
   };
 
   const operations = async () => {
@@ -730,7 +750,7 @@
   };
 
   const tags = async () => {
-    const data = await api('/api/tags'); const rows = data.tags.map(tag => { const row = node('tr'); const name = node('td'); name.append(button(tag.name, 'row-button', () => { state.explorerPreset = { tag: tag.name }; state.explorerPage = 1; state.view = 'explorer'; render(); })); row.append(name, node('td', String(tag.usage_count)), node('td', tag.canonical_id || 'Canonical')); return row; });
+    const data = await api('/api/tags'); const rows = data.tags.map(tag => { const row = node('tr'); const name = node('td'); name.append(button(tag.name, 'row-button', () => { state.explorerPreset = { tag: tag.name }; state.explorerPage = 1; state.view = 'explorer'; void render(); })); row.append(name, node('td', String(tag.usage_count)), node('td', tag.canonical_id || 'Canonical')); return row; });
     view.replaceChildren(section('Tags & taxonomy', 'Select a tag to inspect every matching memory.'), renderTable(['Tag', 'Memories', 'Canonical target'], rows));
   };
 
@@ -745,7 +765,7 @@
       else if (!scatterData.points?.length) projectionResult.append(node('p', 'No ready embeddings are available to project yet.', 'muted'));
       else {
         const plot = node('div', undefined, 'scatterplot'); const svg = svgNode('svg', { viewBox: '0 0 760 300', role: 'img', 'aria-label': 'Two dimensional embedding projection' }); const xs = scatterData.points.map(point => point.x); const ys = scatterData.points.map(point => point.y); const minX = Math.min(...xs); const minY = Math.min(...ys); const xSpan = Math.max(...xs) - minX || 1; const ySpan = Math.max(...ys) - minY || 1;
-        scatterData.points.forEach(point => { const circle = svgNode('circle', { cx: 30 + (point.x - minX) / xSpan * 700, cy: 270 - (point.y - minY) / ySpan * 240, r: 4, class: `scatter-point status-${point.status}`, tabindex: '0', role: 'button', 'aria-label': point.title }); circle.addEventListener('click', () => openDetail(point.id)); circle.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDetail(point.id); } }); svg.append(circle); }); plot.append(svg); projectionResult.append(plot);
+        scatterData.points.forEach(point => { const circle = svgNode('circle', { cx: 30 + (point.x - minX) / xSpan * 700, cy: 270 - (point.y - minY) / ySpan * 240, r: 4, class: `scatter-point status-${point.status}`, tabindex: '0', role: 'button', 'aria-label': point.title }); circle.addEventListener('click', () => void openDetail(point.id)); circle.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void openDetail(point.id); } }); svg.append(circle); }); plot.append(svg); projectionResult.append(plot);
         if (scatterData.truncated) projectionResult.append(node('p', `Showing the newest ${scatterData.points.length} of ${scatterData.total_ready} ready embeddings.`, 'muted'));
       }
     })), projectionResult); fragment.append(projection);
@@ -844,9 +864,9 @@
   const applyViewState = (hash) => {
     const params = new URLSearchParams(String(hash || '').replace(/^#/, ''));
     const requested = params.get('view');
-    if (!requested || !Object.prototype.hasOwnProperty.call(names, requested)) return false;
+    if (!requested || !Object.hasOwn(names, requested)) return false;
     state.view = requested;
-    if (Object.prototype.hasOwnProperty.call(presetKeys, requested)) {
+    if (Object.hasOwn(presetKeys, requested)) {
       const preset = {}; params.forEach((value, key) => { if (key.startsWith('f.')) preset[key.slice(2)] = value; });
       state[presetKeys[requested]] = preset;
       state[pageKeys[requested]] = Math.max(1, Number.parseInt(params.get('page') || '1', 10) || 1);
@@ -882,10 +902,10 @@
     || (view.contains(document.activeElement) && document.activeElement !== view);
   const schedule = () => {
     clearInterval(state.poller); state.poller = setInterval(() => {
-      if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render();
+      if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) void render();
     }, 10000);
   };
-  document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); render(); }));
+  document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => { state.view = item.dataset.view; setNotice(''); void render(); }));
   document.querySelector('#refresh').addEventListener('click', render);
   document.querySelector('#close-detail').addEventListener('click', () => dialog.close());
   document.querySelector('#close-event-detail').addEventListener('click', () => eventDialog.close());
@@ -903,8 +923,8 @@
     const invoker = traceDialog._invoker; traceDialog._invoker = null;
     if (invoker?.isConnected) invoker.focus();
   });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) render(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !pollingPaused() && ['overview', 'events', 'operations'].includes(state.view)) void render(); });
   window.addEventListener('beforeunload', () => { clearInterval(state.poller); clearInterval(state.feedTimer); state.renderController?.abort(); state.detailController?.abort(); });
-  window.addEventListener('popstate', () => { if (applyViewState(location.hash)) render(); });
-  connection('checking', 'Checking connection…'); applyViewState(location.hash); render(); schedule();
+  globalThis.addEventListener('popstate', () => { if (applyViewState(location.hash)) void render(); });
+  connection('checking', 'Checking connection…'); applyViewState(location.hash); void render(); schedule();
 })();

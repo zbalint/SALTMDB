@@ -256,7 +256,8 @@ function assembleRetrieveContext(g, q, opts) {
   // reading the code. Standard path-compressing find with an explicit self-parent base case:
   const find = x => {
     if (parent[x] === undefined) parent[x] = x;
-    return parent[x] === x ? x : (parent[x] = find(parent[x]));
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
   };
   const union = (a, b) => { parent[find(a)] = find(b); };
   for (const e of g.contradictsEdges) {
@@ -266,7 +267,8 @@ function assembleRetrieveContext(g, q, opts) {
   const components = {};
   for (const id of contradictsTouched) {
     const root = find(id);
-    (components[root] ||= []).push(id);
+    if (!components[root]) components[root] = [];
+    components[root].push(id);
   }
   // Scope to components that actually touch a primary hit -- a contradicts edge sitting
   // anywhere else in the corpus is not relevant to *this* retrieval and must not leak in.
@@ -528,12 +530,17 @@ function render() {
   const expansion = result.memories.filter(m => m.inclusion === "expansion");
   const conflictOnly = result.memories.filter(m => m.inclusion === "conflict_only");
 
-  const memRow = m => `<tr>
-      <td><span class="tag ${m.inclusion === 'primary' ? '' : m.inclusion === 'expansion' ? 'exp' : 'conf'}">${m.inclusion}</span></td>
+  const memRow = m => {
+    let className = 'conf';
+    if (m.inclusion === 'primary') className = '';
+    else if (m.inclusion === 'expansion') className = 'exp';
+    return `<tr>
+      <td><span class="tag ${className}">${m.inclusion}</span></td>
       <td>${m.title}${WORLD.memories[m.entity_id]?.synthetic ? ' <span class="synthetic">(synthetic)</span>' : ''}</td>
       <td class="id">${m.entity_id}</td>
       <td><code style="font-size:11px;">${JSON.stringify(m.retrieval_provenance)}</code></td>
     </tr>`;
+  };
 
   const opts = currentOptions();
   const b = result.metadata.budget, f = result.metadata.fan_out;

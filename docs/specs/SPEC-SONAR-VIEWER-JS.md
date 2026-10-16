@@ -69,3 +69,7 @@ Everything in D7, Python findings, all other rules.
 ## 9. Pre-lock gate notes
 
 The S9383 call targets, the two contract-test strings, the S4624 trailing-space string (`filter-link ` with an empty status must stay exactly that), and the prototype script line range were checked by the consultant against `5a4e7ac`. Gate step 7: scope lists three files in section 0, section 8 acceptance 3 and the `Does not touch` line.
+
+## Amendment 1 (2026-10-16)
+
+Resolves a contradiction found by the developer in D8: two existing tests pin the exact source text of two `render();` lines, so re-pinning them conflicts with the rule that tests must not be edited to make a check pass, and deleting them is out of scope. D8 is withdrawn and `tests/test_viewer_rework_contracts.py` is removed from scope. The S9383 findings at the two pinned lines (baseline `viewer.js` lines 308 and 356) are not fixed; they stay byte-identical and are reported to the owner. All other S9383 sites in D2 and D9 are fixed with `void`.
