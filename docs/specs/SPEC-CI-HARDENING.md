@@ -320,3 +320,19 @@ Contradiction resolved: the developer reported BLOCKED because section 8 step 9 
 Decision: this spec does not bump `mcp` (a runtime dependency of the product; that change gets its own spec, developer and tester). Step 9 is replaced by the individual gates, with `pip-audit` recorded as a known baseline failure and `deptry` run explicitly because `./verify` stops at the first failing step and never reached it. The post-push step 10 waits until the dependency fix is ready, so the two commits are pushed together and `lint` is green on the pushed tip. Not changed: scope (still five files), the workflow text, every other step.
 
 Re-grep after the edit: `./verify exits 0` appears nowhere in the spec as an acceptance bar; section 9 notes below record the step-9 change.
+
+## Review record
+
+- **Models.** Architect: Claude Sonnet 5.5. Consultant: Claude harness session (model not recorded by the architect). Developer: OMP harness, primary model `openai-codex/gpt-5.6-luna`, advisor slot active, advisor model not exposed by the runtime. Tester: OMP harness, working model `glm-5.3-flash`, advisor slot active, advisor model not exposed. A second architect (the a2amx project's, Claude Sonnet, via a relay agent) read the draft read-only once.
+- **BLOCKED/amend cycles:** 2 (Amendment 1, Amendment 2), both from the architect's spec, both found by the developer's first literal run of an acceptance step.
+
+| where found | by | problem | resolution |
+| --- | --- | --- | --- |
+| draft review, pass 1 | consultant | The hygiene job's gitleaks range `upstream..HEAD` is empty on a push-triggered CI run (the checkout tracks `origin/<branch>`), so the secret scan would check nothing on pushes | Script scans the whole history always |
+| draft review, pass 1 | consultant | Acceptance step 1 would fail while the spec was untracked; step 4 and 6 exit-code notes missing; step 7 did not tie SHAs to version tags; zizmor mode differed between script and acceptance; CONTRIBUTING line anchors disagreed | Wording and commands fixed; zizmor offline everywhere |
+| draft review | a2amx architect (read-only) | The test job's exact command was in no acceptance step; cancelled runs under `cancel-in-progress` undefined; interpreter implicit; dropped package build unnamed | Step 8 added, D10 rule, `--python 3.11`, section 7 line |
+| draft review, pass 2 | consultant | Step 4's negative control used `--gitleaks-ignore-path /dev/null`, which does not disable a root `.gitleaksignore` | Replaced by a clone-based control, which was itself wrong (next row) |
+| implementation | developer | The replacement control, run from the repo root, still loaded the root allowlist: gitleaks reads `.gitleaksignore` from `--gitleaks-ignore-path` (default current directory), not from the scanned source. The architect's claim from pass 2 was never re-run in the deliverable's layout | Amendment 1: `--gitleaks-ignore-path "$tmp/c" "$tmp/c"` |
+| implementation | developer | `./verify` exits 1 at `pip-audit` on the baseline (`mcp` 1.29.0, CVE-2026-59951); the spec had not run the full gate at lock time | Amendment 2: gates run individually, the CVE is a recorded baseline failure, a follow-up dependency spec ships with this commit |
+| tester pass | tester | No defect in the diff. Observation: gitleaks default rules did not flag one high-entropy fake token shape (`token:` assignment, base64-like), so the scan is rule-shape dependent | Recorded; no change |
+| architect review | architect | No problems found in the diff; one open item left to step 10 (the first CI run) | n/a |

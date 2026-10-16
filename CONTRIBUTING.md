@@ -147,9 +147,10 @@ It runs `ruff check`, `ruff format --check`, `mypy`, `bandit`, `pip-audit`, `dep
 `pytest tests/ hooks/tests/`.
 Or install the git hook once via `uv run pre-commit install` to run the same checks
 automatically on every commit (`.pre-commit-config.yaml`; the `pip-audit`/`deptry` steps are
-CI-only — network/full-env cost makes them a poor fit for every local commit). CI enforces the
-same set as a required `lint` job (`.github/workflows/python-tests.yml`) alongside the existing
-`test` job.
+CI-only — network/full-env cost makes them a poor fit for every local commit). CI runs the same
+set in its `lint` job (`.github/workflows/python-tests.yml`) alongside the `test` job and a
+`hygiene` job (`scripts/prepush-fast.sh`: gitleaks, actionlint, zizmor). Nothing in GitHub blocks
+a push on a red job: there is no branch protection or ruleset yet.
 
 **Known follow-up items** (found during 2026-07-31 tool adoption, deliberately not fixed as part
 of it — each needs its own reviewed change):
