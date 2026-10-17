@@ -84,6 +84,79 @@ def list_entity_tags(conn, entity_id: str, *, include_core: bool = False) -> lis
     return [row[0] for row in rows if include_core or row[0] != "#core"]
 
 
+def _log_tag_issue(conn, agent_id: str | None, content: str, unexpected: bool = False) -> None:
+    try:
+        from saltmdb.domain.services.event_service import log_event
+
+        log_event(
+            agent_id=agent_id or "system",
+            type="issue",
+            content=content,
+            db_connection=conn,
+            _in_transaction=True,
+        )
+    except Exception as ex:
+        if unexpected:
+            logger.warning("Could not log unexpected tag rejection", exc_info=True)
+        else:
+            logger.warning("Failed to log tag sanitization event: %s", ex)
+
+
+def _sanitize_resolution_name(conn, name: str, agent_id: str | None) -> str:
+    # Step 1: shape-sanitize -- collapse a single disallowed character to '-'; a rejection
+    # here should be unreachable (validate_tag_names already rejects pre-transaction), but
+    # never let an unexpected rejection crash mid-transaction -- fall back to legacy delete
+    # behavior and log a warning instead.
+    raw_body = name[1:]
+    sanitized_body, rejection = sanitize_tag_body(raw_body.lower())
+    if rejection:
+        sanitized_body = re.sub(r"[^a-z0-9-]", "", raw_body.lower())
+        _log_tag_issue(
+            conn,
+            agent_id,
+            f"Unexpected tag rejection reached resolve_or_create_tag (should have been caught pre-transaction): {rejection}",
+            unexpected=True,
+        )
+    sanitized_name = ("#" + sanitized_body) if sanitized_body else name
+    if sanitized_name != name:
+        _log_tag_issue(
+            conn,
+            agent_id,
+            f"Tag name sanitized during resolve_or_create_tag: '{name}' -> '{sanitized_name}'",
+        )
+        name = sanitized_name
+    return name
+
+
+# Step 2: exact match
+def _resolve_exact_tag(conn, name: str) -> str | None:
+    row = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (name,)).fetchone()
+    return (row[1] if row[1] else row[0]) if row else None
+
+
+# Step 3: normalized_name / computed-normalization fallback (mirrors store_memory)
+def _resolve_normalized_tag(conn, norm_input: str) -> str | None:
+    row = conn.execute(
+        "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
+        (norm_input, norm_input),
+    ).fetchone()
+    return (row[1] if row[1] else row[0]) if row else None
+
+
+# Step 4: plural/suffix fallback -- full scan (small table, same cost model already
+# accepted by merge_tags_heuristics()), only for norm_input longer than 3 chars.
+def _resolve_plural_tag(conn, norm_input: str) -> str | None:
+    if len(norm_input) <= 3:
+        return None
+    stripped_input = norm_input.rstrip("s")
+    all_rows = conn.execute("SELECT id, name, normalized_name, canonical_id FROM tags").fetchall()
+    for row in all_rows:
+        existing_norm = row[2] if row[2] else re.sub(r"[-_\s]+", "", row[1].lower().lstrip("#"))
+        if len(existing_norm) > 3 and stripped_input == existing_norm.rstrip("s"):
+            return row[3] if row[3] else row[0]
+    return None
+
+
 def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | None:
     """Single source of truth for tag write-time resolution.
 
@@ -112,75 +185,19 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
     name = normalize_tag_name(tag_name)
     if not name or name == "#":
         return None
-
-    # Step 1: shape-sanitize -- collapse a single disallowed character to '-'; a rejection
-    # here should be unreachable (validate_tag_names already rejects pre-transaction), but
-    # never let an unexpected rejection crash mid-transaction -- fall back to legacy delete
-    # behavior and log a warning instead.
-    raw_body = name[1:]
-    sanitized_body, rejection = sanitize_tag_body(raw_body.lower())
-    if rejection:
-        sanitized_body = re.sub(r"[^a-z0-9-]", "", raw_body.lower())
-        try:
-            from saltmdb.domain.services.event_service import log_event
-
-            log_event(
-                agent_id=agent_id or "system",
-                type="issue",
-                content=f"Unexpected tag rejection reached resolve_or_create_tag (should have been caught pre-transaction): {rejection}",
-                db_connection=conn,
-                _in_transaction=True,
-            )
-        except Exception:
-            logger.warning("Could not log unexpected tag rejection", exc_info=True)
-    sanitized_name = ("#" + sanitized_body) if sanitized_body else name
-
-    if sanitized_name != name:
-        try:
-            from saltmdb.domain.services.event_service import log_event
-
-            log_event(
-                agent_id=agent_id or "system",
-                type="issue",
-                content=f"Tag name sanitized during resolve_or_create_tag: '{name}' -> '{sanitized_name}'",
-                db_connection=conn,
-                _in_transaction=True,
-            )
-        except Exception as ex:
-            logger.warning("Failed to log tag sanitization event: %s", ex)
-        name = sanitized_name
-
+    name = _sanitize_resolution_name(conn, name, agent_id)
     if not name or name == "#":
         return None
-
-    # Step 2: exact match
-    row = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (name,)).fetchone()
-    if row:
-        return row[1] if row[1] else row[0]
-
-    # Step 3: normalized_name / computed-normalization fallback (mirrors store_memory)
-    norm_input = name.lower().lstrip("#")
-    norm_input = re.sub(r"[-_\s]+", "", norm_input)
-
-    row = conn.execute(
-        "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
-        (norm_input, norm_input),
-    ).fetchone()
-    if row:
-        return row[1] if row[1] else row[0]
-
-    # Step 4: plural/suffix fallback -- full scan (small table, same cost model already
-    # accepted by merge_tags_heuristics()), only for norm_input longer than 3 chars.
-    if len(norm_input) > 3:
-        stripped_input = norm_input.rstrip("s")
-        all_rows = conn.execute(
-            "SELECT id, name, normalized_name, canonical_id FROM tags"
-        ).fetchall()
-        for tid, tname, tnorm, tcanon in all_rows:
-            existing_norm = tnorm if tnorm else re.sub(r"[-_\s]+", "", tname.lower().lstrip("#"))
-            if len(existing_norm) > 3 and stripped_input == existing_norm.rstrip("s"):
-                return tcanon if tcanon else tid
-
+    exact_id = _resolve_exact_tag(conn, name)
+    if exact_id:
+        return exact_id
+    norm_input = re.sub(r"[-_\s]+", "", name.lower().lstrip("#"))
+    normalized_id = _resolve_normalized_tag(conn, norm_input)
+    if normalized_id:
+        return normalized_id
+    plural_id = _resolve_plural_tag(conn, norm_input)
+    if plural_id:
+        return plural_id
     # Step 5: create a new tag row
     tag_id = str(uuid.uuid4())
     conn.execute(

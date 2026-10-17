@@ -129,16 +129,9 @@ def _replacement_error(code: str, message: str, field: str | None = None) -> dic
     return rejected([envelope_error(code, message, field)])
 
 
-def _validate_replacement_inputs(  # noqa: PLR0911
-    entity_id: str | None,
-    title: str | None,
-    tags: list | None,
-    content: str | None,
-    reason: str | None,
-    scope: str | None,
-    memory_type: str | None,
+def _validate_replacement_required_fields(
+    entity_id: str | None, title: str | None, content: str | None, reason: str | None
 ) -> dict | None:
-    """Validate all caller-controlled replacement fields before opening a write transaction."""
     if not entity_id or not isinstance(entity_id, str) or not entity_id.strip():
         return _replacement_error("MISSING_ENTITY_ID", _ENTITY_ID_MANDATORY, "entity_id")
     if not isinstance(title, str) or not title.strip():
@@ -159,6 +152,12 @@ def _validate_replacement_inputs(  # noqa: PLR0911
         return _replacement_error(
             "MISSING_REASON", "reason is mandatory and cannot be empty.", "reason"
         )
+    return None
+
+
+def _validate_replacement_optional_fields(
+    tags: list | None, scope: str | None, memory_type: str | None
+) -> dict | None:
     if tags is not None and (
         not isinstance(tags, list)
         or not tags
@@ -176,6 +175,22 @@ def _validate_replacement_inputs(  # noqa: PLR0911
             "memory_type",
         )
     return None
+
+
+def _validate_replacement_inputs(
+    entity_id: str | None,
+    title: str | None,
+    tags: list | None,
+    content: str | None,
+    reason: str | None,
+    scope: str | None,
+    memory_type: str | None,
+) -> dict | None:
+    """Validate all caller-controlled replacement fields before opening a write transaction."""
+    required_error = _validate_replacement_required_fields(entity_id, title, content, reason)
+    if required_error is not None:
+        return required_error
+    return _validate_replacement_optional_fields(tags, scope, memory_type)
 
 
 def _successor_details(entity_id: str, conn) -> tuple[list[dict], dict]:
@@ -898,6 +913,69 @@ def supersede_memory(
     )
 
 
+def _touch_assembled_memory(conn, resolved_id: str, stored_accessed_at, touch: bool):
+    accessed_at = stored_accessed_at
+    if touch:
+        accessed_at = datetime.now(UTC).isoformat()
+        try:
+            conn.execute(_LAST_ACCESSED_UPDATE_SQL, (accessed_at, resolved_id))
+            if not is_coordinator_connection(conn):
+                conn.commit()
+        except sqlite3.OperationalError as touch_exc:
+            if "readonly database" not in str(touch_exc).lower():
+                raise
+            accessed_at = stored_accessed_at
+            # touch skipped; report the untouched stored value
+            logger.debug(
+                "_assemble_memory_record: skipped last_accessed_at touch on read-only "
+                "connection for %s",
+                resolved_id,
+            )
+    return accessed_at
+
+
+def _assemble_memory_fields(conn, resolved_id: str, row, accessed_at, agent_id: str | None) -> dict:
+    from . import tags as tag_ops
+
+    return {
+        "id": row[0],
+        "title": row[1],
+        "status": row[3],
+        "created_at": row[4],
+        "updated_at": row[5],
+        "last_accessed_at": accessed_at,
+        "agent_id": row[7],
+        "scope": row[8],
+        "is_core": bool(row[9]),
+        "parent_ids": [
+            parent_id
+            for parent_id in (json.loads(row[10]) if row[10] else [])
+            if _can_read_entity(conn, parent_id, agent_id)
+        ],
+        "valid_from": row[11],
+        "valid_to": row[12],
+        "metadata": json.loads(row[13]) if row[13] else {},
+        "context_id": row[14],
+        "memory_type": row[15],
+        "quality_score": row[16],
+        "quality_status": row[17],
+        "quality_flags": json.loads(row[18]) if row[18] else [],
+        "agent_session_id": row[19],
+        "last_touched_session_id": row[20],
+        "tags": tag_ops.list_entity_tags(conn, resolved_id),
+    }
+
+
+def _assemble_memory_content(data: dict, content: str, include_content: bool) -> None:
+    if include_content:
+        data.update(large_content_descriptor(content))
+    else:
+        from saltmdb.utils.text import extract_title_and_snippet
+
+        snippet = extract_title_and_snippet(content)[1]
+        data["snippet"] = snippet
+
+
 def _assemble_memory_record(
     conn,
     resolved_id: str,
@@ -945,67 +1023,13 @@ def _assemble_memory_record(
     ).fetchone()
     if not row:
         return None
-
-    accessed_at = row[6]
-    if touch:
-        accessed_at = datetime.now(UTC).isoformat()
-        try:
-            conn.execute(
-                _LAST_ACCESSED_UPDATE_SQL,
-                (accessed_at, resolved_id),
-            )
-            if not is_coordinator_connection(conn):
-                conn.commit()
-        except sqlite3.OperationalError as touch_exc:
-            if "readonly database" not in str(touch_exc).lower():
-                raise
-            accessed_at = row[6]  # touch skipped; report the untouched stored value
-            logger.debug(
-                "_assemble_memory_record: skipped last_accessed_at touch on read-only "
-                "connection for %s",
-                resolved_id,
-            )
-
-    from . import tags as tag_ops
-
-    data = {
-        "id": row[0],
-        "title": row[1],
-        "status": row[3],
-        "created_at": row[4],
-        "updated_at": row[5],
-        "last_accessed_at": accessed_at,
-        "agent_id": row[7],
-        "scope": row[8],
-        "is_core": bool(row[9]),
-        "parent_ids": [
-            parent_id
-            for parent_id in (json.loads(row[10]) if row[10] else [])
-            if _can_read_entity(conn, parent_id, agent_id)
-        ],
-        "valid_from": row[11],
-        "valid_to": row[12],
-        "metadata": json.loads(row[13]) if row[13] else {},
-        "context_id": row[14],
-        "memory_type": row[15],
-        "quality_score": row[16],
-        "quality_status": row[17],
-        "quality_flags": json.loads(row[18]) if row[18] else [],
-        "agent_session_id": row[19],
-        "last_touched_session_id": row[20],
-        "tags": tag_ops.list_entity_tags(conn, resolved_id),
-    }
+    accessed_at = _touch_assembled_memory(conn, resolved_id, row[6], touch)
+    data = _assemble_memory_fields(conn, resolved_id, row, accessed_at, agent_id)
     if include_trace_provenance:
         from saltmdb.domain.services import trace_service
 
         data["trace_provenance"] = trace_service.entity_trace_provenance(conn, resolved_id, limit=5)
-    if include_content:
-        data.update(large_content_descriptor(row[2]))
-    else:
-        from saltmdb.utils.text import extract_title_and_snippet
-
-        _, snippet = extract_title_and_snippet(row[2])
-        data["snippet"] = snippet
+    _assemble_memory_content(data, row[2], include_content)
     if include_lineage:
         data["lineage"] = _memory_lineage(resolved_id, conn, max_depth=max_depth, agent_id=agent_id)
     return data
@@ -1162,7 +1186,83 @@ def inspect_memory(
             close_connection(conn)
 
 
-def update_memory_metadata(  # noqa: C901
+def _write_metadata_update(
+    conn,
+    resolved_id: str,
+    metadata: dict,
+    agent_session_id: str | None,
+    result_holder: dict[str, Any],
+) -> None:
+    from saltmdb.utils import error_codes
+
+    row = conn.execute("SELECT metadata FROM entities WHERE id = ?", (resolved_id,)).fetchone()
+    if not row:
+        result_holder["result"] = rejected(
+            [
+                envelope_error(
+                    error_codes.NOT_FOUND,
+                    f"Memory '{resolved_id}' not found.",
+                    "entity_id",
+                )
+            ]
+        )
+        return
+    try:
+        current = json.loads(row[0]) if row[0] else {}
+        if not isinstance(current, dict):
+            current = {}
+    except (json.JSONDecodeError, TypeError):
+        current = {}
+    merged = {**current, **metadata}
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "UPDATE entities SET metadata = ?, updated_at = ?, last_touched_session_id = ? "
+        "WHERE id = ?",
+        (json.dumps(merged), now, agent_session_id, resolved_id),
+    )
+    changed_keys = sorted(metadata.keys())
+    message = (
+        f"Memory '{resolved_id}' metadata updated "
+        f"({len(changed_keys)} key(s): {', '.join(changed_keys)})."
+        if changed_keys
+        else f"Memory '{resolved_id}' metadata unchanged (empty patch)."
+    )
+    result_holder["result"] = envelope_ok({"id": resolved_id, "message": message})
+
+
+def _metadata_target(conn, entity_id: str, agent_id: str | None):
+    from saltmdb.utils import error_codes
+
+    resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
+    if candidates:
+        item = envelope_error(
+            "AMBIGUOUS_ID_PREFIX",
+            f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
+            "entity_id",
+        )
+        item["candidates"] = candidates
+        if truncated:
+            item["candidates_truncated"] = True
+        return None, rejected([item])
+    if not resolved_id or (
+        agent_id is not None
+        and not conn.execute(
+            "SELECT 1 FROM entities WHERE id = ? AND agent_id = ?", (resolved_id, agent_id)
+        ).fetchone()
+    ):
+        return None, rejected(
+            [
+                envelope_error(
+                    error_codes.NOT_FOUND,
+                    f"No memory matches entity_id '{entity_id}'.",
+                    "entity_id",
+                )
+            ]
+        )
+    return resolved_id, None
+
+
+def update_memory_metadata(
     entity_id: str,
     metadata: Any,
     agent_session_id: str | None = None,
@@ -1195,79 +1295,22 @@ def update_memory_metadata(  # noqa: C901
                 )
             ]
         )
-
     should_close = False
     conn = db_connection
     if not conn:
         conn = get_connection(db_path or get_db_path())
         should_close = True
-
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
-        if candidates:
-            item = envelope_error(
-                "AMBIGUOUS_ID_PREFIX",
-                f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
-                "entity_id",
-            )
-            item["candidates"] = candidates
-            if truncated:
-                item["candidates_truncated"] = True
-            return rejected([item])
-        if not resolved_id or (
-            agent_id is not None
-            and not conn.execute(
-                "SELECT 1 FROM entities WHERE id = ? AND agent_id = ?", (resolved_id, agent_id)
-            ).fetchone()
-        ):
-            return rejected(
-                [
-                    envelope_error(
-                        error_codes.NOT_FOUND,
-                        f"No memory matches entity_id '{entity_id}'.",
-                        "entity_id",
-                    )
-                ]
-            )
-
+        resolved_id, target_error = _metadata_target(conn, entity_id, agent_id)
+        if target_error is not None:
+            return target_error
         result_holder: dict[str, Any] = {}
-
-        def _write(c):
-            row = c.execute("SELECT metadata FROM entities WHERE id = ?", (resolved_id,)).fetchone()
-            if not row:
-                result_holder["result"] = rejected(
-                    [
-                        envelope_error(
-                            error_codes.NOT_FOUND,
-                            f"Memory '{resolved_id}' not found.",
-                            "entity_id",
-                        )
-                    ]
-                )
-                return
-            try:
-                current = json.loads(row[0]) if row[0] else {}
-                if not isinstance(current, dict):
-                    current = {}
-            except (json.JSONDecodeError, TypeError):
-                current = {}
-            merged = {**current, **metadata}
-            now = datetime.now(UTC).isoformat()
-            c.execute(
-                "UPDATE entities SET metadata = ?, updated_at = ?, last_touched_session_id = ? "
-                "WHERE id = ?",
-                (json.dumps(merged), now, agent_session_id, resolved_id),
-            )
-            changed_keys = sorted(metadata.keys())
-            message = (
-                f"Memory '{resolved_id}' metadata updated "
-                f"({len(changed_keys)} key(s): {', '.join(changed_keys)})."
-                if changed_keys
-                else f"Memory '{resolved_id}' metadata unchanged (empty patch)."
-            )
-            result_holder["result"] = envelope_ok({"id": resolved_id, "message": message})
-
-        write_transaction_retrying(conn, _write)
+        write_transaction_retrying(
+            conn,
+            lambda transaction_conn: _write_metadata_update(
+                transaction_conn, resolved_id, metadata, agent_session_id, result_holder
+            ),
+        )
         return result_holder.get(
             "result",
             rejected(
@@ -1287,7 +1330,37 @@ def update_memory_metadata(  # noqa: C901
             close_connection(conn)
 
 
-def fetch_memory_chunk(  # noqa: C901, PLR0911
+def _load_memory_chunk(conn, id_val: str, touch: bool):
+    cursor = conn.execute(
+        """
+        SELECT id, title, full_content, status, created_at, updated_at, agent_id, scope, metadata
+        FROM entities WHERE id = ?
+        """,
+        (id_val,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    if touch:
+        now = datetime.now(UTC).isoformat()
+        conn.execute(_LAST_ACCESSED_UPDATE_SQL, (now, id_val))
+        if not is_coordinator_connection(conn):
+            conn.commit()
+    return row[2]
+
+
+def _format_chunk_prefix_error(entity_id: str, candidates: list[dict], truncated: bool) -> str:
+    lines = [
+        f"  {candidate['id']} — {candidate['title']!r} [{candidate['status']}]"
+        for candidate in candidates
+    ]
+    return (
+        f"Error: Ambiguous ID prefix '{entity_id}' matches "
+        f"{len(candidates)}{'+' if truncated else ''} memories:\n" + "\n".join(lines)
+    )
+
+
+def fetch_memory_chunk(  # noqa: PLR0911
     entity_id: str = None, db_connection=None, db_path: str = None, *, touch: bool = True
 ) -> str:
     """Returns full markdown text of a memory."""
@@ -1300,30 +1373,12 @@ def fetch_memory_chunk(  # noqa: C901, PLR0911
         conn = get_connection(db_path)
         should_close = True
 
-    def _load_and_touch(id_val):
-        cursor = conn.execute(
-            """
-            SELECT id, title, full_content, status, created_at, updated_at, agent_id, scope, metadata
-            FROM entities WHERE id = ?
-        """,
-            (id_val,),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None
-        if touch:
-            now = datetime.now(UTC).isoformat()
-            conn.execute(_LAST_ACCESSED_UPDATE_SQL, (now, id_val))
-            if not is_coordinator_connection(conn):
-                conn.commit()
-        return row[2]
-
     try:
         resolved_id = resolve_entity_id(conn, entity_id)
         if not resolved_id:
             return f"Error: Could not resolve memory entity for input '{entity_id}'."
 
-        content = _load_and_touch(resolved_id)
+        content = _load_memory_chunk(conn, resolved_id, touch)
         if content is not None:
             return content
 
@@ -1331,13 +1386,9 @@ def fetch_memory_chunk(  # noqa: C901, PLR0911
         # when the exact/UUID/title resolution above already missed -- precedence unchanged.
         prefix_id, candidates, truncated = resolve_id_prefix(conn, entity_id)
         if candidates:
-            lines = [f"  {c['id']} — {c['title']!r} [{c['status']}]" for c in candidates]
-            return (
-                f"Error: Ambiguous ID prefix '{entity_id}' matches "
-                f"{len(candidates)}{'+' if truncated else ''} memories:\n" + "\n".join(lines)
-            )
+            return _format_chunk_prefix_error(entity_id, candidates, truncated)
         if prefix_id:
-            content = _load_and_touch(prefix_id)
+            content = _load_memory_chunk(conn, prefix_id, touch)
             if content is not None:
                 return content
 
