@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import pytest
 from unittest.mock import patch
 
 from saltmdb.db import schema
@@ -214,5 +215,155 @@ def test_old_relation_index_migration_rebuilds_partial_definition(tmp_path: Path
     connection = init_db(str(db_path))
     try:
         assert _normalized_sql(_relation_index_sql(connection)) == _EXPECTED_RELATION_INDEX_SQL
+    finally:
+        connection.close()
+
+
+def test_init_db_rebuilds_fts_indexes_with_porter_and_existing_rows(tmp_path: Path):
+    db_path = tmp_path / "fts.db"
+    connection = init_db(str(db_path))
+    connection.execute(
+        "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, full_content, retrieval_text) "
+        "VALUES ('fts-row', '2026-01-01', '2026-01-01', '2026-01-01', 'Running', 'Running quickly', 'Running quickly')"
+    )
+    connection.execute("DROP TABLE entities_fts")
+    connection.execute("DROP TABLE retrieval_fts")
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM retrieval_fts").fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT id FROM entities_fts WHERE entities_fts MATCH 'run' AND id = 'fts-row'"
+            ).fetchone()[0]
+            == "fts-row"
+        )
+        assert (
+            connection.execute(
+                "SELECT id FROM retrieval_fts WHERE retrieval_fts MATCH 'run' AND id = 'fts-row'"
+            ).fetchone()[0]
+            == "fts-row"
+        )
+    finally:
+        connection.close()
+
+
+def test_init_db_reseeds_predicate_alias_pointer(tmp_path: Path):
+    db_path = tmp_path / "predicates.db"
+    connection = init_db(str(db_path))
+    alias_id = connection.execute("SELECT id FROM predicates WHERE name = 'elaborates'").fetchone()[
+        0
+    ]
+    connection.execute("DELETE FROM predicates WHERE id = ?", (alias_id,))
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        canonical_id = connection.execute(
+            "SELECT id FROM predicates WHERE name = 'elaborates_on'"
+        ).fetchone()[0]
+        alias_canonical_id = connection.execute(
+            "SELECT canonical_id FROM predicates WHERE name = 'elaborates'"
+        ).fetchone()[0]
+        assert alias_canonical_id == canonical_id
+    finally:
+        connection.close()
+
+
+def test_fresh_init_db_creates_performance_indexes(tmp_path: Path):
+    connection = init_db(str(tmp_path / "performance.db"))
+    try:
+        rows = dict(
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'index' AND name IN "
+                "('idx_relations_unique_edge', 'idx_agent_sessions_cwd_started')"
+            ).fetchall()
+        )
+        assert _normalized_sql(rows["idx_relations_unique_edge"]) == _EXPECTED_RELATION_INDEX_SQL
+        assert _normalized_sql(rows["idx_agent_sessions_cwd_started"]) == (
+            "CREATE INDEX idx_agent_sessions_cwd_started ON _agent_sessions(cwd, started_at DESC)"
+        )
+    finally:
+        connection.close()
+
+
+def test_track_a_legacy_event_sweep_is_gated_and_idempotent(tmp_path: Path):
+    db_path = tmp_path / "track-a.db"
+    connection = init_db(str(db_path))
+    connection.execute(
+        "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
+        ("legacy-event", "agent", "consolidation_request", '{"target":"x"}'),
+    )
+    connection.execute("PRAGMA user_version = 0")
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+            "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+            "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_track_a_sweep_does_not_run_for_version_one(tmp_path: Path):
+    db_path = tmp_path / "track-a-v1.db"
+    connection = init_db(str(db_path))
+    connection.execute(
+        "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
+        ("legacy-v1", "agent", "consolidation_request", '{"target":"x"}'),
+    )
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+            "AND json_extract(content, '$.target_event_id') = 'legacy-v1'"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+def test_track_a_failure_leaves_version_for_retry(tmp_path: Path):
+    db_path = tmp_path / "track-a-retry.db"
+    connection = init_db(str(db_path))
+    connection.execute(
+        "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
+        ("legacy-retry", "agent", "consolidation_request", '{"target":"x"}'),
+    )
+    connection.execute("PRAGMA user_version = 0")
+    connection.commit()
+    connection.close()
+
+    with patch("saltmdb.domain.services.event_service.dismiss_events", side_effect=RuntimeError):
+        with pytest.raises(RuntimeError):
+            init_db(str(db_path))
+
+    connection = init_db(str(db_path))
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+            "AND json_extract(content, '$.target_event_id') = 'legacy-retry'"
+        ).fetchone()[0] == 1
     finally:
         connection.close()

@@ -439,7 +439,412 @@ def _backfill_scd_history_revises_edges(conn, now: str) -> None:
         )
 
 
-def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
+def _migrate_lifecycle_version_3(conn: sqlite3.Connection) -> None:
+    # v3 repairs deterministic lifecycle drift from releases that allowed agents to create
+    # supersedes edges directly and retained vectors after archival. Ambiguous graph branches
+    # are reported but never guessed at automatically.
+    try:
+        # Never leapfrog a failed prerequisite migration.  The earlier blocks deliberately
+        # catch OperationalError so startup can continue; an exact gate is therefore needed
+        # to prevent v3 from marking an unfinished v1/v2 database as fully migrated.
+        if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] == 2:
+            from datetime import UTC, datetime
+
+            now = datetime.now(UTC).isoformat()
+            conn.execute("SAVEPOINT lifecycle_invariants_v3")
+            try:
+                # CREATE INDEX IF NOT EXISTS does not update an existing definition.  Some
+                # upgraded databases therefore still have the retired two-column shape
+                # (context_id, project_id).  Rebuild it inside the versioned/savepointed
+                # migration so the live schema actually matches fresh databases.
+                conn.execute("DROP INDEX IF EXISTS idx_entities_context")
+                conn.execute("CREATE INDEX idx_entities_context ON entities(context_id)")
+                summary = _migrate_legacy_lifecycle_invariants(conn, now)
+                conn.execute("PRAGMA user_version = 3")
+            except Exception:
+                # The surrounding OperationalError handler intentionally permits startup to
+                # continue.  Roll this migration back first so that retryability does not
+                # mean committing a half-archived/half-cleaned database.
+                conn.execute("ROLLBACK TO lifecycle_invariants_v3")
+                conn.execute("RELEASE lifecycle_invariants_v3")
+                raise
+            else:
+                conn.execute("RELEASE lifecycle_invariants_v3")
+            if summary["ambiguous_supersedes_components"]:
+                logger.warning(
+                    "Lifecycle migration left %d ambiguous supersedes components for review",
+                    summary["ambiguous_supersedes_components"],
+                )
+            logger.info("Lifecycle invariant migration completed: %s", summary)
+    except sqlite3.OperationalError as e:
+        logger.warning(
+            "Lifecycle invariant migration skipped/failed (will retry next startup): %s", e
+        )
+
+
+def _migrate_track_a_version_1(conn: sqlite3.Connection) -> None:
+    # Track A store-time disposition rewrite (memory-core rework, see
+    # scratch/plans/track_a_disposition_detailed.md §5): one-time retirement of the legacy
+    # `consolidation_request`/`supersession_candidate` event backlog, now that store_memory no
+    # longer emits either type. Reuses the existing `dismiss_events` mechanism (an
+    # `event_dismissed` audit record per event, reason="track_a_migration") purely as a
+    # historical audit trail -- agent API redesign Phase 6 removed both the public
+    # `dismiss_event` MCP tool and `get_recent_events`' dismissed-suppression/status-
+    # derivation logic (§3.5), so this sweep no longer has any effect on what `get_events`
+    # returns; `dismiss_events` itself is kept only because this sweep still calls it.
+    # Gated on PRAGMA user_version (unused elsewhere in this codebase) so this genuinely runs
+    # once, ever, per DB -- NOT on every init_db() call -- otherwise it would silently
+    # auto-dismiss any future legitimate event of either type too, not just this one-time
+    # legacy backlog (Codex Track-A plan review round 2 finding). A crash mid-sweep leaves
+    # user_version at 0 and the sweep safely retries next startup; a completed sweep never
+    # re-runs and never touches a future event again.
+    try:
+        if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 1:
+            legacy_ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM events WHERE type IN ('consolidation_request', 'supersession_candidate')"
+                ).fetchall()
+            ]
+            if legacy_ids:
+                from saltmdb.domain.services.event_service import dismiss_events
+
+                dismiss_events(
+                    event_ids=legacy_ids,
+                    reason="track_a_migration",
+                    agent_id="system",
+                    db_connection=conn,
+                    _in_transaction=True,
+                )
+            conn.execute("PRAGMA user_version = 1")
+    except sqlite3.OperationalError as e:
+        logger.warning("Track A migration sweep skipped/failed (will retry next startup): %s", e)
+
+
+def _migrate_predicate_version_2(conn: sqlite3.Connection) -> None:
+    # Agent API redesign plan §7 (Phase 8 data migration): closed predicate vocabulary --
+    # rewrite every drifted relation edge onto its canonical spelling (§7.1), rebuild the
+    # canonical predicate registry (§7.2), and backfill revises edges for pre-immutable-
+    # identity SCD history rows (§7.3). Ships as a `user_version = 2` block inside init_db(),
+    # never a hand-run script (§7.0): a script migrates one database and nothing else, not
+    # third-party clones, not temp test DBs; running inside init_db() also solves daemon
+    # concurrency for free (the daemon holds the DB open and serializes writes through the
+    # coordinator, so this runs at the right moment by construction). Same crash-safety shape
+    # as the Track A sweep above: a crash mid-migration leaves user_version at 1 and the
+    # whole block safely retries next startup; a completed migration never re-runs.
+    try:
+        if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 2:
+            from datetime import UTC, datetime
+
+            now = datetime.now(UTC).isoformat()
+            _migrate_predicate_drift(conn, now)
+            _rebuild_predicate_registry(conn)
+            _backfill_scd_history_revises_edges(conn, now)
+            conn.execute("PRAGMA user_version = 2")
+    except sqlite3.OperationalError as e:
+        logger.warning(
+            "Phase 8 predicate-vocabulary migration skipped/failed (will retry next startup): %s",
+            e,
+        )
+
+
+def _ensure_performance_indexes(conn: sqlite3.Connection) -> None:
+    # Performance indexes for high-traffic filtering columns
+    for index_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_active_title ON entities(title) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_agent_scope ON entities(agent_id, scope)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
+        # Additive, not a replacement for idx_entities_is_core above (that index does not
+        # filter archived rows). Backs core_governance_service.load_active_cores' ordering
+        # (overdue first, earliest upcoming review) over exactly the active-core set.
+        "CREATE INDEX IF NOT EXISTS idx_entities_core_review "
+        "ON entities(core_review_after, created_at) WHERE is_core = 1 AND status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(agent_id, content_hash) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_entities_embedding_recovery ON entities(id, content_hash, retrieval_text_hash, status) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_agent_session ON entities(agent_session_id, created_at DESC) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_entities_last_touched_session ON entities(last_touched_session_id) WHERE status != 'archived'",
+        "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_events_agent_session ON events(agent_session_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
+        "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
+        "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
+        "CREATE INDEX IF NOT EXISTS idx_entity_tags_tag_id ON entity_tags(tag_id)",
+        "CREATE INDEX IF NOT EXISTS idx_predicates_normalized_name ON predicates(normalized_name)",
+        "CREATE INDEX IF NOT EXISTS idx_predicates_canonical ON predicates(canonical_id)",
+    ]:
+        try:
+            conn.execute(index_sql)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "already exists" not in msg and "already an index" not in msg:
+                logger.error("Failed to create index (%s): %s", index_sql, e)
+
+
+def _migrate_legacy_columns(conn: sqlite3.Connection) -> None:
+    # Schema migration: attempt to add new columns to entities table if they don't exist
+    for col in [
+        "valid_from DATETIME",
+        "valid_to DATETIME",
+        "metadata TEXT",
+        "project_id TEXT",
+        "context_id TEXT",
+        "agent_session_id TEXT",
+        "last_touched_session_id TEXT",
+        "embedding_status TEXT DEFAULT 'pending'",
+        "content_hash TEXT",
+        "quality_score REAL",
+        "quality_status TEXT",
+        "quality_flags TEXT",
+        "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'",
+        # Optional caller-supplied candidate-generation text.  It is intentionally nullable
+        # and hash-separated from the authoritative full_content/content_hash pair.
+        "retrieval_text TEXT",
+        "retrieval_text_hash TEXT",
+        # Core-memory bootstrap governance (see core_governance_service.py, the sole owner of
+        # these columns' semantics). All nullable: a demoted normal memory may retain historical
+        # lifecycle data, but enforcement/rendering ignore it entirely while is_core=0.
+        "core_reason TEXT",
+        "core_exit_condition TEXT",
+        "core_review_after DATETIME",
+        "core_last_reviewed_at DATETIME",
+        "core_last_reviewed_by TEXT",
+        "core_review_rationale TEXT",
+        "core_detail_memory_ids TEXT",  # JSON array of full UUIDs; sole authority for the
+        # 3-detail cap -- incidental elaborates_on graph edges are never silently adopted into it
+    ]:
+        _add_column_if_missing(conn, "entities", col)
+    # Schema migration (alpha.61 / Schema Version 13): remove the entities.domain
+    # classification column entirely. It shipped in alpha.58 as a closed vocabulary
+    # (VALID_DOMAINS) hardcoded to one operator's personal project/life-area split, which
+    # doesn't generalize to other installs and duplicates what tags already cover. Adoption
+    # was negligible in practice. DROP INDEX first since SQLite's ALTER TABLE DROP COLUMN
+    # refuses to run while an index still references the column. Guarded for SQLite < 3.35
+    # (no DROP COLUMN support) and for repeated runs against an already-migrated DB (both
+    # raise OperationalError, which is expected and safe to ignore here).
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_entities_domain")
+        conn.execute("ALTER TABLE entities DROP COLUMN domain")
+    except sqlite3.OperationalError as e:
+        logger.debug(
+            "entities.domain column drop skipped (already migrated or unsupported SQLite version): %s",
+            e,
+        )
+    # Schema migration: attempt to add new columns to events table if they don't exist
+    for col in ["agent_session_id TEXT", "context_id TEXT"]:
+        _add_column_if_missing(conn, "events", col)
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_events_session")
+        conn.execute("ALTER TABLE events DROP COLUMN " + "session_" + "id")
+    except sqlite3.OperationalError as e:
+        logger.debug("events legacy session column drop skipped: %s", e)
+
+
+def _backfill_legacy_entity_metadata(conn: sqlite3.Connection) -> None:
+    # Backfill embedding_status = 'archived' for any archived entities
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entities_archived_embedding_pending ON entities(id) "
+            "WHERE status = 'archived' AND embedding_status IS NOT 'archived'"
+        )
+        conn.execute(
+            "UPDATE entities INDEXED BY idx_entities_archived_embedding_pending SET embedding_status = 'archived' "
+            "WHERE status = 'archived' AND embedding_status IS NOT 'archived';"
+        )
+    except sqlite3.OperationalError:
+        pass
+    # Schema migration: backfill content_hash for legacy entities that predate the column.
+    # content_hash was added as a nullable ALTER TABLE column above, so every entity written
+    # before that migration ran started (and, until this backfill, stayed) NULL. That NULL
+    # is not just cosmetic: embedding_service.write_entity_chunk_embeddings' staleness guard
+    # is opt-in on expected_content_hash being non-None, and backfill_chunk_embeddings
+    # forwards the entities.content_hash column value verbatim as that argument -- so a NULL
+    # here silently disabled the exact stale-write guard the guard exists for, on every
+    # legacy entity (Codex re-review finding, Foundation phase). Idempotent and cheap in
+    # steady state: matches zero rows once every entity has a hash, since store_memory sets
+    # content_hash on every write from this point on.
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entities_hash_missing ON entities(id) "
+            "WHERE content_hash IS NULL OR content_hash = ''"
+        )
+        for _eid, _content in conn.execute(
+            "SELECT id, full_content FROM entities INDEXED BY idx_entities_hash_missing "
+            "WHERE content_hash IS NULL OR content_hash = ''"
+        ).fetchall():
+            conn.execute(
+                "UPDATE entities SET content_hash = ? WHERE id = ?",
+                (compute_content_hash(_content or ""), _eid),
+            )
+    except sqlite3.OperationalError as e:
+        logger.warning("content_hash backfill migration skipped/failed: %s", e)
+    # Schema migration: project_id is retired in favor of context_id (kept as a physical
+    # column for compatibility, but no longer written/read by application code past this backfill)
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entities_context_backfill ON entities(id) "
+            "WHERE context_id IS NULL AND project_id IS NOT NULL"
+        )
+        conn.execute(
+            "UPDATE entities INDEXED BY idx_entities_context_backfill SET context_id = project_id "
+            "WHERE context_id IS NULL AND project_id IS NOT NULL;"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _migrate_agent_session_columns(conn: sqlite3.Connection) -> None:
+    # Additive migration for databases created before lifecycle metadata existed.
+    for column in (
+        "agent_id TEXT",
+        "last_activity_at DATETIME",
+        "ended_at DATETIME",
+        "ended_reason TEXT",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE _agent_sessions ADD COLUMN {column}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_sessions_cwd_started
+            ON _agent_sessions(cwd, started_at DESC);
+        """)
+
+
+def _migrate_relation_index(conn: sqlite3.Connection) -> None:
+    relation_index_row = None
+    try:
+        relation_index_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_relations_unique_edge",),
+        ).fetchone()
+    except sqlite3.OperationalError as e:
+        logger.warning("Relations index definition lookup skipped/failed: %s", e)
+    relation_index_sql = relation_index_row[0] if relation_index_row else None
+    expected_relation_index_sql = (
+        "CREATE UNIQUE INDEX idx_relations_unique_edge "
+        "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
+    )
+    relation_index_is_current = (
+        " ".join((relation_index_sql or "").split()) == expected_relation_index_sql
+    )
+    if not relation_index_is_current:
+        try:
+            conn.execute("""
+                DELETE FROM relations
+                WHERE valid_to IS NULL
+                  AND rowid NOT IN (
+                    SELECT MIN(rowid) FROM relations
+                    WHERE valid_to IS NULL
+                    GROUP BY source_id, target_id, predicate
+                );
+            """)
+        except sqlite3.OperationalError as e:
+            logger.warning("Relations dedup backfill skipped/failed: %s", e)
+
+        # Schema migration (alpha.57 / Schema Version 10): the UNIQUE index on relations must become
+        # a PARTIAL index (WHERE valid_to IS NULL) now that commit_consolidation starts populating
+        # valid_to via expire-then-insert repointing. SQLite has no ALTER INDEX, and CREATE UNIQUE
+        # INDEX IF NOT EXISTS is a silent no-op against an already-existing same-named index even when
+        # its definition differs -- so this must unconditionally DROP + recreate to actually replace
+        # the old (Quick Wins round) non-partial index. Idempotent: cheap no-op once already migrated.
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_relations_unique_edge")
+            conn.execute(
+                "CREATE UNIQUE INDEX idx_relations_unique_edge "
+                "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
+            )
+        except sqlite3.OperationalError as e:
+            logger.warning("Relations partial unique index migration skipped/failed: %s", e)
+
+
+def _ensure_retrieval_fts(conn: sqlite3.Connection) -> None:
+    try:
+        retrieval_cols = [
+            row[1] for row in conn.execute("PRAGMA table_info(retrieval_fts)").fetchall()
+        ]
+        if not retrieval_cols or "retrieval_text" not in retrieval_cols:
+            conn.execute("DROP TABLE IF EXISTS retrieval_fts")
+            conn.execute("""
+                CREATE VIRTUAL TABLE retrieval_fts USING fts5(
+                    id UNINDEXED,
+                    retrieval_text,
+                    tokenize='porter'
+                );
+                """)
+            conn.execute("""
+                INSERT INTO retrieval_fts (id, retrieval_text)
+                SELECT id, retrieval_text FROM entities
+                WHERE status != 'archived' AND retrieval_text IS NOT NULL AND retrieval_text != '';
+                """)
+    except sqlite3.OperationalError:
+        # FTS5 is available in supported SQLite builds; preserve the existing graceful
+        # startup posture for unusual builds that omit it.
+        pass
+
+
+def _seed_predicate_registry(conn: sqlite3.Connection) -> None:
+    _canonical_pred_names = (
+        *sorted(AGENT_SELECTABLE_PREDICATES),
+        *sorted(RESERVED_PREDICATES),
+        *sorted(LEGACY_READONLY_PREDICATES),
+    )
+    for _pred_name in _canonical_pred_names:
+        conn.execute(
+            "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+            (str(uuid.uuid4()), _pred_name, _pred_name),
+        )
+    for _alias_name, (_canon_name, _swap) in PREDICATE_ALIASES.items():
+        conn.execute(
+            "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
+            (str(uuid.uuid4()), _alias_name, _alias_name),
+        )
+        # Alias onto the canonical row. Guarded by canonical_id IS NULL so a future manual
+        # re-merge tool's decision is never silently clobbered on restart -- this is a seed
+        # default, not an unconditional re-assertion.
+        _canon_row = conn.execute(
+            "SELECT id FROM predicates WHERE name = ?", (_canon_name,)
+        ).fetchone()
+        if _canon_row:
+            conn.execute(
+                "UPDATE predicates SET canonical_id = ? WHERE name = ? AND canonical_id IS NULL AND id != ?",
+                (_canon_row[0], _alias_name, _canon_row[0]),
+            )
+
+
+def _ensure_entity_fts(conn: sqlite3.Connection) -> None:
+    try:
+        cursor = conn.execute("PRAGMA table_info(entities_fts)")
+        cols = [r[1] for r in cursor.fetchall()]
+        if not cols or "search_aliases" not in cols:
+            conn.execute("DROP TABLE IF EXISTS entities_fts")
+            conn.execute("""
+                CREATE VIRTUAL TABLE entities_fts USING fts5(
+                    id UNINDEXED,
+                    title,
+                    full_content,
+                    search_aliases,
+                    tokenize='porter'
+                );
+                """)
+            # Backfill FTS index from existing entities
+            conn.execute("""
+                INSERT INTO entities_fts (id, title, full_content, search_aliases)
+                SELECT id, title, full_content,
+                       coalesce(json_extract(metadata, '$.search_aliases'), '')
+                FROM entities;
+                """)
+    except sqlite3.OperationalError:
+        pass
+
+
+def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: PLR0915
     """Initialize the local SQLite database with Write-Ahead Logging (WAL), DDL tables, triggers, and migrations."""
     if not db_path:
         db_path = get_db_path()
@@ -517,117 +922,9 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         );
         """)
 
-        # Schema migration: attempt to add new columns to entities table if they don't exist
-        for col in [
-            "valid_from DATETIME",
-            "valid_to DATETIME",
-            "metadata TEXT",
-            "project_id TEXT",
-            "context_id TEXT",
-            "agent_session_id TEXT",
-            "last_touched_session_id TEXT",
-            "embedding_status TEXT DEFAULT 'pending'",
-            "content_hash TEXT",
-            "quality_score REAL",
-            "quality_status TEXT",
-            "quality_flags TEXT",
-            "memory_type TEXT CHECK(memory_type IN ('fact','event','procedure','decision','preference')) DEFAULT 'fact'",
-            # Optional caller-supplied candidate-generation text.  It is intentionally nullable
-            # and hash-separated from the authoritative full_content/content_hash pair.
-            "retrieval_text TEXT",
-            "retrieval_text_hash TEXT",
-            # Core-memory bootstrap governance (see core_governance_service.py, the sole owner of
-            # these columns' semantics). All nullable: a demoted normal memory may retain historical
-            # lifecycle data, but enforcement/rendering ignore it entirely while is_core=0.
-            "core_reason TEXT",
-            "core_exit_condition TEXT",
-            "core_review_after DATETIME",
-            "core_last_reviewed_at DATETIME",
-            "core_last_reviewed_by TEXT",
-            "core_review_rationale TEXT",
-            "core_detail_memory_ids TEXT",  # JSON array of full UUIDs; sole authority for the
-            # 3-detail cap -- incidental elaborates_on graph edges are never silently adopted into it
-        ]:
-            _add_column_if_missing(conn, "entities", col)
+        _migrate_legacy_columns(conn)
 
-        # Schema migration (alpha.61 / Schema Version 13): remove the entities.domain
-        # classification column entirely. It shipped in alpha.58 as a closed vocabulary
-        # (VALID_DOMAINS) hardcoded to one operator's personal project/life-area split, which
-        # doesn't generalize to other installs and duplicates what tags already cover. Adoption
-        # was negligible in practice. DROP INDEX first since SQLite's ALTER TABLE DROP COLUMN
-        # refuses to run while an index still references the column. Guarded for SQLite < 3.35
-        # (no DROP COLUMN support) and for repeated runs against an already-migrated DB (both
-        # raise OperationalError, which is expected and safe to ignore here).
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_entities_domain")
-            conn.execute("ALTER TABLE entities DROP COLUMN domain")
-        except sqlite3.OperationalError as e:
-            logger.debug(
-                "entities.domain column drop skipped (already migrated or unsupported SQLite version): %s",
-                e,
-            )
-
-        # Schema migration: attempt to add new columns to events table if they don't exist
-        for col in ["agent_session_id TEXT", "context_id TEXT"]:
-            _add_column_if_missing(conn, "events", col)
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_events_session")
-            conn.execute("ALTER TABLE events DROP COLUMN " + "session_" + "id")
-        except sqlite3.OperationalError as e:
-            logger.debug("events legacy session column drop skipped: %s", e)
-
-        # Backfill embedding_status = 'archived' for any archived entities
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_archived_embedding_pending ON entities(id) "
-                "WHERE status = 'archived' AND embedding_status IS NOT 'archived'"
-            )
-            conn.execute(
-                "UPDATE entities INDEXED BY idx_entities_archived_embedding_pending SET embedding_status = 'archived' "
-                "WHERE status = 'archived' AND embedding_status IS NOT 'archived';"
-            )
-        except sqlite3.OperationalError:
-            pass
-
-        # Schema migration: backfill content_hash for legacy entities that predate the column.
-        # content_hash was added as a nullable ALTER TABLE column above, so every entity written
-        # before that migration ran started (and, until this backfill, stayed) NULL. That NULL
-        # is not just cosmetic: embedding_service.write_entity_chunk_embeddings' staleness guard
-        # is opt-in on expected_content_hash being non-None, and backfill_chunk_embeddings
-        # forwards the entities.content_hash column value verbatim as that argument -- so a NULL
-        # here silently disabled the exact stale-write guard the guard exists for, on every
-        # legacy entity (Codex re-review finding, Foundation phase). Idempotent and cheap in
-        # steady state: matches zero rows once every entity has a hash, since store_memory sets
-        # content_hash on every write from this point on.
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_hash_missing ON entities(id) "
-                "WHERE content_hash IS NULL OR content_hash = ''"
-            )
-            for _eid, _content in conn.execute(
-                "SELECT id, full_content FROM entities INDEXED BY idx_entities_hash_missing "
-                "WHERE content_hash IS NULL OR content_hash = ''"
-            ).fetchall():
-                conn.execute(
-                    "UPDATE entities SET content_hash = ? WHERE id = ?",
-                    (compute_content_hash(_content or ""), _eid),
-                )
-        except sqlite3.OperationalError as e:
-            logger.warning("content_hash backfill migration skipped/failed: %s", e)
-
-        # Schema migration: project_id is retired in favor of context_id (kept as a physical
-        # column for compatibility, but no longer written/read by application code past this backfill)
-        try:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entities_context_backfill ON entities(id) "
-                "WHERE context_id IS NULL AND project_id IS NOT NULL"
-            )
-            conn.execute(
-                "UPDATE entities INDEXED BY idx_entities_context_backfill SET context_id = project_id "
-                "WHERE context_id IS NULL AND project_id IS NOT NULL;"
-            )
-        except sqlite3.OperationalError:
-            pass
+        _backfill_legacy_entity_metadata(conn)
 
         # Durable embedding work.  Jobs deliberately have no FK: old releases
         # may retain historical entities, and job diagnostics must remain
@@ -816,51 +1113,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # Guard both relation-maintenance blocks with the exact partial index definition: when
         # sqlite_master proves the index is current, its uniqueness guarantee makes both scans
         # unnecessary on every subsequent startup.
-        relation_index_row = None
-        try:
-            relation_index_row = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
-                ("idx_relations_unique_edge",),
-            ).fetchone()
-        except sqlite3.OperationalError as e:
-            logger.warning("Relations index definition lookup skipped/failed: %s", e)
-        relation_index_sql = relation_index_row[0] if relation_index_row else None
-        expected_relation_index_sql = (
-            "CREATE UNIQUE INDEX idx_relations_unique_edge "
-            "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
-        )
-        relation_index_is_current = (
-            " ".join((relation_index_sql or "").split()) == expected_relation_index_sql
-        )
-
-        if not relation_index_is_current:
-            try:
-                conn.execute("""
-                    DELETE FROM relations
-                    WHERE valid_to IS NULL
-                      AND rowid NOT IN (
-                        SELECT MIN(rowid) FROM relations
-                        WHERE valid_to IS NULL
-                        GROUP BY source_id, target_id, predicate
-                    );
-                """)
-            except sqlite3.OperationalError as e:
-                logger.warning("Relations dedup backfill skipped/failed: %s", e)
-
-            # Schema migration (alpha.57 / Schema Version 10): the UNIQUE index on relations must become
-            # a PARTIAL index (WHERE valid_to IS NULL) now that commit_consolidation starts populating
-            # valid_to via expire-then-insert repointing. SQLite has no ALTER INDEX, and CREATE UNIQUE
-            # INDEX IF NOT EXISTS is a silent no-op against an already-existing same-named index even when
-            # its definition differs -- so this must unconditionally DROP + recreate to actually replace
-            # the old (Quick Wins round) non-partial index. Idempotent: cheap no-op once already migrated.
-            try:
-                conn.execute("DROP INDEX IF EXISTS idx_relations_unique_edge")
-                conn.execute(
-                    "CREATE UNIQUE INDEX idx_relations_unique_edge "
-                    "ON relations(source_id, target_id, predicate) WHERE valid_to IS NULL"
-                )
-            except sqlite3.OperationalError as e:
-                logger.warning("Relations partial unique index migration skipped/failed: %s", e)
+        _migrate_relation_index(conn)
 
         # Schema migration (alpha.60 / Schema Version 12): bi-temporal event/world-time axis for
         # relations, independent of valid_from/valid_to (system/transaction time, consolidation-only).
@@ -883,83 +1136,15 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         # aliases of their canonical target. Mirrors saltmdb.utils.predicate_vocabulary exactly
         # -- that module is the single source of truth this block renders into the DB registry,
         # so search_tags/list_predicates and this seed can never drift apart.
-        _canonical_pred_names = (
-            *sorted(AGENT_SELECTABLE_PREDICATES),
-            *sorted(RESERVED_PREDICATES),
-            *sorted(LEGACY_READONLY_PREDICATES),
-        )
-        for _pred_name in _canonical_pred_names:
-            conn.execute(
-                "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (str(uuid.uuid4()), _pred_name, _pred_name),
-            )
-        for _alias_name, (_canon_name, _swap) in PREDICATE_ALIASES.items():
-            conn.execute(
-                "INSERT OR IGNORE INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (str(uuid.uuid4()), _alias_name, _alias_name),
-            )
-            # Alias onto the canonical row. Guarded by canonical_id IS NULL so a future manual
-            # re-merge tool's decision is never silently clobbered on restart -- this is a seed
-            # default, not an unconditional re-assertion.
-            _canon_row = conn.execute(
-                "SELECT id FROM predicates WHERE name = ?", (_canon_name,)
-            ).fetchone()
-            if _canon_row:
-                conn.execute(
-                    "UPDATE predicates SET canonical_id = ? WHERE name = ? AND canonical_id IS NULL AND id != ?",
-                    (_canon_row[0], _alias_name, _canon_row[0]),
-                )
+        _seed_predicate_registry(conn)
 
         # 5. Virtual FTS5 Table with Porter Tokenizer & Search Aliases
-        try:
-            cursor = conn.execute("PRAGMA table_info(entities_fts)")
-            cols = [r[1] for r in cursor.fetchall()]
-            if not cols or "search_aliases" not in cols:
-                conn.execute("DROP TABLE IF EXISTS entities_fts")
-                conn.execute("""
-                CREATE VIRTUAL TABLE entities_fts USING fts5(
-                    id UNINDEXED,
-                    title,
-                    full_content,
-                    search_aliases,
-                    tokenize='porter'
-                );
-                """)
-                # Backfill FTS index from existing entities
-                conn.execute("""
-                INSERT INTO entities_fts (id, title, full_content, search_aliases)
-                SELECT id, title, full_content,
-                       coalesce(json_extract(metadata, '$.search_aliases'), '')
-                FROM entities;
-                """)
-        except sqlite3.OperationalError:
-            pass
+        _ensure_entity_fts(conn)
 
         # Dedicated optional retrieval-text FTS index.  It intentionally contains no
         # authoritative title/content columns, and all writes are maintained transactionally by
         # the triggers below.  A best-effort backfill keeps upgrades idempotent.
-        try:
-            retrieval_cols = [
-                r[1] for r in conn.execute("PRAGMA table_info(retrieval_fts)").fetchall()
-            ]
-            if not retrieval_cols or "retrieval_text" not in retrieval_cols:
-                conn.execute("DROP TABLE IF EXISTS retrieval_fts")
-                conn.execute("""
-                CREATE VIRTUAL TABLE retrieval_fts USING fts5(
-                    id UNINDEXED,
-                    retrieval_text,
-                    tokenize='porter'
-                );
-                """)
-                conn.execute("""
-                INSERT INTO retrieval_fts (id, retrieval_text)
-                SELECT id, retrieval_text FROM entities
-                WHERE status != 'archived' AND retrieval_text IS NOT NULL AND retrieval_text != '';
-                """)
-        except sqlite3.OperationalError:
-            # FTS5 is available in supported SQLite builds; preserve the existing graceful
-            # startup posture for unusual builds that omit it.
-            pass
+        _ensure_retrieval_fts(conn)
 
         from saltmdb.db.vector_schema import (
             init_vector_schema,
@@ -1106,22 +1291,7 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
 
         # 6c. Agent Sessions Table for Last Session Bootstrap Digest
         _ensure_agent_sessions_table(conn)
-        # Additive migration for databases created before lifecycle metadata existed.
-        for column in (
-            "agent_id TEXT",
-            "last_activity_at DATETIME",
-            "ended_at DATETIME",
-            "ended_reason TEXT",
-        ):
-            try:
-                conn.execute(f"ALTER TABLE _agent_sessions ADD COLUMN {column}")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" not in str(exc).lower():
-                    raise
-        conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_agent_sessions_cwd_started
-            ON _agent_sessions(cwd, started_at DESC);
-        """)
+        _migrate_agent_session_columns(conn)
 
         # Drop old triggers to recreate with search_aliases support
         conn.execute("DROP TRIGGER IF EXISTS insert_entity_fts")
@@ -1251,147 +1421,13 @@ def init_db(db_path: str = None) -> sqlite3.Connection:  # noqa: C901, PLR0915
         END;
         """)
 
-        # Performance indexes for high-traffic filtering columns
-        for index_sql in [
-            "CREATE INDEX IF NOT EXISTS idx_entities_status_updated ON entities(status, updated_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_entities_active_title ON entities(title) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_agent_scope ON entities(agent_id, scope)",
-            "CREATE INDEX IF NOT EXISTS idx_entities_context ON entities(context_id)",
-            "CREATE INDEX IF NOT EXISTS idx_entities_embedding ON entities(embedding_status) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_is_core ON entities(is_core) WHERE is_core = 1",
-            # Additive, not a replacement for idx_entities_is_core above (that index does not
-            # filter archived rows). Backs core_governance_service.load_active_cores' ordering
-            # (overdue first, earliest upcoming review) over exactly the active-core set.
-            "CREATE INDEX IF NOT EXISTS idx_entities_core_review "
-            "ON entities(core_review_after, created_at) WHERE is_core = 1 AND status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(agent_id, content_hash) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_retrieval_text_hash ON entities(retrieval_text_hash) WHERE status != 'archived' AND retrieval_text_hash IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_entities_embedding_recovery ON entities(id, content_hash, retrieval_text_hash, status) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_memory_type ON entities(memory_type) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_agent_session ON entities(agent_session_id, created_at DESC) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_entities_last_touched_session ON entities(last_touched_session_id) WHERE status != 'archived'",
-            "CREATE INDEX IF NOT EXISTS idx_events_agent_type ON events(agent_id, type, timestamp DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_events_agent_session ON events(agent_session_id, timestamp DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)",
-            "CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)",
-            "CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate)",
-            "CREATE INDEX IF NOT EXISTS idx_tags_canonical ON tags(canonical_id)",
-            "CREATE INDEX IF NOT EXISTS idx_entity_tags_tag_id ON entity_tags(tag_id)",
-            "CREATE INDEX IF NOT EXISTS idx_predicates_normalized_name ON predicates(normalized_name)",
-            "CREATE INDEX IF NOT EXISTS idx_predicates_canonical ON predicates(canonical_id)",
-        ]:
-            try:
-                conn.execute(index_sql)
-            except sqlite3.OperationalError as e:
-                msg = str(e).lower()
-                if "already exists" not in msg and "already an index" not in msg:
-                    logger.error("Failed to create index (%s): %s", index_sql, e)
+        _ensure_performance_indexes(conn)
 
-        # Track A store-time disposition rewrite (memory-core rework, see
-        # scratch/plans/track_a_disposition_detailed.md §5): one-time retirement of the legacy
-        # `consolidation_request`/`supersession_candidate` event backlog, now that store_memory no
-        # longer emits either type. Reuses the existing `dismiss_events` mechanism (an
-        # `event_dismissed` audit record per event, reason="track_a_migration") purely as a
-        # historical audit trail -- agent API redesign Phase 6 removed both the public
-        # `dismiss_event` MCP tool and `get_recent_events`' dismissed-suppression/status-
-        # derivation logic (§3.5), so this sweep no longer has any effect on what `get_events`
-        # returns; `dismiss_events` itself is kept only because this sweep still calls it.
-        # Gated on PRAGMA user_version (unused elsewhere in this codebase) so this genuinely runs
-        # once, ever, per DB -- NOT on every init_db() call -- otherwise it would silently
-        # auto-dismiss any future legitimate event of either type too, not just this one-time
-        # legacy backlog (Codex Track-A plan review round 2 finding). A crash mid-sweep leaves
-        # user_version at 0 and the sweep safely retries next startup; a completed sweep never
-        # re-runs and never touches a future event again.
-        try:
-            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 1:
-                legacy_ids = [
-                    r[0]
-                    for r in conn.execute(
-                        "SELECT id FROM events WHERE type IN ('consolidation_request', 'supersession_candidate')"
-                    ).fetchall()
-                ]
-                if legacy_ids:
-                    from saltmdb.domain.services.event_service import dismiss_events
+        _migrate_track_a_version_1(conn)
 
-                    dismiss_events(
-                        event_ids=legacy_ids,
-                        reason="track_a_migration",
-                        agent_id="system",
-                        db_connection=conn,
-                        _in_transaction=True,
-                    )
-                conn.execute("PRAGMA user_version = 1")
-        except sqlite3.OperationalError as e:
-            logger.warning(
-                "Track A migration sweep skipped/failed (will retry next startup): %s", e
-            )
+        _migrate_predicate_version_2(conn)
 
-        # Agent API redesign plan §7 (Phase 8 data migration): closed predicate vocabulary --
-        # rewrite every drifted relation edge onto its canonical spelling (§7.1), rebuild the
-        # canonical predicate registry (§7.2), and backfill revises edges for pre-immutable-
-        # identity SCD history rows (§7.3). Ships as a `user_version = 2` block inside init_db(),
-        # never a hand-run script (§7.0): a script migrates one database and nothing else, not
-        # third-party clones, not temp test DBs; running inside init_db() also solves daemon
-        # concurrency for free (the daemon holds the DB open and serializes writes through the
-        # coordinator, so this runs at the right moment by construction). Same crash-safety shape
-        # as the Track A sweep above: a crash mid-migration leaves user_version at 1 and the
-        # whole block safely retries next startup; a completed migration never re-runs.
-        try:
-            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] < 2:
-                from datetime import UTC, datetime
-
-                now = datetime.now(UTC).isoformat()
-                _migrate_predicate_drift(conn, now)
-                _rebuild_predicate_registry(conn)
-                _backfill_scd_history_revises_edges(conn, now)
-                conn.execute("PRAGMA user_version = 2")
-        except sqlite3.OperationalError as e:
-            logger.warning(
-                "Phase 8 predicate-vocabulary migration skipped/failed (will retry next "
-                "startup): %s",
-                e,
-            )
-
-        # v3 repairs deterministic lifecycle drift from releases that allowed agents to create
-        # supersedes edges directly and retained vectors after archival. Ambiguous graph branches
-        # are reported but never guessed at automatically.
-        try:
-            # Never leapfrog a failed prerequisite migration.  The earlier blocks deliberately
-            # catch OperationalError so startup can continue; an exact gate is therefore needed
-            # to prevent v3 from marking an unfinished v1/v2 database as fully migrated.
-            if conn.execute(_PRAGMA_USER_VERSION).fetchone()[0] == 2:
-                from datetime import UTC, datetime
-
-                now = datetime.now(UTC).isoformat()
-                conn.execute("SAVEPOINT lifecycle_invariants_v3")
-                try:
-                    # CREATE INDEX IF NOT EXISTS does not update an existing definition.  Some
-                    # upgraded databases therefore still have the retired two-column shape
-                    # (context_id, project_id).  Rebuild it inside the versioned/savepointed
-                    # migration so the live schema actually matches fresh databases.
-                    conn.execute("DROP INDEX IF EXISTS idx_entities_context")
-                    conn.execute("CREATE INDEX idx_entities_context ON entities(context_id)")
-                    summary = _migrate_legacy_lifecycle_invariants(conn, now)
-                    conn.execute("PRAGMA user_version = 3")
-                except Exception:
-                    # The surrounding OperationalError handler intentionally permits startup to
-                    # continue.  Roll this migration back first so that retryability does not
-                    # mean committing a half-archived/half-cleaned database.
-                    conn.execute("ROLLBACK TO lifecycle_invariants_v3")
-                    conn.execute("RELEASE lifecycle_invariants_v3")
-                    raise
-                else:
-                    conn.execute("RELEASE lifecycle_invariants_v3")
-                if summary["ambiguous_supersedes_components"]:
-                    logger.warning(
-                        "Lifecycle migration left %d ambiguous supersedes components for review",
-                        summary["ambiguous_supersedes_components"],
-                    )
-                logger.info("Lifecycle invariant migration completed: %s", summary)
-        except sqlite3.OperationalError as e:
-            logger.warning(
-                "Lifecycle invariant migration skipped/failed (will retry next startup): %s", e
-            )
+        _migrate_lifecycle_version_3(conn)
 
     write_transaction_retrying(conn, _write)
     return conn

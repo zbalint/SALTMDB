@@ -74,3 +74,11 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling); see the assignment event.
+
+## Amendment 1 (2026-10-17)
+
+Records the outcome of review; no contract changes. `init_db` ends at proxy score 8 with eleven extracted helpers (`_migrate_legacy_columns`, `_backfill_legacy_entity_metadata`, `_migrate_track_a_version_1`, `_migrate_predicate_version_2`, `_migrate_lifecycle_version_3`, `_ensure_performance_indexes`, `_migrate_agent_session_columns`, `_migrate_relation_index`, `_ensure_retrieval_fts`, `_seed_predicate_registry`, `_ensure_entity_fts`). The vector setup and the trigger blocks stay inline in `init_db` (D6: import and transaction order). The `C901` suppression on `init_db` is removed (D5); `PLR0915` stays.
+
+Evidence: an independent differential over eleven database scenarios (fresh, versions 1 to 3, current, a future marker, legacy columns, relation-index repair, forced v2 and v3 failures with retry) matched the baseline byte for byte on `sqlite_master`, `user_version`, rows and log messages, and every SQL string literal is unchanged.
+
+Residual test gaps found by mutation and left open (also true before the refactor): `_migrate_track_a_version_1` has no legacy version-0 fixture, so its audit row, version gates and retry are unpinned; individual performance-index definitions (relations source, events agent session, predicates canonical) are unpinned; the legacy column default and dropped `domain` column; the bad-embedding-value backfill; log-only warnings. A tests-only follow-up can add these.
