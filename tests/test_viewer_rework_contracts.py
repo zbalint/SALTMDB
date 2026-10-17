@@ -3,6 +3,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -133,7 +134,10 @@ class TestViewerReworkContracts(unittest.TestCase):
         handler = self._handler()
         invalid = self._capture(handler)
         handler.get_relations_neighborhood({"entity_id": ["root"], "as_of": ["not-a-time"]})
-        self.assertEqual(invalid["status"], 400)
+        self.assertEqual(
+            invalid,
+            {"data": {"error": "as_of must be an ISO-8601 timestamp"}, "status": 400},
+        )
 
         exact = self._capture(handler)
         handler.get_relations_neighborhood({"entity_id": ["root"], "max_edges": ["1"]})
@@ -146,6 +150,17 @@ class TestViewerReworkContracts(unittest.TestCase):
         self.assertEqual(exact["data"]["total_matching_edges"], 2)
         self.assertEqual(exact["data"]["omitted_edge_count"], 1)
         self.assertTrue(exact["data"]["truncated"])
+
+    def test_do_get_dispatches_entity_lineage_and_unknown_paths(self):
+        handler = self._handler()
+        with patch.object(handler, "get_lineage") as get_lineage:
+            handler.path = "/api/entities/missing/lineage"
+            handler.do_GET()
+        get_lineage.assert_called_once_with("missing")
+        unknown = self._capture(handler)
+        handler.path = "/not-an-endpoint"
+        handler.do_GET()
+        self.assertEqual(unknown, {"data": {"error": "Endpoint not found"}, "status": 404})
 
     def test_quality_and_operations_contracts(self):
         store_memory(

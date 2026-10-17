@@ -1,7 +1,15 @@
 """Embedding scatterplot endpoint: GET /api/scatterplot."""
 
+from __future__ import annotations
+
 import logging
+import sqlite3
+from types import ModuleType
 from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy
+    from numpy.typing import NDArray
 
 from saltmdb.db.vector_schema import try_load_vector_extension
 
@@ -68,31 +76,64 @@ def _blas_free_pca(X, n_components=2, n_iter=3, seed=42):
     return X @ Q[:, :n_components]
 
 
+def _scatter_checkpoint(msg):
+    # A native-level crash (e.g. OpenBLAS DLL abort) kills the process
+    # without raising a Python exception, so ordinary error logging
+    # never runs. Log + flush BEFORE each risky step so viewer.log
+    # shows the last checkpoint reached even if the process dies
+    # immediately after, pinpointing the exact crashing line.
+    logger.info("get_scatterplot checkpoint: %s", msg)
+    for h in logger.handlers:
+        h.flush()
+    for h in logging.getLogger().handlers:
+        h.flush()
+
+
+def _scatter_parse_rows(
+    rows: list[sqlite3.Row], np: ModuleType
+) -> tuple[list[dict[str, object]], list[NDArray[numpy.float32]]]:
+    valid_items = []
+    vectors = []
+    for r in rows:
+        blob = r["embedding"]
+        if blob:
+            vec = np.frombuffer(blob, dtype=np.float32)
+            if vec.shape[0] == 384:
+                vectors.append(vec)
+                valid_items.append(
+                    {
+                        "id": r["id"],
+                        "title": r["title"] or r["id"][:8],
+                        "status": r["status"],
+                        "agent_id": r["agent_id"] or "system",
+                        "is_core": bool(r["is_core"]),
+                    }
+                )
+    return valid_items, vectors
+
+
+def _scatter_points(valid_items, coords_2d):
+    points = []
+    for idx, item in enumerate(valid_items):
+        item["x"] = round(float(coords_2d[idx, 0]), 4)
+        item["y"] = round(float(coords_2d[idx, 1]), 4)
+        points.append(item)
+    return points
+
+
 class ScatterplotMixin(ViewerHandlerProtocol):
     """Provides get_scatterplot(); mixed into the final SALTMDBHandler elsewhere."""
 
-    def get_scatterplot(self):  # noqa: C901, PLR0915
-        def _checkpoint(msg):
-            # A native-level crash (e.g. OpenBLAS DLL abort) kills the process
-            # without raising a Python exception, so ordinary error logging
-            # never runs. Log + flush BEFORE each risky step so viewer.log
-            # shows the last checkpoint reached even if the process dies
-            # immediately after, pinpointing the exact crashing line.
-            logger.info("get_scatterplot checkpoint: %s", msg)
-            for h in logger.handlers:
-                h.flush()
-            for h in logging.getLogger().handlers:
-                h.flush()
-
+    def get_scatterplot(self):
         conn = None
         try:
-            _checkpoint("start")
+            _scatter_checkpoint("start")
             conn = self.get_db_connection()
-            _checkpoint("db connected")
+            _scatter_checkpoint("db connected")
             if not try_load_vector_extension(conn):
                 self.send_json({"points": [], "error": "sqlite_vec extension unavailable"})
                 return
-            _checkpoint("vector extension loaded")
+            _scatter_checkpoint("vector extension loaded")
             ready_from = """
                 FROM entities e
                 JOIN entity_embeddings ee ON e.id = ee.entity_id
@@ -106,56 +147,31 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                 (SCATTERPLOT_MAX_POINTS,),
             )
             rows = cursor.fetchall()
-            _checkpoint(f"fetched {len(rows)} rows")
+            _scatter_checkpoint(f"fetched {len(rows)} rows")
             if not rows:
                 self.send_json({"points": []})
                 return
 
             import numpy as np
 
-            _checkpoint("numpy imported")
-
-            valid_items = []
-            vectors = []
-            for r in rows:
-                blob = r["embedding"]
-                if blob:
-                    vec = np.frombuffer(blob, dtype=np.float32)
-                    if vec.shape[0] == 384:
-                        vectors.append(vec)
-                        valid_items.append(
-                            {
-                                "id": r["id"],
-                                "title": r["title"] or r["id"][:8],
-                                "status": r["status"],
-                                "agent_id": r["agent_id"] or "system",
-                                "is_core": bool(r["is_core"]),
-                            }
-                        )
-
-            _checkpoint(f"parsed {len(vectors)} vectors via np.frombuffer")
-
+            _scatter_checkpoint("numpy imported")
+            valid_items, vectors = _scatter_parse_rows(rows, np)
+            _scatter_checkpoint(f"parsed {len(vectors)} vectors via np.frombuffer")
             if len(vectors) < 2:
                 self.send_json({"points": []})
                 return
 
             X = np.vstack(vectors)
-            _checkpoint(f"np.vstack done, X.shape={X.shape}")
+            _scatter_checkpoint(f"np.vstack done, X.shape={X.shape}")
             x_centered = X - np.mean(X, axis=0)
-            _checkpoint("np.mean/centering done")
+            _scatter_checkpoint("np.mean/centering done")
             # Randomized power-iteration PCA — avoids all LAPACK/BLAS heavy
             # routines (SVD, eigh, matmul on large matrices) that crash
             # OpenBLAS in windowless Windows processes.
             # Uses only small dot products; stable across all platforms.
             coords_2d = _blas_free_pca(x_centered, n_components=2, n_iter=3, seed=42)
-            _checkpoint("_blas_free_pca done")
-
-            points = []
-            for idx, item in enumerate(valid_items):
-                item["x"] = round(float(coords_2d[idx, 0]), 4)
-                item["y"] = round(float(coords_2d[idx, 1]), 4)
-                points.append(item)
-
+            _scatter_checkpoint("_blas_free_pca done")
+            points = _scatter_points(valid_items, coords_2d)
             self.send_json(
                 {
                     "points": points,
@@ -163,7 +179,7 @@ class ScatterplotMixin(ViewerHandlerProtocol):
                     "truncated": total_ready > SCATTERPLOT_MAX_POINTS,
                 }
             )
-            _checkpoint("response sent")
+            _scatter_checkpoint("response sent")
         except Exception as e:
             logger.error("Error in get_scatterplot: %s", e, exc_info=True)
             self.send_json({"error": "Embedding projection unavailable"}, 500)

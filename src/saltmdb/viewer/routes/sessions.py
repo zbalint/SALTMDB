@@ -217,78 +217,122 @@ def _load_sessions(conn, active_session_ids: set[str], liveness_known: bool) -> 
 class SessionsMixin(ViewerHandlerProtocol):
     """Provides get_sessions(); mixed into the final SALTMDBHandler elsewhere."""
 
-    def get_sessions(self, query):  # noqa: C901, PLR0912, PLR0915
+    def _session_options(self, query):
+        page = _bounded_query_int(query, "page", 1, 1, 1_000_000)
+        limit = _bounded_query_int(query, "limit", 50, 1, MAX_SESSION_LIMIT)
+        options = {
+            "page": page,
+            "limit": limit,
+            "offset": (page - 1) * limit,
+            "id_prefix": query.get("id_prefix", [None])[0],
+            "state": query.get("state", [None])[0],
+            "agent_id": query.get("agent_id", [None])[0],
+            "cwd": query.get("cwd", [None])[0],
+            "date_field": query.get("date_field", [None])[0],
+            "date_from": query.get("date_from", [None])[0],
+            "date_to": query.get("date_to", [None])[0],
+            "sort": query.get("sort", ["recent"])[0] or "recent",
+        }
+        self._validate_session_options(options)
+        return options
+
+    @staticmethod
+    def _validate_session_options(options):
+        state = options["state"]
+        date_field = options["date_field"]
+        date_from = options["date_from"]
+        date_to = options["date_to"]
+        sort = options["sort"]
+        if state and state not in ("active", "lost", "ended", "unknown"):
+            raise ValueError("state must be active, lost, ended, or unknown")
+        if date_field and date_field not in ("started_at", "last_activity_at", "ended_at"):
+            raise ValueError("date_field must be started_at, last_activity_at, or ended_at")
+        if (date_from or date_to) and not date_field:
+            raise ValueError("date_field is required when a date bound is supplied")
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from must not be after date_to")
+        if sort not in _SESSION_SORTS:
+            raise ValueError("sort must be recent, oldest, started_desc, or started_asc")
+
+    @staticmethod
+    def _filter_sessions(all_sessions, options):
+        filtered = SessionsMixin._filter_session_identity(all_sessions, options)
+        filtered = SessionsMixin._filter_session_owner(filtered, options)
+        return SessionsMixin._filter_session_dates(filtered, options)
+
+    @staticmethod
+    def _filter_session_identity(all_sessions, options):
+        filtered = all_sessions
+        if options["id_prefix"]:
+            filtered = [s for s in filtered if s["session_id"].startswith(options["id_prefix"])]
+        if options["state"]:
+            filtered = [s for s in filtered if s["liveness"] == options["state"]]
+        return filtered
+
+    @staticmethod
+    def _filter_session_owner(all_sessions, options):
+        filtered = all_sessions
+        if options["agent_id"]:
+            filtered = [
+                s for s in filtered if s["agent_id"] and options["agent_id"] in s["agent_id"]
+            ]
+        if options["cwd"]:
+            filtered = [s for s in filtered if s["cwd"] and options["cwd"] in s["cwd"]]
+        return filtered
+
+    @staticmethod
+    def _filter_session_dates(all_sessions, options):
+        filtered = all_sessions
+        if options["date_from"]:
+            bound = _utc_day_bound(options["date_from"], end_exclusive=False)
+            filtered = [
+                s
+                for s in filtered
+                if s[options["date_field"]] and s[options["date_field"]] >= bound
+            ]
+        if options["date_to"]:
+            bound = _utc_day_bound(options["date_to"], end_exclusive=True)
+            filtered = [
+                s for s in filtered if s[options["date_field"]] and s[options["date_field"]] < bound
+            ]
+        return filtered
+
+    @staticmethod
+    def _sort_sessions(all_sessions, sort):
+        field, direction = _SESSION_SORTS[sort]
+        with_value = [s for s in all_sessions if s.get(field)]
+        without_value = [s for s in all_sessions if not s.get(field)]
+        with_value.sort(key=lambda s: s[field], reverse=(direction == "DESC"))
+        return with_value + without_value
+
+    def get_sessions(self, query):
         conn = None
         try:
-            page = _bounded_query_int(query, "page", 1, 1, 1_000_000)
-            limit = _bounded_query_int(query, "limit", 50, 1, MAX_SESSION_LIMIT)
-            offset = (page - 1) * limit
-            id_prefix = query.get("id_prefix", [None])[0]
-            state = query.get("state", [None])[0]
-            agent_id = query.get("agent_id", [None])[0]
-            cwd = query.get("cwd", [None])[0]
-            date_field = query.get("date_field", [None])[0]
-            date_from = query.get("date_from", [None])[0]
-            date_to = query.get("date_to", [None])[0]
-            sort = query.get("sort", ["recent"])[0] or "recent"
-
-            if state and state not in ("active", "lost", "ended", "unknown"):
-                raise ValueError("state must be active, lost, ended, or unknown")
-            if date_field and date_field not in ("started_at", "last_activity_at", "ended_at"):
-                raise ValueError("date_field must be started_at, last_activity_at, or ended_at")
-            if (date_from or date_to) and not date_field:
-                raise ValueError("date_field is required when a date bound is supplied")
-            if date_from and date_to and date_from > date_to:
-                raise ValueError("date_from must not be after date_to")
-            if sort not in _SESSION_SORTS:
-                raise ValueError("sort must be recent, oldest, started_desc, or started_asc")
-
+            options = self._session_options(query)
             conn = self.get_db_connection()
             active_session_ids, liveness_known = _daemon_liveness(self.server)
             all_sessions = _load_sessions(conn, active_session_ids, liveness_known)
-            if id_prefix:
-                all_sessions = [s for s in all_sessions if s["session_id"].startswith(id_prefix)]
-            if state:
-                all_sessions = [s for s in all_sessions if s["liveness"] == state]
-            if agent_id:
-                all_sessions = [
-                    s for s in all_sessions if s["agent_id"] and agent_id in s["agent_id"]
-                ]
-            if cwd:
-                all_sessions = [s for s in all_sessions if s["cwd"] and cwd in s["cwd"]]
-            if date_from:
-                bound = _utc_day_bound(date_from, end_exclusive=False)
-                all_sessions = [s for s in all_sessions if s[date_field] and s[date_field] >= bound]
-            if date_to:
-                bound = _utc_day_bound(date_to, end_exclusive=True)
-                all_sessions = [s for s in all_sessions if s[date_field] and s[date_field] < bound]
-
-            field, direction = _SESSION_SORTS[sort]
-            with_value = [s for s in all_sessions if s.get(field)]
-            without_value = [s for s in all_sessions if not s.get(field)]
-            with_value.sort(key=lambda s: s[field], reverse=(direction == "DESC"))
-            all_sessions = with_value + without_value
-
+            all_sessions = self._filter_sessions(all_sessions, options)
+            all_sessions = self._sort_sessions(all_sessions, options["sort"])
             total_count = len(all_sessions)
-            total_pages = (total_count + limit - 1) // limit if limit > 0 else 0
-            page_items = all_sessions[offset : offset + limit]
-
+            total_pages = (total_count + options["limit"] - 1) // options["limit"]
+            page_items = all_sessions[options["offset"] : options["offset"] + options["limit"]]
             self.send_json(
                 {
-                    "page": page,
-                    "limit": limit,
+                    "page": options["page"],
+                    "limit": options["limit"],
                     "total_count": total_count,
                     "total_pages": total_pages,
-                    "sort": sort,
-                    "state": state,
-                    "agent_id": agent_id,
-                    "cwd": cwd,
-                    "date_field": date_field,
-                    "date_from": date_from,
-                    "date_to": date_to,
+                    "sort": options["sort"],
+                    "state": options["state"],
+                    "agent_id": options["agent_id"],
+                    "cwd": options["cwd"],
+                    "date_field": options["date_field"],
+                    "date_from": options["date_from"],
+                    "date_to": options["date_to"],
                     "pagination": {
-                        "page": page,
-                        "per_page": limit,
+                        "page": options["page"],
+                        "per_page": options["limit"],
                         "total": total_count,
                         "total_pages": total_pages,
                     },

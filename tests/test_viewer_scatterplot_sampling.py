@@ -71,6 +71,49 @@ class TestViewerScatterplotSampling(unittest.TestCase):
         self.assertEqual(data["total_ready"], 4)
         self.assertFalse(data["truncated"])
 
+    def test_projection_preserves_newest_row_order_and_coordinates(self):
+        self.conn.execute("DELETE FROM entity_embeddings")
+        self.conn.execute("DELETE FROM entities")
+        for entity_id, index in (("a", 0), ("b", 1)):
+            stamp = f"2026-09-2{index + 5}T00:00:00+00:00"
+            self.conn.execute(
+                "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, "
+                "full_content, status, embedding_status) VALUES (?, ?, ?, ?, ?, 'body', 'raw', 'ready')",
+                (entity_id, stamp, stamp, stamp, entity_id),
+            )
+            vector = np.zeros(384, dtype=np.float32)
+            vector[index] = 1
+            self.conn.execute(
+                "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
+                (entity_id, vector.tobytes()),
+            )
+        self.conn.commit()
+
+        data = self._scatterplot()
+        self.assertEqual(
+            data["points"],
+            [
+                {
+                    "id": "b",
+                    "title": "b",
+                    "status": "raw",
+                    "agent_id": "system",
+                    "is_core": False,
+                    "x": 0.7071,
+                    "y": 0.0,
+                },
+                {
+                    "id": "a",
+                    "title": "a",
+                    "status": "raw",
+                    "agent_id": "system",
+                    "is_core": False,
+                    "x": -0.7071,
+                    "y": 0.0,
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

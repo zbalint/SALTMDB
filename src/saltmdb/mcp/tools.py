@@ -204,6 +204,98 @@ class DirectDispatchBackend:
         return dispatch.DISPATCH_TABLE[tool_name](**kwargs)
 
 
+def _rpc_starting_response(tool_name: str, advice: str) -> dict:
+    return {"status": "DAEMON_STARTING", "tool": tool_name, "advice": advice}
+
+
+def _rpc_call_once(db_path, tool_name, kwargs):
+    from saltmdb.mcp.identity import SESSION_IDENTITY
+
+    return daemon_client.call(
+        db_path,
+        tool_name,
+        kwargs,
+        caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
+    )
+
+
+def _rpc_read_retry(db_path, tool_name, kwargs):
+    try:
+        return _rpc_call_once(db_path, tool_name, kwargs)
+    except daemon_client.DaemonStartingError:
+        return _rpc_starting_response(
+            tool_name,
+            "The SALTMDB daemon is still starting after a restart. Wait a "
+            "few seconds and repeat the call; nothing was executed.",
+        )
+
+
+def _rpc_write_lost_response(tool_name: str) -> dict:
+    return {
+        "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
+        "tool": tool_name,
+        "advice": (
+            "The daemon connection was lost while this write was in flight. "
+            "Whether it committed is unknown from here -- SQLite's own "
+            "transaction durability means it either fully committed or fully "
+            "rolled back, never partially, but that answer didn't make it "
+            "back over this connection. Re-verify before retrying, to avoid "
+            "creating a duplicate."
+        ),
+    }
+
+
+def _rpc_dispatch_with_recovery(db_path, tool_name, kwargs):
+    try:
+        return _rpc_call_once(db_path, tool_name, kwargs)
+    except daemon_client.DaemonStartingError:
+        return _rpc_starting_response(
+            tool_name,
+            "The SALTMDB daemon is still starting after a restart. Wait a few seconds "
+            "and repeat the call; nothing was executed.",
+        )
+    except daemon_client.DaemonRpcError as e:
+        if e.code != "MID_CALL_FAILURE":
+            raise
+        if tool_name in protocol.READ_TOOLS:
+            return _rpc_read_retry(db_path, tool_name, kwargs)
+        if tool_name in protocol.WRITE_TOOLS:
+            return _rpc_write_lost_response(tool_name)
+        raise
+
+
+def _rpc_prepare_kwargs(tool_name: str, kwargs: dict) -> dict:
+    from saltmdb.mcp.identity import SESSION_IDENTITY
+
+    # The adapter is the trust boundary for agent identity.  Public wrappers already add
+    # this field for the daemon, but re-assert it here so an internal caller (or a stale
+    # wrapper) cannot smuggle a different agent_id through the transport envelope.  Tools
+    # whose contract is intentionally cross-agent/ownership-neutral must not receive an
+    # agent_id key, except get_events, whose agent_id is a read filter and passes through
+    # untouched.
+    if tool_name in _AGENT_ID_INJECTED_TOOLS:
+        kwargs = {**kwargs, "agent_id": _effective_agent_id()}
+    elif tool_name in _AGENT_ID_PASSTHROUGH_TOOLS:
+        # Explicit no-op: passthrough tools retain their caller-supplied filter.
+        pass
+    else:
+        kwargs = {key: value for key, value in kwargs.items() if key != "agent_id"}
+
+    if tool_name in {
+        "log_event",
+        "store_memory",
+        "consolidate_memories",
+        "revise_memory",
+        "supersede_memory",
+        "update_memory_metadata",
+        "capture_trace_start",
+        "capture_trace_memory_link",
+        "capture_trace_complete",
+    }:
+        kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
+    return kwargs
+
+
 class RpcBackend:
     """The only backend used in real production adapter runtime -- configured exactly once, by
     __main__.py's default branch, synchronously, BEFORE mcp.run() is called (not inside
@@ -213,88 +305,13 @@ class RpcBackend:
 
     def call(self, tool_name: str, kwargs: dict):
         from saltmdb.config import get_db_path
-        from saltmdb.mcp.identity import SESSION_IDENTITY
 
         with daemon_client.startup_budget():
-            # The adapter is the trust boundary for agent identity.  Public wrappers already add
-            # this field for the daemon, but re-assert it here so an internal caller (or a stale
-            # wrapper) cannot smuggle a different agent_id through the transport envelope.  Tools
-            # whose contract is intentionally cross-agent/ownership-neutral must not receive an
-            # agent_id key, except get_events, whose agent_id is a read filter and passes through
-            # untouched.
-            if tool_name in _AGENT_ID_INJECTED_TOOLS:
-                kwargs = {**kwargs, "agent_id": _effective_agent_id()}
-            elif tool_name in _AGENT_ID_PASSTHROUGH_TOOLS:
-                # Explicit no-op: passthrough tools retain their caller-supplied filter.
-                pass
-            else:
-                kwargs = {key: value for key, value in kwargs.items() if key != "agent_id"}
-
-            if tool_name in {
-                "log_event",
-                "store_memory",
-                "consolidate_memories",
-                "revise_memory",
-                "supersede_memory",
-                "update_memory_metadata",
-                "capture_trace_start",
-                "capture_trace_memory_link",
-                "capture_trace_complete",
-            }:
-                kwargs = {**kwargs, "agent_session_id": SESSION_IDENTITY.agent_session_id}
-
+            kwargs = _rpc_prepare_kwargs(tool_name, kwargs)
             # Transport metadata, consumed by daemon/server.py before ordinary tool dispatch.  This
             # intentionally differs from public agent_session_id filters on search/event tools.
             db_path = get_db_path()
-            try:
-                return daemon_client.call(
-                    db_path,
-                    tool_name,
-                    kwargs,
-                    caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
-                )
-            except daemon_client.DaemonStartingError:
-                return {
-                    "status": "DAEMON_STARTING",
-                    "tool": tool_name,
-                    "advice": (
-                        "The SALTMDB daemon is still starting after a restart. Wait a few seconds "
-                        "and repeat the call; nothing was executed."
-                    ),
-                }
-            except daemon_client.DaemonRpcError as e:
-                if e.code == "MID_CALL_FAILURE":
-                    if tool_name in protocol.READ_TOOLS:
-                        try:
-                            return daemon_client.call(
-                                db_path,
-                                tool_name,
-                                kwargs,
-                                caller_agent_session_id=SESSION_IDENTITY.agent_session_id,
-                            )
-                        except daemon_client.DaemonStartingError:
-                            return {
-                                "status": "DAEMON_STARTING",
-                                "tool": tool_name,
-                                "advice": (
-                                    "The SALTMDB daemon is still starting after a restart. Wait a "
-                                    "few seconds and repeat the call; nothing was executed."
-                                ),
-                            }
-                    if tool_name in protocol.WRITE_TOOLS:
-                        return {
-                            "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
-                            "tool": tool_name,
-                            "advice": (
-                                "The daemon connection was lost while this write was in flight. "
-                                "Whether it committed is unknown from here -- SQLite's own "
-                                "transaction durability means it either fully committed or fully "
-                                "rolled back, never partially, but that answer didn't make it "
-                                "back over this connection. Re-verify before retrying, to avoid "
-                                "creating a duplicate."
-                            ),
-                        }
-                raise
+            return _rpc_dispatch_with_recovery(db_path, tool_name, kwargs)
 
 
 _backend = None  # unconfigured by default -- calling a tool with no backend set raises clearly
@@ -820,6 +837,73 @@ def _predicate_disposition_error(
     )
 
 
+def _validate_relation_item(item, field):
+    item_predicate = item.get("predicate") if isinstance(item, dict) else None
+    check = _predicate_disposition_error(item_predicate, field) if item_predicate else None
+    if check is None:
+        return None, item, True
+    error_entry, canonical, swap = check
+    if canonical is None:
+        return error_entry, item, False
+    fixed_item = dict(item)
+    fixed_item["predicate"] = canonical
+    if swap:
+        fixed_item["source_id"] = item.get("target_id")
+        fixed_item["target_id"] = item.get("source_id")
+    return error_entry, fixed_item, True
+
+
+def _validate_relation_batch(relations_, submitted):
+    from saltmdb.utils.corrected_call import build_corrected_call
+    from saltmdb.utils.envelope import error as env_error
+    from saltmdb.utils.envelope import rejected
+
+    errors: list[dict] = []
+    corrected_items: list = []
+    can_fully_correct = True
+    for idx, item in enumerate(relations_):
+        error_entry, fixed_item, corrected = _validate_relation_item(
+            item, f"relations[{idx}].predicate"
+        )
+        if error_entry is not None:
+            errors.append(error_entry)
+        corrected_items.append(fixed_item)
+        can_fully_correct = can_fully_correct and corrected
+    if not errors:
+        return None
+    corrected_call = (
+        build_corrected_call(manage_relation, submitted, {"relations": corrected_items})
+        if can_fully_correct
+        else None
+    )
+    return rejected(
+        [env_error(e["code"], e["message"], e.get("field")) for e in errors],
+        corrected_call=corrected_call,
+    )
+
+
+def _validate_relation_single(predicate, source_id, target_id, submitted):
+    check = _predicate_disposition_error(predicate, "predicate")
+    if check is None:
+        return None
+    from saltmdb.utils.corrected_call import build_corrected_call
+    from saltmdb.utils.envelope import error as env_error
+    from saltmdb.utils.envelope import rejected
+
+    error_entry, canonical, swap = check
+    corrected_call = None
+    if canonical is not None:
+        fixes: dict[str, Any] = {"predicate": canonical}
+        if swap:
+            fixes["source_id"] = target_id
+            fixes["target_id"] = source_id
+        corrected_call = build_corrected_call(manage_relation, submitted, fixes)
+    return rejected(
+        [env_error(error_entry["code"], error_entry["message"], error_entry.get("field"))],
+        corrected_call=corrected_call,
+    )
+
+
 @mcp.tool()
 def manage_relation(
     relations: list[RelationBatchItem] | None = None,
@@ -877,65 +961,13 @@ def manage_relation(
 
     if relations_:
         relations_ = _strip_item_agent_id(relations_)
-        from saltmdb.utils.corrected_call import build_corrected_call
-        from saltmdb.utils.envelope import error as env_error
-        from saltmdb.utils.envelope import rejected
-
-        errors: list[dict] = []
-        corrected_items: list = []
-        can_fully_correct = True
-        for idx, item in enumerate(relations_):
-            item_predicate = item.get("predicate") if isinstance(item, dict) else None
-            check = (
-                _predicate_disposition_error(item_predicate, f"relations[{idx}].predicate")
-                if item_predicate
-                else None
-            )
-            if check is None:
-                corrected_items.append(item)
-                continue
-            error_entry, canonical, swap = check
-            errors.append(error_entry)
-            if canonical is not None:
-                fixed_item = dict(item)
-                fixed_item["predicate"] = canonical
-                if swap:
-                    fixed_item["source_id"] = item.get("target_id")
-                    fixed_item["target_id"] = item.get("source_id")
-                corrected_items.append(fixed_item)
-            else:
-                can_fully_correct = False
-                corrected_items.append(item)
-
-        if errors:
-            corrected_call = (
-                build_corrected_call(manage_relation, submitted, {"relations": corrected_items})
-                if can_fully_correct
-                else None
-            )
-            return rejected(
-                [env_error(e["code"], e["message"], e.get("field")) for e in errors],
-                corrected_call=corrected_call,
-            )
+        rejection = _validate_relation_batch(relations_, submitted)
+        if rejection is not None:
+            return rejection
     elif not invalidate and predicate:
-        check = _predicate_disposition_error(predicate, "predicate")
-        if check is not None:
-            from saltmdb.utils.corrected_call import build_corrected_call
-            from saltmdb.utils.envelope import error as env_error
-            from saltmdb.utils.envelope import rejected
-
-            error_entry, canonical, swap = check
-            corrected_call = None
-            if canonical is not None:
-                fixes: dict[str, Any] = {"predicate": canonical}
-                if swap:
-                    fixes["source_id"] = target_id
-                    fixes["target_id"] = source_id
-                corrected_call = build_corrected_call(manage_relation, submitted, fixes)
-            return rejected(
-                [env_error(error_entry["code"], error_entry["message"], error_entry.get("field"))],
-                corrected_call=corrected_call,
-            )
+        rejection = _validate_relation_single(predicate, source_id, target_id, submitted)
+        if rejection is not None:
+            return rejection
 
     return _backend_or_raise().call(
         "manage_relation",

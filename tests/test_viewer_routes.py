@@ -114,6 +114,24 @@ class TestViewerBrowseAndHybridSearch(unittest.TestCase):
         self.assertEqual(captured["data"]["entities"][0]["id"], "middle")
         self.assertEqual(captured["data"]["sort"], "created_desc")
 
+    def test_entities_equal_timestamps_use_id_ascending_tiebreak(self):
+        stamp = "2026-08-11T12:00:00+00:00"
+        self._insert_entity("zeta", stamp, stamp)
+        self._insert_entity("alpha", stamp, stamp)
+        handler = self._handler()
+        captured = self._capture(handler)
+
+        handler.get_entities({"sort": ["updated_desc"]})
+        self.assertEqual(
+            [entity["id"] for entity in captured["data"]["entities"][:2]],
+            ["alpha", "zeta"],
+        )
+        handler.get_entities({"sort": ["created_asc"]})
+        self.assertEqual(
+            [entity["id"] for entity in captured["data"]["entities"][:2]],
+            ["alpha", "zeta"],
+        )
+
     def test_entities_reject_invalid_temporal_query(self):
         handler = self._handler()
         missing_field = self._capture(handler)
@@ -223,6 +241,19 @@ class TestViewerAgentSessions(unittest.TestCase):
             (event_id, timestamp, agent_id, event_type, f"content {event_id}", agent_session_id),
         )
         self.conn.commit()
+
+    def test_get_sessions_accepts_all_states_and_rejects_invalid_state(self):
+        handler = self._handler()
+        for state in ("active", "lost", "ended", "unknown"):
+            captured = self._capture(handler)
+            handler.get_sessions({"state": [state]})
+            self.assertEqual(captured["status"], 200, state)
+        invalid = self._capture(handler)
+        handler.get_sessions({"state": ["retired"]})
+        self.assertEqual(invalid["status"], 400)
+        self.assertEqual(
+            invalid["data"], {"error": "state must be active, lost, ended, or unknown"}
+        )
 
     def test_get_entities_exposes_session_columns_and_session_id_filters_created_or_touched(self):
         # created by sess-a, never touched by anyone else

@@ -88,3 +88,9 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling); see the assignment event.
+
+## Amendment 1 (2026-10-17)
+
+Contradiction resolved: D1 and D7 say SQL text stays identical, but moving the multi-line SQL string literals into helper functions changes their embedded indentation. The affected literals are the entity list SELECT and the entity tag SELECT (`entities.py`), the lineage candidates SELECT (`entity_detail.py`), and the neighborhood rows SELECT and recursive count query (`relations.py`). Decision: whitespace-only differences inside these literals are accepted. Clause text, clause order and bound-parameter order are identical to the baseline, and SQLite's result does not depend on whitespace.
+
+Residual test gaps found by mutation and left open: the default `limit` of 50 in `_entity_options` is not pinned by any test (also true before the refactor). `get_entity_detail` (score 17), `capture_trace_memory_link`, `_normalize_list_or_str` and `relations_graph` stay above the proxy limit and are untouched (D6).

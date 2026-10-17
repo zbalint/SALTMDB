@@ -112,11 +112,31 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.debug("Client disconnected during OPTIONS request: %s", e)
 
-    def do_GET(self):  # noqa: C901, PLR0912, PLR0915
+    def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
+        if self._dispatch_get_api(path, query):
+            return
+        if self._dispatch_get_entity(path, query):
+            return
+        if path == "/" or path == "/index.html":  # noqa: PLR1714
+            self.send_html(get_frontend_html())
+            return
+        self.send_json({"error": "Endpoint not found"}, 404)
 
+    def _dispatch_get_api(self, path, query):
+        for dispatcher in (
+            self._dispatch_get_primary,
+            self._dispatch_get_sessions,
+            self._dispatch_get_relations,
+            self._dispatch_get_secondary,
+        ):
+            if dispatcher(path, query):
+                return True
+        return False
+
+    def _dispatch_get_primary(self, path, query):
         if path.startswith("/static/"):
             self.send_static_asset(path)
         elif path == "/api/embeddings_stats":
@@ -131,7 +151,12 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_feed(query)
         elif path == "/api/tags":
             self.get_tags()
-        elif path == "/api/sessions":
+        else:
+            return False
+        return True
+
+    def _dispatch_get_sessions(self, path, query):
+        if path == "/api/sessions":
             self.get_sessions(query)
         elif path.startswith("/api/sessions/"):
             self.get_session_detail(urllib.parse.unquote(path[len("/api/sessions/") :]))
@@ -139,7 +164,12 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_traces(query)
         elif path.startswith("/api/traces/"):
             self.get_trace_detail(urllib.parse.unquote(path[len("/api/traces/") :]))
-        elif path == "/api/locks":
+        else:
+            return False
+        return True
+
+    def _dispatch_get_relations(self, path, query):
+        if path == "/api/locks":
             self.send_json(
                 {"error": "System Locks was retired", "replacement": "/api/operations"}, 410
             )
@@ -149,7 +179,12 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_relations_neighborhood(query)
         elif path == "/api/relations/graph":
             self.get_relations_graph(query)
-        elif path == "/api/stats":
+        else:
+            return False
+        return True
+
+    def _dispatch_get_secondary(self, path, query):
+        if path == "/api/stats":
             self.get_stats()
         elif path == "/api/operations":
             self.get_operations()
@@ -157,24 +192,24 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
             self.get_quality(query)
         elif path == "/api/search":
             self.get_search(query)
-        elif path.startswith(_ENTITIES_API_PREFIX) or path.startswith("/api/entity/"):
-            prefix = (
-                _ENTITIES_API_PREFIX if path.startswith(_ENTITIES_API_PREFIX) else "/api/entity/"
-            )
-            raw_subpath = path[len(prefix) :]
-            if raw_subpath.endswith("/lineage"):
-                eid = urllib.parse.unquote(raw_subpath[: -len("/lineage")])
-                self.get_lineage(eid)
-            elif raw_subpath.endswith("/relations"):
-                eid = urllib.parse.unquote(raw_subpath[: -len("/relations")])
-                self.get_entity_relations(eid, query)
-            else:
-                entity_id = urllib.parse.unquote(raw_subpath)
-                self.get_entity_detail(entity_id)
-        elif path == "/" or path == "/index.html":  # noqa: PLR1714
-            self.send_html(get_frontend_html())
         else:
-            self.send_json({"error": "Endpoint not found"}, 404)
+            return False
+        return True
+
+    def _dispatch_get_entity(self, path, query):
+        if not (path.startswith(_ENTITIES_API_PREFIX) or path.startswith("/api/entity/")):
+            return False
+        prefix = _ENTITIES_API_PREFIX if path.startswith(_ENTITIES_API_PREFIX) else "/api/entity/"
+        raw_subpath = path[len(prefix) :]
+        if raw_subpath.endswith("/lineage"):
+            self.get_lineage(urllib.parse.unquote(raw_subpath[: -len("/lineage")]))
+        elif raw_subpath.endswith("/relations"):
+            self.get_entity_relations(
+                urllib.parse.unquote(raw_subpath[: -len("/relations")]), query
+            )
+        else:
+            self.get_entity_detail(urllib.parse.unquote(raw_subpath))
+        return True
 
     def do_POST(self):
         self.send_json({"error": "Viewer is read-only"}, 405)

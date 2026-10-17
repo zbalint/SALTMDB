@@ -14,7 +14,7 @@ from saltmdb.db.viewer_sessions import (
     register_session,
     unregister_session,
 )
-from saltmdb.viewer.routes.sessions import _load_sessions
+from saltmdb.viewer.routes.sessions import SessionsMixin, _load_sessions
 
 
 class TestViewerSessions(unittest.TestCase):
@@ -114,6 +114,16 @@ class TestViewerSessions(unittest.TestCase):
             mock_kernel32.OpenProcess.return_value = 0
             mock_get_last_error.return_value = 5
             self.assertTrue(_pid_alive(target_pid))
+
+    def test_session_agent_filter_is_case_sensitive(self):
+        sessions = [
+            {"session_id": "one", "agent_id": "Agent-A", "cwd": "/project"},
+            {"session_id": "two", "agent_id": "agent-a", "cwd": "/project"},
+        ]
+        filtered = SessionsMixin._filter_session_owner(
+            sessions, {"agent_id": "agent-", "cwd": None}
+        )
+        self.assertEqual([session["session_id"] for session in filtered], ["two"])
 
     def test_trace_count_and_lifecycle_defaults_for_trace_session(self):
         self.conn.execute(

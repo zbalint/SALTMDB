@@ -126,6 +126,20 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(consolidation_kwargs["agent_id"], "test_agent")
         self.assertNotIn("agent_id", consolidation_kwargs["consolidations"][0])
 
+    def test_rpc_backend_stamps_lifecycle_writes_and_not_reads(self):
+        from unittest.mock import patch
+
+        backend = tools.RpcBackend()
+        with patch("saltmdb.daemon.client.call", return_value="ok") as rpc_call:
+            for tool_name in ("log_event", "revise_memory", "supersede_memory"):
+                backend.call(tool_name, {})
+                self.assertEqual(
+                    rpc_call.call_args.args[2]["agent_session_id"],
+                    SESSION_IDENTITY.agent_session_id,
+                )
+            backend.call("search_tags", {})
+            self.assertNotIn("agent_session_id", rpc_call.call_args.args[2])
+
     def test_daemon_dispatch_forwards_batch_owner_to_relation_service(self):
         """The daemon must retain the adapter-injected owner for bulk relation attribution."""
         from unittest.mock import patch
@@ -2481,6 +2495,17 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             "offer a corrected_call, even though another item in the same batch was a "
             "mechanically-derivable alias",
         )
+
+    def test_bulk_swap_alias_corrected_call_swaps_each_item_ids(self):
+        id1, id2 = self._mk_pair("bulk_swap_alias")
+        result = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "verified_by"}]
+        )
+        self.assertEqual(result["status"], "rejected")
+        corrected = result["corrected_call"]["relations"][0]
+        self.assertEqual(corrected["predicate"], "verifies")
+        self.assertEqual(corrected["source_id"], id2)
+        self.assertEqual(corrected["target_id"], id1)
 
 
 class TestGetEventsEndToEnd(unittest.TestCase):

@@ -25,6 +25,147 @@ _VIEWER_HANDLER_ERROR_LOG = "SALTMDB Viewer handler error: %s"
 _INTERNAL_SERVER_ERROR = "Internal server error. Check viewer logs for details."
 
 
+def _neighborhood_options(query):
+    root_id = query.get("entity_id", [""])[0]
+    if not root_id or len(root_id) > 512:
+        raise ValueError("entity_id is required and must be at most 512 characters")
+    depth = _bounded_query_int(query, "depth", 1, 1, 2)
+    max_nodes = _bounded_query_int(query, "max_nodes", 50, 1, 50)
+    max_edges = _bounded_query_int(query, "max_edges", 100, 1, 100)
+    include_archived = query.get("exclude_archived", ["true"])[0].lower() not in (
+        "true",
+        "1",
+        "yes",
+    )
+    predicate = query.get("predicate", [None])[0]
+    raw_as_of = query.get("as_of", [None])[0]
+    if raw_as_of:
+        try:
+            as_of = datetime.fromisoformat(raw_as_of.replace("Z", "+00:00")).isoformat()
+        except ValueError as exc:
+            raise ValueError("as_of must be an ISO-8601 timestamp") from exc
+    else:
+        as_of = datetime.now(UTC).isoformat()
+    return root_id, depth, max_nodes, max_edges, include_archived, predicate, as_of
+
+
+def _neighborhood_fetch_rows(
+    conn, frontier, max_edges, current_edges, include_archived, predicate, as_of
+):
+    placeholders = ",".join("?" for _ in frontier)
+    clauses = [f"(r.source_id IN ({placeholders}) OR r.target_id IN ({placeholders}))"]
+    params = list(frontier) * 2
+    if predicate:
+        clauses.append(_PREDICATE_FILTER_SQL)
+        params.append(predicate)
+    validity_sql, validity_params = active_relation_filter(as_of)
+    clauses.append(validity_sql)
+    params.extend(validity_params)
+    if not include_archived:
+        clauses.append(
+            "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
+        )
+    remaining_edges = max_edges - len(current_edges)
+    return conn.execute(
+        f"""
+        SELECT r.id, r.source_id, r.target_id, r.predicate, r.created_at,
+               s.title AS source_title, s.status AS source_status,
+               t.title AS target_title, t.status AS target_status
+        FROM relations r
+        LEFT JOIN entities s ON s.id = r.source_id
+        LEFT JOIN entities t ON t.id = r.target_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT ?
+        """,
+        params + [remaining_edges + 1],
+    ).fetchall()
+
+
+def _neighborhood_row_payload(row):
+    return {
+        "id": row[0],
+        "source": row[1],
+        "target": row[2],
+        "predicate": row[3],
+        "created_at": row[4],
+        "source_title": row[5] or row[1],
+        "source_status": row[6] or "raw",
+        "target_title": row[7] or row[2],
+        "target_status": row[8] or "raw",
+    }
+
+
+def _neighborhood_add_row(row, frontier, seen, edges, emitted_ids, max_nodes, max_edges):
+    if len(edges) >= max_edges or row[0] in emitted_ids:
+        return None
+    other = row[2] if row[1] in frontier else row[1]
+    if other not in seen and len(seen) >= max_nodes:
+        return None
+    edges.append(_neighborhood_row_payload(row))
+    emitted_ids.add(row[0])
+    if other not in seen:
+        seen.add(other)
+        return other
+    return None
+
+
+def _neighborhood_add_rows(rows, frontier, seen, edges, emitted_ids, max_nodes, max_edges):
+    next_frontier = set()
+    for row in rows:
+        other = _neighborhood_add_row(row, frontier, seen, edges, emitted_ids, max_nodes, max_edges)
+        if other is not None:
+            next_frontier.add(other)
+    return next_frontier
+
+
+def _neighborhood_edges(
+    conn, root_id, depth, max_nodes, max_edges, include_archived, predicate, as_of
+):
+    seen = {root_id}
+    frontier = {root_id}
+    edges: list[dict[str, Any]] = []
+    emitted_ids: set[str] = set()
+    for _ in range(depth):
+        if not frontier or len(edges) >= max_edges or len(seen) >= max_nodes:
+            break
+        rows = _neighborhood_fetch_rows(
+            conn, frontier, max_edges, edges, include_archived, predicate, as_of
+        )
+        frontier = _neighborhood_add_rows(
+            rows, frontier, seen, edges, emitted_ids, max_nodes, max_edges
+        )
+    return seen, edges
+
+
+def _neighborhood_count(conn, root_id, depth, include_archived, predicate, as_of):
+    count_validity_sql, count_params = active_relation_filter(as_of)
+    count_filters = [count_validity_sql]
+    if predicate:
+        count_filters.append(_PREDICATE_FILTER_SQL)
+        count_params.append(predicate)
+    if not include_archived:
+        count_filters.append(
+            "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
+        )
+    filter_sql = " AND ".join(count_filters)
+    return conn.execute(
+        f"""WITH RECURSIVE frontier(id, depth) AS (
+                SELECT ?, 0
+                UNION
+                SELECT CASE WHEN r.source_id = frontier.id THEN r.target_id ELSE r.source_id END,
+                       frontier.depth + 1
+                FROM relations r JOIN frontier ON r.source_id = frontier.id OR r.target_id = frontier.id
+                LEFT JOIN entities s ON s.id = r.source_id LEFT JOIN entities t ON t.id = r.target_id
+                WHERE frontier.depth < ? AND {filter_sql}
+            )
+            SELECT COUNT(DISTINCT r.id) FROM relations r JOIN frontier ON r.source_id = frontier.id OR r.target_id = frontier.id
+            LEFT JOIN entities s ON s.id = r.source_id LEFT JOIN entities t ON t.id = r.target_id
+            WHERE frontier.depth < ? AND {filter_sql}""",
+        [root_id, depth] + count_params + [depth] + count_params,
+    ).fetchone()[0]
+
+
 class RelationsMixin(ViewerHandlerProtocol):
     """Provides get_relations_graph/get_all_relations/get_relations_neighborhood/get_entity_relations."""
 
@@ -190,34 +331,12 @@ class RelationsMixin(ViewerHandlerProtocol):
             if conn:
                 conn.close()
 
-    def get_relations_neighborhood(self, query):  # noqa: C901, PLR0912, PLR0915
+    def get_relations_neighborhood(self, query):
         """Return a bounded, deterministic local relation neighborhood."""
         conn = None
         try:
-            root_id = query.get("entity_id", [""])[0]
-            if not root_id or len(root_id) > 512:
-                self.send_json(
-                    {"error": "entity_id is required and must be at most 512 characters"}, 400
-                )
-                return
-            depth = _bounded_query_int(query, "depth", 1, 1, 2)
-            max_nodes = _bounded_query_int(query, "max_nodes", 50, 1, 50)
-            max_edges = _bounded_query_int(query, "max_edges", 100, 1, 100)
-            include_archived = query.get("exclude_archived", ["true"])[0].lower() not in (
-                "true",
-                "1",
-                "yes",
-            )
-            predicate = query.get("predicate", [None])[0]
-            raw_as_of = query.get("as_of", [None])[0]
-            if raw_as_of:
-                try:
-                    as_of = datetime.fromisoformat(raw_as_of.replace("Z", "+00:00")).isoformat()
-                except ValueError as exc:
-                    raise ValueError("as_of must be an ISO-8601 timestamp") from exc
-            else:
-                as_of = datetime.now(UTC).isoformat()
-
+            options = _neighborhood_options(query)
+            root_id, depth, max_nodes, max_edges, include_archived, predicate, as_of = options
             conn = self.get_db_connection()
             root = conn.execute(
                 "SELECT id, title, status FROM entities WHERE id = ?", (root_id,)
@@ -225,101 +344,16 @@ class RelationsMixin(ViewerHandlerProtocol):
             if not root:
                 self.send_json({"error": "Entity not found"}, 404)
                 return
-
-            seen = {root_id}
-            frontier = {root_id}
-            edges: list[dict[str, Any]] = []
-            emitted_ids = set()
-            has_more = False
-            for _ in range(depth):
-                if not frontier or len(edges) >= max_edges or len(seen) >= max_nodes:
-                    break
-                placeholders = ",".join("?" for _ in frontier)
-                clauses = [f"(r.source_id IN ({placeholders}) OR r.target_id IN ({placeholders}))"]
-                params = list(frontier) * 2
-                if predicate:
-                    clauses.append(_PREDICATE_FILTER_SQL)
-                    params.append(predicate)
-                validity_sql, validity_params = active_relation_filter(as_of)
-                clauses.append(validity_sql)
-                params.extend(validity_params)
-                if not include_archived:
-                    clauses.append(
-                        "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
-                    )
-                remaining_edges = max_edges - len(edges)
-                rows = conn.execute(
-                    f"""
-                    SELECT r.id, r.source_id, r.target_id, r.predicate, r.created_at,
-                           s.title AS source_title, s.status AS source_status,
-                           t.title AS target_title, t.status AS target_status
-                    FROM relations r
-                    LEFT JOIN entities s ON s.id = r.source_id
-                    LEFT JOIN entities t ON t.id = r.target_id
-                    WHERE {" AND ".join(clauses)}
-                    ORDER BY r.created_at ASC, r.id ASC
-                    LIMIT ?
-                    """,
-                    params + [remaining_edges + 1],
-                ).fetchall()
-                has_more = has_more or len(rows) > remaining_edges
-                next_frontier = set()
-                for row in rows:
-                    if len(edges) >= max_edges:
-                        break
-                    if row[0] in emitted_ids:
-                        continue
-                    other = row[2] if row[1] in frontier else row[1]
-                    if other not in seen and len(seen) >= max_nodes:
-                        continue
-                    edges.append(
-                        {
-                            "id": row[0],
-                            "source": row[1],
-                            "target": row[2],
-                            "predicate": row[3],
-                            "created_at": row[4],
-                            "source_title": row[5] or row[1],
-                            "source_status": row[6] or "raw",
-                            "target_title": row[7] or row[2],
-                            "target_status": row[8] or "raw",
-                        }
-                    )
-                    emitted_ids.add(row[0])
-                    if other not in seen:
-                        seen.add(other)
-                        next_frontier.add(other)
-                frontier = next_frontier
-
+            seen, edges = _neighborhood_edges(
+                conn, root_id, depth, max_nodes, max_edges, include_archived, predicate, as_of
+            )
             node_rows = conn.execute(
                 f"SELECT id, title, status FROM entities WHERE id IN ({','.join('?' for _ in seen)}) ORDER BY title, id",
                 list(seen),
             ).fetchall()
-            count_validity_sql, count_params = active_relation_filter(as_of)
-            count_filters = [count_validity_sql]
-            if predicate:
-                count_filters.append(_PREDICATE_FILTER_SQL)
-                count_params.append(predicate)
-            if not include_archived:
-                count_filters.append(
-                    "COALESCE(s.status, 'raw') != 'archived' AND COALESCE(t.status, 'raw') != 'archived'"
-                )
-            filter_sql = " AND ".join(count_filters)
-            total_matching_edges = conn.execute(
-                f"""WITH RECURSIVE frontier(id, depth) AS (
-                        SELECT ?, 0
-                        UNION
-                        SELECT CASE WHEN r.source_id = frontier.id THEN r.target_id ELSE r.source_id END,
-                               frontier.depth + 1
-                        FROM relations r JOIN frontier ON r.source_id = frontier.id OR r.target_id = frontier.id
-                        LEFT JOIN entities s ON s.id = r.source_id LEFT JOIN entities t ON t.id = r.target_id
-                        WHERE frontier.depth < ? AND {filter_sql}
-                    )
-                    SELECT COUNT(DISTINCT r.id) FROM relations r JOIN frontier ON r.source_id = frontier.id OR r.target_id = frontier.id
-                    LEFT JOIN entities s ON s.id = r.source_id LEFT JOIN entities t ON t.id = r.target_id
-                    WHERE frontier.depth < ? AND {filter_sql}""",
-                [root_id, depth] + count_params + [depth] + count_params,
-            ).fetchone()[0]
+            total_matching_edges = _neighborhood_count(
+                conn, root_id, depth, include_archived, predicate, as_of
+            )
             self.send_json(
                 {
                     "root_id": root_id,

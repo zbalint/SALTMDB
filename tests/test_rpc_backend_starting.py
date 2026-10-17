@@ -3,13 +3,19 @@ from unittest.mock import patch
 
 from saltmdb.daemon import client as daemon_client
 from saltmdb.mcp import tools
+from saltmdb.mcp.identity import SESSION_IDENTITY
 
 
 class TestRpcBackendStarting(unittest.TestCase):
     backend: tools.RpcBackend
 
     def setUp(self):
+        SESSION_IDENTITY.reset()
+        SESSION_IDENTITY.configure_agent_id("test_agent")
         self.backend = tools.RpcBackend()
+
+    def tearDown(self):
+        SESSION_IDENTITY.reset()
 
     def test_daemon_starting_returns_retryable_result(self):
         with patch.object(
@@ -51,6 +57,32 @@ class TestRpcBackendStarting(unittest.TestCase):
         with patch.object(daemon_client, "call", side_effect=error):
             with self.assertRaises(daemon_client.DaemonStartupError):
                 self.backend.call("search_tags", {})
+
+    def test_mid_call_write_failure_returns_exact_non_retry_envelope(self):
+        error = daemon_client.DaemonRpcError("MID_CALL_FAILURE", "connection dropped")
+        with patch.object(daemon_client, "call", side_effect=error):
+            result = self.backend.call("store_memory", {})
+        self.assertEqual(
+            result,
+            {
+                "status": "DAEMON_CONNECTION_LOST_DURING_WRITE",
+                "tool": "store_memory",
+                "advice": (
+                    "The daemon connection was lost while this write was in flight. "
+                    "Whether it committed is unknown from here -- SQLite's own "
+                    "transaction durability means it either fully committed or fully "
+                    "rolled back, never partially, but that answer didn't make it "
+                    "back over this connection. Re-verify before retrying, to avoid "
+                    "creating a duplicate."
+                ),
+            },
+        )
+
+    def test_mid_call_write_failure_is_not_retried(self):
+        error = daemon_client.DaemonRpcError("MID_CALL_FAILURE", "connection dropped")
+        with patch.object(daemon_client, "call", side_effect=error) as call:
+            self.backend.call("store_memory", {})
+        self.assertEqual(call.call_count, 1)
 
     def test_mid_call_read_retry_uses_the_original_twenty_five_second_budget(self):
         class _Clock:

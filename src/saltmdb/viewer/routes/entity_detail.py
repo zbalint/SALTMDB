@@ -18,6 +18,83 @@ logger = logging.getLogger(__name__)
 MAX_LINEAGE_CANDIDATES = 5
 
 
+def _resolve_lineage_reference(conn, entity_id):
+    # An exact ID always wins; otherwise the reference may be an ID prefix or an exact
+    # title, and must identify exactly one memory -- never a silent best guess.
+    row = conn.execute(
+        "SELECT id, title, status FROM entities WHERE id = ?", (entity_id,)
+    ).fetchone()
+    if row:
+        return row, None
+    escaped = entity_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    candidates = conn.execute(
+        """SELECT id, title, status FROM entities
+           WHERE id LIKE ? ESCAPE '\\' OR title = ?
+           ORDER BY updated_at DESC, id LIMIT ?""",
+        (f"{escaped}%", entity_id, MAX_LINEAGE_CANDIDATES + 1),
+    ).fetchall()
+    if len(candidates) > 1:
+        return None, (
+            {
+                "error": "Ambiguous entity reference",
+                "candidates": [
+                    {"id": c[0], "title": c[1], "status": c[2]}
+                    for c in candidates[:MAX_LINEAGE_CANDIDATES]
+                ],
+            },
+            409,
+        )
+    return (candidates[0] if candidates else None), None
+
+
+def _lineage_result(conn, entity_id):
+    # Phase 3 exposes a direction-specific graph operation.  Keep the
+    # legacy call as a compatibility fallback for an in-process viewer
+    # during rolling upgrades; both shapes are normalized for the panel.
+    get_lineage = getattr(relation_service, "get_lineage", None)
+    if get_lineage is not None:
+        from saltmdb.utils.envelope import is_rejected
+
+        ancestor_result = get_lineage(
+            entity_id=entity_id,
+            direction="ancestors",
+            max_depth=10,
+            db_connection=conn,
+        )
+        if isinstance(ancestor_result, dict) and is_rejected(ancestor_result):
+            return None, ancestor_result.get("errors", [{}])[0].get("message", "Unknown error")
+        direction_nodes = ancestor_result.get("data", {}).get("nodes", [])
+        return [(node, "ancestors") for node in direction_nodes if isinstance(node, dict)], None
+    lineage_result = relation_service.analyze_lineage(entity_id=entity_id, db_connection=conn)
+    if lineage_result.get("error"):
+        return None, lineage_result["error"]
+    return [(node, "ancestors") for node in lineage_result.get("ancestors", [])], None
+
+
+def _lineage_nodes(raw_nodes):
+    nodes = []
+    seen = set()
+    for node, direction in raw_nodes:
+        node_id = node.get("id")
+        if not node_id or node_id in seen:
+            continue
+        seen.add(node_id)
+        depth = node.get("depth", node.get("generation_depth", 0))
+        nodes.append(
+            {
+                "id": node_id,
+                "depth": depth,
+                "generation_depth": node.get("generation_depth", depth),
+                "title": node.get("title"),
+                "status": node.get("status"),
+                "agent_id": node.get("agent_id"),
+                "updated_at": node.get("updated_at"),
+                "direction": node.get("direction", direction),
+            }
+        )
+    return nodes
+
+
 class EntityDetailMixin(ViewerHandlerProtocol):
     """Provides get_lineage() and get_entity_detail(); mixed into SALTMDBHandler elsewhere."""
 
@@ -25,94 +102,24 @@ class EntityDetailMixin(ViewerHandlerProtocol):
         conn = None
         try:
             conn = self.get_db_connection()
-            # An exact ID always wins; otherwise the reference may be an ID prefix or an exact
-            # title, and must identify exactly one memory -- never a silent best guess.
-            row = conn.execute(
-                "SELECT id, title, status FROM entities WHERE id = ?", (entity_id,)
-            ).fetchone()
-            if not row:
-                escaped = entity_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                candidates = conn.execute(
-                    """SELECT id, title, status FROM entities
-                       WHERE id LIKE ? ESCAPE '\\' OR title = ?
-                       ORDER BY updated_at DESC, id LIMIT ?""",
-                    (f"{escaped}%", entity_id, MAX_LINEAGE_CANDIDATES + 1),
-                ).fetchall()
-                if len(candidates) > 1:
-                    self.send_json(
-                        {
-                            "error": "Ambiguous entity reference",
-                            "candidates": [
-                                {"id": c[0], "title": c[1], "status": c[2]}
-                                for c in candidates[:MAX_LINEAGE_CANDIDATES]
-                            ],
-                        },
-                        409,
-                    )
-                    return
-                row = candidates[0] if candidates else None
+            row, error = _resolve_lineage_reference(conn, entity_id)
+            if error:
+                self.send_json(*error)
+                return
             if not row:
                 self.send_json({"error": "Entity not found"}, 404)
                 return
             entity_id, root_title, root_status = row[0], row[1], row[2]
-
-            # Phase 3 exposes a direction-specific graph operation.  Keep the
-            # legacy call as a compatibility fallback for an in-process viewer
-            # during rolling upgrades; both shapes are normalized for the panel.
-            get_lineage = getattr(relation_service, "get_lineage", None)
-            if get_lineage is not None:
-                from saltmdb.utils.envelope import is_rejected
-
-                ancestor_result = get_lineage(
-                    entity_id=entity_id,
-                    direction="ancestors",
-                    max_depth=10,
-                    db_connection=conn,
-                )
-                if isinstance(ancestor_result, dict) and is_rejected(ancestor_result):
-                    message = ancestor_result.get("errors", [{}])[0].get("message", "Unknown error")
-                    self.send_json({"error": message}, 404)
-                    return
-                raw_nodes: list[tuple[dict, str]] = []
-                direction_nodes = ancestor_result.get("data", {}).get("nodes", [])
-                raw_nodes.extend(
-                    (node, "ancestors") for node in direction_nodes if isinstance(node, dict)
-                )
-            else:
-                lineage_result = relation_service.analyze_lineage(
-                    entity_id=entity_id, db_connection=conn
-                )
-                if lineage_result.get("error"):
-                    self.send_json({"error": lineage_result["error"]}, 404)
-                    return
-                raw_nodes = [(node, "ancestors") for node in lineage_result.get("ancestors", [])]
-
-            nodes = []
-            seen = set()
-            for node, direction in raw_nodes:
-                node_id = node.get("id")
-                if not node_id or node_id in seen:
-                    continue
-                seen.add(node_id)
-                depth = node.get("depth", node.get("generation_depth", 0))
-                nodes.append(
-                    {
-                        "id": node_id,
-                        "depth": depth,
-                        "generation_depth": node.get("generation_depth", depth),
-                        "title": node.get("title"),
-                        "status": node.get("status"),
-                        "agent_id": node.get("agent_id"),
-                        "updated_at": node.get("updated_at"),
-                        "direction": node.get("direction", direction),
-                    }
-                )
+            raw_nodes, error_message = _lineage_result(conn, entity_id)
+            if error_message:
+                self.send_json({"error": error_message}, 404)
+                return
             self.send_json(
                 {
                     "root_id": entity_id,
                     "root_title": root_title,
                     "root_status": root_status,
-                    "nodes": nodes,
+                    "nodes": _lineage_nodes(raw_nodes),
                 }
             )
         except Exception as e:
