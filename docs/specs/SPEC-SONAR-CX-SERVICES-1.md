@@ -47,6 +47,8 @@ Sonar reports 16 functions above the cognitive-complexity limit of 15 in this gr
 - D11. Proxy target: at most 12 for every new helper and for the listed function; where the function is very large (score above 60) at most 15 is accepted for the function itself if the report shows why 12 was not reachable safely, and the architect's Sonar re-read decides.
 - D12. No direct test exists for `librarian_service.merge_tags_heuristics` (callers at `librarian_service.py` lines 78 and 125; try `tests/test_librarian_service.py` and `tests/test_tag_merge_tool.py`) and `get_recent_events` is only thinly tested by name: write characterization tests through their public entry points first. `score_pairs` is the implementation behind two `@overload` stubs: body only.
 
+- D13. No new findings (owner rule, 2026-10-17; amendment before assignment). The refactor must not introduce a new Sonar finding: every extracted helper takes only the parameters it reads, and no parameter is left unused in an edited or new function (rule `python:S1172`; the CX-UTILS-DB split left two). Check with `.venv/bin/ruff check --select ARG src/saltmdb/domain/services` on the edited files, comparing against the baseline so only new hits count, and list the result in the report. Do not add suppressions to silence it. The goal is better code, not a quiet gate: if the right fix is outside scope, report it.
+
 ## 3. Changes per file
 
 Line numbers and scores come from the Sonar analysis of commit `5a4e7ac` and may have drifted by a few lines; match by function name.
