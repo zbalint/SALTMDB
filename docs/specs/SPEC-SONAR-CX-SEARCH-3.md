@@ -26,6 +26,9 @@ Second half of the `search_memory` split: fusion and reranking, supersession col
 - D6. Target after this spec: `search_memory` itself at most 12 on the proxy (Sonar limit 15), or, if that cannot be reached safely, at most 15 with the report showing why. If a safe extraction cannot reach it, stop and report; do not force it.
 - D7. Measure with the complexipy proxy pinned at 8.0.1 in a scratch venv outside the repo (see `docs/specs/SPEC-SONAR-CX-HOOKS.md` section 6 for the exact commands). Every new helper at most 12.
 
+- D13. No new findings (owner rule, 2026-10-17; amendment before assignment). The refactor must not introduce a new Sonar finding. Every extracted helper takes only the parameters it reads, and no parameter or local is left unused in an edited or new function (rules `python:S1172` and `python:S1481`; the earlier splits left both kinds). Check with `.venv/bin/ruff check --select ARG` on the edited files against a baseline taken before your first edit (only new hits count), and look for unused names bound by tuple-unpacking assignments, which ruff does not report (a small `ast` script is enough; loop targets are not flagged by Sonar). List both results in the report. Do not add suppressions, and remove a `# noqa` marker the refactor makes unnecessary. The goal is better code, not a quiet gate: if the right fix is outside scope, report it.
+- D14. Pin what the extracted helpers now own. For every comparison operator at a boundary, every cap or limit, every sort or tie-break key, every early return and every access or governance gate in the functions of section 3, a repo test must fail when that one thing is flipped. Use exact equality at boundaries (measure float values the way the code does), fixed ids for tie-breaks (never uuid4 order), and assert full result sets and order, not counts or membership alone. After the extraction, run a mutation pass of your own on the new helpers with repo tests only, on a scratch copy of the current tree (never in the assigned checkout; check `saltmdb.__file__` resolves from the copy); a mutant counts as killed only when a named repo test fails; report survivors honestly. Each new test must also pass on the pre-refactor source (scratch copy of HEAD), except a test of a helper that only exists after the extraction, which skips there.
+
 ## 3. Changes per file
 
 | File | Function | Sonar score at 5a4e7ac |
@@ -54,7 +57,7 @@ Everything outside `search_memory`'s body in `orchestrator.py`; S107.
 2. The proxy reports every new helper at most 12 and `search_memory` at the score stated in D6.
 3. `git diff -U0 src/saltmdb/domain/services/memory_service/orchestrator.py` shows no changed line between `def search_memory(` and the end of its docstring.
 4. `git diff --stat` lists only `orchestrator.py` and, at most, test files.
-5. Mutation sample: at least three behaviors in the extracted code broken one at a time, each making a test fail, then restored.
+5. Mutation sample: at least three behaviors in the extracted code broken one at a time, each making a named repo test fail, on a scratch copy of the current working tree (never in the assigned checkout).
 6. Architect, after review and commit: `scripts/prepush-sonar.sh` and a Sonar re-read.
 
 ## 9. Pre-lock gate notes

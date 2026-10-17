@@ -24,6 +24,9 @@ LOCKED 2026-10-16
 - D4. Tests use temporary SQLite databases and the existing fixtures; stubs for embedding/reranker follow the existing tests (they patch `search_primitives.<name>` and `reranker_service` module names, so patch the same way). Expected values are literals, never recomputed with the code under test.
 - D5. Branches that cannot be reached through the public arguments are listed in the report with the line range; do not alter production code to reach them.
 
+- D13. No new findings (owner rule, 2026-10-17; amendment before assignment). The refactor must not introduce a new Sonar finding. Every extracted helper takes only the parameters it reads, and no parameter or local is left unused in an edited or new function (rules `python:S1172` and `python:S1481`; the earlier splits left both kinds). Check with `.venv/bin/ruff check --select ARG` on the edited files against a baseline taken before your first edit (only new hits count), and look for unused names bound by tuple-unpacking assignments, which ruff does not report (a small `ast` script is enough; loop targets are not flagged by Sonar). List both results in the report. Do not add suppressions, and remove a `# noqa` marker the refactor makes unnecessary. The goal is better code, not a quiet gate: if the right fix is outside scope, report it.
+- D14. Pin what the extracted helpers now own. For every comparison operator at a boundary, every cap or limit, every sort or tie-break key, every early return and every access or governance gate in the functions of section 3, a repo test must fail when that one thing is flipped. Use exact equality at boundaries (measure float values the way the code does), fixed ids for tie-breaks (never uuid4 order), and assert full result sets and order, not counts or membership alone. After the extraction, run a mutation pass of your own on the new helpers with repo tests only, on a scratch copy of the current tree (never in the assigned checkout; check `saltmdb.__file__` resolves from the copy); a mutant counts as killed only when a named repo test fails; report survivors honestly. Each new test must also pass on the pre-refactor source (scratch copy of HEAD), except a test of a helper that only exists after the extraction, which skips there.
+
 ## 3. Changes per file
 
 | File | Change |
@@ -51,7 +54,7 @@ Any production change, any refactor, any other function.
 1. `./verify` exits 0.
 2. `git diff --stat` lists only test files (the new file and, at most, one existing neighbouring test file).
 3. The report states coverage of `search_memory` lines before and after, and lists the remaining uncovered line ranges with reasons (D5).
-4. Mutation check, at least eight distinct mutations spread over the function (for example flip a `mode` comparison, drop the supersession collapse, change a filter, change the abstain threshold, alter the cursor offset, change a diagnostics key): break each in a scratch copy or the assigned checkout, show a new test fails, restore it; the tree must match your own diff afterward.
+4. Mutation check, at least eight distinct mutations spread over the function (for example flip a `mode` comparison, drop the supersession collapse, change a filter, change the abstain threshold, alter the cursor offset, change a diagnostics key): break each in a scratch copy of the current working tree (never in the assigned checkout), show a named repo test fails, delete the copy; the assigned checkout must still match your own diff afterward (hash it before and after).
 5. Architect: tester pass; no Sonar re-read (no production change).
 
 ## 9. Pre-lock gate notes
