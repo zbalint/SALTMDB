@@ -900,18 +900,7 @@ def _log_windows_job_diagnostics() -> None:
         logger.warning("Windows job-object diagnostic logging failed (non-fatal)", exc_info=True)
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
-    parser = argparse.ArgumentParser(prog="saltmdb-daemon")
-    parser.add_argument(
-        "--foreground",
-        action="store_true",
-        help="Explicit foreground launch (ops/debugging) -- disables the grace-period "
-        "auto-shutdown timer; runs until SIGINT/SIGTERM regardless of session count.",
-    )
-    args = parser.parse_args()
-
-    db_path = discovery.resolve_canonical_db_path()
-
+def _prepare_startup(args: argparse.Namespace, db_path: str) -> float:
     if not args.foreground:
         _daemon_log_redirect(db_path)
     _configure_stdio_logging()
@@ -933,31 +922,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         args.foreground,
         startup_lag_s,
     )
-    t0 = time.monotonic()
+    return time.monotonic()
 
-    for _blas_var in (
-        "OPENBLAS_NUM_THREADS",
-        "OMP_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-    ):
-        os.environ.setdefault(_blas_var, "1")
 
-    # Step 1-2: cross-OS mount refusal check, first -- cheapest, most safety-critical.
-    classification = platform_paths.classify_db_path(db_path)
-    if classification != "local":
-        logger.error(
-            "Refusing to start: database path %s classified as %r (cross-OS shared-DB mount or "
-            "undetermined) -- see reconciliation doc §2.4 for why this is unsupported.",
-            db_path,
-            classification,
-        )
-        sys.exit(1)
-
-    key = discovery.daemon_key(db_path)
-    e_port = discovery.election_port(key)
-    p_port = discovery.probe_port(key)
-
+def _bind_daemon_sockets(
+    db_path: str, key: str, e_port: int, p_port: int
+) -> tuple[socket.socket, socket.socket, float]:
     # Step 3: guard-socket bind (the ownership mutex). Bind-only, never accept()s, for the
     # daemon's entire lifetime -- matches reconciliation §2.1 exactly.
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -985,16 +955,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         probe_sock.close()
         guard.close()
         sys.exit(1)
+    return guard, probe_sock, t_bound
 
-    state = _DaemonState(db_path, key, args.foreground)
 
-    # Start the probe accept-loop thread immediately -- before init_db or anything else -- so the
-    # "initializing" identify state is accurate for the whole remainder of startup.
-    probe_thread = threading.Thread(
-        target=_probe_accept_loop, args=(probe_sock, state), daemon=True
-    )
-    probe_thread.start()
-
+def _start_durable_services(
+    state: _DaemonState,
+    db_path: str,
+    probe_sock: socket.socket,
+    guard: socket.socket,
+) -> tuple[float, float]:
     # Step 4: the bootstrap connection is the only writer before the coordinator.
     conn = init_db(db_path)
     conn.close()
@@ -1038,56 +1007,59 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         probe_sock.close()
         guard.close()
         sys.exit(1)
+    return t_db, t_recovery
 
-    # Step 5: service-port TCP listener, OS-assigned port.
-    service_server = _ThreadingRpcServer(("127.0.0.1", 0), _RpcRequestHandler)
-    service_server.daemon_state = state
-    service_port = service_server.server_address[1]
-    state.service_port = service_port
 
-    # Step 6: Viewer thread, BEFORE discovery-file publication (round-5 fix -- a Viewer bind
-    # failure must never leave a broken daemon already advertised as ready). Librarian's
-    # integration is just its existing trigger_librarian()/run_librarian_now() call sites, already
-    # wired to the single-worker _librarian_trigger_pool -- nothing additional to "start" here.
-    viewer_httpd = None
-    viewer_thread = None
-    if config.is_viewer_enabled():
-        from saltmdb.viewer.routes import SALTMDBHandler
-        from saltmdb.viewer.server import SALTMDBTCPServer
-        from saltmdb.viewer.context import ViewerReadGateway
+def _start_viewer(
+    config,
+    state: _DaemonState,
+    db_path: str,
+    service_server: _ThreadingRpcServer,
+    probe_sock: socket.socket,
+    guard: socket.socket,
+):
+    from saltmdb.viewer.routes import SALTMDBHandler
+    from saltmdb.viewer.server import SALTMDBTCPServer
+    from saltmdb.viewer.context import ViewerReadGateway
 
-        viewer_port = config.get_viewer_port()
-        # Round-4 fix: explicit, since the daemon constructs this directly and bypasses
-        # viewer/server.py:main(), where allow_reuse_address was previously set.
-        SALTMDBTCPServer.allow_reuse_address = True
-        try:
-            viewer_httpd = SALTMDBTCPServer(("127.0.0.1", viewer_port), SALTMDBHandler)
-            viewer_httpd.daemon_state = state
-            viewer_httpd.viewer_gateway = ViewerReadGateway(db_path, state)
-        except OSError as e:
-            logger.error("Viewer bind failed on port %d: %s", viewer_port, e)
-            service_server.server_close()
-            if state.embedding_scheduler is not None:
-                state.embedding_scheduler.stop()
-            if state.coordinator is not None:
-                state.coordinator.shutdown(timeout=config.DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S)
-            probe_sock.close()
-            guard.close()
-            sys.exit(1)
-        viewer_thread = threading.Thread(target=viewer_httpd.serve_forever, daemon=True)
-        viewer_thread.start()
-        state.viewer_port = viewer_port  # daemon-authoritative for the viewer_status RPC (Codex
-        # round-1 finding: saltmdb-viewer must report the daemon's own state, never its own
-        # client-local env, since the two can legitimately differ).
-    startup_shutdown_requested = threading.Event()
+    viewer_port = config.get_viewer_port()
+    # Round-4 fix: explicit, since the daemon constructs this directly and bypasses
+    # viewer/server.py:main(), where allow_reuse_address was previously set.
+    SALTMDBTCPServer.allow_reuse_address = True
+    try:
+        viewer_httpd = SALTMDBTCPServer(("127.0.0.1", viewer_port), SALTMDBHandler)
+        viewer_httpd.daemon_state = state
+        viewer_httpd.viewer_gateway = ViewerReadGateway(db_path, state)
+    except OSError as e:
+        logger.error("Viewer bind failed on port %d: %s", viewer_port, e)
+        service_server.server_close()
+        if state.embedding_scheduler is not None:
+            state.embedding_scheduler.stop()
+        if state.coordinator is not None:
+            state.coordinator.shutdown(timeout=config.DAEMON_SHUTDOWN_DRAIN_TIMEOUT_S)
+        probe_sock.close()
+        guard.close()
+        sys.exit(1)
+    viewer_thread = threading.Thread(target=viewer_httpd.serve_forever, daemon=True)
+    viewer_thread.start()
+    state.viewer_port = viewer_port  # daemon-authoritative for the viewer_status RPC (Codex
+    # round-1 finding: saltmdb-viewer must report the daemon's own state, never its own
+    # client-local env, since the two can legitimately differ).
+    return viewer_httpd
 
-    def _startup_signal_handler(*_args) -> None:
-        startup_shutdown_requested.set()
 
-    if sys.platform != "win32":
-        signal.signal(signal.SIGTERM, _startup_signal_handler)
-    signal.signal(signal.SIGINT, _startup_signal_handler)
-
+def _publish_ready(
+    state: _DaemonState,
+    key: str,
+    db_path: str,
+    service_port: int,
+    e_port: int,
+    p_port: int,
+    t0: float,
+    t_bound: float,
+    t_db: float,
+    t_recovery: float,
+) -> None:
     # Step 7: generate the auth token and publish the discovery file -- the final startup step,
     # so nothing is ever advertised as ready until every other listener has already bound.
     auth_token = secrets.token_urlsafe(32)
@@ -1122,6 +1094,96 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger.debug("Embedding recovery not started: daemon is already draining")
     if sys.platform == "win32":
         _log_windows_job_diagnostics()
+
+
+def _start_service_server(state: _DaemonState) -> tuple[_ThreadingRpcServer, int]:
+    # Step 5: service-port TCP listener, OS-assigned port.
+    service_server = _ThreadingRpcServer(("127.0.0.1", 0), _RpcRequestHandler)
+    service_server.daemon_state = state
+    service_port = service_server.server_address[1]
+    state.service_port = service_port
+    return service_server, service_port
+
+
+def _start_probe_thread(probe_sock: socket.socket, state: _DaemonState) -> None:
+    # Start the probe accept-loop thread immediately -- before init_db or anything else -- so the
+    # "initializing" identify state is accurate for the whole remainder of startup.
+    probe_thread = threading.Thread(
+        target=_probe_accept_loop, args=(probe_sock, state), daemon=True
+    )
+    probe_thread.start()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="saltmdb-daemon")
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Explicit foreground launch (ops/debugging) -- disables the grace-period "
+        "auto-shutdown timer; runs until SIGINT/SIGTERM regardless of session count.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    db_path = discovery.resolve_canonical_db_path()
+
+    t0 = _prepare_startup(args, db_path)
+
+    for _blas_var in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ.setdefault(_blas_var, "1")
+
+    # Step 1-2: cross-OS mount refusal check, first -- cheapest, most safety-critical.
+    classification = platform_paths.classify_db_path(db_path)
+    if classification != "local":
+        logger.error(
+            "Refusing to start: database path %s classified as %r (cross-OS shared-DB mount or "
+            "undetermined) -- see reconciliation doc §2.4 for why this is unsupported.",
+            db_path,
+            classification,
+        )
+        sys.exit(1)
+
+    key = discovery.daemon_key(db_path)
+    e_port = discovery.election_port(key)
+    p_port = discovery.probe_port(key)
+
+    guard, probe_sock, t_bound = _bind_daemon_sockets(db_path, key, e_port, p_port)
+
+    state = _DaemonState(db_path, key, args.foreground)
+
+    _start_probe_thread(probe_sock, state)
+
+    t_db, t_recovery = _start_durable_services(state, db_path, probe_sock, guard)
+
+    service_server, service_port = _start_service_server(state)
+
+    # Step 6: Viewer thread, BEFORE discovery-file publication (round-5 fix -- a Viewer bind
+    # failure must never leave a broken daemon already advertised as ready). Librarian's
+    # integration is just its existing trigger_librarian()/run_librarian_now() call sites, already
+    # wired to the single-worker _librarian_trigger_pool -- nothing additional to "start" here.
+    viewer_httpd = (
+        _start_viewer(config, state, db_path, service_server, probe_sock, guard)
+        if config.is_viewer_enabled()
+        else None
+    )
+    startup_shutdown_requested = threading.Event()
+
+    def _startup_signal_handler(*_args) -> None:
+        startup_shutdown_requested.set()
+
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, _startup_signal_handler)
+    signal.signal(signal.SIGINT, _startup_signal_handler)
+
+    _publish_ready(state, key, db_path, service_port, e_port, p_port, t0, t_bound, t_db, t_recovery)
 
     # Codex round-1 finding (confirmed against Python's own documented constraint: "[shutdown]
     # must be called while serve_forever() is running in a different thread, or it will
