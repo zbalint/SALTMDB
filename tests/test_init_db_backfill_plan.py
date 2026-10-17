@@ -306,19 +306,25 @@ def test_track_a_legacy_event_sweep_is_gated_and_idempotent(tmp_path: Path):
     connection = init_db(str(db_path))
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert connection.execute(
-            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
-            "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+                "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         connection.close()
 
     connection = init_db(str(db_path))
     try:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
-            "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+                "AND json_extract(content, '$.target_event_id') = 'legacy-event'"
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         connection.close()
 
@@ -336,12 +342,16 @@ def test_track_a_sweep_does_not_run_for_version_one(tmp_path: Path):
 
     connection = init_db(str(db_path))
     try:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
-            "AND json_extract(content, '$.target_event_id') = 'legacy-v1'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+                "AND json_extract(content, '$.target_event_id') = 'legacy-v1'"
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         connection.close()
+
 
 def test_track_a_failure_leaves_version_for_retry(tmp_path: Path):
     db_path = tmp_path / "track-a-retry.db"
@@ -361,9 +371,84 @@ def test_track_a_failure_leaves_version_for_retry(tmp_path: Path):
     connection = init_db(str(db_path))
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
+                "AND json_extract(content, '$.target_event_id') = 'legacy-retry'"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        connection.close()
+
+
+def test_legacy_columns_restore_default_and_drop_domain(tmp_path: Path):
+    db_path = tmp_path / "legacy-columns.db"
+    connection = init_db(str(db_path))
+    connection.execute("DROP INDEX IF EXISTS idx_entities_embedding")
+    connection.execute("DROP TRIGGER IF EXISTS archive_memory_embedding_status")
+    connection.execute("DROP INDEX IF EXISTS idx_entities_archived_embedding_pending")
+    connection.execute("ALTER TABLE entities DROP COLUMN embedding_status")
+    connection.execute("ALTER TABLE entities ADD COLUMN domain TEXT")
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        columns = {
+            row[1]: row[4] for row in connection.execute("PRAGMA table_info(entities)").fetchall()
+        }
+        assert columns["embedding_status"] == "'pending'"
+        assert "domain" not in columns
+    finally:
+        connection.close()
+
+
+def test_archived_entity_backfill_sets_archived_embedding_status(tmp_path: Path):
+    db_path = tmp_path / "archived-backfill.db"
+    connection = init_db(str(db_path))
+    connection.execute(
+        "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, status, title, full_content, embedding_status) "
+        "VALUES ('archived-only', '2026-01-01', '2026-01-01', '2026-01-01', 'archived', 'Archived', 'body', 'pending')"
+    )
+    connection.commit()
+    connection.close()
+
+    connection = init_db(str(db_path))
+    try:
+        assert (
+            connection.execute(
+                "SELECT embedding_status FROM entities WHERE id = 'archived-only'"
+            ).fetchone()[0]
+            == "archived"
+        )
+    finally:
+        connection.close()
+
+
+def test_performance_index_error_is_tolerated_during_init(tmp_path: Path):
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql.startswith("CREATE INDEX") and "idx_entities_status_updated" in sql:
+                raise sqlite3.OperationalError("forced index failure")
+            return super().execute(sql, parameters)
+
+    db_path = tmp_path / "performance-error.db"
+    with patch.object(
+        schema,
+        "get_connection",
+        side_effect=lambda path: sqlite3.connect(path, factory=FailingConnection),
+    ):
+        connection = init_db(str(db_path))
+    try:
         assert connection.execute(
-            "SELECT COUNT(*) FROM events WHERE type = 'event_dismissed' "
-            "AND json_extract(content, '$.target_event_id') = 'legacy-retry'"
-        ).fetchone()[0] == 1
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_relations_unique_edge'"
+        ).fetchone()
+        assert (
+            connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'idx_entities_status_updated'"
+            ).fetchone()
+            is None
+        )
     finally:
         connection.close()
