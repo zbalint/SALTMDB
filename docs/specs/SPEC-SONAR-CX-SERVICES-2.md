@@ -83,9 +83,13 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 2. The proxy command in section 6 reports no function above 12 in the files in scope, except items listed under D6 in the report.
 3. `git diff --stat` lists only files from section 0 scope.
 4. The report lists, per function: before and after proxy score, the characterization tests added (or why none), and anything left under D6.
-5. Mutation check for the new tests: for a sample of at least one behavior per refactored function, break it in the production file in the assigned checkout, show a new or existing test fails, restore it; the tree must match your own diff afterward.
+5. Mutation check for the new tests: for a sample of at least one behavior per refactored function, break it in the production file of a scratch copy of the current working tree (never in the assigned checkout; Amendment 1), show a named repo test fails, delete the copy; the assigned checkout must still match your own diff afterward (hash it before and after).
 6. Architect, after review and commit: `scripts/prepush-sonar.sh` and a Sonar re-read show the S3776 keys for these functions gone.
 
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling, patch targets, extraction needs); see the assignment event.
+
+## Amendment 1 (2026-10-17)
+
+Resolves a developer BLOCKED (acceptance 8.5 said to break production code "in the assigned checkout", while the assignment and D14 call for mutants on a copy of the current tree). Decision: mutation checks run on a scratch copy of the current working tree, with `PYTHONPATH` pointing at the copy and `saltmdb.__file__` checked, never in the assigned checkout. Section 8.5 is reworded to match; D14 is unchanged. Deliberate faults in the shared checkout are riskier (a crash leaves a broken tree for the other agents), and SERVICES-1 showed that a scratch copy works.
