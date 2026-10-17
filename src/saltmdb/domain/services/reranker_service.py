@@ -177,7 +177,7 @@ def score_pairs(
 def score_pairs(*args: Any, **kwargs: Any) -> list[float] | None: ...
 
 
-def score_pairs(  # noqa: PLR0911
+def score_pairs(
     query: str,
     candidates: list[str],
     *,
@@ -207,11 +207,9 @@ def score_pairs(  # noqa: PLR0911
     score all of them).
     """
     from saltmdb.config import (
-        CROSS_ENCODER_CANDIDATE_CAP_OPTIONS,
         CROSS_ENCODER_MAX_CANDIDATES,
         CROSS_ENCODER_MAX_CHARS,
         CROSS_ENCODER_MAX_QUERY_CHARS,
-        CROSS_ENCODER_TEXT_CAP_OPTIONS,
     )
 
     cap = CROSS_ENCODER_MAX_CANDIDATES if candidate_cap is None else candidate_cap
@@ -227,27 +225,10 @@ def score_pairs(  # noqa: PLR0911
             "reason": None,
         }
     )
-    if (
-        isinstance(cap, bool)
-        or not isinstance(cap, int)
-        or cap not in CROSS_ENCODER_CANDIDATE_CAP_OPTIONS
-    ):
-        _score_diagnostics.value["reason"] = "invalid_candidate_cap"
+    reason = _validate_score_request(candidates, cap, text_cap, model_name)
+    if reason is not None:
+        _score_diagnostics.value["reason"] = reason
         return None
-    if (
-        isinstance(text_cap, bool)
-        or not isinstance(text_cap, int)
-        or text_cap not in CROSS_ENCODER_TEXT_CAP_OPTIONS
-    ):
-        _score_diagnostics.value["reason"] = "invalid_text_cap_chars"
-        return None
-    if not candidates:
-        _score_diagnostics.value["reason"] = "empty_candidates"
-        return None
-    if model_name is None and not is_cross_encoder_enabled():
-        _score_diagnostics.value["reason"] = "disabled_or_unsupported_model"
-        return None
-
     effective_model_name = model_name
     if effective_model_name is None:
         effective_model_name = get_reranker_model_name()
@@ -273,9 +254,7 @@ def score_pairs(  # noqa: PLR0911
     # finiteness before trusting the output at all. `bool` is explicitly excluded even though
     # Python's `isinstance(True, int)` is True -- a boolean is never a legitimate cross-encoder
     # logit, and letting it silently pass as 0.0/1.0 would violate the `list[float]` contract.
-    if len(scores) != len(capped) or not all(
-        isinstance(s, (int, float)) and not isinstance(s, bool) and math.isfinite(s) for s in scores
-    ):
+    if not _validate_score_output(scores, len(capped)):
         logger.warning(
             "Cross-encoder reranking returned malformed output (model=%s, expected %d scores, "
             "got %r); falling back.",
@@ -295,6 +274,36 @@ def score_pairs(  # noqa: PLR0911
         }
     )
     return scores
+
+
+def _validate_score_request(
+    candidates: list[str], cap: int, text_cap: int, model_name: str | None
+) -> str | None:
+    from saltmdb.config import CROSS_ENCODER_CANDIDATE_CAP_OPTIONS, CROSS_ENCODER_TEXT_CAP_OPTIONS
+
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, int)
+        or cap not in CROSS_ENCODER_CANDIDATE_CAP_OPTIONS
+    ):
+        return "invalid_candidate_cap"
+    if (
+        isinstance(text_cap, bool)
+        or not isinstance(text_cap, int)
+        or text_cap not in CROSS_ENCODER_TEXT_CAP_OPTIONS
+    ):
+        return "invalid_text_cap_chars"
+    if not candidates:
+        return "empty_candidates"
+    if model_name is None and not is_cross_encoder_enabled():
+        return "disabled_or_unsupported_model"
+    return None
+
+
+def _validate_score_output(scores: list[Any], expected: int) -> bool:
+    return len(scores) == expected and all(
+        isinstance(s, (int, float)) and not isinstance(s, bool) and math.isfinite(s) for s in scores
+    )
 
 
 def score_pairs_preflight(

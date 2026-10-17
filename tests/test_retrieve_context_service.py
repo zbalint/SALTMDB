@@ -153,6 +153,22 @@ class TestRetrieveContextService(unittest.TestCase):
             self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
             self.assertEqual(result["errors"][0]["field"], "entity_ids")
 
+    def test_global_strategy_requires_string_query(self):
+        for query in (None, 42):
+            result = assemble_retrieve_context(
+                entity_ids=None,
+                query=cast(str | None, query),
+                strategy="global",
+                db_connection=self.conn,
+            )
+            self.assertEqual(result["status"], "rejected")
+            self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+            self.assertEqual(
+                result["errors"][0]["message"],
+                'query is required for strategy="global"',
+            )
+            self.assertEqual(result["errors"][0]["field"], "query")
+
     def test_unknown_entity_id_rejects_whole_anchor_set(self):
         primary = self._memory("Resolvable anchor")
         for entity_ids in ([str(uuid.uuid4())], [primary, str(uuid.uuid4())]):

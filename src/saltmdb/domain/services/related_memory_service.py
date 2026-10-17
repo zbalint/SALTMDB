@@ -157,7 +157,76 @@ def _fetch_pool(
     ]
 
 
-def find_related_memories(  # noqa: C901
+def _finalize_related(
+    merged: dict[str, dict[str, Any]], with_all: bool, minimum: float, limit: int
+) -> list[dict[str, Any]]:
+    ordered = sorted(merged.values(), key=lambda item: (-item["score"], item["id"]))
+    if with_all:
+        return ordered
+    return [item for item in ordered if item["score"] >= minimum][:limit]
+
+
+def _score_segment(
+    conn: sqlite3.Connection,
+    segment: str,
+    segment_index: int,
+    clean_excludes: list[str],
+    agent_id: str | None,
+    db_path: str,
+) -> dict[str, dict[str, Any]]:
+    where_clauses, params = _where_clauses(clean_excludes, agent_id)
+    fts_rows = _fts_candidates(conn, segment, where_clauses, params)
+    semantic_rows = _semantic_candidates(
+        segment, where_clauses, params, db_path, len(clean_excludes)
+    )
+    candidate_ids: list[str] = []
+    metadata: dict[str, dict[str, Any]] = {}
+    for entity_id, fts_rank, _ in fts_rows:
+        if entity_id in metadata:
+            continue
+        candidate_ids.append(entity_id)
+        metadata[entity_id] = {"fts_rank": fts_rank, "semantic_distance": None}
+    for entity_id, distance in semantic_rows:
+        if entity_id in metadata:
+            metadata[entity_id]["semantic_distance"] = float(distance)
+            continue
+        if len(candidate_ids) >= RELATED_MEMORIES_POOL_PER_SEGMENT:
+            break
+        candidate_ids.append(entity_id)
+        metadata[entity_id] = {"fts_rank": None, "semantic_distance": float(distance)}
+    pool = _fetch_pool(conn, candidate_ids, metadata)
+    if not pool:
+        return {}
+    scores = reranker_service.score_pairs(
+        segment,
+        [f"{title} {content}" for _, title, content, _ in pool],
+        model_name=DEDUP_CROSS_ENCODER_MODEL,
+        candidate_cap=RELATED_MEMORIES_POOL_PER_SEGMENT,
+    )
+    if scores is None:
+        return {}
+    return {
+        entity_id: {
+            "id": entity_id,
+            "title": title,
+            "score": float(score),
+            "segment": segment_index,
+            **candidate_metadata,
+        }
+        for (entity_id, title, _content, candidate_metadata), score in zip(pool, scores)
+    }
+
+
+def _merge_segment_scores(
+    merged: dict[str, dict[str, Any]], candidates: dict[str, dict[str, Any]]
+) -> None:
+    for entity_id, candidate in candidates.items():
+        current = merged.get(entity_id)
+        if current is None or candidate["score"] > current["score"]:
+            merged[entity_id] = candidate
+
+
+def find_related_memories(
     conn: sqlite3.Connection,
     db_path: str,
     text: str,
@@ -178,54 +247,9 @@ def find_related_memories(  # noqa: C901
 
     merged: dict[str, dict[str, Any]] = {}
     for segment_index, segment in enumerate(segments):
-        where_clauses, params = _where_clauses(clean_excludes, agent_id)
-        fts_rows = _fts_candidates(conn, segment, where_clauses, params)
-        semantic_rows = _semantic_candidates(
-            segment, where_clauses, params, db_path, len(clean_excludes)
+        _merge_segment_scores(
+            merged,
+            _score_segment(conn, segment, segment_index, clean_excludes, agent_id, db_path),
         )
-        candidate_ids: list[str] = []
-        metadata: dict[str, dict[str, Any]] = {}
-        for entity_id, fts_rank, _ in fts_rows:
-            if entity_id in metadata:
-                continue
-            candidate_ids.append(entity_id)
-            metadata[entity_id] = {
-                "fts_rank": fts_rank,
-                "semantic_distance": None,
-            }
-        for entity_id, distance in semantic_rows:
-            if entity_id in metadata:
-                metadata[entity_id]["semantic_distance"] = float(distance)
-                continue
-            if len(candidate_ids) >= RELATED_MEMORIES_POOL_PER_SEGMENT:
-                break
-            candidate_ids.append(entity_id)
-            metadata[entity_id] = {"fts_rank": None, "semantic_distance": float(distance)}
-        pool = _fetch_pool(conn, candidate_ids, metadata)
-        if not pool:
-            continue
-        candidate_texts = [f"{title} {content}" for _, title, content, _ in pool]
-        scores = reranker_service.score_pairs(
-            segment,
-            candidate_texts,
-            model_name=DEDUP_CROSS_ENCODER_MODEL,
-            candidate_cap=RELATED_MEMORIES_POOL_PER_SEGMENT,
-        )
-        if scores is None:
-            continue
-        for (entity_id, title, _content, candidate_metadata), score in zip(pool, scores):
-            current = merged.get(entity_id)
-            if current is None or score > current["score"]:
-                merged[entity_id] = {
-                    "id": entity_id,
-                    "title": title,
-                    "score": float(score),
-                    "segment": segment_index,
-                    **candidate_metadata,
-                }
 
-    ordered = sorted(merged.values(), key=lambda item: (-item["score"], item["id"]))
-    if with_all:
-        return ordered
-    filtered = [item for item in ordered if item["score"] >= effective_min_score]
-    return filtered[:effective_limit]
+    return _finalize_related(merged, with_all, effective_min_score, effective_limit)

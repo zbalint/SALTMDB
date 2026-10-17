@@ -89,6 +89,46 @@ def log_event(
             close_connection(conn)
 
 
+def _event_query_parts(
+    context_id: str | None,
+    agent_id: str | None,
+    type_filter: str | None,
+    agent_session_id: str | None,
+    event_id: str | None,
+) -> tuple[list[str], list]:
+    where_clauses = []
+    params: list = []
+    for value, clause in (
+        (context_id, "context_id = ?"),
+        (agent_id, "agent_id = ?"),
+        (type_filter, "type = ?"),
+        (agent_session_id, "agent_session_id = ?"),
+        (event_id, "id = ?"),
+    ):
+        if value:
+            where_clauses.append(clause)
+            params.append(value)
+    return where_clauses, params
+
+
+def _event_display(row, *, full_content: bool, event_id: str | None) -> dict:
+    eid, etime, eagent, etype, econtent, ecode, esess, ectx = row
+    skip_truncation = full_content or bool(event_id)
+    display_content = (
+        econtent if skip_truncation or len(econtent) <= 1000 else econtent[:1000] + " [TRUNCATED]"
+    )
+    return {
+        "id": eid,
+        "timestamp": etime,
+        "agent_id": eagent,
+        "type": etype,
+        "content": display_content,
+        "error_code": ecode,
+        "agent_session_id": esess,
+        "context_id": ectx,
+    }
+
+
 def get_recent_events(
     context_id: str = None,
     agent_id: str = None,
@@ -128,24 +168,9 @@ def get_recent_events(
         should_close = True
 
     try:
-        where_clauses = []
-        params: list = []
-        if context_id:
-            where_clauses.append("context_id = ?")
-            params.append(context_id)
-        if agent_id:
-            where_clauses.append("agent_id = ?")
-            params.append(agent_id)
-        if type_filter:
-            where_clauses.append("type = ?")
-            params.append(type_filter)
-        if agent_session_id:
-            where_clauses.append("agent_session_id = ?")
-            params.append(agent_session_id)
-        if event_id:
-            where_clauses.append("id = ?")
-            params.append(event_id)
-
+        where_clauses, params = _event_query_parts(
+            context_id, agent_id, type_filter, agent_session_id, event_id
+        )
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         direction = "ASC" if order == "oldest_first" else "DESC"
 
@@ -160,28 +185,10 @@ def get_recent_events(
             params + [limit, offset],
         )
 
-        results = []
-        for r in cursor.fetchall():
-            eid, etime, eagent, etype, econtent, ecode, esess, ectx = r
-            skip_truncation = full_content or bool(event_id)
-            display_content = (
-                econtent
-                if skip_truncation or len(econtent) <= 1000
-                else econtent[:1000] + " [TRUNCATED]"
-            )
-            results.append(
-                {
-                    "id": eid,
-                    "timestamp": etime,
-                    "agent_id": eagent,
-                    "type": etype,
-                    "content": display_content,
-                    "error_code": ecode,
-                    "agent_session_id": esess,
-                    "context_id": ectx,
-                }
-            )
-        return results
+        return [
+            _event_display(row, full_content=full_content, event_id=event_id)
+            for row in cursor.fetchall()
+        ]
     except Exception as e:
         logger.error("Error fetching recent events: %s", e)
         return [{"error": str(e)}]
@@ -190,7 +197,62 @@ def get_recent_events(
             close_connection(conn)
 
 
-def dismiss_events(  # noqa: C901
+def _validate_dismissible_events(c, event_ids: list[str]) -> dict[str, str]:
+    # 1. Fetch existing events
+    ph = ",".join("?" for _ in event_ids)
+    cursor = c.execute(f"SELECT id, type FROM events WHERE id IN ({ph})", event_ids)
+    found = {row[0]: row[1] for row in cursor.fetchall()}
+    missing = [eid for eid in event_ids if eid not in found]
+    if missing:
+        raise ValueError(f"Events not found: {missing}")
+    # Dismissible: any `consolidation_request` (covers the vector_cluster/
+    # supersession_candidate/tag/general `content.target` flavors) and the
+    # top-level `supersession_candidate` EVENT TYPE (the live signal fired by
+    # store_memory's dedup path) -- per the approved feature contract.
+    invalid_types = [
+        eid
+        for eid, etype in found.items()
+        if etype not in ("consolidation_request", "supersession_candidate")
+    ]
+    if invalid_types:
+        raise ValueError(f"Events are not dismissible types: {invalid_types}")
+    return found
+
+
+def _dismiss_events_write(c, event_ids: list[str], reason: str, agent_id: str) -> None:
+    found = _validate_dismissible_events(c, event_ids)
+    ph = ",".join("?" for _ in event_ids)
+    # 2. Check which are already dismissed
+    dismiss_cursor = c.execute(
+        f"SELECT json_extract(content, '$.target_event_id') FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id') IN ({ph})",
+        event_ids,
+    )
+    already_dismissed = {row[0] for row in dismiss_cursor.fetchall() if row[0]}
+    to_dismiss = [eid for eid in event_ids if eid not in already_dismissed]
+    if not to_dismiss:
+        return
+    # 3. Insert dismissals
+    now = datetime.now(UTC).isoformat()
+    for eid in to_dismiss:
+        dismissal_id = str(uuid.uuid4())
+        content_json = json.dumps(
+            {
+                "target_event_id": eid,
+                "reason": reason,
+                "target_type": found[eid],
+                "dismissed_by": agent_id,
+            }
+        )
+        c.execute(
+            """
+            INSERT INTO events (id, timestamp, agent_id, type, content)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (dismissal_id, now, agent_id, "event_dismissed", content_json),
+        )
+
+
+def dismiss_events(
     event_ids: str | list[str],
     reason: str,
     agent_id: str = "system",
@@ -230,65 +292,12 @@ def dismiss_events(  # noqa: C901
         should_close = True
 
     try:
-
-        def _write(c):
-            # 1. Fetch existing events
-            ph = ",".join("?" for _ in event_ids)
-            cursor = c.execute(f"SELECT id, type FROM events WHERE id IN ({ph})", event_ids)
-            found = {row[0]: row[1] for row in cursor.fetchall()}
-
-            missing = [eid for eid in event_ids if eid not in found]
-            if missing:
-                raise ValueError(f"Events not found: {missing}")
-
-            # Dismissible: any `consolidation_request` (covers the vector_cluster/
-            # supersession_candidate/tag/general `content.target` flavors) and the
-            # top-level `supersession_candidate` EVENT TYPE (the live signal fired by
-            # store_memory's dedup path) -- per the approved feature contract.
-            invalid_types = [
-                eid
-                for eid, etype in found.items()
-                if etype not in ("consolidation_request", "supersession_candidate")
-            ]
-            if invalid_types:
-                raise ValueError(f"Events are not dismissible types: {invalid_types}")
-
-            # 2. Check which are already dismissed
-            dismiss_cursor = c.execute(
-                f"SELECT json_extract(content, '$.target_event_id') FROM events WHERE type='event_dismissed' AND json_extract(content, '$.target_event_id') IN ({ph})",
-                event_ids,
-            )
-            already_dismissed = {row[0] for row in dismiss_cursor.fetchall() if row[0]}
-
-            to_dismiss = [eid for eid in event_ids if eid not in already_dismissed]
-            if not to_dismiss:
-                return
-
-            # 3. Insert dismissals
-            now = datetime.now(UTC).isoformat()
-            for eid in to_dismiss:
-                dismissal_id = str(uuid.uuid4())
-                content_json = json.dumps(
-                    {
-                        "target_event_id": eid,
-                        "reason": reason,
-                        "target_type": found[eid],
-                        "dismissed_by": agent_id,
-                    }
-                )
-
-                c.execute(
-                    """
-                    INSERT INTO events (id, timestamp, agent_id, type, content)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (dismissal_id, now, agent_id, "event_dismissed", content_json),
-                )
-
         if _in_transaction:
-            _write(conn)
+            _dismiss_events_write(conn, event_ids, reason, agent_id)
         else:
-            write_transaction_retrying(conn, _write)
+            write_transaction_retrying(
+                conn, lambda c: _dismiss_events_write(c, event_ids, reason, agent_id)
+            )
         return "Events dismissed successfully"
     finally:
         if should_close:

@@ -152,6 +152,83 @@ def _component_lifecycle_resolved(
     return len(non_archived) == 1
 
 
+def _build_unresolved_component(
+    component: dict[str, Any],
+    primary_hit_ids: set[str],
+    primary_hit_score: dict[str, float],
+    expansion_candidate_ids: set[str],
+    entity_info: dict[str, dict[str, str | None]],
+) -> dict[str, Any] | None:
+    if component["resolved"]:
+        return None
+    member_ids: set[str] = component["member_ids"]
+    members = []
+    for entity_id in sorted(member_ids):
+        if entity_id in primary_hit_ids:
+            inclusion, title, status = "primary", None, None
+        elif entity_id in expansion_candidate_ids:
+            inclusion, title, status = "expansion", None, None
+        else:
+            inclusion = "conflict_only"
+            title = entity_info[entity_id]["title"]
+            status = entity_info[entity_id]["status"]
+        members.append({"id": entity_id, "inclusion": inclusion, "title": title, "status": status})
+    conflict_only_count = sum(
+        entity_id not in primary_hit_ids and entity_id not in expansion_candidate_ids
+        for entity_id in member_ids
+    )
+    tiebreak_score = max(
+        primary_hit_score[entity_id] for entity_id in member_ids if entity_id in primary_hit_ids
+    )
+    return {
+        "members": members,
+        "edges": component["edges"],
+        "conflict_only_count": conflict_only_count,
+        "tiebreak_score": tiebreak_score,
+        "member_sort_key": tuple(sorted(member_ids)),
+    }
+
+
+def _admit_conflict_components(
+    unresolved_components: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    admitted = []
+    admitted_count = 0
+    dropped_count = 0
+    for index, component in enumerate(unresolved_components):
+        component_count = component["conflict_only_count"]
+        if admitted_count + component_count > CONTEXT_EXPANSION_CONTRADICTS_CAP:
+            dropped_count = len(unresolved_components) - index
+            break
+        admitted.append(component)
+        admitted_count += component_count
+    return admitted, dropped_count
+
+
+def _open_conflict_connection(
+    db_connection: sqlite3.Connection | None, db_path: str | None
+) -> tuple[sqlite3.Connection, bool]:
+    if db_connection:
+        return db_connection, False
+    return get_connection(db_path or get_db_path()), True
+
+
+def _load_entity_info(
+    conn: sqlite3.Connection, member_ids: set[str]
+) -> dict[str, dict[str, str | None]]:
+    if not member_ids:
+        return {}
+    placeholders = ",".join("?" for _ in member_ids)
+    rows = conn.execute(
+        f"SELECT id, title, status FROM entities WHERE id IN ({placeholders})",
+        tuple(member_ids),
+    ).fetchall()
+    entity_info = {row[0]: {"title": row[1], "status": row[2]} for row in rows}
+    for entity_id in member_ids:
+        entity_info.setdefault(entity_id, {"title": "Unknown", "status": "unknown"})
+    return entity_info
+
+
 def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
     expansion_result: dict[str, Any],
     primary_hits: list[dict[str, Any]],
@@ -173,11 +250,7 @@ def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
             },
         }
 
-    should_close = False
-    conn = db_connection
-    if not conn:
-        conn = get_connection(db_path or get_db_path())
-        should_close = True
+    conn, should_close = _open_conflict_connection(db_connection, db_path)
 
     try:
         pit = point_in_time or datetime.now(UTC).isoformat()
@@ -191,94 +264,34 @@ def assemble_conflict_sets(  # noqa: C901, PLR0912, PLR0915
             contradicts_edges, point_in_time=pit, db_connection=conn
         )
         member_ids = set().union(*(c["member_ids"] for c in components)) if components else set()
-        entity_info: dict[str, dict[str, str | None]] = {}
-        if member_ids:
-            placeholders = ",".join("?" for _ in member_ids)
-            rows = conn.execute(
-                f"SELECT id, title, status FROM entities WHERE id IN ({placeholders})",
-                tuple(member_ids),
-            ).fetchall()
-            entity_info = {row[0]: {"title": row[1], "status": row[2]} for row in rows}
-            for entity_id in member_ids:
-                entity_info.setdefault(
-                    entity_id,
-                    {"title": "Unknown", "status": "unknown"},
+        entity_info = _load_entity_info(conn, member_ids)
+
+        unresolved_components = [
+            built
+            for component in components
+            if (
+                built := _build_unresolved_component(
+                    component,
+                    primary_hit_ids,
+                    primary_hit_score,
+                    expansion_candidate_ids,
+                    entity_info,
                 )
-
-        unresolved_components: list[dict[str, Any]] = []
-        for component in components:
-            if component["resolved"]:
-                continue
-            component_member_ids: set[str] = component["member_ids"]
-
-            members: list[dict[str, Any]] = []
-            for entity_id in sorted(component_member_ids):
-                if entity_id in primary_hit_ids:
-                    inclusion = "primary"
-                    title = None
-                    status = None
-                elif entity_id in expansion_candidate_ids:
-                    inclusion = "expansion"
-                    title = None
-                    status = None
-                else:
-                    inclusion = "conflict_only"
-                    title = entity_info[entity_id]["title"]
-                    status = entity_info[entity_id]["status"]
-                members.append(
-                    {
-                        "id": entity_id,
-                        "inclusion": inclusion,
-                        "title": title,
-                        "status": status,
-                    }
-                )
-
-            conflict_only_count = sum(
-                entity_id not in primary_hit_ids and entity_id not in expansion_candidate_ids
-                for entity_id in component_member_ids
             )
-            tiebreak_score = max(
-                primary_hit_score[entity_id]
-                for entity_id in component_member_ids
-                if entity_id in primary_hit_ids
-            )
-            unresolved_components.append(
-                {
-                    "members": members,
-                    "edges": component["edges"],
-                    "conflict_only_count": conflict_only_count,
-                    "tiebreak_score": tiebreak_score,
-                    "member_sort_key": tuple(sorted(component_member_ids)),
-                }
-            )
-
-        unresolved_components.sort(
-            key=lambda component: (
-                -component["tiebreak_score"],
-                component["member_sort_key"],
-            )
-        )
-        eligible_count = len(unresolved_components)
-        admitted: list[dict[str, Any]] = []
-        admitted_conflict_only_count = 0
-        dropped_count = 0
-        for index, component in enumerate(unresolved_components):
-            component_count = component["conflict_only_count"]
-            if admitted_conflict_only_count + component_count > CONTEXT_EXPANSION_CONTRADICTS_CAP:
-                dropped_count = eligible_count - index
-                break
-            admitted.append(component)
-            admitted_conflict_only_count += component_count
-
-        conflict_sets = [
-            {"members": component["members"], "edges": component["edges"]} for component in admitted
+            is not None
         ]
+        unresolved_components.sort(
+            key=lambda component: (-component["tiebreak_score"], component["member_sort_key"])
+        )
+        admitted, dropped_count = _admit_conflict_components(unresolved_components)
         return {
-            "conflict_sets": conflict_sets,
+            "conflict_sets": [
+                {"members": component["members"], "edges": component["edges"]}
+                for component in admitted
+            ],
             "contradicts_cap": {
                 "cap": CONTEXT_EXPANSION_CONTRADICTS_CAP,
-                "eligible_count": eligible_count,
+                "eligible_count": len(unresolved_components),
                 "truncated": dropped_count > 0,
                 "dropped_count": dropped_count,
             },

@@ -25,6 +25,79 @@ from saltmdb.utils.text import resolve_entity_ref
 logger = logging.getLogger(__name__)
 
 
+def _resolve_primary_hits(
+    conn, entity_ids, agent_id
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    resolved_hits = []
+    unresolved_errors = []
+    for raw_id in entity_ids:
+        resolved_id, candidates, truncated = resolve_entity_ref(conn, raw_id, agent_id=agent_id)
+        if candidates:
+            item = error(
+                "AMBIGUOUS_ID_PREFIX",
+                f"ID prefix '{raw_id}' matches multiple memories; provide a longer prefix or full UUID.",
+                "entity_ids",
+            )
+            item["candidates"] = candidates
+            if truncated:
+                item["candidates_truncated"] = True
+            unresolved_errors.append(item)
+            continue
+        if not resolved_id:
+            unresolved_errors.append(
+                error("UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{raw_id}'.", "entity_ids")
+            )
+            continue
+        row = conn.execute(
+            "SELECT title, memory_type FROM entities WHERE id = ?", (resolved_id,)
+        ).fetchone()
+        if row is None:
+            unresolved_errors.append(
+                error("UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{raw_id}'.", "entity_ids")
+            )
+            continue
+        resolved_hits.append({"id": resolved_id, "title": row[0], "memory_type": row[1]})
+    return resolved_hits, unresolved_errors
+
+
+def _validate_retrieve_request(strategy: str, entity_ids: list[str] | None, query: str | None):
+    if strategy == "global":
+        if not query or not isinstance(query, str):
+            return rejected(
+                [error("VALIDATION_ERROR", 'query is required for strategy="global"', "query")]
+            )
+        return None
+    if not entity_ids or not isinstance(entity_ids, list):
+        return rejected(
+            [
+                error(
+                    "VALIDATION_ERROR",
+                    "entity_ids is required and must be a non-empty list",
+                    "entity_ids",
+                )
+            ]
+        )
+    if not all(isinstance(item, str) and item for item in entity_ids):
+        return rejected(
+            [
+                error(
+                    "VALIDATION_ERROR",
+                    "entity_ids must be a list of non-empty strings",
+                    "entity_ids",
+                )
+            ]
+        )
+    return None
+
+
+def _open_retrieve_connection(
+    db_connection: sqlite3.Connection | None, db_path: str | None
+) -> tuple[sqlite3.Connection, bool]:
+    if db_connection is not None:
+        return db_connection, False
+    return get_connection(db_path or get_db_path()), True
+
+
 def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     entity_ids: list[str] | None = None,
     query: str | None = None,
@@ -43,38 +116,10 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
     one function can serve both strategies -- exactly one is semantically required depending on
     strategy, enforced by the explicit validation block below, not by the type signature itself.
     """
-    if strategy == "global":
-        if not query or not isinstance(query, str):
-            return rejected(
-                [error("VALIDATION_ERROR", 'query is required for strategy="global"', "query")]
-            )
-    else:
-        if not entity_ids or not isinstance(entity_ids, list):
-            return rejected(
-                [
-                    error(
-                        "VALIDATION_ERROR",
-                        "entity_ids is required and must be a non-empty list",
-                        "entity_ids",
-                    )
-                ]
-            )
-        if not all(isinstance(item, str) and item for item in entity_ids):
-            return rejected(
-                [
-                    error(
-                        "VALIDATION_ERROR",
-                        "entity_ids must be a list of non-empty strings",
-                        "entity_ids",
-                    )
-                ]
-            )
-
-    should_close = False
-    conn = db_connection
-    if conn is None:
-        conn = get_connection(db_path or get_db_path())
-        should_close = True
+    validation_error = _validate_retrieve_request(strategy, entity_ids, query)
+    if validation_error is not None:
+        return validation_error
+    conn, should_close = _open_retrieve_connection(db_connection, db_path)
 
     try:
         if strategy == "global":
@@ -83,44 +128,9 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
             )
         pit = datetime.now(UTC).isoformat()
 
-        resolved_hits: list[dict[str, Any]] = []
-        unresolved_errors: list[dict[str, Any]] = []
-        for raw_id in cast(list[str], entity_ids):
-            resolved_id, candidates, truncated = resolve_entity_ref(conn, raw_id, agent_id=agent_id)
-            if candidates:
-                item = error(
-                    "AMBIGUOUS_ID_PREFIX",
-                    f"ID prefix '{raw_id}' matches multiple memories; provide a longer prefix or full UUID.",
-                    "entity_ids",
-                )
-                item["candidates"] = candidates
-                if truncated:
-                    item["candidates_truncated"] = True
-                unresolved_errors.append(item)
-                continue
-            if not resolved_id:
-                unresolved_errors.append(
-                    error(
-                        "UNKNOWN_ENTITY_ID",
-                        f"No memory matches entity_id '{raw_id}'.",
-                        "entity_ids",
-                    )
-                )
-                continue
-            row = conn.execute(
-                "SELECT title, memory_type FROM entities WHERE id = ?", (resolved_id,)
-            ).fetchone()
-            if row is None:
-                unresolved_errors.append(
-                    error(
-                        "UNKNOWN_ENTITY_ID",
-                        f"No memory matches entity_id '{raw_id}'.",
-                        "entity_ids",
-                    )
-                )
-                continue
-            resolved_hits.append({"id": resolved_id, "title": row[0], "memory_type": row[1]})
-
+        resolved_hits, unresolved_errors = _resolve_primary_hits(
+            conn, cast(list[str], entity_ids), agent_id
+        )
         if unresolved_errors:
             return rejected(unresolved_errors)
 
@@ -157,8 +167,8 @@ def assemble_retrieve_context(  # noqa: C901, PLR0912, PLR0915
             for member in conflict_set["members"]
             if member["inclusion"] == "conflict_only"
         }
-        excluded_for_orphan_lookup = (
-            set(primary_hit_ids_set) | expansion_candidate_ids | conflict_only_ids
+        excluded_for_orphan_lookup = cast(
+            set[str], set(primary_hit_ids_set) | expansion_candidate_ids | conflict_only_ids
         )
         orphan_result = find_orphan_community_matches(
             primary_hits,

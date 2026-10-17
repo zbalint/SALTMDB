@@ -41,6 +41,19 @@ class TestClassifyResult(unittest.TestCase):
         status, code = telemetry_service.classify_result([1, 2, 3], None)
         self.assertEqual(status, "ok")
 
+    def test_daemon_write_failure_status_is_error_with_code_or_status(self):
+        self.assertEqual(
+            telemetry_service.classify_result(
+                {"status": "DAEMON_CONNECTION_LOST_DURING_WRITE", "error_code": "CONNECTION_LOST"},
+                None,
+            ),
+            ("error", "CONNECTION_LOST"),
+        )
+        self.assertEqual(
+            telemetry_service.classify_result({"status": "REJECTED"}, None),
+            ("error", "REJECTED"),
+        )
+
 
 class TestRecordCall(unittest.TestCase):
     def setUp(self):

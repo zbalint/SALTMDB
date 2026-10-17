@@ -120,3 +120,38 @@ class TestLibrarianService(unittest.TestCase):
             "SELECT status FROM entities WHERE id = ?", (id1,)
         ).fetchone()[0]
         self.assertEqual(p1_status, "raw")
+
+    def test_merge_tags_heuristics_merges_normalized_duplicate_tags(self):
+        self.conn.execute(
+            "INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)",
+            ("tag-a", "#Topic"),
+        )
+        self.conn.execute(
+            "INSERT INTO tags (id, name, canonical_id) VALUES (?, ?, NULL)",
+            ("tag-b", "#topic"),
+        )
+        memory = store_memory(
+            title="Tag merge association",
+            content="Association target content with enough detail for the memory quality checks.",
+            agent_id="agent1",
+            db_path=self.db_path,
+        )
+        self.assertIsInstance(memory, dict)
+        self.assertEqual(memory["status"], "ok", memory)
+        entity_id = memory["data"]["id"]
+        self.conn.execute(
+            "INSERT INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+            (entity_id, "tag-b"),
+        )
+        self.conn.commit()
+        librarian_service.merge_tags_heuristics(conn=self.conn)
+        rows = self.conn.execute(
+            "SELECT id, name, canonical_id FROM tags WHERE id IN ('tag-a', 'tag-b') ORDER BY id"
+        ).fetchall()
+        self.assertEqual(rows, [("tag-a", "#Topic", None), ("tag-b", "#topic", "tag-a")])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT tag_id FROM entity_tags WHERE entity_id = ?", (entity_id,)
+            ).fetchall(),
+            [("tag-a",)],
+        )

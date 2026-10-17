@@ -20,71 +20,78 @@ logger = logging.getLogger(__name__)
 _COMMUNITY_DETECTION_TASK_NAME = "community_detection"
 
 
+def _community_group_inputs(group, graph, node_ids, raw_vector):
+    member_ids = sorted(node_ids[i] for i in group)
+    if len(member_ids) == 1:
+        representative_id = member_ids[0]
+        source = (
+            {representative_id: raw_vector[representative_id]}
+            if representative_id in raw_vector
+            else {}
+        )
+        return member_ids, [], source, {representative_id: 1.0}
+    subgraph = graph.subgraph(group)
+    pagerank_scores = subgraph.pagerank(directed=False)
+    pagerank = {node_ids[group[i]]: pagerank_scores[i] for i in range(len(group))}
+    max_score = max(pagerank.values())
+    top_ids = sorted(eid for eid, score in pagerank.items() if score == max_score)
+    return (
+        member_ids,
+        top_ids,
+        {eid: raw_vector[eid] for eid in member_ids if eid in raw_vector},
+        pagerank,
+    )
+
+
+def _community_centroid(centroid_source, member_ids, pagerank_by_id):
+    import numpy as np
+
+    if not centroid_source:
+        return None
+    if len(centroid_source) == 1 and len(member_ids) == 1:
+        return _normalize_community_vector(next(iter(centroid_source.values())))
+    total_weight = sum(pagerank_by_id[eid] for eid in centroid_source)
+    weighted_sum = np.zeros(384, dtype=np.float64)
+    for eid, vec in centroid_source.items():
+        weight = (
+            pagerank_by_id[eid] / total_weight if total_weight > 0 else 1.0 / len(centroid_source)
+        )
+        weighted_sum += weight * _normalize_community_vector(vec.astype(np.float64))
+    return _normalize_community_vector(weighted_sum)
+
+
+def _community_representative(top_ids, centroid_vec, raw_vector):
+    import numpy as np
+
+    if len(top_ids) == 1:
+        return top_ids[0]
+    if centroid_vec is None:
+        return sorted(top_ids)[0]
+
+    def cosine(eid: str) -> float:
+        if eid not in raw_vector:
+            return -1.0
+        return float(
+            np.dot(_normalize_community_vector(raw_vector[eid].astype(np.float64)), centroid_vec)
+        )
+
+    best_sim = max(cosine(eid) for eid in top_ids)
+    return sorted(eid for eid in top_ids if cosine(eid) == best_sim)[0]
+
+
 def _compute_community_group(group, graph, node_ids, raw_vector):
     """Compute one partition group's representative and centroid.
 
     This internal seam keeps the singleton branch directly exercisable without pretending that
     ModularityVertexPartition reliably emits singleton groups for connected vertices.
     """
-    import numpy as np
-
-    top_ids = []
-    member_ids = sorted(node_ids[i] for i in group)
-    if len(member_ids) == 1:
-        representative_id = member_ids[0]
-        centroid_source = (
-            {representative_id: raw_vector[representative_id]}
-            if representative_id in raw_vector
-            else {}
-        )
-        pagerank_by_id = {representative_id: 1.0}
-    else:
-        subgraph = graph.subgraph(group)
-        pagerank_scores = subgraph.pagerank(directed=False)
-        pagerank_by_id = {node_ids[group[i]]: pagerank_scores[i] for i in range(len(group))}
-        max_score = max(pagerank_by_id.values())
-        top_ids = sorted(eid for eid, score in pagerank_by_id.items() if score == max_score)
-        representative_id = None
-        centroid_source = {eid: raw_vector[eid] for eid in member_ids if eid in raw_vector}
-
-    if not centroid_source:
-        centroid_vec = None
-    elif len(centroid_source) == 1 and len(member_ids) == 1:
-        centroid_vec = _normalize_community_vector(next(iter(centroid_source.values())))
-    else:
-        total_weight = sum(pagerank_by_id[eid] for eid in centroid_source)
-        weighted_sum = np.zeros(384, dtype=np.float64)
-        for eid, vec in centroid_source.items():
-            weight = (
-                pagerank_by_id[eid] / total_weight
-                if total_weight > 0
-                else (1.0 / len(centroid_source))
-            )
-            weighted_sum += weight * _normalize_community_vector(vec.astype(np.float64))
-        centroid_vec = _normalize_community_vector(weighted_sum)
-
+    member_ids, top_ids, centroid_source, pagerank_by_id = _community_group_inputs(
+        group, graph, node_ids, raw_vector
+    )
+    representative_id = member_ids[0] if len(member_ids) == 1 else None
+    centroid_vec = _community_centroid(centroid_source, member_ids, pagerank_by_id)
     if len(member_ids) > 1:
-        if len(top_ids) == 1:
-            representative_id = top_ids[0]
-        elif centroid_vec is not None:
-            centroid_for_similarity = centroid_vec
-
-            def _cosine_sim(eid: str) -> float:
-                if eid not in raw_vector:
-                    return -1.0
-                return float(
-                    np.dot(
-                        _normalize_community_vector(raw_vector[eid].astype(np.float64)),
-                        centroid_for_similarity,
-                    )
-                )
-
-            best_sim = max(_cosine_sim(eid) for eid in top_ids)
-            closest = sorted(eid for eid in top_ids if _cosine_sim(eid) == best_sim)
-            representative_id = closest[0]
-        else:
-            representative_id = sorted(top_ids)[0]
-
+        representative_id = _community_representative(top_ids, centroid_vec, raw_vector)
     return member_ids, representative_id, centroid_vec
 
 

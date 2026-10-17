@@ -78,6 +78,17 @@ class TestOrphanCommunityService(unittest.TestCase):
             )
         )
 
+    def _fixed_memory(self, entity_id: str, title: str) -> str:
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO entities "
+            "(id, created_at, updated_at, last_accessed_at, agent_id, scope, status, title, full_content) "
+            "VALUES (?, ?, ?, ?, ?, 'shared', 'raw', ?, ?)",
+            (entity_id, now, now, now, "orphan-community-test", title, f"content for {title}"),
+        )
+        self.conn.commit()
+        return entity_id
+
     def _insert_vector(self, entity_id: str, vector: list[float]) -> None:
         self.conn.execute(
             "INSERT INTO entity_embeddings (entity_id, embedding) VALUES (?, ?)",
@@ -187,6 +198,28 @@ class TestOrphanCommunityService(unittest.TestCase):
         self.assertGreater(COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD, 0.0)
         self.assertEqual(result, self._zero_result())
 
+    def test_scenario_05b_orphan_at_threshold_is_assigned(self):
+        orphan = self._memory("At threshold orphan")
+        member = self._memory("At threshold member")
+        self._insert_community(
+            "community-at-threshold",
+            [member],
+            _axis_vector(0),
+        )
+        self._insert_vector(orphan, _axis_vector(0))
+        self._insert_vector(member, _axis_vector(0))
+        with patch(
+            "saltmdb.domain.services.orphan_community_service.COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD",
+            1.0,
+        ):
+            result = find_orphan_community_matches(
+                self._primary(orphan), set(), db_connection=self.conn
+            )
+        self.assertEqual(
+            [match["entity_id"] for match in result["orphan_community_matches"]],
+            [member],
+        )
+
     def test_scenario_06_members_rank_by_similarity_to_specific_orphan(self):
         orphan = self._memory("Specific orphan anchor")
         centroid_similarity = (COMMUNITY_ORPHAN_SIMILARITY_THRESHOLD + 1.0) / 2.0
@@ -210,6 +243,40 @@ class TestOrphanCommunityService(unittest.TestCase):
         self.assertEqual(
             [match["entity_id"] for match in result["orphan_community_matches"]],
             [orphan_closest, centroid_closest],
+        )
+
+    def test_equal_similarity_keeps_first_seen_orphan_assignment(self):
+        orphan_a = self._fixed_memory("orphan-a", "Orphan A")
+        orphan_b = self._fixed_memory("orphan-b", "Orphan B")
+        member = self._fixed_memory("member-tie", "Member tie")
+        self._insert_community("community-a", [member], _axis_vector(0))
+        self._insert_vector(orphan_a, _axis_vector(0))
+        self._insert_vector(orphan_b, _axis_vector(0))
+        self._insert_vector(member, _axis_vector(0))
+        result = find_orphan_community_matches(
+            self._primary(orphan_a) + self._primary(orphan_b),
+            set(),
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(result["orphan_community_matches"]), 1)
+        self.assertEqual(result["orphan_community_matches"][0]["orphan_entity_id"], orphan_a)
+
+    def test_equal_similarity_members_sort_by_ascending_id(self):
+        orphan = self._fixed_memory("orphan-sort", "Orphan sort")
+        member_z = self._fixed_memory("member-z", "Member Z")
+        member_a = self._fixed_memory("member-a", "Member A")
+        self._insert_community("community-sort", [member_z, member_a], _axis_vector(0))
+        self._insert_vector(orphan, _axis_vector(0))
+        self._insert_vector(member_z, _axis_vector(0))
+        self._insert_vector(member_a, _axis_vector(0))
+        result = find_orphan_community_matches(
+            self._primary(orphan),
+            set(),
+            db_connection=self.conn,
+        )
+        self.assertEqual(
+            [match["entity_id"] for match in result["orphan_community_matches"]],
+            [member_a, member_z],
         )
 
     def test_scenario_07_excluded_ids_are_never_admitted(self):

@@ -108,3 +108,13 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling, patch targets, extraction needs); see the assignment event.
+
+## Amendment 1 (2026-10-17)
+
+Records the outcome of review; no contract change beyond the D6 disposition below.
+
+- Result: fourteen of the fifteen listed functions end at proxy score 12 or less with extracted private helpers in the same files. `retrieve_context_service.assemble_retrieve_context` goes from 65 to 44 and is left under D6: its remaining body shares mutable envelopes across the expansion, conflict, orphan, budget and lineage steps, so a safe split needs a typed bundle and ordered render helpers, which is a design change. It gets its own spec after a consultant review. D11's allowance for functions above 60 does not narrow D6.
+- D13 held: `ruff --select ARG` on the fifteen files shows exactly the three findings that existed before (cohesion `db_path`, community coordinator `db_path`, the event `_write(c)` closure); no suppression was added.
+- Review: tester pass plus three delta passes, and the architect's own mutants on a clean copy. Round 1 found ten survivors, round 2 six more (one of them a developer kill claim that did not replicate), round 3 three tie-break survivors; each was pinned by a repo test that also passes on the pre-refactor source. Thirty-two characterization tests were added in all. A string-literal comparison old versus new showed no SQL, log or error text lost; whitespace re-indentation inside triple-quoted SQL that moved to another nesting depth is accepted.
+- Residual test gaps found by mutation and left open (true before the refactor too): `context_budget._load_token_counts` fallback for missing content; the ephemeral connection that `context_budget` opens for a `db_path` call is never asserted closed; `context_expansion._rank_expansion_nodes` count of distinct origins versus raw pairs is not pinned; the community-retrieval agent-visibility test checks membership of two entities, not the full set; the seed-gap test compares sets, not order. A tests-only hardening spec should cover them before the next service-layer slice.
+- Out of scope and still above 12 (not in this spec): `recompute_communities` 23, `classify_contradicts_components` 14, `_component_lifecycle_resolved` 15, `split_segments` 21, `get_model` 14.

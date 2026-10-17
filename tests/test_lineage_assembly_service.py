@@ -103,6 +103,36 @@ class TestLineageAssemblyService(unittest.TestCase):
             predecessor = ancestor
         return head, ancestors
 
+    def test_same_depth_and_timestamp_are_tiebroken_by_ascending_id(self):
+        head = "head-fixed"
+        nodes = [
+            {
+                "id": "ancestor-z",
+                "title": "Ancestor Z",
+                "depth": 1,
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "ancestor-a",
+                "title": "Ancestor A",
+                "depth": 1,
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        ]
+        with patch(
+            "saltmdb.domain.services.lineage_assembly_service._get_lineage_raw",
+            return_value={"root": {"title": "Fixed head"}, "nodes": [*nodes, {"id": head}]},
+        ):
+            result = assemble_lineage(
+                self._expansion([]),
+                [{"id": head, "score": 1.0}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            [entry["id"] for entry in result[head]["historical"]],
+            ["ancestor-a", "ancestor-z"],
+        )
+
     def test_no_head_candidates_returns_empty_without_opening_connection(self):
         with patch(
             "saltmdb.domain.services.lineage_assembly_service.get_connection",

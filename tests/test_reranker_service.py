@@ -131,6 +131,18 @@ class TestScorePairs(unittest.TestCase):
             result = reranker_service.score_pairs("query", ["a", "b"])
         self.assertIsNone(result)
 
+    def test_more_scores_than_candidates_returns_none_with_malformed_diagnostics(self):
+        os.environ["SALTMDB_RERANKER_MODEL"] = "Xenova/ms-marco-MiniLM-L-6-v2"
+        fake_model = MagicMock()
+        fake_model.rerank.return_value = [1.0, 2.0, 3.0]
+        with patch.object(reranker_service, "get_model", return_value=fake_model):
+            result = reranker_service.score_pairs("query", ["a", "b"])
+        self.assertIsNone(result)
+        self.assertEqual(
+            reranker_service.get_last_score_diagnostics()["reason"],
+            "malformed_output",
+        )
+
     def test_non_numeric_output_returns_none(self):
         os.environ["SALTMDB_RERANKER_MODEL"] = "Xenova/ms-marco-MiniLM-L-6-v2"
         fake_model = MagicMock()

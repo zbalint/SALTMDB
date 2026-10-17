@@ -7,7 +7,7 @@ from unittest.mock import patch
 import sqlite_vec
 
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services import embedding_service
+from saltmdb.domain.services import cohesion_service, embedding_service
 from saltmdb.domain.services.cohesion_service import (
     get_fresh_entity_centroids,
     min_pairwise_cohesion,
@@ -148,7 +148,7 @@ class TestCohesionService(unittest.TestCase):
         self.assertNotIn("e3", centroids)
         self.assertIn("e3", unresolved)
         self.assertIsInstance(unresolved["e3"], str)
-        self.assertTrue(len(unresolved["e3"]) > 0)
+        self.assertEqual(unresolved["e3"], "no embeddable content")
         self.assertEqual(observed_state["e3"], ("hash-c", "raw"))
 
     def test_get_fresh_entity_centroids_omits_observed_state_for_archived_unscorable_entity(self):
@@ -166,6 +166,88 @@ class TestCohesionService(unittest.TestCase):
         self.assertNotIn("e3-archived", centroids)
         self.assertIn("e3-archived", unresolved)
         self.assertNotIn("e3-archived", observed_state)
+
+    def test_get_fresh_entity_centroids_excludes_archived_fresh_chunks(self):
+        self._insert_entity(
+            "archived-fresh",
+            content_hash="archived-hash",
+            full_content="archived content",
+            status="archived",
+        )
+        self._insert_chunk(
+            "archived-fresh",
+            0,
+            _axis_vector(0),
+            content_hash="archived-hash",
+        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(
+            ["archived-fresh"], self.conn, self.db_path
+        )
+        self.assertNotIn("archived-fresh", centroids)
+        self.assertEqual(
+            unresolved["archived-fresh"],
+            "entity is archived, not eligible as a consolidation/cluster candidate",
+        )
+        self.assertNotIn("archived-fresh", observed_state)
+
+    def test_get_fresh_entity_centroids_preserves_observed_state_on_centroid_exception(self):
+        self._insert_entity(
+            "exception-fresh",
+            content_hash="fresh-exception-hash",
+            full_content="fresh content",
+        )
+        self._insert_chunk(
+            "exception-fresh",
+            0,
+            _axis_vector(0),
+            content_hash="fresh-exception-hash",
+        )
+        with patch.object(
+            cohesion_service,
+            "_centroid",
+            side_effect=RuntimeError("centroid failed"),
+        ):
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                ["exception-fresh"], self.conn, self.db_path
+            )
+        self.assertNotIn("exception-fresh", centroids)
+        self.assertNotIn("exception-fresh", observed_state)
+
+    def test_get_fresh_entity_centroids_falls_back_for_consolidated_entity(self):
+        self._insert_entity(
+            "consolidated-fallback",
+            content_hash="consolidated-hash",
+            full_content="consolidated content",
+            status="consolidated",
+        )
+        with patch.object(embedding_service, "embed_texts", return_value=[_axis_vector(0)]):
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                ["consolidated-fallback"], self.conn, self.db_path
+            )
+        self.assertIn("consolidated-fallback", centroids)
+        self.assertNotIn("consolidated-fallback", unresolved)
+        self.assertEqual(
+            observed_state["consolidated-fallback"], ("consolidated-hash", "consolidated")
+        )
+
+    def test_get_fresh_entity_centroids_preserves_observed_state_on_fallback_exception(self):
+        self._insert_entity(
+            "exception-fallback",
+            content_hash="exception-hash",
+            full_content="embeddable content",
+        )
+        with patch(
+            "saltmdb.domain.services.embedding_service.compute_entity_chunk_embeddings",
+            side_effect=RuntimeError("embedding failed"),
+        ):
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                ["exception-fallback"], self.conn, self.db_path
+            )
+        self.assertNotIn("exception-fallback", centroids)
+        self.assertEqual(
+            unresolved["exception-fallback"], "fallback embedding failed: embedding failed"
+        )
+        self.assertEqual(observed_state["exception-fallback"], ("exception-hash", "raw"))
 
     def test_get_fresh_entity_centroids_omits_observed_state_when_entity_not_found(self):
         """An id with no entities row at all must stay fully unresolved with no observed_state

@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import patch
 
+import numpy as np
+
 import sqlite_vec
 
 from saltmdb import config
@@ -235,6 +237,86 @@ class TestCommunityRetrievalService(unittest.TestCase):
             representatives[:2],
         )
 
+    def test_scenario_04b_seed_gap_boundary_is_admitted(self):
+        first_rep, _ = self._insert_community(
+            "community-seed-equal-a",
+            [("Seed equal A", _axis_vector(0))],
+            _axis_vector(0),
+        )
+        second_rep, _ = self._insert_community(
+            "community-seed-equal-b",
+            [("Seed equal B", _axis_vector(0))],
+            _cosine_vector(0.5),
+        )
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            query_vector = community_retrieval_service._normalize(
+                np.array(
+                    community_retrieval_service.embed_text("community query"), dtype=np.float64
+                )
+            )
+        blob = self.conn.execute(
+            "SELECT embedding FROM community_embeddings WHERE community_id = ?",
+            ("community-seed-equal-b",),
+        ).fetchone()[0]
+        second_similarity = float(
+            np.dot(
+                query_vector,
+                community_retrieval_service._normalize(
+                    np.frombuffer(blob, dtype=np.float32).astype(np.float64)
+                ),
+            )
+        )
+        gap = 1.0 - second_similarity
+        with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_TOP_K_COMMUNITIES", 2):
+            with patch.object(
+                community_retrieval_service,
+                "CONTEXT_GLOBAL_SEED_SIMILARITY_GAP",
+                gap,
+            ):
+                with patch.object(
+                    community_retrieval_service,
+                    "embed_text",
+                    return_value=_axis_vector(0),
+                ):
+                    result = seed_and_rank_communities("community query", db_connection=self.conn)
+        self.assertCountEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [first_rep, second_rep],
+        )
+        self.assertEqual(result["seed_cap"]["gap_dropped_count"], 0)
+
+    def test_agent_visibility_excludes_private_other_agent_members(self):
+        private_rep, _ = self._insert_community(
+            "community-private-other",
+            [("Private other", _axis_vector(0))],
+            _axis_vector(0),
+        )
+        shared_rep, _ = self._insert_community(
+            "community-shared-other",
+            [("Shared other", _axis_vector(0))],
+            _axis_vector(0),
+        )
+        self.conn.execute(
+            "UPDATE entities SET agent_id = ?, scope = ? WHERE id IN (?, ?)",
+            ("other-agent", "private", private_rep, shared_rep),
+        )
+        self.conn.execute(
+            "UPDATE entities SET scope = ? WHERE id = ?",
+            ("shared", shared_rep),
+        )
+        self.conn.commit()
+        with patch.object(community_retrieval_service, "embed_text", return_value=_axis_vector(0)):
+            result = seed_and_rank_communities(
+                "community query",
+                db_connection=self.conn,
+                agent_id="requesting-agent",
+            )
+        member_ids = {match["entity_id"] for match in result["member_matches"]} | {
+            match["entity_id"] for match in result["representative_matches"]
+        }
+        self.assertNotIn(private_rep, member_ids)
+        self.assertIn(shared_rep, member_ids)
+
     def test_scenario_05_best_per_query_match_becomes_representative_even_if_not_the_fixed_one(
         self,
     ):
@@ -317,6 +399,42 @@ class TestCommunityRetrievalService(unittest.TestCase):
         )
         member_ids = [match["entity_id"] for match in result["member_matches"]]
         self.assertIn(first_ids[1], member_ids)
+
+    def test_scenario_06b_representative_gap_equality_is_admitted(self):
+        _, first_ids = self._insert_community(
+            "community-rep-equal-a",
+            [("Rep equal A", _axis_vector(0))],
+            _axis_vector(0),
+        )
+        _, second_ids = self._insert_community(
+            "community-rep-equal-b",
+            [("Rep equal B", _axis_vector(1))],
+            _axis_vector(0),
+        )
+        with patch.object(community_retrieval_service, "CONTEXT_GLOBAL_TOP_K_COMMUNITIES", 2):
+            with patch.object(
+                community_retrieval_service,
+                "CONTEXT_GLOBAL_REPRESENTATIVE_RESERVE_CAP",
+                2,
+            ):
+                with patch.object(
+                    community_retrieval_service,
+                    "CONTEXT_GLOBAL_REPRESENTATIVE_SIMILARITY_GAP",
+                    1.0,
+                ):
+                    with patch.object(
+                        community_retrieval_service,
+                        "embed_text",
+                        return_value=_axis_vector(0),
+                    ):
+                        result = seed_and_rank_communities(
+                            "community query", db_connection=self.conn
+                        )
+        self.assertEqual(
+            [match["entity_id"] for match in result["representative_matches"]],
+            [first_ids[0], second_ids[0]],
+        )
+        self.assertEqual(result["representative_reserve"]["gap_dropped_count"], 0)
 
     def test_scenario_07_member_pool_is_shared_and_truncated_by_query_similarity(self):
         first_rep, first_ids = self._insert_community(

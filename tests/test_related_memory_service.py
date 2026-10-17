@@ -228,6 +228,14 @@ class TestRelatedMemoryService(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.find()
 
+    def test_equal_scores_retain_first_segment_metadata(self):
+        self.seed("tie")
+        self.scores = {(SEGMENT_A, "tie"): 6.0, (SEGMENT_B, "tie"): 6.0}
+        self.semantic.side_effect = [[("tie", 0.4)], [("tie", 0.2)]]
+        result = self.find(SEGMENT_A + "\n\n" + SEGMENT_B)
+        self.assertEqual(result[0]["segment"], 0)
+        self.assertEqual(result[0]["semantic_distance"], 0.4)
+
 
 class TestExplicitCrossEncoderModel(unittest.TestCase):
     def test_explicit_model_bypasses_deployment_gate_and_default_remains_disabled(self):

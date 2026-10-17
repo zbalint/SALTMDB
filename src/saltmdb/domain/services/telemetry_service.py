@@ -25,6 +25,21 @@ from saltmdb.db.connection import get_connection, write_transaction_retrying, cl
 logger = logging.getLogger(__name__)
 
 
+def _classify_dict_result(result: dict[str, Any]) -> tuple[str, str | None]:
+    status = result.get("status")
+    if status == "rejected":
+        code = (result.get("errors") or [{}])[0].get("code") if result.get("errors") else None
+        return "rejected", code
+    if isinstance(status, str) and status.upper() in {
+        "REJECTED",
+        "DAEMON_CONNECTION_LOST_DURING_WRITE",
+    }:
+        return "error", result.get("error_code") or status
+    if result.get("error"):
+        return "error", None
+    return "ok", None
+
+
 def classify_result(result: Any, raised: BaseException | None) -> tuple[str, str | None]:
     """Best-effort (status, error_code) classification from a tool call's outcome.
 
@@ -38,18 +53,7 @@ def classify_result(result: Any, raised: BaseException | None) -> tuple[str, str
     if isinstance(result, str) and result.startswith("Error"):
         return "error", None
     if isinstance(result, dict):
-        status = result.get("status")
-        if status == "rejected":
-            return "rejected", (result.get("errors") or [{}])[0].get("code") if result.get(
-                "errors"
-            ) else None
-        if isinstance(status, str) and status.upper() in {
-            "REJECTED",
-            "DAEMON_CONNECTION_LOST_DURING_WRITE",
-        }:
-            return "error", result.get("error_code") or status
-        if result.get("error"):
-            return "error", None
+        return _classify_dict_result(result)
     return "ok", None
 
 

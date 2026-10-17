@@ -348,6 +348,84 @@ class TestTraceService(unittest.TestCase):
         self.assertNotIn("user_prompt", item)
         self.assertEqual(result["warnings"][0]["code"], "TRACE_SEARCH_NOT_YET_SEMANTIC")
 
+    def test_search_orders_traces_by_created_at_descending(self):
+        from saltmdb.domain.services import trace_service
+
+        newer = self._start(turn_id="newer")
+        older = self._start(turn_id="older")
+        self.conn.execute(
+            "UPDATE conversation_traces SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-01-02T00:00:00+00:00", "2026-01-02T00:00:00+00:00", older),
+        )
+        self.conn.execute(
+            "UPDATE conversation_traces SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", newer),
+        )
+        self.conn.commit()
+        result = trace_service.search_traces(db_connection=self.conn)
+        self.assertEqual(
+            [item["trace_id"] for item in result["data"]["results"][:2]],
+            [older, newer],
+        )
+
+    def test_search_caps_and_deduplicates_linked_entity_ids(self):
+        from saltmdb.domain.services import trace_service
+
+        trace_id = self._start(turn_id="linked-cap")
+        for index in range(11):
+            self._entity(f"linked-{index}")
+        now = datetime.now(UTC)
+        links = [
+            (
+                f"link-{index}",
+                trace_id,
+                f"linked-{index}",
+                f"hash-{index}",
+                (now + timedelta(seconds=index)).isoformat(),
+            )
+            for index in range(11)
+        ]
+        links.append(
+            (
+                "link-duplicate",
+                trace_id,
+                "linked-0",
+                "hash-duplicate",
+                (now + timedelta(seconds=0.5)).isoformat(),
+            )
+        )
+        self.conn.executemany(
+            "INSERT INTO trace_memory_links "
+            "(id, trace_id, entity_id, content_hash, write_operation, created_at) "
+            "VALUES (?, ?, ?, ?, 'store_memory_new', ?)",
+            links,
+        )
+        self.conn.commit()
+        result = trace_service.search_traces(db_connection=self.conn)
+        item = next(row for row in result["data"]["results"] if row["trace_id"] == trace_id)
+        self.assertEqual(item["linked_entity_ids"], [f"linked-{index}" for index in range(10)])
+
+    def test_search_paginates_with_lookahead_row_and_cursor(self):
+        from saltmdb.domain.services import trace_service
+
+        self._start(turn_id="page-1")
+        self._start(turn_id="page-2")
+        self._start(turn_id="page-3")
+        first_page = trace_service.search_traces(limit=2, db_connection=self.conn)
+        first_ids = [item["trace_id"] for item in first_page["data"]["results"]]
+        self.assertEqual(len(first_ids), 2)
+        self.assertIsNotNone(first_page["data"]["next_cursor"])
+        second_page = trace_service.search_traces(
+            limit=2,
+            cursor=first_page["data"]["next_cursor"],
+            db_connection=self.conn,
+        )
+        second_ids = [item["trace_id"] for item in second_page["data"]["results"]]
+        self.assertEqual(len(second_ids), 1)
+        self.assertTrue(set(second_ids).isdisjoint(first_ids))
+        self.assertEqual(len(set(first_ids + second_ids)), 3)
+        self.assertIsNone(second_page["data"]["next_cursor"])
+
     def _start_text(self, text, turn_id="turn-a"):
         from saltmdb.domain.services import trace_service
 

@@ -41,10 +41,131 @@ def compute_adhoc_centroid(content: str) -> list[float] | None:
     return _centroid(vectors)
 
 
-def get_fresh_entity_centroids(  # noqa: C901, PLR0912, PLR0915
-    entity_ids: list[str],
+def _fresh_centroids(
     conn: sqlite3.Connection,
-    db_path: str,
+    unique_ids: list[str],
+    centroids: dict[str, list[float]],
+    unresolved: dict[str, str],
+    observed_state: dict[str, tuple[str, str]],
+) -> None:
+    # Fresh-join path: pull chunk vectors + content_hash/status for entities with fresh,
+    # non-archived persisted rows. Mirrors memory_service.py's canonical chunk-query join
+    # (rerank_candidates_by_topic) -- `status != 'archived'` (never "raw-only": commit_consolidation
+    # parents legitimately include already-'consolidated' entities in the refresh workflow) and
+    # `c.content_hash IS e.content_hash` for staleness exclusion.
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = conn.execute(
+        f"""
+        SELECT c.entity_id, c.embedding, e.content_hash, e.status
+        FROM entity_chunk_embeddings c
+        JOIN entities e ON e.id = c.entity_id
+        WHERE c.entity_id IN ({placeholders})
+          AND e.status != 'archived'
+          AND c.content_hash IS e.content_hash
+        """,
+        unique_ids,
+    ).fetchall()
+    import numpy as np
+
+    grouped_vectors: dict[str, list] = {}
+    for entity_id, embedding_blob, content_hash, status in rows:
+        grouped_vectors.setdefault(entity_id, []).append(embedding_blob)
+        # All rows for one entity share identical content_hash/status by construction (the
+        # join predicate ties every row to entities' current committed values) -- record once.
+        if entity_id not in observed_state:
+            observed_state[entity_id] = (content_hash, status)
+    for entity_id, blobs in grouped_vectors.items():
+        try:
+            vectors = [np.frombuffer(b, dtype=np.float32) for b in blobs]
+            centroids[entity_id] = _centroid(vectors)
+        except Exception as e:
+            logger.warning(
+                "get_fresh_entity_centroids: centroid computation failed for %s (fresh path): %s",
+                entity_id,
+                e,
+            )
+            unresolved[entity_id] = f"centroid computation failed: {e}"
+            observed_state.pop(entity_id, None)
+
+
+def _fallback_one(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    centroids: dict[str, list[float]],
+    unresolved: dict[str, str],
+    observed_state: dict[str, tuple[str, str]],
+    compute_entity_chunk_embeddings,
+    np,
+) -> None:
+    # P1 (Codex review, bf4qtkp7j / 7a5eba85): row_content_hash/row_status are captured
+    # OUTSIDE the try body's happy path so the except handler below can still recover them
+    # -- a successful entity-row read (content_hash, status) is real observed state even if
+    # the embedding computation that follows it fails or produces nothing. Dropping that
+    # state made a valid override_justification unreachable for an active-but-unscorable
+    # parent: commit's TOCTOU revalidation hard-rejects any resolved parent with no
+    # observed_state entry at all, so a parent that legitimately has "no usable content"
+    # could never clear revalidation even with an explicit override. An archived or
+    # never-found parent must NOT get an observed_state entry -- those stay hard-rejected,
+    # not overrideable, which is exactly what leaving row_status None/"archived" preserves.
+    row_content_hash = None
+    row_status = None
+    try:
+        row = conn.execute(
+            "SELECT full_content, content_hash, status FROM entities WHERE id = ?",
+            (entity_id,),
+        ).fetchone()
+        if not row:
+            unresolved[entity_id] = "entity not found"
+            return
+        full_content, content_hash, status = row
+        if status == "archived":
+            unresolved[entity_id] = (
+                "entity is archived, not eligible as a consolidation/cluster candidate"
+            )
+            return
+        row_content_hash, row_status = content_hash, status
+        chunk_rows = compute_entity_chunk_embeddings(entity_id, full_content or "")
+        if not chunk_rows:
+            unresolved[entity_id] = "no embeddable content"
+            observed_state[entity_id] = (content_hash, status)
+            return
+        vectors = [np.array(r["embedding"], dtype=np.float32) for r in chunk_rows]
+        centroids[entity_id] = _centroid(vectors)
+        observed_state[entity_id] = (content_hash, status)
+    except Exception as e:
+        logger.warning("get_fresh_entity_centroids: fallback failed for %s: %s", entity_id, e)
+        unresolved[entity_id] = f"fallback embedding failed: {e}"
+        if row_content_hash is not None and row_status is not None:
+            observed_state[entity_id] = (row_content_hash, row_status)
+
+
+def _fallback_centroid(
+    conn: sqlite3.Connection,
+    remaining: list[str],
+    centroids: dict[str, list[float]],
+    unresolved: dict[str, str],
+    observed_state: dict[str, tuple[str, str]],
+) -> None:
+    # Fallback path, wrapped in try/except (mirrors memory_service._batch_semantic_similarities'
+    # degradation convention): for any id with zero fresh rows, one query for its current
+    # full_content/content_hash/status, then an on-demand embedding.
+    from saltmdb.domain.services.embedding_service import compute_entity_chunk_embeddings
+    import numpy as np
+
+    for entity_id in remaining:
+        _fallback_one(
+            conn,
+            entity_id,
+            centroids,
+            unresolved,
+            observed_state,
+            compute_entity_chunk_embeddings,
+            np,
+        )
+
+
+def get_fresh_entity_centroids(
+    entity_ids: list[str], conn: sqlite3.Connection, db_path: str
 ) -> tuple[dict[str, list[float]], dict[str, str], dict[str, tuple[str, str]]]:
     """Returns (centroids, unresolved, observed_state).
 
@@ -68,12 +189,8 @@ def get_fresh_entity_centroids(  # noqa: C901, PLR0912, PLR0915
     centroids: dict[str, list[float]] = {}
     unresolved: dict[str, str] = {}
     observed_state: dict[str, tuple[str, str]] = {}
-
     if not entity_ids:
         return centroids, unresolved, observed_state
-
-    import numpy as np
-
     # P2 (Codex review, bf4qtkp7j): the fresh-join path below queries entity_chunk_embeddings,
     # a `vec0` virtual table -- it requires the sqlite-vec extension loaded on THIS connection.
     # try_load_vector_extension's return value must actually be checked: if the load failed, the
@@ -81,109 +198,19 @@ def get_fresh_entity_centroids(  # noqa: C901, PLR0912, PLR0915
     # failed load as a guarded miss for every id -- skip the vec0 query entirely and let every
     # id fall through to the per-entity fallback path below, which needs no vec0 access.
     vector_extension_loaded = try_load_vector_extension(conn)
-
     # De-dup while preserving order -- callers may pass the same id more than once (e.g. a
     # cross-item union in bulk_commit_consolidation).
     unique_ids = list(dict.fromkeys(entity_ids))
-
-    # Fresh-join path: pull chunk vectors + content_hash/status for entities with fresh,
-    # non-archived persisted rows. Mirrors memory_service.py's canonical chunk-query join
-    # (rerank_candidates_by_topic) -- `status != 'archived'` (never "raw-only": commit_consolidation
-    # parents legitimately include already-'consolidated' entities in the refresh workflow) and
-    # `c.content_hash IS e.content_hash` for staleness exclusion.
-    rows = []
     if vector_extension_loaded:
-        placeholders = ",".join("?" for _ in unique_ids)
-        rows = conn.execute(
-            f"""
-            SELECT c.entity_id, c.embedding, e.content_hash, e.status
-            FROM entity_chunk_embeddings c
-            JOIN entities e ON e.id = c.entity_id
-            WHERE c.entity_id IN ({placeholders})
-              AND e.status != 'archived'
-              AND c.content_hash IS e.content_hash
-            """,
-            unique_ids,
-        ).fetchall()
+        _fresh_centroids(conn, unique_ids, centroids, unresolved, observed_state)
     else:
         logger.warning(
             "get_fresh_entity_centroids: sqlite-vec extension unavailable on this connection, "
             "falling back to per-entity on-demand embedding for all %d requested id(s)",
             len(unique_ids),
         )
-
-    grouped_vectors: dict[str, list] = {}
-    for entity_id, embedding_blob, content_hash, status in rows:
-        grouped_vectors.setdefault(entity_id, []).append(embedding_blob)
-        # All rows for one entity share identical content_hash/status by construction (the
-        # join predicate ties every row to entities' current committed values) -- record once.
-        if entity_id not in observed_state:
-            observed_state[entity_id] = (content_hash, status)
-
-    for entity_id, blobs in grouped_vectors.items():
-        try:
-            vectors = [np.frombuffer(b, dtype=np.float32) for b in blobs]
-            centroids[entity_id] = _centroid(vectors)
-        except Exception as e:
-            logger.warning(
-                "get_fresh_entity_centroids: centroid computation failed for %s (fresh path): %s",
-                entity_id,
-                e,
-            )
-            unresolved[entity_id] = f"centroid computation failed: {e}"
-            observed_state.pop(entity_id, None)
-
-    # Fallback path, wrapped in try/except (mirrors memory_service._batch_semantic_similarities'
-    # degradation convention): for any id with zero fresh rows, one query for its current
-    # full_content/content_hash/status, then an on-demand embedding.
-    from saltmdb.domain.services.embedding_service import compute_entity_chunk_embeddings
-
     remaining = [eid for eid in unique_ids if eid not in centroids and eid not in unresolved]
-    for entity_id in remaining:
-        # P1 (Codex review, bf4qtkp7j / 7a5eba85): row_content_hash/row_status are captured
-        # OUTSIDE the try body's happy path so the except handler below can still recover them
-        # -- a successful entity-row read (content_hash, status) is real observed state even if
-        # the embedding computation that follows it fails or produces nothing. Dropping that
-        # state made a valid override_justification unreachable for an active-but-unscorable
-        # parent: commit's TOCTOU revalidation hard-rejects any resolved parent with no
-        # observed_state entry at all, so a parent that legitimately has "no usable content"
-        # could never clear revalidation even with an explicit override. An archived or
-        # never-found parent must NOT get an observed_state entry -- those stay hard-rejected,
-        # not overrideable, which is exactly what leaving row_status None/"archived" preserves.
-        row_content_hash = None
-        row_status = None
-        try:
-            row = conn.execute(
-                "SELECT full_content, content_hash, status FROM entities WHERE id = ?",
-                (entity_id,),
-            ).fetchone()
-            if not row:
-                unresolved[entity_id] = "entity not found"
-                continue
-
-            full_content, content_hash, status = row
-            if status == "archived":
-                unresolved[entity_id] = (
-                    "entity is archived, not eligible as a consolidation/cluster candidate"
-                )
-                continue
-            row_content_hash, row_status = content_hash, status
-
-            chunk_rows = compute_entity_chunk_embeddings(entity_id, full_content or "")
-            if not chunk_rows:
-                unresolved[entity_id] = "no embeddable content"
-                observed_state[entity_id] = (content_hash, status)
-                continue
-
-            vectors = [np.array(r["embedding"], dtype=np.float32) for r in chunk_rows]
-            centroids[entity_id] = _centroid(vectors)
-            observed_state[entity_id] = (content_hash, status)
-        except Exception as e:
-            logger.warning("get_fresh_entity_centroids: fallback failed for %s: %s", entity_id, e)
-            unresolved[entity_id] = f"fallback embedding failed: {e}"
-            if row_status is not None and row_content_hash is not None:
-                observed_state[entity_id] = (row_content_hash, row_status)
-
+    _fallback_centroid(conn, remaining, centroids, unresolved, observed_state)
     return centroids, unresolved, observed_state
 
 

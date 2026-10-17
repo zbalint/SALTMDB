@@ -137,6 +137,29 @@ def _run_maintenance_pass_impl(db_path: str, force: bool) -> str:
         close_connection(conn)
 
 
+def _merge_tag_groups(conn: sqlite3.Connection, grouped: dict[str, list[Any]]) -> None:
+    for norm, tag_list in grouped.items():
+        if len(tag_list) <= 1:
+            continue
+        canonical_id, canonical_name = tag_list[0]
+        logger.info("Merging tags into canonical tag: '%s' (%s)", canonical_name, canonical_id)
+        for tag_id, name in tag_list[1:]:
+            logger.info("  - Marking alias tag: '%s' (%s)", name, tag_id)
+            conn.execute("UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id))
+            conn.execute(
+                "UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?",
+                (canonical_id, tag_id),
+            )
+            conn.execute(
+                "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN "
+                "(SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
+                (tag_id, canonical_id),
+            )
+            conn.execute(
+                "UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?", (canonical_id, tag_id)
+            )
+
+
 def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
     """Scans tags to merge duplicate and near-identical names to prevent folksonomy fragmentation."""
     should_close = False
@@ -159,29 +182,7 @@ def merge_tags_heuristics(conn: sqlite3.Connection = None, db_path: str = None):
                 norm = name.lower().strip().replace("-", "").replace("_", "").replace("#", "")
                 grouped.setdefault(norm, []).append((tag_id, name))
 
-            for norm, tag_list in grouped.items():
-                if len(tag_list) > 1:
-                    canonical_id, canonical_name = tag_list[0]
-                    logger.info(
-                        "Merging tags into canonical tag: '%s' (%s)", canonical_name, canonical_id
-                    )
-                    for tag_id, name in tag_list[1:]:
-                        logger.info("  - Marking alias tag: '%s' (%s)", name, tag_id)
-                        c.execute(
-                            "UPDATE tags SET canonical_id = ? WHERE id = ?", (canonical_id, tag_id)
-                        )
-                        c.execute(
-                            "UPDATE OR IGNORE entity_tags SET tag_id = ? WHERE tag_id = ?",
-                            (canonical_id, tag_id),
-                        )
-                        c.execute(
-                            "DELETE FROM entity_tags WHERE tag_id = ? AND entity_id IN (SELECT entity_id FROM entity_tags WHERE tag_id = ?)",
-                            (tag_id, canonical_id),
-                        )
-                        c.execute(
-                            "UPDATE entity_tags SET tag_id = ? WHERE tag_id = ?",
-                            (canonical_id, tag_id),
-                        )
+            _merge_tag_groups(c, grouped)
 
         write_transaction_retrying(conn, _write)
     finally:

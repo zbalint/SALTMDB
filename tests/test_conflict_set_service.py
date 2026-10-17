@@ -337,6 +337,31 @@ class TestConflictSetService(unittest.TestCase):
         }
         self.assertTrue(admitted_ids.isdisjoint(dropped_ids))
 
+    def test_cap_boundary_admits_component_equal_to_cap(self):
+        cap = CONTEXT_EXPANSION_CONTRADICTS_CAP
+        primary = self._memory("Boundary primary")
+        neighbors = [self._memory(f"Boundary neighbor {index}") for index in range(cap)]
+        edges = [self._edge(primary, neighbor) for neighbor in neighbors]
+        result = assemble_conflict_sets(
+            self._expansion(edges),
+            [{"id": primary, "score": 1.0}],
+            db_connection=self.conn,
+        )
+        self.assertEqual(len(result["conflict_sets"]), 1)
+        self.assertEqual(
+            {member["id"] for member in result["conflict_sets"][0]["members"]},
+            {primary, *neighbors},
+        )
+        self.assertEqual(
+            result["contradicts_cap"],
+            {
+                "cap": cap,
+                "eligible_count": 1,
+                "truncated": False,
+                "dropped_count": 0,
+            },
+        )
+
     def test_tiebreak_uses_max_primary_hit_score_across_set_endpoints(self):
         low_primary = self._memory("Low primary")
         high_primary = self._memory("High primary")

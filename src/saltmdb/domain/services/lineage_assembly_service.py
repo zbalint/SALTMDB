@@ -38,6 +38,74 @@ def _add_contradiction_flags(
     return entry
 
 
+def _contradiction_peers(components: list[dict[str, Any]]) -> dict[str, set[str]]:
+    peers: dict[str, set[str]] = {}
+    for component in components:
+        if component.get("resolved") is not True:
+            continue
+        for edge in component["edges"]:
+            source_id = edge["source_id"]
+            target_id = edge["target_id"]
+            peers.setdefault(source_id, set()).add(target_id)
+            peers.setdefault(target_id, set()).add(source_id)
+    return peers
+
+
+def _assemble_head_lineage(
+    head_id: str,
+    *,
+    pit: str,
+    conn: sqlite3.Connection,
+    agent_id: str | None,
+    contradiction_peers: dict[str, set[str]],
+) -> tuple[str, dict[str, Any]] | None:
+    ancestors_result = _get_lineage_raw(
+        head_id,
+        direction="ancestors",
+        max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
+        point_in_time=pit,
+        db_connection=conn,
+        agent_id=agent_id,
+    )
+    if "error" in ancestors_result:
+        logger.warning(
+            "Could not assemble lineage for head %s: %s", head_id, ancestors_result["error"]
+        )
+        return None
+    full_ancestor_nodes = [node for node in ancestors_result["nodes"] if node["id"] != head_id]
+    if not full_ancestor_nodes:
+        return None
+    full_ancestor_nodes = _sort_ancestor_nodes(full_ancestor_nodes)
+    recency_kept = full_ancestor_nodes[:LINEAGE_HISTORICAL_CAP]
+    recency_kept_ids = {node["id"] for node in recency_kept}
+    force_included = [
+        node
+        for node in full_ancestor_nodes
+        if node["id"] not in recency_kept_ids and contradiction_peers.get(node["id"])
+    ]
+    final_nodes = _sort_ancestor_nodes(recency_kept + force_included)
+    historical = []
+    for node in final_nodes:
+        entry = {
+            "id": node["id"],
+            "title": node["title"],
+            "archived_at": node["updated_at"],
+            "included_via": "recency"
+            if node["id"] in recency_kept_ids
+            else "contradicts_force_include",
+        }
+        historical.append(_add_contradiction_flags(entry, node["id"], contradiction_peers))
+    current = _add_contradiction_flags(
+        {"id": head_id, "title": ancestors_result["root"]["title"]}, head_id, contradiction_peers
+    )
+    return head_id, {
+        "current": current,
+        "historical": historical,
+        "historical_truncated": len(full_ancestor_nodes) > len(final_nodes),
+        "historical_dropped_count": len(full_ancestor_nodes) - len(final_nodes),
+    }
+
+
 def assemble_lineage(
     expansion_result: dict[str, Any],
     primary_hits: list[dict[str, Any]],
@@ -54,87 +122,28 @@ def assemble_lineage(
     )
     if not head_candidate_ids:
         return {}
-
     should_close = False
     conn = db_connection
     if conn is None:
         conn = get_connection(db_path or get_db_path())
         should_close = True
-
     try:
         pit = point_in_time or datetime.now(UTC).isoformat()
         components = classify_contradicts_components(
-            expansion_result["contradicts_edges"],
-            point_in_time=pit,
-            db_connection=conn,
+            expansion_result["contradicts_edges"], point_in_time=pit, db_connection=conn
         )
-        contradiction_peers: dict[str, set[str]] = {}
-        for component in components:
-            if component.get("resolved") is not True:
-                continue
-            for edge in component["edges"]:
-                source_id = edge["source_id"]
-                target_id = edge["target_id"]
-                contradiction_peers.setdefault(source_id, set()).add(target_id)
-                contradiction_peers.setdefault(target_id, set()).add(source_id)
-
+        contradiction_peers = _contradiction_peers(components)
         output: dict[str, dict[str, Any]] = {}
         for head_id in sorted(head_candidate_ids):
-            ancestors_result = _get_lineage_raw(
+            assembled = _assemble_head_lineage(
                 head_id,
-                direction="ancestors",
-                max_depth=SUPERSESSION_CHAIN_MAX_DEPTH,
-                point_in_time=pit,
-                db_connection=conn,
+                pit=pit,
+                conn=conn,
                 agent_id=agent_id,
+                contradiction_peers=contradiction_peers,
             )
-            if "error" in ancestors_result:
-                logger.warning(
-                    "Could not assemble lineage for head %s: %s",
-                    head_id,
-                    ancestors_result["error"],
-                )
-                continue
-
-            full_ancestor_nodes = [
-                node for node in ancestors_result["nodes"] if node["id"] != head_id
-            ]
-            if not full_ancestor_nodes:
-                continue
-
-            full_ancestor_nodes = _sort_ancestor_nodes(full_ancestor_nodes)
-            recency_kept = full_ancestor_nodes[:LINEAGE_HISTORICAL_CAP]
-            recency_kept_ids = {node["id"] for node in recency_kept}
-            force_included = [
-                node
-                for node in full_ancestor_nodes
-                if node["id"] not in recency_kept_ids and contradiction_peers.get(node["id"])
-            ]
-            final_nodes = _sort_ancestor_nodes(recency_kept + force_included)
-            historical_dropped_count = len(full_ancestor_nodes) - len(final_nodes)
-            historical = []
-            for node in final_nodes:
-                entry = {
-                    "id": node["id"],
-                    "title": node["title"],
-                    "archived_at": node["updated_at"],
-                    "included_via": (
-                        "recency" if node["id"] in recency_kept_ids else "contradicts_force_include"
-                    ),
-                }
-                historical.append(_add_contradiction_flags(entry, node["id"], contradiction_peers))
-
-            current = _add_contradiction_flags(
-                {"id": head_id, "title": ancestors_result["root"]["title"]},
-                head_id,
-                contradiction_peers,
-            )
-            output[head_id] = {
-                "current": current,
-                "historical": historical,
-                "historical_truncated": historical_dropped_count > 0,
-                "historical_dropped_count": historical_dropped_count,
-            }
+            if assembled is not None:
+                output[assembled[0]] = assembled[1]
         return output
     finally:
         if should_close:

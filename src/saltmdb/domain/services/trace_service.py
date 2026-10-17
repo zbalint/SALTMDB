@@ -380,6 +380,65 @@ def _parse_offset(cursor: str | None) -> int:
         return 0
 
 
+def _trace_search_rows(
+    conn, agent_session_id: str | None, entity_id: str | None, page_size: int, offset: int
+):
+    where: list[str] = []
+    params: list[Any] = []
+    if agent_session_id is not None:
+        where.append("ct.agent_session_id = ?")
+        params.append(agent_session_id)
+    if entity_id is not None:
+        where.append(
+            "EXISTS (SELECT 1 FROM trace_memory_links f "
+            "WHERE f.trace_id = ct.id AND f.entity_id = ?)"
+        )
+        params.append(entity_id)
+    return conn.execute(
+        f"""
+        SELECT ct.id, ct.harness, ct.status, ct.created_at, ct.completed_at,
+               ct.user_prompt, ct.final_assistant_message
+        FROM conversation_traces AS ct
+        WHERE {" AND ".join(where) or "1 = 1"}
+        ORDER BY ct.created_at DESC, ct.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        [*params, page_size + 1, offset],
+    ).fetchall()
+
+
+def _trace_search_results(conn, rows: list[tuple]) -> list[dict[str, Any]]:
+    links_by_trace: dict[str, list[str]] = {row[0]: [] for row in rows}
+    if rows:
+        placeholders = ",".join("?" for _ in rows)
+        link_rows = conn.execute(
+            f"""
+            SELECT trace_id, entity_id
+            FROM trace_memory_links
+            WHERE trace_id IN ({placeholders})
+            ORDER BY created_at ASC, id ASC
+            """,
+            [row[0] for row in rows],
+        ).fetchall()
+        for trace_id, linked_entity_id in link_rows:
+            values = links_by_trace[trace_id]
+            if linked_entity_id not in values and len(values) < 10:
+                values.append(linked_entity_id)
+    return [
+        {
+            "trace_id": row[0],
+            "harness": row[1],
+            "status": row[2],
+            "created_at": row[3],
+            "completed_at": row[4],
+            "user_prompt_snippet": extract_title_and_snippet(row[5])[1],
+            "final_assistant_message_snippet": extract_title_and_snippet(row[6] or "")[1],
+            "linked_entity_ids": links_by_trace[row[0]],
+        }
+        for row in rows
+    ]
+
+
 def search_traces(
     agent_session_id: str | None = None,
     entity_id: str | None = None,
@@ -396,61 +455,9 @@ def search_traces(
         _run_read_sweep(conn, coordinator, "search_traces")
         page_size = 5 if limit is None else max(0, limit)
         offset = _parse_offset(cursor)
-        where: list[str] = []
-        params: list[Any] = []
-        if agent_session_id is not None:
-            where.append("ct.agent_session_id = ?")
-            params.append(agent_session_id)
-        if entity_id is not None:
-            where.append(
-                "EXISTS (SELECT 1 FROM trace_memory_links f "
-                "WHERE f.trace_id = ct.id AND f.entity_id = ?)"
-            )
-            params.append(entity_id)
-        rows = conn.execute(
-            f"""
-            SELECT ct.id, ct.harness, ct.status, ct.created_at, ct.completed_at,
-                   ct.user_prompt, ct.final_assistant_message
-            FROM conversation_traces AS ct
-            WHERE {" AND ".join(where) or "1 = 1"}
-            ORDER BY ct.created_at DESC, ct.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            [*params, page_size + 1, offset],
-        ).fetchall()
+        rows = _trace_search_rows(conn, agent_session_id, entity_id, page_size, offset)
         has_more = len(rows) > page_size
-        rows = rows[:page_size]
-
-        links_by_trace: dict[str, list[str]] = {row[0]: [] for row in rows}
-        if rows:
-            placeholders = ",".join("?" for _ in rows)
-            link_rows = conn.execute(
-                f"""
-                SELECT trace_id, entity_id
-                FROM trace_memory_links
-                WHERE trace_id IN ({placeholders})
-                ORDER BY created_at ASC, id ASC
-                """,
-                [row[0] for row in rows],
-            ).fetchall()
-            for trace_id, linked_entity_id in link_rows:
-                values = links_by_trace[trace_id]
-                if linked_entity_id not in values and len(values) < 10:
-                    values.append(linked_entity_id)
-
-        results = [
-            {
-                "trace_id": row[0],
-                "harness": row[1],
-                "status": row[2],
-                "created_at": row[3],
-                "completed_at": row[4],
-                "user_prompt_snippet": extract_title_and_snippet(row[5])[1],
-                "final_assistant_message_snippet": extract_title_and_snippet(row[6] or "")[1],
-                "linked_entity_ids": links_by_trace[row[0]],
-            }
-            for row in rows
-        ]
+        results = _trace_search_results(conn, rows[:page_size])
         warnings = []
         if query_keywords is not None:
             warnings.append(
