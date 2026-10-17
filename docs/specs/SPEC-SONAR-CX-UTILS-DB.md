@@ -89,3 +89,7 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling); see the assignment event.
+
+## Amendment 1 (2026-10-17)
+
+Records the outcome of review; no contract changes. The three-line comment that justified `main()`'s `# noqa: C901, PLR0915` in `__main__.py` is dropped together with that suppression, which `main()` no longer needs (D5). Residual test gaps found by mutation and left open: the 365-day cap on the corrections window in `_correction_buckets` is not pinned by any test (also true before the refactor). Functions above the proxy limit and left unchanged under D6: `cmd_session_digest` (13), `cmd_related_memories` (17), `_migrate_predicate_drift` (14), `init_db` (assigned to SPEC-SONAR-CX-SCHEMA-INIT).

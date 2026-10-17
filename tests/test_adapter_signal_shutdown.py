@@ -166,5 +166,82 @@ class TestAdapterSignalShutdown(unittest.TestCase):
         self._run_signal_test(signal.SIGINT)
 
 
+class TestMainDispatch(unittest.TestCase):
+    def test_rpc_precedence_and_output(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        from saltmdb import __main__ as entry
+
+        for argv, method, params in (
+            (
+                ["saltmdb", "--backfill-chunk-embeddings", "--librarian"],
+                "run_backfill_chunk_embeddings_now",
+                {},
+            ),
+            (["saltmdb", "--librarian"], "run_librarian_now", {"force": True}),
+        ):
+            with (
+                self.subTest(argv=argv),
+                patch.object(sys, "argv", argv),
+                patch.object(entry, "get_db_path", return_value="/tmp/fictional.db"),
+                patch("saltmdb.daemon.client.call_method", return_value={"done": 2}) as call,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertIsNone(entry.main())
+                self.assertEqual(output.getvalue(), "{'done': 2}\n")
+                call.assert_called_once_with("/tmp/fictional.db", method, params)
+
+    def test_rpc_failure_exits_one_without_success_output(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+        from saltmdb import __main__ as entry
+
+        for flag in ("--backfill-chunk-embeddings", "--librarian"):
+            with (
+                self.subTest(flag=flag),
+                patch.object(sys, "argv", ["saltmdb", flag]),
+                patch.object(entry, "get_db_path", return_value="/tmp/fictional.db"),
+                patch("saltmdb.daemon.client.call_method", side_effect=RuntimeError("offline")),
+                redirect_stderr(io.StringIO()) as error,
+                redirect_stdout(io.StringIO()) as output,
+                self.assertRaises(SystemExit) as raised,
+            ):
+                entry.main()
+            self.assertEqual(raised.exception.code, 1)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(
+                error.getvalue(),
+                "Error: could not reach a SALTMDB daemon for /tmp/fictional.db: offline\n",
+            )
+
+    def test_adapter_identity_and_backend_setup_order(self):
+        from unittest.mock import patch
+        from saltmdb import __main__ as entry
+
+        events = []
+        with (
+            patch.object(sys, "argv", ["saltmdb"]),
+            patch.object(entry, "get_agent_id", return_value="configured-agent"),
+            patch(
+                "saltmdb.mcp.identity.SESSION_IDENTITY.configure_agent_id",
+                side_effect=lambda agent_id: events.append(("identity", agent_id)),
+            ),
+            patch(
+                "saltmdb.mcp.tools.configure_backend",
+                side_effect=lambda backend: events.append(("backend", type(backend).__name__)),
+            ),
+            patch(
+                "anyio.run", side_effect=lambda function, *args: events.append(("run", function))
+            ),
+        ):
+            self.assertIsNone(entry.main())
+
+        self.assertEqual(events[0], ("identity", "configured-agent"))
+        self.assertEqual(events[1][0], "backend")
+        self.assertEqual(events[2][0], "run")
+
+
 if __name__ == "__main__":
     unittest.main()

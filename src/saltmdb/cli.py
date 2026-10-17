@@ -230,68 +230,93 @@ def cmd_orphans(args):
     return 1 if "error" in result else 0
 
 
-def _corpus_correction_data(conn, days: int, now) -> dict[str, object]:
+def _correction_week(created_at, week_starts):
     from datetime import UTC, datetime, timedelta
+
+    try:
+        parsed = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    else:
+        parsed = parsed.astimezone(UTC)
+    week = parsed.date() - timedelta(days=parsed.weekday())
+    return week if week in week_starts else None
+
+
+def _bucket_correction_rows(rows, date_index, week_starts, consumer):
+    unparsed_rows = 0
+    for row in rows:
+        week = _correction_week(row[date_index], week_starts)
+        if week is None:
+            unparsed_rows += 1
+            continue
+        consumer(row, week)
+    return unparsed_rows
+
+
+def _record_correction_row(row, week, correction_counts, corrections_by_week):
+    predicate = row[0]
+    correction_counts[predicate] += 1
+    corrections_by_week[week] += 1
+
+
+def _record_memory_row(_row, week, memories_by_week):
+    memories_by_week[week] += 1
+
+
+def _correction_buckets(days, now):
+    from datetime import timedelta
+
+    if days <= 0:
+        return [], {}, {}
+    correction_cutoff = now - timedelta(days=min(days, 365))
+    first_week = correction_cutoff.date() - timedelta(days=correction_cutoff.weekday())
+    current_week = now.date() - timedelta(days=now.weekday())
+    week_starts = []
+    week = first_week
+    while week <= current_week:
+        week_starts.append(week)
+        week += timedelta(days=7)
+    return week_starts, {week: 0 for week in week_starts}, {week: 0 for week in week_starts}
+
+
+def _corpus_correction_data(conn, days: int, now) -> dict[str, object]:
+    from datetime import timedelta
 
     correction_counts = {"revises": 0, "supersedes": 0, "corrects": 0}
     correction_by_week = []
     memories_created = 0
     unparsed_rows = 0
+    week_starts, corrections_by_week, memories_by_week = _correction_buckets(days, now)
     if days > 0:
-        correction_cutoff = now - timedelta(days=min(days, 365))
-        first_week = correction_cutoff.date() - timedelta(days=correction_cutoff.weekday())
-        current_week = now.date() - timedelta(days=now.weekday())
-        week_starts = []
-        week = first_week
-        while week <= current_week:
-            week_starts.append(week)
-            week += timedelta(days=7)
-        corrections_by_week = {week: 0 for week in week_starts}
-        memories_by_week = {week: 0 for week in week_starts}
-        correction_since = correction_cutoff.isoformat()
+        correction_since = (now - timedelta(days=min(days, 365))).isoformat()
 
         relation_rows = conn.execute(
             "SELECT predicate, created_at FROM relations "
             "WHERE predicate IN ('revises', 'supersedes', 'corrects') AND created_at >= ?",
             (correction_since,),
         ).fetchall()
-        for predicate, created_at in relation_rows:
-            try:
-                parsed = datetime.fromisoformat(created_at)
-            except (TypeError, ValueError):
-                unparsed_rows += 1
-                continue
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            else:
-                parsed = parsed.astimezone(UTC)
-            week = parsed.date() - timedelta(days=parsed.weekday())
-            if week not in corrections_by_week:
-                unparsed_rows += 1
-                continue
-            correction_counts[predicate] += 1
-            corrections_by_week[week] += 1
+        unparsed_rows += _bucket_correction_rows(
+            relation_rows,
+            1,
+            corrections_by_week,
+            lambda row, week: _record_correction_row(
+                row, week, correction_counts, corrections_by_week
+            ),
+        )
 
         entity_rows = conn.execute(
             "SELECT created_at FROM entities WHERE created_at >= ?", (correction_since,)
         ).fetchall()
-        for (created_at,) in entity_rows:
-            try:
-                parsed = datetime.fromisoformat(created_at)
-            except (TypeError, ValueError):
-                unparsed_rows += 1
-                continue
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            else:
-                parsed = parsed.astimezone(UTC)
-            week = parsed.date() - timedelta(days=parsed.weekday())
-            if week not in memories_by_week:
-                unparsed_rows += 1
-                continue
-            memories_created += 1
-            memories_by_week[week] += 1
-
+        unparsed_rows += _bucket_correction_rows(
+            entity_rows,
+            0,
+            memories_by_week,
+            lambda row, week: _record_memory_row(row, week, memories_by_week),
+        )
+        memories_created = sum(memories_by_week.values())
         correction_by_week = [
             {
                 "week_start": week.isoformat(),

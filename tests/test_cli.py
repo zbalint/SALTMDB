@@ -457,6 +457,38 @@ class TestCorpusHealthCli(unittest.TestCase):
             report2["telemetry"]["total_calls"], 0, "days=0 must exclude rows just inserted 'now'"
         )
 
+    def test_corrections_days_zero_literal_characterization(self):
+        from datetime import timedelta
+
+        future_entity = self._mk_entity("Future days-zero entity")
+        future_at = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        self.conn.execute(
+            "UPDATE entities SET created_at = ? WHERE id = ?", (future_at, future_entity)
+        )
+        self.conn.commit()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=0))
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            json.loads(buf.getvalue())["corrections"],
+            {
+                "note": (
+                    "revisions and supersessions create new entities, so those entities are included "
+                    "in memories_created; the effective correction window is capped at 365 days; rows "
+                    "outside the window's weeks are counted in unparsed_rows"
+                ),
+                "window_days": 0,
+                "revises": 0,
+                "supersedes": 0,
+                "corrects": 0,
+                "total": 0,
+                "memories_created": 0,
+                "by_week": [],
+                "unparsed_rows": 0,
+            },
+        )
+
     def test_corrections_count_history_in_bounded_windows(self):
         from datetime import timedelta
 

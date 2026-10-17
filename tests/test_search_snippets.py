@@ -113,6 +113,30 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         match = next(r for r in results if r["title"] == "Listing Only Memory")
         self.assertEqual(match["snippet"], heuristic_snippet)
 
+    def test_title_and_snippet_boundaries_are_literal(self):
+        title_boundary = "x" * 60
+        snippet_boundary = "y" * 150
+        self.assertEqual(
+            extract_title_and_snippet(title_boundary),
+            ("x" * 60, "x" * 60),
+        )
+        self.assertEqual(
+            extract_title_and_snippet(snippet_boundary),
+            ("y" * 57 + "...", "y" * 150),
+        )
+
+    def test_untitled_heading_preserves_legacy_fallback(self):
+        self.assertEqual(
+            extract_title_and_snippet("intro\n# Untitled"),
+            ("intro", "intro"),
+        )
+
+    def test_snippet_caps_at_three_nonempty_lines(self):
+        self.assertEqual(
+            extract_title_and_snippet("one\ntwo\nthree\nfour"),
+            ("one", "one two three"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ from saltmdb.daemon.dispatch import dispatch_tool
 from saltmdb.db import connection as connection_module
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service
-from saltmdb.utils.text import resolve_id_prefix
+from saltmdb.utils.text import resolve_entity_ref, resolve_id_prefix
 
 
 def _store(conn, title, content=None, **kw):
@@ -216,6 +216,89 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
             ln for ln in content.splitlines() if ln.strip().startswith(shared_prefix)
         ]
         self.assertEqual(len(candidate_lines), 20)
+
+    def test_resolve_entity_ref_exact_and_missing_literals(self):
+        entity_id = _store(self.conn, "Resolve Entity Ref Target")
+        self.assertEqual(resolve_entity_ref(self.conn, entity_id), (entity_id, [], False))
+        self.assertEqual(resolve_entity_ref(self.conn, "missing-reference"), (None, [], False))
+
+    def test_resolve_entity_ref_ambiguous_prefix_literal(self):
+        id_a = _store(self.conn, "Resolve Ambiguous A")
+        id_b = _store(self.conn, "Resolve Ambiguous B")
+        prefix = id_a[:8]
+        forced_id_b = prefix + id_b[8:]
+        self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
+        self.conn.commit()
+        resolved, candidates, truncated = resolve_entity_ref(self.conn, prefix, agent_id="owner_a")
+        self.assertIsNone(resolved)
+        self.assertEqual({item["id"] for item in candidates}, {id_a, forced_id_b})
+        self.assertFalse(truncated)
+
+    def test_visible_title_resolution_excludes_archived_and_prefers_latest_live(self):
+        def valid_body(label):
+            return (
+                f"# {label}\n\n"
+                "This technical memory records a deterministic resolution fixture with enough "
+                "context for the quality gate to accept it.\n\n"
+                "## Details\n\n"
+                "- The archived row must never win title resolution.\n"
+                "- The newest visible row must win title resolution."
+            )
+
+        archived_only_id = _store(
+            self.conn,
+            "Archived Only Visible Title",
+            content=valid_body("Archived Only"),
+        )
+        memory_service.archive_memory(
+            entity_id=archived_only_id, agent_id="owner_a", db_connection=self.conn
+        )
+        self.assertEqual(
+            resolve_entity_ref(self.conn, "Archived Only Visible Title", agent_id="owner_a"),
+            (None, [], False),
+        )
+
+        older_id = _store(
+            self.conn,
+            "Older Visible Title",
+            content=valid_body("Older"),
+        )
+        latest_id = _store(
+            self.conn,
+            "Latest Visible Title",
+            content=valid_body("Latest"),
+        )
+        other = memory_service.store_memory(
+            content=valid_body("Other Owner"),
+            title="Other Owner Visible Title",
+            agent_id="other_owner",
+            db_connection=self.conn,
+        )
+        self.assertEqual(other["status"], "ok")
+        other_id = other["data"]["id"]
+        self.conn.execute(
+            "UPDATE entities SET title=? WHERE id IN (?,?,?)",
+            ("Repeated Visible Title", older_id, latest_id, other_id),
+        )
+        self.conn.execute("UPDATE entities SET scope='private' WHERE id=?", (other_id,))
+        self.conn.execute(
+            "UPDATE entities SET updated_at=? WHERE id=?",
+            ("2026-01-01T00:00:00+00:00", older_id),
+        )
+        self.conn.execute(
+            "UPDATE entities SET updated_at=? WHERE id=?",
+            ("2026-01-02T00:00:00+00:00", latest_id),
+        )
+        self.conn.execute(
+            "UPDATE entities SET updated_at=? WHERE id=?",
+            ("2026-01-03T00:00:00+00:00", other_id),
+        )
+        self.conn.commit()
+
+        self.assertEqual(
+            resolve_entity_ref(self.conn, "Repeated Visible Title", agent_id="owner_a"),
+            (latest_id, [], False),
+        )
 
 
 class TestEntityIdPrefixResolutionViaDispatch(unittest.TestCase):

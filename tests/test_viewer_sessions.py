@@ -115,6 +115,10 @@ class TestViewerSessions(unittest.TestCase):
             mock_get_last_error.return_value = 5
             self.assertTrue(_pid_alive(target_pid))
 
+    def test_pid_alive_permission_error_is_alive(self):
+        with patch("saltmdb.db.viewer_sessions.os.kill", side_effect=PermissionError):
+            self.assertTrue(_pid_alive(123))
+
     def test_session_agent_filter_is_case_sensitive(self):
         sessions = [
             {"session_id": "one", "agent_id": "Agent-A", "cwd": "/project"},

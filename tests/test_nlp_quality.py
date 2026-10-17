@@ -210,6 +210,37 @@ class TestTextQualityGate(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(nlp.validate_markdown_structure(input_text), expected)
 
+    def test_single_pipe_markdown_row_is_broken_syntax(self):
+        self.assertEqual(
+            nlp.validate_markdown_structure("|"),
+            {
+                "is_valid": False,
+                "error_flag": "BROKEN_MARKDOWN_SYNTAX",
+                "reason": "Malformed Markdown table row detected (insufficient pipe separators).",
+            },
+        )
+
+    def test_literal_auto_format_markdown_characterization(self):
+        source = "# Title\n\n```\nSELECT * FROM users;\n```"
+        self.assertEqual(
+            nlp.auto_format_markdown(source),
+            "# Title\n\n```sql\nSELECT * FROM users;\n```",
+        )
+
+    def test_literal_evaluate_memory_quality_characterization(self):
+        content = "# Title\n\nA concise technical paragraph with enough varied words for the quality gate."
+        self.assertEqual(
+            nlp.evaluate_memory_quality(content),
+            {
+                "status": "ACCEPT",
+                "quality_score": 0.65,
+                "quality_flags": ["HAS_HEADERS"],
+                "hard_errors": [],
+                "warnings": [],
+                "reason": None,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

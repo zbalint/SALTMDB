@@ -45,6 +45,9 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         formatted_twice = nlp.auto_format_markdown(formatted_once)
         self.assertEqual(formatted_once, formatted_twice)
 
+    def test_auto_format_markdown_empty_literal(self):
+        self.assertEqual(nlp.auto_format_markdown(""), "")
+
     def test_tc_adv_04_calibrated_auto_supersession(self):
         """TC-ADV-04: near duplicates persist with an advisory warning."""
         original_content = "SALTMDB memory server default port is set to 8080 and database path defaults to saltmdb db system configuration file settings."

@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from saltmdb.db.schema import init_db
+from saltmdb.db.schema import (
+    _archive_safe_supersedes_targets,
+    _cleanup_orphaned_vectors,
+    _current_relation_sql,
+    _load_current_supersedes,
+    _migrate_legacy_lifecycle_invariants,
+    init_db,
+)
 
 
 class TestLifecycleInvariantMigration(unittest.TestCase):
@@ -73,6 +80,19 @@ class TestLifecycleInvariantMigration(unittest.TestCase):
         )
         self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 3)
 
+    def test_self_relation_migration_literal_outcome(self):
+        self._entity("self-target")
+        self._relation("self-edge", "self-target", "self-target", "related_to")
+        self.conn.commit()
+
+        self._migrate()
+
+        invalid_at, valid_to = self.conn.execute(
+            "SELECT invalid_at,valid_to FROM relations WHERE id='self-edge'"
+        ).fetchone()
+        self.assertIsNotNone(invalid_at)
+        self.assertEqual(invalid_at, valid_to)
+
     def test_skips_entire_branching_supersedes_component(self):
         for entity_id in ("new-a", "new-b", "old"):
             self._entity(entity_id)
@@ -101,6 +121,87 @@ class TestLifecycleInvariantMigration(unittest.TestCase):
                 "WHERE id IN ('cycle-a','cycle-b') ORDER BY id"
             ).fetchone()[0],
             "raw,raw",
+        )
+
+    def test_migration_stats_pin_branch_component(self):
+        for entity_id in ("branch-a", "branch-b", "branch-c", "branch-d", "branch-e"):
+            self._entity(entity_id)
+        self._relation("r1", "branch-a", "branch-b")
+        self._relation("r2", "branch-c", "branch-d")
+        self._relation("r3", "branch-e", "branch-d")
+
+        stats = _migrate_legacy_lifecycle_invariants(self.conn, "2026-01-03T00:00:00+00:00")
+
+        self.assertEqual(stats["ambiguous_supersedes_components"], 1)
+
+    def test_migration_stats_pin_cycle_component(self):
+        for entity_id in ("cycle-a", "cycle-b"):
+            self._entity(entity_id)
+        self._relation("r1", "cycle-a", "cycle-b")
+        self._relation("r2", "cycle-b", "cycle-a")
+
+        stats = _migrate_legacy_lifecycle_invariants(self.conn, "2026-01-03T00:00:00+00:00")
+
+        self.assertEqual(stats["ambiguous_supersedes_components"], 1)
+
+    def test_invalid_at_equal_now_is_not_current(self):
+        self._entity("boundary-new")
+        self._entity("boundary-old")
+        self._relation("boundary-relation", "boundary-new", "boundary-old")
+        now = "2026-01-03T00:00:00+00:00"
+        self.conn.execute(
+            "UPDATE relations SET invalid_at=? WHERE id=?", (now, "boundary-relation")
+        )
+        rows = _load_current_supersedes(
+            self.conn,
+            _current_relation_sql(),
+            (now, now, now, now),
+        )
+        self.assertEqual(rows, [])
+
+    def test_consolidated_supersedes_target_is_archived(self):
+        self._entity("consolidated-new")
+        self._entity("consolidated-old", status="consolidated")
+        rows = [
+            (
+                "consolidated-relation",
+                "consolidated-new",
+                "consolidated-old",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            )
+        ]
+        archived = _archive_safe_supersedes_targets(
+            self.conn,
+            rows,
+            {"consolidated-old", "consolidated-new"},
+            "2026-01-03T00:00:00+00:00",
+        )
+        self.assertEqual(archived, 1)
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM entities WHERE id='consolidated-old'").fetchone()[
+                0
+            ],
+            "archived",
+        )
+
+    def test_cleanup_removes_archived_retrieval_vector(self):
+        self._entity("retrieval-archived", status="archived")
+        vector = b"\x00" * (384 * 4)
+        self.conn.execute(
+            "INSERT INTO retrieval_embeddings(entity_id,embedding,source_hash) VALUES (?,?,?)",
+            ("retrieval-archived", vector, "source-hash"),
+        )
+        self.conn.commit()
+
+        _cleanup_orphaned_vectors(self.conn)
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM retrieval_embeddings WHERE entity_id=?",
+                ("retrieval-archived",),
+            ).fetchone()[0],
+            0,
         )
 
     def test_rebuilds_stale_context_index_definition(self):

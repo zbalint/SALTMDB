@@ -16,21 +16,16 @@ logger = logging.getLogger(__name__)
 _PRAGMA_USER_VERSION = "PRAGMA user_version"
 
 
-def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
-    conn, now: str
-) -> dict[str, int]:
-    """Repair deterministic lifecycle drift left by pre-v3 releases.
-
-    A supersedes component is migrated only when every node has at most one incoming and one
-    outgoing edge. Branching components are intentionally retained for human review.
-    """
-    current_sql = """
+def _current_relation_sql() -> str:
+    return """
         (valid_from IS NULL OR datetime(valid_from) <= datetime(?))
         AND (valid_to IS NULL OR datetime(valid_to) > datetime(?))
         AND (valid_at IS NULL OR datetime(valid_at) <= datetime(?))
         AND (invalid_at IS NULL OR datetime(invalid_at) > datetime(?))
     """
-    current_params = (now, now, now, now)
+
+
+def _invalidate_self_relations(conn, current_sql, current_params, now):
     self_rows = conn.execute(
         f"SELECT id FROM relations WHERE source_id=target_id AND {current_sql}", current_params
     ).fetchall()
@@ -38,12 +33,39 @@ def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
         conn.execute(
             "UPDATE relations SET invalid_at=?, valid_to=? WHERE id=?", (now, now, relation_id)
         )
+    return self_rows
 
-    rows = conn.execute(
+
+def _load_current_supersedes(conn, current_sql, current_params):
+    return conn.execute(
         f"""SELECT id,source_id,target_id,created_at,valid_from FROM relations
              WHERE predicate='supersedes' AND source_id != target_id AND {current_sql}""",
         current_params,
     ).fetchall()
+
+
+def _walk_supersedes_component(adjacency, start, seen):
+    component: set[str] = set()
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node in component:
+            continue
+        component.add(node)
+        queue.extend(adjacency[node] - component)
+    seen.update(component)
+    return component
+
+
+def _component_is_ambiguous(component, rows, anomalous):
+    component_edge_count = sum(1 for row in rows if row[1] in component)
+    # Degree limits alone do not prove linearity: A->B plus B->A gives every node one
+    # incoming/outgoing edge but is a closed cycle with no canonical winner.  A connected
+    # linear component must also have exactly |V|-1 edges.
+    return bool(component & anomalous or component_edge_count != len(component) - 1)
+
+
+def _find_safe_supersedes_nodes(rows):
     incoming = Counter(row[2] for row in rows)
     outgoing = Counter(row[1] for row in rows)
     adjacency: dict[str, set[str]] = defaultdict(set)
@@ -59,24 +81,15 @@ def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
     for start in adjacency:
         if start in seen:
             continue
-        component: set[str] = set()
-        queue = deque([start])
-        while queue:
-            node = queue.popleft()
-            if node in component:
-                continue
-            component.add(node)
-            queue.extend(adjacency[node] - component)
-        seen.update(component)
-        component_edge_count = sum(1 for row in rows if row[1] in component)
-        # Degree limits alone do not prove linearity: A->B plus B->A gives every node one
-        # incoming/outgoing edge but is a closed cycle with no canonical winner.  A connected
-        # linear component must also have exactly |V|-1 edges.
-        if component & anomalous or component_edge_count != len(component) - 1:
+        component = _walk_supersedes_component(adjacency, start, seen)
+        if _component_is_ambiguous(component, rows, anomalous):
             ambiguous_components += 1
         else:
             safe_nodes.update(component)
+    return safe_nodes, ambiguous_components
 
+
+def _archive_safe_supersedes_targets(conn, rows, safe_nodes, now):
     from saltmdb.domain.services.embedding_service import (
         cancel_embedding_jobs_for_entity,
         cancel_retrieval_embedding_jobs_for_entity,
@@ -106,12 +119,10 @@ def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
         clear_embedding_vectors_for_entity(conn, target_id, strict=True)
         cancel_retrieval_embedding_jobs_for_entity(conn, target_id, clear_vector=True)
         archived += 1
+    return archived
 
-    conn.execute(
-        "UPDATE entities SET valid_to=COALESCE(updated_at,valid_from,created_at) "
-        "WHERE status='archived' AND valid_to IS NULL"
-    )
 
+def _cleanup_orphaned_vectors(conn):
     vector_ids: set[str] = set()
     for table in ("entity_embeddings", "entity_chunk_embeddings", "retrieval_embeddings"):
         vector_ids.update(
@@ -121,10 +132,33 @@ def _migrate_legacy_lifecycle_invariants(  # noqa: C901, PLR0912
                 "ON e.id=v.entity_id WHERE e.id IS NULL OR e.status='archived'"
             ).fetchall()
         )
+    from saltmdb.domain.services.embedding_service import clear_embedding_vectors_for_entity
+
     for entity_id in vector_ids:
         clear_embedding_vectors_for_entity(conn, entity_id, strict=True)
         conn.execute("DELETE FROM retrieval_embeddings WHERE entity_id=?", (entity_id,))
+    return vector_ids
 
+
+def _migrate_legacy_lifecycle_invariants(conn, now: str) -> dict[str, int]:
+    """Repair deterministic lifecycle drift left by pre-v3 releases.
+
+    A supersedes component is migrated only when every node has at most one incoming and one
+    outgoing edge. Branching components are intentionally retained for human review.
+    """
+    current_sql = _current_relation_sql()
+    current_params = (now, now, now, now)
+    self_rows = _invalidate_self_relations(conn, current_sql, current_params, now)
+    rows = _load_current_supersedes(conn, current_sql, current_params)
+    safe_nodes, ambiguous_components = _find_safe_supersedes_nodes(rows)
+    archived = _archive_safe_supersedes_targets(conn, rows, safe_nodes, now)
+
+    conn.execute(
+        "UPDATE entities SET valid_to=COALESCE(updated_at,valid_from,created_at) "
+        "WHERE status='archived' AND valid_to IS NULL"
+    )
+
+    vector_ids = _cleanup_orphaned_vectors(conn)
     return {
         "self_relations": len(self_rows),
         "archived_supersedes_targets": archived,

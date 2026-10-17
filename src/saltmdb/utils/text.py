@@ -100,6 +100,32 @@ def resolve_id_prefix(
     return None, [], False
 
 
+def _resolve_existing_entity(conn, resolved, agent_id):
+    if not resolved:
+        return None
+    try:
+        if conn.execute(
+            "SELECT 1 FROM entities WHERE id = ?"
+            + (" AND (agent_id = ? OR scope = 'shared')" if agent_id is not None else ""),
+            (resolved, agent_id) if agent_id is not None else (resolved,),
+        ).fetchone():
+            return resolved
+    except sqlite3.Error as exc:
+        logger.debug("Existence check unavailable during entity-ref resolution: %s", exc)
+    return None
+
+
+def _resolve_visible_title(conn, raw_id, agent_id):
+    if agent_id is None:
+        return None
+    visible_title = conn.execute(
+        "SELECT id FROM entities WHERE title = ? AND status != 'archived' "
+        "AND (agent_id = ? OR scope = 'shared') ORDER BY updated_at DESC LIMIT 1",
+        (raw_id, agent_id),
+    ).fetchone()
+    return visible_title[0] if visible_title else None
+
+
 def resolve_entity_ref(
     conn, raw_id: str, agent_id: str | None = None
 ) -> tuple[str | None, list[dict], bool]:
@@ -121,25 +147,12 @@ def resolve_entity_ref(
     """
     if not raw_id or not isinstance(raw_id, str):
         return None, [], False
-    resolved = resolve_entity_id(conn, raw_id)
+    resolved = _resolve_existing_entity(conn, resolve_entity_id(conn, raw_id), agent_id)
     if resolved:
-        try:
-            if conn.execute(
-                "SELECT 1 FROM entities WHERE id = ?"
-                + (" AND (agent_id = ? OR scope = 'shared')" if agent_id is not None else ""),
-                (resolved, agent_id) if agent_id is not None else (resolved,),
-            ).fetchone():
-                return resolved, [], False
-        except sqlite3.Error as exc:
-            logger.debug("Existence check unavailable during entity-ref resolution: %s", exc)
-    if agent_id is not None:
-        visible_title = conn.execute(
-            "SELECT id FROM entities WHERE title = ? AND status != 'archived' "
-            "AND (agent_id = ? OR scope = 'shared') ORDER BY updated_at DESC LIMIT 1",
-            (raw_id, agent_id),
-        ).fetchone()
-        if visible_title:
-            return visible_title[0], [], False
+        return resolved, [], False
+    title_id = _resolve_visible_title(conn, raw_id, agent_id)
+    if title_id:
+        return title_id, [], False
     prefix_id, candidates, truncated = resolve_id_prefix(conn, raw_id, agent_id=agent_id)
     if candidates:
         return None, candidates, truncated
@@ -148,11 +161,7 @@ def resolve_entity_ref(
     return None, [], False
 
 
-def extract_title_and_snippet(markdown_text: str):
-    """Heuristic helper to extract a clean title and snippet from markdown text."""
-    if not markdown_text:
-        return "Untitled", ""
-    lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+def _extract_title(lines):
     title = "Untitled"
     for line in lines:
         if line.startswith("#"):
@@ -160,23 +169,32 @@ def extract_title_and_snippet(markdown_text: str):
             if candidate:
                 title = candidate
                 break
-
     if title == "Untitled" and lines:
         title = lines[0]
         if len(title) > 60:
             title = title[:57] + "..."
+    return title
 
+
+def _extract_snippet(lines):
     text_lines = []
     for line in lines:
         if not line.startswith("#"):
             text_lines.append(line)
             if len(text_lines) >= 3:
                 break
-
     snippet = " ".join(text_lines)
     if len(snippet) > 150:
         snippet = snippet[:147] + "..."
-    return title, snippet
+    return snippet
+
+
+def extract_title_and_snippet(markdown_text: str):
+    """Heuristic helper to extract a clean title and snippet from markdown text."""
+    if not markdown_text:
+        return "Untitled", ""
+    lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+    return _extract_title(lines), _extract_snippet(lines)
 
 
 def sanitize_fts_query(query: str) -> str:

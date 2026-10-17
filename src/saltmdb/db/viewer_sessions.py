@@ -2,11 +2,13 @@ import os
 import sys
 import logging
 from datetime import datetime, UTC
+from typing import Any, cast
 from saltmdb.db.connection import write_transaction_retrying
 
 logger = logging.getLogger(__name__)
 
-kernel32 = None
+kernel32: Any = None
+wintypes: Any = None
 if sys.platform == "win32":
     import ctypes
     from ctypes import wintypes
@@ -22,61 +24,66 @@ if sys.platform == "win32":
     kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 
 
-def _pid_alive(pid: int) -> bool:  # noqa: PLR0911
+def _pid_alive_windows(pid: int) -> bool:
+    import ctypes
+
+    ctypes = cast(Any, ctypes)
+    try:
+        # PROCESS_QUERY_LIMITED_INFORMATION (0x1000): sufficient for
+        # GetExitCodeProcess without needing the SYNCHRONIZE right.
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            try:
+                # Use wintypes.DWORD (c_ulong) — the correct type for the
+                # lpExitCode out-parameter; c_uint32 would cause ArgumentError.
+                exit_code = wintypes.DWORD()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    # 259 (STILL_ACTIVE) means the process has not exited.
+                    alive = exit_code.value == 259
+                    logger.info(
+                        "[win32] PID %s: GetExitCodeProcess exit_code=%s alive=%s",
+                        pid,
+                        exit_code.value,
+                        alive,
+                    )
+                    return alive
+                err = getattr(ctypes, "get_last_error")()
+                logger.warning(
+                    "[win32] PID %s: GetExitCodeProcess failed, error=%s; assuming alive",
+                    pid,
+                    err,
+                )
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        error = getattr(ctypes, "get_last_error")()
+        if error == 5:  # ERROR_ACCESS_DENIED: process exists, no permission
+            logger.info("[win32] PID %s: OpenProcess ACCESS_DENIED, treating as alive", pid)
+            return True
+        logger.warning("[win32] PID %s: OpenProcess failed, error=%s, treating as dead", pid, error)
+        return False
+    except Exception as e:
+        logger.warning(
+            "Failed to check PID liveness on Windows for PID %s: %s", pid, e, exc_info=True
+        )
+        return False
+
+
+def _pid_alive_posix(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _pid_alive(pid: int) -> bool:
     """Checks whether a process with the given PID is currently alive on Linux or Windows."""
     if sys.platform == "win32":
-        import ctypes
-
-        try:
-            # PROCESS_QUERY_LIMITED_INFORMATION (0x1000): sufficient for
-            # GetExitCodeProcess without needing the SYNCHRONIZE right.
-            handle = kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                try:
-                    # Use wintypes.DWORD (c_ulong) — the correct type for the
-                    # lpExitCode out-parameter; c_uint32 would cause ArgumentError.
-                    exit_code = wintypes.DWORD()
-                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                        # 259 (STILL_ACTIVE) means the process has not exited.
-                        alive = exit_code.value == 259
-                        logger.info(
-                            "[win32] PID %s: GetExitCodeProcess exit_code=%s alive=%s",
-                            pid,
-                            exit_code.value,
-                            alive,
-                        )
-                        return alive
-                    err = ctypes.get_last_error()
-                    logger.warning(
-                        "[win32] PID %s: GetExitCodeProcess failed, error=%s; assuming alive",
-                        pid,
-                        err,
-                    )
-                    return True
-                finally:
-                    kernel32.CloseHandle(handle)
-            else:
-                error = ctypes.get_last_error()
-                if error == 5:  # ERROR_ACCESS_DENIED: process exists, no permission
-                    logger.info("[win32] PID %s: OpenProcess ACCESS_DENIED, treating as alive", pid)
-                    return True
-                logger.warning(
-                    "[win32] PID %s: OpenProcess failed, error=%s, treating as dead", pid, error
-                )
-                return False
-        except Exception as e:
-            logger.warning(
-                "Failed to check PID liveness on Windows for PID %s: %s", pid, e, exc_info=True
-            )
-            return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+        return _pid_alive_windows(pid)
+    return _pid_alive_posix(pid)
 
 
 def register_session(conn, port: int, pid: int | None = None) -> None:
