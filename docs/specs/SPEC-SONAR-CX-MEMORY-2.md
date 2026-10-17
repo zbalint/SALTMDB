@@ -7,12 +7,10 @@ LOCKED 2026-10-16
 - Backlog item: none (Sonar cleanup, rule `python:S3776` cognitive complexity). Shared `context_id`: `saltmdb-sonar-fix-2026-10`.
 - Baseline: `develop` after SPEC-SONAR-CX-MEMORY-1 is committed; `./verify` exits 0.
 - Location and branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`.
-- Test seams: the public functions of `memory_service` (`check_duplicate_memories`, `bulk_archive_memory`, `update_memory_metadata`, `fetch_memory_chunk`, `resolve_or_create_tag`, `chunk_candidate_search`, `get_relevance_preview_data`) and the ranking helpers called directly as the existing tests do.
+- Test seams: the public functions of `memory_service` (`check_duplicate_memories`, `bulk_archive_memory`, `update_memory_metadata`, `fetch_memory_chunk`, `resolve_or_create_tag`) with temporary databases.
 - Scope (may edit), source:
   - `src/saltmdb/domain/services/memory_service/duplicates.py`
   - `src/saltmdb/domain/services/memory_service/lifecycle.py`
-  - `src/saltmdb/domain/services/memory_service/ranking.py`
-  - `src/saltmdb/domain/services/memory_service/search_primitives.py`
   - `src/saltmdb/domain/services/memory_service/tags.py`
 - Scope (may edit), tests: existing tests for the memory service (find them with `rg -l <function name> tests`); new tests go beside them.
 - Does not touch: everything else.
@@ -20,7 +18,7 @@ LOCKED 2026-10-16
 
 ## 1. Why
 
-Sonar reports 12 functions above the cognitive-complexity limit of 15 in this group. These are the duplicate-detection, lifecycle, tag, search-primitive and ranking functions of the memory service, each below score 60. The fix is a behavior-preserving refactor: extract cohesive private helpers until each function is below the limit. The owner's rule: never close or hide a finding; whatever cannot be fixed with certainty is reported.
+Sonar reports 7 functions above the cognitive-complexity limit of 15 in this group. These are the duplicate-detection, lifecycle and tag functions of the memory service, each below score 60. The fix is a behavior-preserving refactor: extract cohesive private helpers until each function is below the limit. The owner's rule: never close or hide a finding; whatever cannot be fixed with certainty is reported.
 
 ## 2. Decisions
 
@@ -52,11 +50,6 @@ Line numbers and scores come from the Sonar analysis of commit `5a4e7ac` and may
 | `src/saltmdb/domain/services/memory_service/lifecycle.py` | `_assemble_memory_record` | 743 | 16 |
 | `src/saltmdb/domain/services/memory_service/lifecycle.py` | `update_memory_metadata` | 1014 | 23 |
 | `src/saltmdb/domain/services/memory_service/lifecycle.py` | `fetch_memory_chunk` | 1139 | 20 |
-| `src/saltmdb/domain/services/memory_service/ranking.py` | `_collapse_supersedes_families` | 158 | 46 |
-| `src/saltmdb/domain/services/memory_service/ranking.py` | `_build_cross_encoder_candidate_texts` | 272 | 31 |
-| `src/saltmdb/domain/services/memory_service/ranking.py` | `_resolve_supersession_chains` | 413 | 28 |
-| `src/saltmdb/domain/services/memory_service/search_primitives.py` | `chunk_candidate_search` | 315 | 16 |
-| `src/saltmdb/domain/services/memory_service/search_primitives.py` | `get_relevance_preview_data` | 600 | 18 |
 | `src/saltmdb/domain/services/memory_service/tags.py` | `resolve_or_create_tag` | 87 | 33 |
 
 ## 4. Tests
@@ -95,3 +88,7 @@ Other Sonar rules, other files, any change of behavior, performance work, and th
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling, patch targets, extraction needs); see the assignment event.
+
+## Amendment note (2026-10-17)
+
+The original MEMORY-2 scope (12 functions in five files) was split to keep each review reviewable on these core paths. This spec keeps the duplicate-detection, lifecycle and tag functions (7); the ranking and search-primitive functions (5) moved to SPEC-SONAR-CX-MEMORY-2B.
