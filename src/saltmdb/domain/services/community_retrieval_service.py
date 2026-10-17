@@ -129,7 +129,7 @@ def _score_member_embeddings(conn, members, seeded_ids, query_vector):
 
 def _score_members(conn, seeded_ids, query_vector, agent_id):
     members = _load_members(conn, seeded_ids, agent_id)
-    return members, _score_member_embeddings(conn, members, seeded_ids, query_vector)
+    return _score_member_embeddings(conn, members, seeded_ids, query_vector)
 
 
 def _open_global_connection(
@@ -290,9 +290,7 @@ def seed_and_rank_communities(  # noqa: C901, PLR0912, PLR0915
         if not seeded:
             return _empty_result()
         seeded_ids = [community_id for community_id, _ in seeded]
-        members_by_community, scored_by_community = _score_members(
-            conn, seeded_ids, query_vector, agent_id
-        )
+        scored_by_community = _score_members(conn, seeded_ids, query_vector, agent_id)
 
         (
             representative_admitted,
