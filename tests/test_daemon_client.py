@@ -476,6 +476,47 @@ class TestSessionConnectionOpen(unittest.TestCase):
             sent_requests[0]["params"]["caller_agent_session_capability"], "new-capability"
         )
 
+    def test_call_method_removes_stale_capability_when_refreshed_session_has_none(self):
+        session = self._blank_session()
+        session._agent_session_id = "logical-session"
+        session._session_capability = None
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        sent_requests = []
+        with (
+            patch.object(
+                client,
+                "ensure_daemon_running",
+                return_value={"service_port": 1, "auth_token": "tok"},
+            ),
+            patch.object(session, "ensure_fresh"),
+            patch.object(client.socket, "create_connection", return_value=fake_sock),
+            patch.object(
+                client.protocol,
+                "send_frame",
+                side_effect=lambda _sock, request: sent_requests.append(request),
+            ),
+            patch.object(
+                client.protocol,
+                "recv_frame",
+                return_value=protocol.build_ok_response("x", "ok"),
+            ),
+        ):
+            result = client.call_method(
+                "/tmp/saltmdb-test.db",
+                "search_tags",
+                {
+                    "caller_agent_session_id": "logical-session",
+                    "caller_agent_session_capability": "stale-capability",
+                },
+                _session=session,
+                _caller_agent_session_id="logical-session",
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(sent_requests[0]["params"]["caller_agent_session_id"], "logical-session")
+        self.assertNotIn("caller_agent_session_capability", sent_requests[0]["params"])
+
     def test_failed_refresh_blocks_rpc_and_next_call_can_retry_logical_session(self):
         session = self._blank_session()
         session._agent_session_id = "logical-session"

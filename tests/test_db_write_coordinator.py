@@ -101,6 +101,25 @@ class DbWriteCoordinatorTests(unittest.TestCase):
         self.assertFalse(coordinator._started)
         self.assertTrue(coordinator._stopping)
 
+    def test_run_stopping_does_not_drain_queued_job(self):
+        stopping = DbWriteCoordinator(self.path)
+        stopping._started = True
+        executed = False
+
+        def queued_job(_conn: sqlite3.Connection) -> None:
+            nonlocal executed
+            executed = True
+
+        future = stopping.submit("queued", queued_job, wait=False)
+        assert isinstance(future, Future)
+        stopping._stopping = True
+        with patch.object(stopping, "_load_vector_extension"):
+            stopping._run()
+
+        self.assertFalse(executed)
+        self.assertTrue(future.done())
+        self.assertIsInstance(future.exception(), CoordinatorUsageError)
+
     def test_run_stopping_and_cancelled_jobs_skip_execution(self):
         stopping = DbWriteCoordinator(self.path)
         stopping._stopping = True
