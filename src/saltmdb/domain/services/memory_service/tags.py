@@ -128,10 +128,16 @@ def _sanitize_resolution_name(conn, name: str, agent_id: str | None) -> str:
     return name
 
 
+def _canonical_tag_id(row) -> str | None:
+    if not row:
+        return None
+    return row[1] if row[1] else row[0]
+
+
 # Step 2: exact match
 def _resolve_exact_tag(conn, name: str) -> str | None:
     row = conn.execute("SELECT id, canonical_id FROM tags WHERE name = ?", (name,)).fetchone()
-    return (row[1] if row[1] else row[0]) if row else None
+    return _canonical_tag_id(row)
 
 
 # Step 3: normalized_name / computed-normalization fallback (mirrors store_memory)
@@ -140,7 +146,7 @@ def _resolve_normalized_tag(conn, norm_input: str) -> str | None:
         "SELECT id, canonical_id FROM tags WHERE normalized_name = ? OR lower(replace(replace(replace(name,'#',''),'-',''),'_','')) = ?",
         (norm_input, norm_input),
     ).fetchone()
-    return (row[1] if row[1] else row[0]) if row else None
+    return _canonical_tag_id(row)
 
 
 # Step 4: plural/suffix fallback -- full scan (small table, same cost model already
