@@ -632,7 +632,7 @@ def _quality_statistical_findings(text, words, entropy, flags, hard_errors, warn
     _quality_readability_findings(text, flags, warnings)
 
 
-def _quality_structure_findings(text, length, md_res, flags, hard_errors, warnings, reasons):
+def _quality_structure_findings(text, length, md_res, flags, hard_errors, reasons):
     has_list = bool(re.search(r"^\s*(?:[\-\*\+]|\d+\.)\s+", text, re.MULTILINE))
     has_paragraph_break = "\n\n" in text
     header_count = md_res.get("header_count", 0)
@@ -727,7 +727,7 @@ def evaluate_memory_quality(content: str, title: str = None) -> dict:
     entropy = calculate_shannon_entropy(text)
     _quality_statistical_findings(text, words, entropy, flags, hard_errors, warnings, reasons)
     has_list, header_count = _quality_structure_findings(
-        text, length, md_res, flags, hard_errors, warnings, reasons
+        text, length, md_res, flags, hard_errors, reasons
     )
     score = _quality_score(md_res, words, has_list, header_count, flags)
     status, score = _quality_finalize(score, hard_errors, warnings)

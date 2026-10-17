@@ -32,7 +32,7 @@ def _run_rpc_command(method: str, params: dict, action: str) -> None:
     print(result, flush=True)
 
 
-def _run_signal_shutdown(signum, frame, get_current_session, os_module) -> None:
+def _run_signal_shutdown(signum, get_current_session, os_module) -> None:
     logger.info("SALTMDB adapter received signal %s; shutting down.", signum)
     session = get_current_session()
     if session is not None:
@@ -94,8 +94,8 @@ async def _run_adapter_until_shutdown(anyio, signal, os, get_current_session, mc
     entirely, so the same synchronous close-and-exit logic can run directly with no task
     group needed on that path."""
 
-    def _shutdown_on_signal(signum, frame=None) -> None:
-        _run_signal_shutdown(signum, frame, get_current_session, os)
+    def _shutdown_on_signal(signum, *_) -> None:
+        _run_signal_shutdown(signum, get_current_session, os)
 
     if sys.platform == "win32":
         await _run_windows_adapter(mcp, signal, _shutdown_on_signal)
