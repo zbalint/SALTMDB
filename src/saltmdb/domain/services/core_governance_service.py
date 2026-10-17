@@ -249,6 +249,38 @@ def is_overdue(core_review_after: str | None, *, now: datetime | None = None) ->
 # ---------------------------------------------------------------------------
 
 
+def _validate_detail_reference(conn, raw_id: object, *, content: str, seen: set[str]) -> str | None:
+    if not isinstance(raw_id, str) or not _UUID_RE.match(raw_id.strip()):
+        raise ValueError(
+            f"detail_memory_ids must be full UUIDs, not prefixes or other references (got "
+            f"{raw_id!r})."
+        )
+    uid = raw_id.strip().lower()
+    if uid in seen:
+        return None
+    seen.add(uid)
+    row = conn.execute("SELECT title, scope, is_core FROM entities WHERE id = ?", (uid,)).fetchone()
+    if not row:
+        raise ValueError(f"detail_memory_ids references a memory that does not exist: {uid}")
+    title, scope, is_core_val = row
+    if scope != "shared":
+        raise ValueError(
+            f"detail memory {uid} must be shared -- private core details are prohibited."
+        )
+    if is_core_val:
+        raise ValueError(
+            f"detail memory {uid} is itself core -- a core cannot declare another core as a "
+            "detail memory."
+        )
+    if title not in content or uid not in content:
+        raise ValueError(
+            f"Core content must mention both the canonical title and the full UUID of "
+            f"declared detail memory {uid} (title: {title!r}) -- a core must stay directly "
+            "actionable even if a lazy or weaker agent never follows the link."
+        )
+    return uid
+
+
 def validate_detail_memory_ids(conn, detail_memory_ids: list | None, *, content: str) -> list[str]:
     """`detail_memory_ids=None` is the caller's job to interpret as "preserve" before calling
     this -- by the time this runs it is always an explicit list (possibly empty)."""
@@ -262,37 +294,9 @@ def validate_detail_memory_ids(conn, detail_memory_ids: list | None, *, content:
     normalized: list[str] = []
     seen: set[str] = set()
     for raw_id in detail_memory_ids:
-        if not isinstance(raw_id, str) or not _UUID_RE.match(raw_id.strip()):
-            raise ValueError(
-                f"detail_memory_ids must be full UUIDs, not prefixes or other references (got "
-                f"{raw_id!r})."
-            )
-        uid = raw_id.strip().lower()
-        if uid in seen:
-            continue
-        seen.add(uid)
-        row = conn.execute(
-            "SELECT title, scope, is_core FROM entities WHERE id = ?", (uid,)
-        ).fetchone()
-        if not row:
-            raise ValueError(f"detail_memory_ids references a memory that does not exist: {uid}")
-        title, scope, is_core_val = row
-        if scope != "shared":
-            raise ValueError(
-                f"detail memory {uid} must be shared -- private core details are prohibited."
-            )
-        if is_core_val:
-            raise ValueError(
-                f"detail memory {uid} is itself core -- a core cannot declare another core as a "
-                "detail memory."
-            )
-        if title not in content or uid not in content:
-            raise ValueError(
-                f"Core content must mention both the canonical title and the full UUID of "
-                f"declared detail memory {uid} (title: {title!r}) -- a core must stay directly "
-                "actionable even if a lazy or weaker agent never follows the link."
-            )
-        normalized.append(uid)
+        uid = _validate_detail_reference(conn, raw_id, content=content, seen=seen)
+        if uid is not None:
+            normalized.append(uid)
     return normalized
 
 
@@ -572,6 +576,40 @@ def _detail_id_violation(conn, row: dict) -> str | None:
     return None
 
 
+def _invariant_row_violations(conn, row: dict) -> list[str]:
+    # Routed through the same canonical bounded-text validators store/consolidation use
+    # (secondary review finding), not a raw length check -- so a legacy row whose reason/exit
+    # text would fail today's redaction/control-character/CRLF handling is caught the same
+    # way it would be caught on a fresh write, not differently at bootstrap-read time.
+    violations: list[str] = []
+    try:
+        validate_core_reason(row.get("core_reason"))
+    except ValueError:
+        violations.append(f"{row['id']}: core_reason missing or out of bounds")
+    try:
+        validate_core_exit_condition(row.get("core_exit_condition"))
+    except ValueError:
+        violations.append(f"{row['id']}: core_exit_condition missing or out of bounds")
+    review_after = row.get("core_review_after")
+    if not review_after:
+        violations.append(f"{row['id']}: core_review_after missing")
+    else:
+        try:
+            _parse_iso_utc(review_after)
+        except ValueError:
+            violations.append(f"{row['id']}: core_review_after malformed")
+    if len(row.get("full_content") or "") > CORE_MAX_CONTENT_CHARS:
+        violations.append(f"{row['id']}: full_content exceeds {CORE_MAX_CONTENT_CHARS} characters")
+    if row.get("scope") != "shared":
+        violations.append(
+            f"{row['id']}: scope must be shared -- private core memories are prohibited"
+        )
+    detail_violation = _detail_id_violation(conn, row)
+    if detail_violation:
+        violations.append(detail_violation)
+    return violations
+
+
 def find_invariant_violations(rows: list[dict], conn=None) -> list[str]:
     """`conn` is needed only to validate each row's declared `core_detail_memory_ids` (JSON
     shape, per-core cap, full-UUID format, referenced-entity existence, shared+non-core detail
@@ -589,37 +627,7 @@ def find_invariant_violations(rows: list[dict], conn=None) -> list[str]:
             f"active core count {len(rows)} exceeds CORE_MAX_ACTIVE={CORE_MAX_ACTIVE}"
         )
     for row in rows:
-        # Routed through the same canonical bounded-text validators store/consolidation use
-        # (secondary review finding), not a raw length check -- so a legacy row whose reason/exit
-        # text would fail today's redaction/control-character/CRLF handling is caught the same
-        # way it would be caught on a fresh write, not differently at bootstrap-read time.
-        try:
-            validate_core_reason(row.get("core_reason"))
-        except ValueError:
-            violations.append(f"{row['id']}: core_reason missing or out of bounds")
-        try:
-            validate_core_exit_condition(row.get("core_exit_condition"))
-        except ValueError:
-            violations.append(f"{row['id']}: core_exit_condition missing or out of bounds")
-        review_after = row.get("core_review_after")
-        if not review_after:
-            violations.append(f"{row['id']}: core_review_after missing")
-        else:
-            try:
-                _parse_iso_utc(review_after)
-            except ValueError:
-                violations.append(f"{row['id']}: core_review_after malformed")
-        if len(row.get("full_content") or "") > CORE_MAX_CONTENT_CHARS:
-            violations.append(
-                f"{row['id']}: full_content exceeds {CORE_MAX_CONTENT_CHARS} characters"
-            )
-        if row.get("scope") != "shared":
-            violations.append(
-                f"{row['id']}: scope must be shared -- private core memories are prohibited"
-            )
-        detail_violation = _detail_id_violation(conn, row)
-        if detail_violation:
-            violations.append(detail_violation)
+        violations.extend(_invariant_row_violations(conn, row))
     rendered = render_bootstrap_digest(rows)
     if len(rendered) > CORE_MAX_RENDERED_CHARS:
         violations.append(
@@ -837,7 +845,77 @@ def _non_core_state(*, previous_detail_ids: list[str]) -> dict:
     }
 
 
-def resolve_store_core_state(  # noqa: C901, PLR0912
+def _load_existing_core_state(conn, entity_id: str | None) -> dict | None:
+    if not entity_id:
+        return None
+    row = conn.execute(
+        "SELECT is_core, core_reason, core_exit_condition, core_review_after, "
+        "core_detail_memory_ids FROM entities WHERE id = ?",
+        (entity_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "is_core": bool(row[0]),
+        "core_reason": row[1],
+        "core_exit_condition": row[2],
+        "core_review_after": row[3],
+        "core_detail_memory_ids": json.loads(row[4]) if row[4] else [],
+    }
+
+
+def _resolve_core_reason_exit(
+    existing: dict | None, core_reason: str | None, core_exit_condition: str | None
+) -> tuple[str, str]:
+    # Resolved follow-up review finding #3: omission means "preserve the value," never "skip
+    # validation of the effective value" -- the same class of bug already fixed for
+    # detail_memory_ids below. A preserved reason/exit_condition is re-run through the identical
+    # canonical validator a freshly-supplied one gets, so a legacy/corrupted row can no longer be
+    # carried forward malformed just because this write happened to omit the field.
+    if core_reason is not None:
+        reason = validate_core_reason(core_reason)
+    elif existing and existing.get("core_reason"):
+        reason = validate_core_reason(existing["core_reason"])
+    else:
+        raise ValueError("core_reason is required to create or promote a core memory.")
+    if core_exit_condition is not None:
+        exit_condition = validate_core_exit_condition(core_exit_condition)
+    elif existing and existing.get("core_exit_condition"):
+        exit_condition = validate_core_exit_condition(existing["core_exit_condition"])
+    else:
+        raise ValueError("core_exit_condition is required to create or promote a core memory.")
+    return reason, exit_condition
+
+
+def _resolve_core_review(existing: dict | None, core_review_after: str | None) -> tuple[str, bool]:
+    review_after_changed = False
+    if core_review_after is not None:
+        review_after = parse_core_review_after(core_review_after)
+        if existing and existing.get("core_review_after") not in (None, review_after):
+            review_after_changed = True
+    elif existing and existing.get("core_review_after"):
+        # Preserved, not newly supplied: structurally revalidated but exempt from the
+        # future-only bound (an overdue-but-parseable timestamp may still be preserved during a
+        # non-expanding edit -- see _validate_preserved_review_after).
+        review_after = _validate_preserved_review_after(existing["core_review_after"])
+    else:
+        review_after = parse_core_review_after(None, default_days=CORE_DEFAULT_REVIEW_DAYS)
+    return review_after, review_after_changed
+
+
+def _resolve_core_lifecycle(
+    existing: dict | None,
+    *,
+    core_reason: str | None,
+    core_exit_condition: str | None,
+    core_review_after: str | None,
+) -> tuple[str, str, str, bool]:
+    reason, exit_condition = _resolve_core_reason_exit(existing, core_reason, core_exit_condition)
+    review_after, review_after_changed = _resolve_core_review(existing, core_review_after)
+    return reason, exit_condition, review_after, review_after_changed
+
+
+def resolve_store_core_state(
     conn,
     *,
     entity_id: str | None,
@@ -853,32 +931,14 @@ def resolve_store_core_state(  # noqa: C901, PLR0912
     "Error: ..." convention). Returns the effective final core state to persist, including
     `is_new_core`/`review_after_changed` for enforce_overdue_boundary and
     `previous_detail_memory_ids` for reconcile_detail_relations."""
-    existing = None
-    if entity_id:
-        row = conn.execute(
-            "SELECT is_core, core_reason, core_exit_condition, core_review_after, "
-            "core_detail_memory_ids FROM entities WHERE id = ?",
-            (entity_id,),
-        ).fetchone()
-        if row:
-            existing = {
-                "is_core": bool(row[0]),
-                "core_reason": row[1],
-                "core_exit_condition": row[2],
-                "core_review_after": row[3],
-                "core_detail_memory_ids": json.loads(row[4]) if row[4] else [],
-            }
+    existing = _load_existing_core_state(conn, entity_id)
     previous_detail_ids = existing["core_detail_memory_ids"] if existing else []
-
     effective_is_core = (
         existing["is_core"] if (is_core_requested is None and existing) else bool(is_core_requested)
     )
-
-    any_core_field_supplied = (
-        core_reason is not None
-        or core_exit_condition is not None
-        or core_review_after is not None
-        or detail_memory_ids is not None
+    any_core_field_supplied = any(
+        value is not None
+        for value in (core_reason, core_exit_condition, core_review_after, detail_memory_ids)
     )
     if not effective_is_core:
         if any_core_field_supplied:
@@ -889,48 +949,17 @@ def resolve_store_core_state(  # noqa: C901, PLR0912
                 "them entirely."
             )
         return _non_core_state(previous_detail_ids=previous_detail_ids)
-
     if scope != "shared":
         raise ValueError(
             "A core memory must have scope='shared' -- private core memories are prohibited."
         )
-
-    is_new_core = not (existing and existing["is_core"])
-
-    # Resolved follow-up review finding #3: omission means "preserve the value," never "skip
-    # validation of the effective value" -- the same class of bug already fixed for
-    # detail_memory_ids below. A preserved reason/exit_condition is re-run through the identical
-    # canonical validator a freshly-supplied one gets, so a legacy/corrupted row can no longer be
-    # carried forward malformed just because this write happened to omit the field.
-    if core_reason is not None:
-        reason = validate_core_reason(core_reason)
-    elif existing and existing.get("core_reason"):
-        reason = validate_core_reason(existing["core_reason"])
-    else:
-        raise ValueError("core_reason is required to create or promote a core memory.")
-
-    if core_exit_condition is not None:
-        exit_condition = validate_core_exit_condition(core_exit_condition)
-    elif existing and existing.get("core_exit_condition"):
-        exit_condition = validate_core_exit_condition(existing["core_exit_condition"])
-    else:
-        raise ValueError("core_exit_condition is required to create or promote a core memory.")
-
-    review_after_changed = False
-    if core_review_after is not None:
-        review_after = parse_core_review_after(core_review_after)
-        if existing and existing.get("core_review_after") not in (None, review_after):
-            review_after_changed = True
-    elif existing and existing.get("core_review_after"):
-        # Preserved, not newly supplied: structurally revalidated but exempt from the
-        # future-only bound (an overdue-but-parseable timestamp may still be preserved during a
-        # non-expanding edit -- see _validate_preserved_review_after).
-        review_after = _validate_preserved_review_after(existing["core_review_after"])
-    else:
-        review_after = parse_core_review_after(None, default_days=CORE_DEFAULT_REVIEW_DAYS)
-
+    reason, exit_condition, review_after, review_after_changed = _resolve_core_lifecycle(
+        existing,
+        core_reason=core_reason,
+        core_exit_condition=core_exit_condition,
+        core_review_after=core_review_after,
+    )
     validate_core_content_length(content)
-
     # Resolved review finding #4: `detail_memory_ids=None` means "preserve the existing
     # declaration," never "skip validation." The effective list -- whether just-supplied or
     # preserved verbatim from `previous_detail_ids` -- is ALWAYS revalidated against the
@@ -940,10 +969,9 @@ def resolve_store_core_state(  # noqa: C901, PLR0912
     # same function's authoritative in-transaction re-run, so both checkpoints share one path.
     ids_to_validate = previous_detail_ids if detail_memory_ids is None else detail_memory_ids
     effective_detail_ids = validate_detail_memory_ids(conn, ids_to_validate, content=content)
-
     return {
         "is_core": True,
-        "is_new_core": is_new_core,
+        "is_new_core": not (existing and existing["is_core"]),
         "review_after_changed": review_after_changed,
         "core_reason": reason,
         "core_exit_condition": exit_condition,
@@ -1028,7 +1056,136 @@ def resolve_consolidation_core_state(
 # ---------------------------------------------------------------------------
 
 
-def review_core_memory(  # noqa: C901
+def _review_retain(
+    c,
+    resolved_id: str,
+    is_core_now: bool,
+    status: str,
+    rationale: str,
+    agent_id: str,
+    core_review_after: str | None,
+    now: str,
+) -> dict:
+    if not is_core_now or status == "archived":
+        message = (
+            f"Error: review_core_memory(outcome='retain') requires an active core "
+            f"memory; '{resolved_id}' is "
+            f"{'archived' if status == 'archived' else 'not core'}."
+        )
+        return envelope.rejected([envelope.error(error_codes.CONFLICT, message, "entity_id")])
+    try:
+        # parse_core_review_after itself now enforces the future-only lower bound
+        # uniformly (resolved review finding #7) -- no separate re-check needed here.
+        if core_review_after is None:
+            next_review = parse_core_review_after(None, default_days=CORE_DEFAULT_REVIEW_DAYS)
+        else:
+            next_review = parse_core_review_after(core_review_after)
+    except ValueError as e:
+        return envelope.rejected(
+            [envelope.error(error_codes.VALIDATION_ERROR, str(e), "core_review_after")]
+        )
+    c.execute(
+        "UPDATE entities SET core_review_after = ?, core_last_reviewed_at = ?, "
+        "core_last_reviewed_by = ?, core_review_rationale = ?, updated_at = ? WHERE id = ?",
+        (next_review, now, agent_id, rationale, now, resolved_id),
+    )
+    return envelope.ok(
+        {
+            "id": resolved_id,
+            "message": f"Memory '{resolved_id}' retained as core; next review at {next_review}.",
+        }
+    )
+
+
+def _review_demote(
+    c, resolved_id: str, is_core_now: bool, rationale: str, agent_id: str, now: str
+) -> dict:
+    if not is_core_now:
+        return envelope.ok(
+            {"id": resolved_id, "message": f"Memory '{resolved_id}' is already non-core (no-op)."},
+            warnings=[envelope.warning(error_codes.ALREADY_DONE, "Memory was already non-core.")],
+        )
+    core_tag_row = c.execute("SELECT id FROM tags WHERE name = '#core'").fetchone()
+    c.execute(
+        "UPDATE entities SET is_core = 0, core_review_after = NULL, "
+        "core_last_reviewed_at = ?, core_last_reviewed_by = ?, core_review_rationale = ?, "
+        "updated_at = ? WHERE id = ?",
+        (now, agent_id, rationale, now, resolved_id),
+    )
+    if core_tag_row:
+        c.execute(
+            "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
+            (resolved_id, core_tag_row[0]),
+        )
+    return envelope.ok(
+        {
+            "id": resolved_id,
+            "message": f"Memory '{resolved_id}' demoted from core to a normal memory.",
+        }
+    )
+
+
+def _review_archive(
+    c, resolved_id: str, is_core_now: bool, status: str, rationale: str, agent_id: str, now: str
+) -> dict:
+    # archive. Resolved review finding #3: review_core_memory reviews a CORE memory -- it
+    # must never become a second, ownership-neutral general-purpose archive API for ordinary
+    # memories. is_core is never cleared by an archive outcome (only demote clears it), so
+    # is_core=1 reliably identifies a memory that either currently is, or formerly was, a
+    # core -- the one signal usable for legacy rows with no separate "ever was core" column.
+    if not is_core_now:
+        message = (
+            f"Error: review_core_memory(outcome='archive') requires a core memory; "
+            f"'{resolved_id}' is not a core memory. Use archive_memory for ordinary memories."
+        )
+        return envelope.rejected([envelope.error(error_codes.CONFLICT, message, "entity_id")])
+    if status == "archived":
+        return envelope.ok(
+            {"id": resolved_id, "message": f"Memory '{resolved_id}' is already archived (no-op)."},
+            warnings=[envelope.warning(error_codes.ALREADY_DONE, "Memory was already archived.")],
+        )
+    from saltmdb.domain.services.memory_service.lifecycle import _archive_entity_unchecked
+
+    _archive_entity_unchecked(c, resolved_id)
+    c.execute(
+        "UPDATE entities SET core_last_reviewed_at = ?, core_last_reviewed_by = ?, "
+        "core_review_rationale = ? WHERE id = ?",
+        (now, agent_id, rationale, resolved_id),
+    )
+    return envelope.ok(
+        {"id": resolved_id, "message": f"Memory '{resolved_id}' was reviewed and archived."}
+    )
+
+
+def _review_write(
+    c,
+    resolved_id: str,
+    outcome: str,
+    rationale: str,
+    agent_id: str,
+    core_review_after: str | None,
+) -> dict:
+    row = c.execute("SELECT is_core, status FROM entities WHERE id = ?", (resolved_id,)).fetchone()
+    if not row:
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.NOT_FOUND, f"Memory '{resolved_id}' not found.", "entity_id"
+                )
+            ]
+        )
+    is_core_now, status = bool(row[0]), row[1]
+    now = datetime.now(UTC).isoformat()
+    if outcome == "retain":
+        return _review_retain(
+            c, resolved_id, is_core_now, status, rationale, agent_id, core_review_after, now
+        )
+    if outcome == "demote":
+        return _review_demote(c, resolved_id, is_core_now, rationale, agent_id, now)
+    return _review_archive(c, resolved_id, is_core_now, status, rationale, agent_id, now)
+
+
+def review_core_memory(
     conn,
     *,
     entity_id: str,
@@ -1073,7 +1230,6 @@ def review_core_memory(  # noqa: C901
         return envelope.rejected(
             [envelope.error(error_codes.VALIDATION_ERROR, str(e), "review_rationale")]
         )
-
     resolved_id = resolve_entity_id(conn, entity_id)
     if not resolved_id:
         return envelope.rejected(
@@ -1085,132 +1241,11 @@ def review_core_memory(  # noqa: C901
                 )
             ]
         )
-
     result_holder: dict[str, dict] = {}
 
-    def _write(c):  # noqa: C901, PLR0911
-        row = c.execute(
-            "SELECT is_core, status FROM entities WHERE id = ?", (resolved_id,)
-        ).fetchone()
-        if not row:
-            result_holder["result"] = envelope.rejected(
-                [
-                    envelope.error(
-                        error_codes.NOT_FOUND,
-                        f"Memory '{resolved_id}' not found.",
-                        "entity_id",
-                    )
-                ]
-            )
-            return
-        is_core_now, status = bool(row[0]), row[1]
-        now = datetime.now(UTC).isoformat()
-
-        if outcome == "retain":
-            if not is_core_now or status == "archived":
-                message = (
-                    f"Error: review_core_memory(outcome='retain') requires an active core "
-                    f"memory; '{resolved_id}' is "
-                    f"{'archived' if status == 'archived' else 'not core'}."
-                )
-                result_holder["result"] = envelope.rejected(
-                    [envelope.error(error_codes.CONFLICT, message, "entity_id")]
-                )
-                return
-            try:
-                # parse_core_review_after itself now enforces the future-only lower bound
-                # uniformly (resolved review finding #7) -- no separate re-check needed here.
-                if core_review_after is None:
-                    next_review = parse_core_review_after(
-                        None, default_days=CORE_DEFAULT_REVIEW_DAYS
-                    )
-                else:
-                    next_review = parse_core_review_after(core_review_after)
-            except ValueError as e:
-                result_holder["result"] = envelope.rejected(
-                    [envelope.error(error_codes.VALIDATION_ERROR, str(e), "core_review_after")]
-                )
-                return
-            c.execute(
-                "UPDATE entities SET core_review_after = ?, core_last_reviewed_at = ?, "
-                "core_last_reviewed_by = ?, core_review_rationale = ?, updated_at = ? WHERE id = ?",
-                (next_review, now, agent_id, rationale, now, resolved_id),
-            )
-            result_holder["result"] = envelope.ok(
-                {
-                    "id": resolved_id,
-                    "message": f"Memory '{resolved_id}' retained as core; next review at {next_review}.",
-                }
-            )
-            return
-
-        if outcome == "demote":
-            if not is_core_now:
-                result_holder["result"] = envelope.ok(
-                    {
-                        "id": resolved_id,
-                        "message": f"Memory '{resolved_id}' is already non-core (no-op).",
-                    },
-                    warnings=[
-                        envelope.warning(error_codes.ALREADY_DONE, "Memory was already non-core.")
-                    ],
-                )
-                return
-            core_tag_row = c.execute("SELECT id FROM tags WHERE name = '#core'").fetchone()
-            c.execute(
-                "UPDATE entities SET is_core = 0, core_review_after = NULL, "
-                "core_last_reviewed_at = ?, core_last_reviewed_by = ?, core_review_rationale = ?, "
-                "updated_at = ? WHERE id = ?",
-                (now, agent_id, rationale, now, resolved_id),
-            )
-            if core_tag_row:
-                c.execute(
-                    "DELETE FROM entity_tags WHERE entity_id = ? AND tag_id = ?",
-                    (resolved_id, core_tag_row[0]),
-                )
-            result_holder["result"] = envelope.ok(
-                {
-                    "id": resolved_id,
-                    "message": f"Memory '{resolved_id}' demoted from core to a normal memory.",
-                }
-            )
-            return
-
-        # archive. Resolved review finding #3: review_core_memory reviews a CORE memory -- it
-        # must never become a second, ownership-neutral general-purpose archive API for ordinary
-        # memories. is_core is never cleared by an archive outcome (only demote clears it), so
-        # is_core=1 reliably identifies a memory that either currently is, or formerly was, a
-        # core -- the one signal usable for legacy rows with no separate "ever was core" column.
-        if not is_core_now:
-            message = (
-                f"Error: review_core_memory(outcome='archive') requires a core memory; "
-                f"'{resolved_id}' is not a core memory. Use archive_memory for ordinary memories."
-            )
-            result_holder["result"] = envelope.rejected(
-                [envelope.error(error_codes.CONFLICT, message, "entity_id")]
-            )
-            return
-        if status == "archived":
-            result_holder["result"] = envelope.ok(
-                {
-                    "id": resolved_id,
-                    "message": f"Memory '{resolved_id}' is already archived (no-op).",
-                },
-                warnings=[
-                    envelope.warning(error_codes.ALREADY_DONE, "Memory was already archived.")
-                ],
-            )
-            return
-        from saltmdb.domain.services.memory_service.lifecycle import _archive_entity_unchecked
-
-        _archive_entity_unchecked(c, resolved_id)
-        c.execute(
-            "UPDATE entities SET core_last_reviewed_at = ?, core_last_reviewed_by = ?, "
-            "core_review_rationale = ? WHERE id = ?",
-            (now, agent_id, rationale, resolved_id),
-        )
-        result_holder["result"] = envelope.ok(
-            {"id": resolved_id, "message": f"Memory '{resolved_id}' was reviewed and archived."}
+    def _write(c):
+        result_holder["result"] = _review_write(
+            c, resolved_id, outcome, rationale, agent_id, core_review_after
         )
 
     write_transaction_retrying(conn, _write)

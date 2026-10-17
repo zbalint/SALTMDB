@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
@@ -13,6 +14,7 @@ from saltmdb.domain.services.embedding_service import (
     EmbedJobScheduler,
     enqueue_embedding_jobs_for_entity,
     entity_source_hash,
+    process_embedding_jobs_sync,
     reconcile_embedding_jobs,
 )
 from saltmdb.utils.text import compute_content_hash
@@ -153,6 +155,31 @@ class EmbeddingJobsTests(unittest.TestCase):
         )
         reopened.close()
 
+    def test_process_sync_infers_entity_job_payload(self):
+        snapshot = {
+            "id": "job-entity",
+            "job_kind": "entity",
+            "title": "Title",
+            "content": "Body",
+        }
+        with (
+            patch(
+                "saltmdb.domain.services.embedding_service._claim_any_embedding_job",
+                side_effect=[snapshot, None],
+            ),
+            patch(
+                "saltmdb.domain.services.embedding_service._persist_embedding_if_current"
+            ) as persist,
+            patch("saltmdb.domain.services.embedding_service._retry_embedding_job") as retry,
+            patch(
+                "saltmdb.domain.services.embedding_service.embed_text",
+                return_value=[0.0] * 384,
+            ),
+        ):
+            process_embedding_jobs_sync(self.conn)
+        persist.assert_called_once_with(self.conn, snapshot, [0.0] * 384)
+        retry.assert_not_called()
+
     def test_scheduler_capacity_matches_worker_count(self):
         scheduler = EmbedJobScheduler(coordinator=object())
         self.assertTrue(scheduler._capacity.acquire(blocking=False))
@@ -160,3 +187,43 @@ class EmbeddingJobsTests(unittest.TestCase):
         self.assertFalse(scheduler._capacity.acquire(blocking=False))
         scheduler._capacity.release()
         scheduler._capacity.release()
+
+    def test_scheduler_run_stops_after_empty_claim(self):
+        class Coordinator:
+            def __init__(self):
+                self.calls = 0
+
+            def submit(self, label, fn, *, priority):
+                self.calls += 1
+
+        class Pool:
+            def __init__(self):
+                self.shutdown_calls = 0
+
+            def shutdown(self, *, wait, cancel_futures):
+                self.shutdown_calls += 1
+
+        class Stop:
+            def __init__(self):
+                self.waits = []
+                self.stopped = False
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, interval):
+                self.waits.append(interval)
+                if len(self.waits) == 5:
+                    self.stopped = True
+                return self.stopped
+
+        coordinator = Coordinator()
+        scheduler = EmbedJobScheduler(coordinator=coordinator, poll_interval_s=1.0)
+        pool = Pool()
+        stop = Stop()
+        setattr(scheduler, "_stop", stop)
+        setattr(scheduler, "_pool", pool)
+        scheduler._run()
+        self.assertEqual(coordinator.calls, 5)
+        self.assertEqual(stop.waits, [1.0, 2.0, 4.0, 5.0, 5.0])
+        self.assertEqual(pool.shutdown_calls, 1)

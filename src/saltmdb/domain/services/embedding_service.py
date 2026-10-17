@@ -395,44 +395,47 @@ class EmbedJobScheduler:
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
+    def _run_iteration(self, current_poll_interval: float, max_poll_interval: float) -> float:
+        if not self._capacity.acquire(blocking=False):
+            self._stop.wait(current_poll_interval)
+            return current_poll_interval
+        try:
+            snapshot = self._coordinator.submit(
+                "claim_embedding_job", _claim_any_embedding_job, priority="background"
+            )
+        except Exception as submit_exc:
+            if "DAEMON_SHUTTING_DOWN" not in str(submit_exc):
+                logger.exception("embedding job claim failed")
+            self._capacity.release()
+            self._stop.wait(current_poll_interval)
+            return current_poll_interval
+        except BaseException:
+            self._capacity.release()
+            raise
+        if snapshot:
+            try:
+                future = self._pool.submit(self._infer_and_persist, snapshot)
+
+                def _release_if_cancelled(f):
+                    if f.cancelled():
+                        self._capacity.release()
+
+                future.add_done_callback(_release_if_cancelled)
+            except Exception as exc:
+                self._mark_failure(snapshot, exc, release_capacity=True)
+            return self._poll_interval_s
+        self._capacity.release()
+        self._stop.wait(current_poll_interval)
+        return min(current_poll_interval * 2.0, max_poll_interval)
+
     def _run(self) -> None:
         try:
             current_poll_interval = self._poll_interval_s
             max_poll_interval = 5.0
-
             while not self._stop.is_set():
-                if not self._capacity.acquire(blocking=False):
-                    self._stop.wait(current_poll_interval)
-                    continue
-                try:
-                    snapshot = self._coordinator.submit(
-                        "claim_embedding_job", _claim_any_embedding_job, priority="background"
-                    )
-                except Exception as submit_exc:
-                    if "DAEMON_SHUTTING_DOWN" not in str(submit_exc):
-                        logger.exception("embedding job claim failed")
-                    self._capacity.release()
-                    self._stop.wait(current_poll_interval)
-                    continue
-                except BaseException:
-                    self._capacity.release()
-                    raise
-                if snapshot:
-                    current_poll_interval = self._poll_interval_s
-                    try:
-                        future = self._pool.submit(self._infer_and_persist, snapshot)
-
-                        def _release_if_cancelled(f):
-                            if f.cancelled():
-                                self._capacity.release()
-
-                        future.add_done_callback(_release_if_cancelled)
-                    except Exception as exc:
-                        self._mark_failure(snapshot, exc, release_capacity=True)
-                else:
-                    self._capacity.release()
-                    self._stop.wait(current_poll_interval)
-                    current_poll_interval = min(current_poll_interval * 2.0, max_poll_interval)
+                current_poll_interval = self._run_iteration(
+                    current_poll_interval, max_poll_interval
+                )
         finally:
             self._pool.shutdown(wait=False, cancel_futures=True)
 
@@ -933,6 +936,14 @@ def compute_entity_chunk_embeddings(entity_id: str, full_content: str) -> list[d
     ]
 
 
+def _infer_embedding_job_payload(snapshot: dict[str, Any]) -> list[float] | list[dict[str, Any]]:
+    if snapshot["job_kind"] == "entity":
+        return embed_text(f"{snapshot['title']}\n\n{snapshot['content']}")
+    if snapshot["job_kind"] == "retrieval":
+        return embed_text(snapshot["retrieval_text"])
+    return compute_entity_chunk_embeddings(snapshot["entity_id"], snapshot["content"])
+
+
 def process_embedding_jobs_sync(conn) -> None:
     """Test utility to synchronously process all pending embedding jobs on the caller thread."""
     from saltmdb.db.connection import write_transaction
@@ -943,16 +954,7 @@ def process_embedding_jobs_sync(conn) -> None:
         if not snapshot:
             break
         try:
-            if snapshot["job_kind"] == "entity":
-                payload: list[float] | list[dict[str, Any]] = embed_text(
-                    f"{snapshot['title']}\n\n{snapshot['content']}"
-                )
-            elif snapshot["job_kind"] == "retrieval":
-                payload = embed_text(snapshot["retrieval_text"])
-            else:
-                payload = compute_entity_chunk_embeddings(
-                    snapshot["entity_id"], snapshot["content"]
-                )
+            payload = _infer_embedding_job_payload(snapshot)
         except Exception as exc:
             with write_transaction(conn):
                 if snapshot.get("job_kind") == "retrieval":

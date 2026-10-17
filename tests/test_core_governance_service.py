@@ -1901,5 +1901,178 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         self.assertEqual(result["status"], "rejected", result)
 
 
+class TestServices2CoreBoundaries(CoreGovernanceDbTestBase):
+    def test_detail_cap_normalization_and_duplicate_order(self):
+        ids = [
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        ]
+        for index, uid in enumerate(ids):
+            self.conn.execute(
+                "INSERT INTO entities "
+                "(id, created_at, updated_at, last_accessed_at, valid_from, title, full_content, "
+                "scope, status, memory_type, is_core) "
+                "VALUES (?, '2020', '2020', '2020', '2020', ?, 'Detail evidence', "
+                "'shared', 'raw', 'fact', 0)",
+                (uid, f"Detail {index}"),
+            )
+        content = "Detail evidence " + " ".join(
+            f"Detail {index} ({uid})" for index, uid in enumerate(ids)
+        )
+        result = self._store_core(
+            "Detail evidence",
+            content,
+            detail_memory_ids=ids,
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(
+            json.loads(
+                self.conn.execute(
+                    "SELECT core_detail_memory_ids FROM entities WHERE id = ?",
+                    (result["data"]["id"],),
+                ).fetchone()[0]
+            ),
+            ids,
+        )
+        duplicate_content = "Alternate detail evidence " + " ".join(
+            f"Detail {index} ({uid})" for index, uid in enumerate(ids)
+        )
+        duplicate = self._store_core(
+            "Normalized Duplicate Details",
+            duplicate_content,
+            detail_memory_ids=[f" {ids[1].upper()} ", ids[0], ids[1]],
+        )
+        self.assertEqual(duplicate["status"], "ok", duplicate)
+        self.assertEqual(
+            json.loads(
+                self.conn.execute(
+                    "SELECT core_detail_memory_ids FROM entities WHERE id = ?",
+                    (duplicate["data"]["id"],),
+                ).fetchone()[0]
+            ),
+            [ids[1], ids[0]],
+        )
+
+    def test_each_detail_reference_mention_is_required(self):
+        uid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        self.conn.execute(
+            "INSERT INTO entities "
+            "(id, created_at, updated_at, last_accessed_at, valid_from, title, full_content, "
+            "scope, status, memory_type, is_core) "
+            "VALUES (?, '2020', '2020', '2020', '2020', 'Canonical Detail', "
+            "'Detail evidence', 'shared', 'raw', 'fact', 0)",
+            (uid,),
+        )
+        for content in (
+            f"The detail is identified only by its UUID {uid}.",
+            "Canonical Detail is mentioned without the full identifier.",
+        ):
+            with self.subTest(content=content):
+                result = self._store_core("Missing One Mention", content, detail_memory_ids=[uid])
+                self.assertTrue(result.startswith("Error"), result)
+                self.assertIn("must mention both", result)
+
+    def test_invariant_caps_allow_equality_and_preserve_violation_order(self):
+        from unittest.mock import patch
+
+        row = TestFindInvariantViolations()._valid_row(full_content="x" * CORE_MAX_CONTENT_CHARS)
+        with patch.object(cgs, "CORE_MAX_RENDERED_CHARS", 100000):
+            self.assertEqual(cgs.find_invariant_violations([row] * CORE_MAX_ACTIVE), [])
+        rendered_size = len(cgs.render_bootstrap_digest([row]))
+        with patch.object(cgs, "CORE_MAX_RENDERED_CHARS", rendered_size):
+            self.assertEqual(cgs.find_invariant_violations([row]), [])
+        with patch.object(cgs, "CORE_MAX_RENDERED_CHARS", rendered_size - 1):
+            self.assertEqual(
+                cgs.find_invariant_violations([row]),
+                [
+                    f"rendered digest {rendered_size} exceeds CORE_MAX_RENDERED_CHARS={rendered_size - 1}"
+                ],
+            )
+        invalid = {
+            **row,
+            "core_reason": None,
+            "core_exit_condition": None,
+            "core_review_after": None,
+            "scope": "private",
+            "full_content": "x" * (CORE_MAX_CONTENT_CHARS + 1),
+        }
+        self.assertEqual(
+            cgs.find_invariant_violations([invalid]),
+            [
+                f"{row['id']}: core_reason missing or out of bounds",
+                f"{row['id']}: core_exit_condition missing or out of bounds",
+                f"{row['id']}: core_review_after missing",
+                f"{row['id']}: full_content exceeds {CORE_MAX_CONTENT_CHARS} characters",
+                f"{row['id']}: scope must be shared -- private core memories are prohibited",
+            ],
+        )
+
+    def test_review_validation_precedence_and_missing_target(self):
+        for kwargs, field, message in (
+            (
+                {"outcome": "bad", "agent_id": ""},
+                "outcome",
+                "outcome must be one of 'retain', 'demote', 'archive'.",
+            ),
+            ({"agent_id": ""}, "agent_id", "agent_id is mandatory."),
+            ({"review_rationale": "short"}, "review_rationale", None),
+            ({}, "entity_id", "Memory 'missing' not found."),
+        ):
+            with self.subTest(kwargs=kwargs):
+                args = dict(
+                    entity_id="missing",
+                    outcome="retain",
+                    agent_id="reviewer",
+                    review_rationale="C" * 20,
+                )
+                args.update(kwargs)
+                result = cgs.review_core_memory(self.conn, **args)
+                self.assertEqual(result["status"], "rejected")
+                self.assertEqual(result["errors"][0]["field"], field)
+                if message is not None:
+                    self.assertEqual(result["errors"][0]["message"], message)
+
+    def test_retain_rejects_archived_core_before_timestamp_validation(self):
+        result = self._store_core("Archived Retain Boundary")
+        uid = result["data"]["id"]
+        self.conn.execute("UPDATE entities SET status = 'archived' WHERE id = ?", (uid,))
+        reviewed = cgs.review_core_memory(
+            self.conn,
+            entity_id=uid,
+            outcome="retain",
+            agent_id="reviewer",
+            review_rationale="C" * 20,
+            core_review_after="invalid",
+        )
+        self.assertEqual(reviewed["errors"][0]["code"], "CONFLICT")
+        self.assertEqual(
+            reviewed["errors"][0]["message"],
+            f"Error: review_core_memory(outcome='retain') requires an active core "
+            f"memory; '{uid}' is archived.",
+        )
+
+    def test_detail_uuid_gate_rejects_prefix_with_exact_message(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^detail_memory_ids must be full UUIDs, not prefixes or other references "
+            r"\(got 'prefix'\)\.$",
+        ):
+            cgs.validate_detail_memory_ids(self.conn, ["prefix"], content="irrelevant")
+
+    def test_non_core_detail_only_write_rejected_with_exact_message(self):
+        result = self._store_normal(
+            "Non-core detail-only write",
+            detail_memory_ids=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+        )
+        self.assertEqual(
+            result,
+            "Error: core_reason/core_exit_condition/core_review_after/detail_memory_ids were "
+            "supplied but the effective memory is not core -- these fields are rejected, never "
+            "silently ignored. Pass is_core=True to create/keep a core memory, or omit them "
+            "entirely.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

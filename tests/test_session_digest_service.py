@@ -953,6 +953,74 @@ class TestSessionHandover(unittest.TestCase):
         tiny = self._digest(1)
         self.assertEqual(tiny.count("<session-stub "), 8)
 
+    def test_direct_handover_reports_stubbed_and_exact_stub_order(self):
+        session_ids = []
+        base = datetime(2024, 1, 1, 10, tzinfo=UTC)
+        for index in range(8):
+            session_id = f"0192d7e0-0000-7000-8000-{index:012d}"
+            stamp = (base + timedelta(seconds=index, microseconds=index)).isoformat(
+                timespec="microseconds"
+            )
+            session_ids.append(session_id)
+            self._session(session_id, stamp, ended="goodbye", ended_at=stamp)
+            self._trace(session_id, session_id, "q" * 500, "a" * 5000, stamp)
+        cohort = session_digest_service._cohort_for_cwd(
+            self.conn, self.CWD, before=None, now=datetime(2024, 1, 2, tzinfo=UTC)
+        )
+        digest, stubbed = session_digest_service._render_handover(
+            self.conn, cohort, 3500, return_stubs=True
+        )
+        self.assertTrue(stubbed)
+        stub_ids = [
+            line.split('id="', 1)[1].split('"', 1)[0]
+            for line in digest.splitlines()
+            if line.startswith("<session-stub ")
+        ]
+        self.assertEqual(stub_ids, session_ids[5::-1])
+        tiny, tiny_stubbed = session_digest_service._render_handover(
+            self.conn, cohort, 1, return_stubs=True
+        )
+        self.assertTrue(tiny_stubbed)
+        self.assertEqual(tiny.count("<session-stub "), 8)
+
+    def test_direct_handover_exact_budget_boundary(self):
+        self._session("s1", "2024-01-01T10:00:00+00:00", ended="goodbye")
+        self._trace(
+            "s1",
+            "t1",
+            "q" * 500,
+            "a" * 5000,
+            "2024-01-01T10:01:00+00:00",
+        )
+        cohort = session_digest_service._cohort_for_cwd(
+            self.conn, self.CWD, before=None, now=datetime(2024, 1, 2, tzinfo=UTC)
+        )
+        below, below_stubbed = session_digest_service._render_handover(
+            self.conn, cohort, 1302, return_stubs=True
+        )
+        at, at_stubbed = session_digest_service._render_handover(
+            self.conn, cohort, 1303, return_stubs=True
+        )
+        self.assertTrue(below_stubbed)
+        self.assertEqual(len(below), 287)
+        self.assertFalse(at_stubbed)
+        self.assertEqual(len(at), 1303)
+
+    def test_handover_fit_phase_zero_budget_boundary(self):
+        fit_phase = getattr(session_digest_service, "_handover_fit_phase", None)
+        if fit_phase is None:
+            self.skipTest("pre-refactor source has no extracted fit-phase seam")
+
+        empty = "<empty-markup>"
+
+        def render(cap, shown, stub_ids, *, empty_bodies=False):
+            return (empty if empty_bodies else "<normal-output>"), 0
+
+        self.assertEqual(
+            fit_phase(render, [], len(empty), [], set()),
+            ("exhausted", empty),
+        )
+
 
 class TestHandoverMaxCharsConfig(unittest.TestCase):
     def _get(self, value):
