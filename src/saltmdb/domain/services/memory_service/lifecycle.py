@@ -5,6 +5,7 @@ within this package.
 """
 
 import json
+from functools import partial
 import sqlite3
 import uuid
 from datetime import datetime, UTC
@@ -273,7 +274,433 @@ def _insert_replacement_tags(conn, entity_id: str, tags: list, agent_id: str | N
             )
 
 
-def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _replacement_target(conn, entity_id: str) -> tuple[str | None, dict | None]:
+    resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
+    if candidates:
+        item = envelope_error(
+            "AMBIGUOUS_ID_PREFIX",
+            f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
+            "entity_id",
+        )
+        item["candidates"] = candidates
+        if truncated:
+            item["candidates_truncated"] = True
+        return None, rejected([item])
+    if not resolved_id:
+        return None, _replacement_error(
+            "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
+        )
+    target = conn.execute("SELECT status FROM entities WHERE id = ?", (resolved_id,)).fetchone()
+    if target is None:
+        return None, _replacement_error(
+            "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
+        )
+    if target[0] != "raw":
+        successors, lineage = _successor_details(resolved_id, conn)
+        return None, rejected(
+            [
+                envelope_error(
+                    "INACTIVE_TARGET",
+                    f"Memory '{resolved_id}' is inactive ({target[0]}). Fetch an active successor and inspect it before retrying; no replacement was created. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
+                    "entity_id",
+                )
+            ],
+            effective={
+                "target_id": resolved_id,
+                "status": target[0],
+                "active_successors": successors,
+                "lineage": lineage,
+            },
+        )
+    return resolved_id, None
+
+
+def _replacement_content(
+    before: dict, title: str, content: str, tags: list | None, metadata: dict | None
+) -> tuple[dict | None, dict | None]:
+    new_title = redact_secrets(title.strip())
+    new_content = redact_secrets(content)
+    # validate_memory_input raises only for title bounds/metadata shape; its error is safe to
+    # return before BEGIN and therefore guarantees zero side effects on malformed requests.
+    try:
+        from .validation import validate_memory_input
+
+        validate_memory_input(
+            new_title,
+            new_content,
+            metadata if metadata is not None else before.get("metadata"),
+            tags,
+        )
+    except ValueError as exc:
+        return None, _replacement_error("INVALID_MEMORY", str(exc))
+    now = datetime.now(UTC).isoformat()
+    content_hash = compute_content_hash(new_content)
+    quality = evaluate_memory_quality(new_content, new_title)
+    if quality.get("status") == "REJECT":
+        return None, _replacement_error(
+            "MEMORY_QUALITY_REJECTED",
+            f"Memory quality check rejected (Score: {quality.get('quality_score', 0):.2f}). "
+            f"Reason: {quality.get('reason', 'quality requirements were not met')}",
+        )
+    return {
+        "new_title": new_title,
+        "new_content": new_content,
+        "content_hash": content_hash,
+        "quality": quality,
+        "now": now,
+    }, None
+
+
+def _replacement_fields(
+    before: dict,
+    inherited_tags: list | None,
+    tags: list | None,
+    agent_id: str | None,
+    context_id: str | None,
+    scope: str | None,
+    memory_type: str | None,
+    metadata: dict | None,
+    reason: str,
+    content_data: dict,
+) -> dict:
+    inherited_agent_id = before.get("agent_id") if agent_id is None else agent_id
+    inherited_context = before.get("context_id") if context_id is None else context_id
+    inherited_scope = before.get("scope") if scope is None else scope
+    inherited_type = before.get("memory_type") or "fact" if memory_type is None else memory_type
+    inherited_metadata = before.get("metadata") if metadata is None else json.dumps(metadata)
+    effective_tags = inherited_tags if tags is None else tags
+    if effective_tags is None:
+        effective_tags = []
+    inherited: dict[str, Any] = {
+        field: value
+        for field, value, supplied in (
+            ("tags", inherited_tags, tags is not None),
+            ("agent_id", inherited_agent_id, agent_id is not None),
+            ("context_id", inherited_context, context_id is not None),
+            ("scope", inherited_scope, scope is not None),
+            ("memory_type", inherited_type, memory_type is not None),
+        )
+        if not supplied
+    }
+    changed: dict[str, Any] = {"title": content_data["new_title"], "reason": reason.strip()}
+    changed.update(
+        {
+            field: value
+            for field, value, supplied in (
+                ("tags", list(effective_tags), tags is not None),
+                ("agent_id", inherited_agent_id, agent_id is not None),
+                ("context_id", inherited_context, context_id is not None),
+                ("scope", inherited_scope, scope is not None),
+                ("memory_type", inherited_type, memory_type is not None),
+                ("metadata", inherited_metadata, metadata is not None),
+            )
+            if supplied
+        }
+    )
+    return {
+        "inherited_agent_id": inherited_agent_id,
+        "inherited_context": inherited_context,
+        "inherited_scope": inherited_scope,
+        "inherited_type": inherited_type,
+        "inherited_metadata": inherited_metadata,
+        "effective_tags": effective_tags,
+        "inherited": inherited,
+        "changed": changed,
+    }
+
+
+def _replacement_prepare(
+    conn,
+    entity_id: str,
+    resolved_id: str,
+    title: str,
+    tags: list | None,
+    content: str,
+    reason: str,
+    agent_id: str | None,
+    context_id: str | None,
+    scope: str | None,
+    memory_type: str | None,
+    agent_session_id: str | None,
+    metadata: dict | None,
+) -> tuple[dict | None, dict | None]:
+    columns, before = _replacement_snapshot(conn, resolved_id)
+    from . import tags as tag_ops
+
+    inherited_tags = tag_ops.list_entity_tags(conn, resolved_id) if tags is None else None
+    if not before:
+        return None, _replacement_error(
+            "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
+        )
+    orphaned_edges = _semantic_edge_worklist(conn, resolved_id)
+    content_data, content_error = _replacement_content(before, title, content, tags, metadata)
+    if content_error is not None:
+        return None, content_error
+    content_data = cast(dict, content_data)
+    fields = _replacement_fields(
+        before,
+        inherited_tags,
+        tags,
+        agent_id,
+        context_id,
+        scope,
+        memory_type,
+        metadata,
+        reason,
+        content_data,
+    )
+    fields.update(
+        {
+            "columns": columns,
+            "before": before,
+            "orphaned_edges": orphaned_edges,
+            "now": content_data["now"],
+            "agent_session_id": agent_session_id,
+        }
+    )
+    fields.update(content_data)
+    return fields, None
+
+
+def _replacement_locked_source(c, resolved_id: str, before: dict) -> dict:
+    current = c.execute("SELECT status FROM entities WHERE id = ?", (resolved_id,)).fetchone()
+    if current is None:
+        raise _LifecycleRejected(
+            _replacement_error(
+                "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{resolved_id}'.", "entity_id"
+            )
+        )
+    if current[0] != "raw":
+        successors, lineage = _successor_details(resolved_id, c)
+        raise _LifecycleRejected(
+            rejected(
+                [
+                    envelope_error(
+                        "INACTIVE_TARGET",
+                        f"Memory '{resolved_id}' became inactive ({current[0]}) before replacement; retry against an active successor. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
+                        "entity_id",
+                    )
+                ],
+                effective={
+                    "target_id": resolved_id,
+                    "status": current[0],
+                    "active_successors": successors,
+                    "lineage": lineage,
+                },
+            )
+        )
+    # Re-read the frozen source under the lock.  If a concurrent writer changed any
+    # source column, abort rather than silently copying a stale predecessor snapshot.
+    locked_before = _replacement_snapshot(c, resolved_id)[1]
+    for frozen in (
+        "title",
+        "full_content",
+        "agent_id",
+        "context_id",
+        "scope",
+        "memory_type",
+        "created_at",
+        "content_hash",
+        "metadata",
+        "parent_ids",
+        "valid_from",
+    ):
+        if locked_before.get(frozen) != before.get(frozen):
+            raise _LifecycleRejected(
+                _replacement_error(
+                    "TARGET_CHANGED",
+                    "Target changed while replacement was being prepared; retry after fetching it again.",
+                    "entity_id",
+                )
+            )
+    return locked_before
+
+
+def _replacement_insert_entity(
+    c, context: dict, locked_before: dict, resolved_id: str, operation: str
+):
+    new_id = str(uuid.uuid4())
+    replacement = dict(locked_before)
+    replacement.update(
+        {
+            "id": new_id,
+            "created_at": context["now"],
+            "updated_at": context["now"],
+            "last_accessed_at": context["now"],
+            "agent_id": context["inherited_agent_id"],
+            "context_id": context["inherited_context"],
+            "scope": context["inherited_scope"],
+            "memory_type": context["inherited_type"],
+            "metadata": context["inherited_metadata"],
+            "status": "raw",
+            "embedding_status": "pending",
+            "title": context["new_title"],
+            "full_content": context["new_content"],
+            "valid_from": context["now"],
+            "valid_to": None,
+            "content_hash": context["content_hash"],
+            "agent_session_id": context["agent_session_id"],
+            "last_touched_session_id": context["agent_session_id"],
+            "quality_score": context["quality"].get("quality_score"),
+            "quality_status": context["quality"].get("status"),
+            "quality_flags": json.dumps(context["quality"].get("quality_flags", [])),
+        }
+    )
+    insert_columns = [column for column in context["columns"] if column in replacement]
+    placeholders = ", ".join("?" for _ in insert_columns)
+    c.execute(
+        f"INSERT INTO entities ({', '.join(insert_columns)}) VALUES ({placeholders})",
+        [replacement[column] for column in insert_columns],
+    )
+    _insert_replacement_tags(c, new_id, context["effective_tags"], context["inherited_agent_id"])
+    archived_at = context["now"]
+    c.execute(
+        "UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id = ? AND status = 'raw'",
+        (archived_at, archived_at, resolved_id),
+    )
+    from saltmdb.domain.services.embedding_service import (
+        cancel_embedding_jobs_for_entity,
+        cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
+        enqueue_embedding_jobs_for_entity,
+        enqueue_retrieval_embedding_job_for_entity,
+    )
+
+    cancel_embedding_jobs_for_entity(c, resolved_id)
+    clear_embedding_vectors_for_entity(c, resolved_id)
+    cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
+    enqueue_embedding_jobs_for_entity(
+        c, new_id, context["new_title"], context["new_content"], context["content_hash"]
+    )
+    enqueue_retrieval_embedding_job_for_entity(
+        c,
+        new_id,
+        replacement.get("retrieval_text"),
+        replacement.get("retrieval_text_hash"),
+        force=True,
+    )
+    relation_id = str(uuid.uuid4())
+    c.execute(
+        "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            relation_id,
+            new_id,
+            resolved_id,
+            operation,
+            context["now"],
+            context["now"],
+            context["now"],
+        ),
+    )
+    return new_id, relation_id
+
+
+def _replacement_repoint_edges(c, resolved_id: str, new_id: str, now: str):
+    repointed: list[dict[str, Any]] = []
+    still_orphaned_ids: set[str] = set()
+    # Re-read under the write lock rather than trusting the pre-transaction
+    # `orphaned_edges` snapshot -- mirrors the frozen-column re-check above, so a
+    # relation created/invalidated concurrently between validation and this lock is
+    # not silently missed or double-handled.
+    for edge in _semantic_edge_worklist(c, resolved_id):
+        new_source = new_id if edge["source_id"] == resolved_id else edge["source_id"]
+        new_target = new_id if edge["target_id"] == resolved_id else edge["target_id"]
+        if new_source == new_target:
+            # A pre-existing self-loop on the predecessor would become a
+            # self-referential edge on the new entity, which store_relation's own
+            # guard forbids elsewhere. Leave this one edge completely untouched
+            # (still an active edge on the archived predecessor, still reported as
+            # orphaned) for the caller to resolve by hand, rather than fabricating a
+            # disallowed edge or invalidating it with no replacement.
+            still_orphaned_ids.add(edge["relation_id"])
+            continue
+        c.execute(
+            "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+            (now, now, edge["relation_id"]),
+        )
+        new_relation_id = str(uuid.uuid4())
+        insert_cursor = c.execute(
+            """
+            INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
+            """,
+            (new_relation_id, new_source, new_target, edge["predicate"], now, now, now),
+        )
+        if insert_cursor.rowcount == 0:
+            # An active edge with this exact (source, target, predicate) triple
+            # already exists -- the old edge above is still correctly invalidated
+            # (it's now redundant with the pre-existing one), but don't report a
+            # new_relation_id that was never actually written.
+            continue
+        repointed.append(
+            {
+                "old_relation_id": edge["relation_id"],
+                "new_relation_id": new_relation_id,
+                "source_id": new_source,
+                "target_id": new_target,
+                "predicate": edge["predicate"],
+            }
+        )
+    return repointed, still_orphaned_ids
+
+
+def _replacement_write(c, operation: str, resolved_id: str, context: dict, repoint_relations: bool):
+    locked_before = _replacement_locked_source(c, resolved_id, context["before"])
+    new_id, relation_id = _replacement_insert_entity(
+        c, context, locked_before, resolved_id, operation
+    )
+    if repoint_relations:
+        repointed, still_orphaned_ids = _replacement_repoint_edges(
+            c, resolved_id, new_id, context["now"]
+        )
+    else:
+        repointed, still_orphaned_ids = [], set()
+    return new_id, relation_id, repointed, still_orphaned_ids
+
+
+def _replacement_response(
+    operation: str,
+    resolved_id: str,
+    reason: str,
+    context: dict,
+    new_id: str,
+    relation_id: str,
+    repointed_relations: list[dict[str, Any]],
+    still_orphaned_ids: set[str],
+    repoint_relations: bool,
+) -> dict:
+    # A large new body echoed back verbatim risks tripping the calling MCP client's own
+    # response-size limit (confirmed live 2026-09-14 on a ~94KB supersede_memory response) --
+    # dump it to a file past the threshold, same as get_memory's full-content read path. Done
+    # only now, after the write has actually committed, so a rejected write (TARGET_CHANGED/
+    # INACTIVE_TARGET) never leaves an orphaned dump file with nothing referencing it.
+    changed = context["changed"]
+    changed.update(large_content_descriptor(context["new_content"]))
+    response_orphaned_edges = (
+        [edge for edge in context["orphaned_edges"] if edge["relation_id"] in still_orphaned_ids]
+        if repoint_relations
+        else context["orphaned_edges"]
+    )
+    return envelope_ok(
+        {
+            "old_id": resolved_id,
+            "new_id": new_id,
+            "relation_id": relation_id,
+            "predicate": operation,
+            "reason": reason.strip(),
+            "inherited": context["inherited"],
+            "changed": changed,
+            "inherited_fields": list(context["inherited"]),
+            "changed_fields": list(changed),
+            "orphaned_semantic_edges": response_orphaned_edges,
+            "semantic_relations_repointed": bool(repoint_relations),
+            "repointed_relations": repointed_relations,
+        }
+    )
+
+
+def _replacement_operation(
     operation: Literal["revises", "supersedes"],
     *,
     entity_id: str | None = None,
@@ -291,7 +718,7 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     db_connection=None,
     db_path: str | None = None,
     _in_transaction: bool = False,
-) -> dict:  # noqa: C901, PLR0911, PLR0912, PLR0915
+) -> dict:
     """Atomically create an immutable replacement and archive its predecessor.
 
     All validation and inactive-target checks happen before the write transaction.  The callback
@@ -328,331 +755,60 @@ def _replacement_operation(  # noqa: C901, PLR0911, PLR0912, PLR0915
     title = cast(str, title)
     content = cast(str, content)
     reason = cast(str, reason)
-
     should_close = False
     conn = db_connection
     if conn is None:
         conn = get_connection(db_path or get_db_path())
         should_close = True
     try:
-        resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id)
-        if candidates:
-            item = envelope_error(
-                "AMBIGUOUS_ID_PREFIX",
-                f"ID prefix '{entity_id}' matches multiple memories; provide a longer prefix or full UUID.",
-                "entity_id",
-            )
-            item["candidates"] = candidates
-            if truncated:
-                item["candidates_truncated"] = True
-            return rejected([item])
-        if not resolved_id:
-            return _replacement_error(
-                "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
-            )
-
-        target = conn.execute("SELECT status FROM entities WHERE id = ?", (resolved_id,)).fetchone()
-        if target is None:
-            return _replacement_error(
-                "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
-            )
-        if target[0] != "raw":
-            successors, lineage = _successor_details(resolved_id, conn)
-            return rejected(
-                [
-                    envelope_error(
-                        "INACTIVE_TARGET",
-                        f"Memory '{resolved_id}' is inactive ({target[0]}). Fetch an active successor and inspect it before retrying; no replacement was created. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
-                        "entity_id",
-                    )
-                ],
-                effective={
-                    "target_id": resolved_id,
-                    "status": target[0],
-                    "active_successors": successors,
-                    "lineage": lineage,
-                },
-            )
-
-        columns, before = _replacement_snapshot(conn, resolved_id)
-        from . import tags as tag_ops
-
-        inherited_tags = tag_ops.list_entity_tags(conn, resolved_id) if tags is None else None
-        if not before:
-            return _replacement_error(
-                "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
-            )
-        orphaned_edges = _semantic_edge_worklist(conn, resolved_id)
-        new_title = redact_secrets(title.strip())
-        new_content = redact_secrets(content)
-        # validate_memory_input raises only for title bounds/metadata shape; its error is safe to
-        # return before BEGIN and therefore guarantees zero side effects on malformed requests.
-        try:
-            from .validation import validate_memory_input
-
-            validate_memory_input(
-                new_title,
-                new_content,
-                metadata if metadata is not None else before.get("metadata"),
-                tags,
-            )
-        except ValueError as exc:
-            return _replacement_error("INVALID_MEMORY", str(exc))
-
-        now = datetime.now(UTC).isoformat()
-        content_hash = compute_content_hash(new_content)
-        quality = evaluate_memory_quality(new_content, new_title)
-        if quality.get("status") == "REJECT":
-            return _replacement_error(
-                "MEMORY_QUALITY_REJECTED",
-                f"Memory quality check rejected (Score: {quality.get('quality_score', 0):.2f}). "
-                f"Reason: {quality.get('reason', 'quality requirements were not met')}",
-            )
-        inherited_agent_id = before.get("agent_id") if agent_id is None else agent_id
-        inherited_context = before.get("context_id") if context_id is None else context_id
-        inherited_scope = before.get("scope") if scope is None else scope
-        inherited_type = before.get("memory_type") or "fact" if memory_type is None else memory_type
-        inherited_metadata = before.get("metadata") if metadata is None else json.dumps(metadata)
-
-        effective_tags = inherited_tags if tags is None else tags
-        if effective_tags is None:
-            effective_tags = []
-        inherited: dict[str, Any] = {
-            field: value
-            for field, value, supplied in (
-                ("tags", inherited_tags, tags is not None),
-                ("agent_id", inherited_agent_id, agent_id is not None),
-                ("context_id", inherited_context, context_id is not None),
-                ("scope", inherited_scope, scope is not None),
-                ("memory_type", inherited_type, memory_type is not None),
-            )
-            if not supplied
-        }
-        changed: dict[str, Any] = {
-            "title": new_title,
-            "reason": reason.strip(),
-        }
-        changed.update(
-            {
-                field: value
-                for field, value, supplied in (
-                    ("tags", list(effective_tags), tags is not None),
-                    ("agent_id", inherited_agent_id, agent_id is not None),
-                    ("context_id", inherited_context, context_id is not None),
-                    ("scope", inherited_scope, scope is not None),
-                    ("memory_type", inherited_type, memory_type is not None),
-                    ("metadata", inherited_metadata, metadata is not None),
-                )
-                if supplied
-            }
+        resolved_id, target_error = _replacement_target(conn, entity_id)
+        if target_error is not None:
+            return target_error
+        resolved_id = cast(str, resolved_id)
+        context, preparation_error = _replacement_prepare(
+            conn,
+            entity_id,
+            resolved_id,
+            title,
+            tags,
+            content,
+            reason,
+            agent_id,
+            context_id,
+            scope,
+            memory_type,
+            agent_session_id,
+            metadata,
         )
-
-        def _write(c):
-            current = c.execute(
-                "SELECT status FROM entities WHERE id = ?", (resolved_id,)
-            ).fetchone()
-            if current is None:
-                raise _LifecycleRejected(
-                    _replacement_error(
-                        "UNKNOWN_ENTITY_ID",
-                        f"No memory matches entity_id '{resolved_id}'.",
-                        "entity_id",
-                    )
-                )
-            if current[0] != "raw":
-                successors, lineage = _successor_details(resolved_id, c)
-                raise _LifecycleRejected(
-                    rejected(
-                        [
-                            envelope_error(
-                                "INACTIVE_TARGET",
-                                f"Memory '{resolved_id}' became inactive ({current[0]}) before replacement; retry against an active successor. To correct stale/wrong information on an inactive memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{resolved_id}') -- no revise_memory/supersede_memory call is possible on an inactive target.",
-                                "entity_id",
-                            )
-                        ],
-                        effective={
-                            "target_id": resolved_id,
-                            "status": current[0],
-                            "active_successors": successors,
-                            "lineage": lineage,
-                        },
-                    )
-                )
-
-            # Re-read the frozen source under the lock.  If a concurrent writer changed any
-            # source column, abort rather than silently copying a stale predecessor snapshot.
-            _, locked_before = _replacement_snapshot(c, resolved_id)
-            for frozen in (
-                "title",
-                "full_content",
-                "agent_id",
-                "context_id",
-                "scope",
-                "memory_type",
-                "created_at",
-                "content_hash",
-                "metadata",
-                "parent_ids",
-                "valid_from",
-            ):
-                if locked_before.get(frozen) != before.get(frozen):
-                    raise _LifecycleRejected(
-                        _replacement_error(
-                            "TARGET_CHANGED",
-                            "Target changed while replacement was being prepared; retry after fetching it again.",
-                            "entity_id",
-                        )
-                    )
-
-            new_id = str(uuid.uuid4())
-            replacement = dict(locked_before)
-            replacement.update(
-                {
-                    "id": new_id,
-                    "created_at": now,
-                    "updated_at": now,
-                    "last_accessed_at": now,
-                    "agent_id": inherited_agent_id,
-                    "context_id": inherited_context,
-                    "scope": inherited_scope,
-                    "memory_type": inherited_type,
-                    "metadata": inherited_metadata,
-                    "status": "raw",
-                    "embedding_status": "pending",
-                    "title": new_title,
-                    "full_content": new_content,
-                    "valid_from": now,
-                    "valid_to": None,
-                    "content_hash": content_hash,
-                    "agent_session_id": agent_session_id,
-                    "last_touched_session_id": agent_session_id,
-                    "quality_score": quality.get("quality_score"),
-                    "quality_status": quality.get("status"),
-                    "quality_flags": json.dumps(quality.get("quality_flags", [])),
-                }
-            )
-            insert_columns = [column for column in columns if column in replacement]
-            placeholders = ", ".join("?" for _ in insert_columns)
-            c.execute(
-                f"INSERT INTO entities ({', '.join(insert_columns)}) VALUES ({placeholders})",
-                [replacement[column] for column in insert_columns],
-            )
-            _insert_replacement_tags(c, new_id, effective_tags, inherited_agent_id)
-
-            archived_at = now
-            c.execute(
-                "UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id = ? AND status = 'raw'",
-                (archived_at, archived_at, resolved_id),
-            )
-            from saltmdb.domain.services.embedding_service import (
-                cancel_embedding_jobs_for_entity,
-                cancel_retrieval_embedding_jobs_for_entity,
-                clear_embedding_vectors_for_entity,
-                enqueue_embedding_jobs_for_entity,
-                enqueue_retrieval_embedding_job_for_entity,
-            )
-
-            cancel_embedding_jobs_for_entity(c, resolved_id)
-            clear_embedding_vectors_for_entity(c, resolved_id)
-            cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
-            enqueue_embedding_jobs_for_entity(c, new_id, new_title, new_content, content_hash)
-            enqueue_retrieval_embedding_job_for_entity(
-                c,
-                new_id,
-                replacement.get("retrieval_text"),
-                replacement.get("retrieval_text_hash"),
-                force=True,
-            )
-            relation_id = str(uuid.uuid4())
-            c.execute(
-                "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (relation_id, new_id, resolved_id, operation, now, now, now),
-            )
-
-            repointed: list[dict[str, Any]] = []
-            still_orphaned_ids: set[str] = set()
-            if repoint_relations:
-                # Re-read under the write lock rather than trusting the pre-transaction
-                # `orphaned_edges` snapshot -- mirrors the frozen-column re-check above, so a
-                # relation created/invalidated concurrently between validation and this lock is
-                # not silently missed or double-handled.
-                for edge in _semantic_edge_worklist(c, resolved_id):
-                    new_source = new_id if edge["source_id"] == resolved_id else edge["source_id"]
-                    new_target = new_id if edge["target_id"] == resolved_id else edge["target_id"]
-                    if new_source == new_target:
-                        # A pre-existing self-loop on the predecessor would become a
-                        # self-referential edge on the new entity, which store_relation's own
-                        # guard forbids elsewhere. Leave this one edge completely untouched
-                        # (still an active edge on the archived predecessor, still reported as
-                        # orphaned) for the caller to resolve by hand, rather than fabricating a
-                        # disallowed edge or invalidating it with no replacement.
-                        still_orphaned_ids.add(edge["relation_id"])
-                        continue
-                    c.execute(
-                        "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
-                        (now, now, edge["relation_id"]),
-                    )
-                    new_relation_id = str(uuid.uuid4())
-                    insert_cursor = c.execute(
-                        """
-                        INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-                        """,
-                        (new_relation_id, new_source, new_target, edge["predicate"], now, now, now),
-                    )
-                    if insert_cursor.rowcount == 0:
-                        # An active edge with this exact (source, target, predicate) triple
-                        # already exists -- the old edge above is still correctly invalidated
-                        # (it's now redundant with the pre-existing one), but don't report a
-                        # new_relation_id that was never actually written.
-                        continue
-                    repointed.append(
-                        {
-                            "old_relation_id": edge["relation_id"],
-                            "new_relation_id": new_relation_id,
-                            "source_id": new_source,
-                            "target_id": new_target,
-                            "predicate": edge["predicate"],
-                        }
-                    )
-            return new_id, relation_id, repointed, still_orphaned_ids
-
+        if preparation_error is not None:
+            return preparation_error
+        context = cast(dict, context)
+        callback = partial(
+            _replacement_write,
+            operation=operation,
+            resolved_id=resolved_id,
+            context=context,
+            repoint_relations=repoint_relations,
+        )
         try:
             if _in_transaction:
-                new_id, relation_id, repointed_relations, still_orphaned_ids = _write(conn)
+                new_id, relation_id, repointed_relations, still_orphaned_ids = callback(conn)
             else:
                 new_id, relation_id, repointed_relations, still_orphaned_ids = (
-                    write_transaction_retrying(conn, _write)
+                    write_transaction_retrying(conn, callback)
                 )
         except _LifecycleRejected as exc:
             return exc.payload
-        # A large new body echoed back verbatim risks tripping the calling MCP client's own
-        # response-size limit (confirmed live 2026-09-14 on a ~94KB supersede_memory response) --
-        # dump it to a file past the threshold, same as get_memory's full-content read path. Done
-        # only now, after the write has actually committed, so a rejected write (TARGET_CHANGED/
-        # INACTIVE_TARGET) never leaves an orphaned dump file with nothing referencing it.
-        changed.update(large_content_descriptor(new_content))
-        response_orphaned_edges = (
-            [edge for edge in orphaned_edges if edge["relation_id"] in still_orphaned_ids]
-            if repoint_relations
-            else orphaned_edges
-        )
-        return envelope_ok(
-            {
-                "old_id": resolved_id,
-                "new_id": new_id,
-                "relation_id": relation_id,
-                "predicate": operation,
-                "reason": reason.strip(),
-                "inherited": inherited,
-                "changed": changed,
-                "inherited_fields": list(inherited),
-                "changed_fields": list(changed),
-                "orphaned_semantic_edges": response_orphaned_edges,
-                "semantic_relations_repointed": bool(repoint_relations),
-                "repointed_relations": repointed_relations,
-            }
+        return _replacement_response(
+            operation,
+            resolved_id,
+            reason,
+            context,
+            new_id,
+            relation_id,
+            repointed_relations,
+            still_orphaned_ids,
+            repoint_relations,
         )
     except Exception as exc:
         logger.error("Error %sing memory: %s", operation, exc)
