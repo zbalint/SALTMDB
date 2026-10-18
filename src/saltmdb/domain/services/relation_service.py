@@ -4,7 +4,7 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, UTC
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from saltmdb.config import (
     get_db_path,
     COHESION_MIN_PAIRWISE_THRESHOLD,
@@ -579,7 +579,61 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
             close_connection(conn)
 
 
-def invalidate_relation(  # noqa: C901
+def _invalidate_relation_write(
+    conn,
+    resolved_source: str,
+    resolved_target: str,
+    predicate: str,
+    invalid_at: str | None,
+    now: str,
+) -> dict:
+    normalized_requested = _normalize_predicate_name(predicate)
+    canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+    note = (
+        f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
+        if predicate and normalized_requested and normalized_requested != canonical_predicate
+        else ""
+    )
+    existing = conn.execute(
+        "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
+        (resolved_source, resolved_target, canonical_predicate),
+    ).fetchone()
+    if not existing:
+        existing = conn.execute(
+            "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND invalid_at IS NOT NULL ORDER BY rowid DESC",
+            (resolved_source, resolved_target, canonical_predicate),
+        ).fetchone()
+    if not existing:
+        return rejected([envelope_error(error_codes.NOT_FOUND, "Error: relation not found")])
+
+    rel_id, existing_invalid_at = existing
+    if existing_invalid_at is not None:
+        message = f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
+        return envelope_ok(
+            {"relation_id": rel_id, "message": message},
+            warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
+        )
+
+    effective_invalid_at = invalid_at or now
+    conn.execute(
+        "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+        (effective_invalid_at, effective_invalid_at, rel_id),
+    )
+    message = (
+        f"Relation invalidated: '{canonical_predicate}' between {resolved_source} "
+        f"and {resolved_target} at {effective_invalid_at} (ID: {rel_id}){note}"
+    )
+    return envelope_ok({"relation_id": rel_id, "message": message})
+
+
+def _open_relation_connection(db_connection, db_path: str | None):
+    if db_connection:
+        return db_connection, db_path, False
+    resolved_path = db_path or get_db_path()
+    return get_connection(resolved_path), resolved_path, True
+
+
+def invalidate_relation(
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
@@ -603,12 +657,7 @@ def invalidate_relation(  # noqa: C901
             ]
         )
 
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
+    conn, db_path, should_close = _open_relation_connection(db_connection, db_path)
 
     resolved_source, source_error = _resolve_relation_endpoint(conn, source_id, "source_id")
     resolved_target, target_error = _resolve_relation_endpoint(conn, target_id, "target_id")
@@ -625,60 +674,17 @@ def invalidate_relation(  # noqa: C901
 
     now = datetime.now(UTC).isoformat()
     try:
-
-        def _do_invalidate():
-            normalized_requested = _normalize_predicate_name(predicate)
-            canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
-            note = (
-                f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
-                if predicate
-                and normalized_requested
-                and normalized_requested != canonical_predicate
-                else ""
-            )
-            existing = conn.execute(
-                "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-                (resolved_source, resolved_target, canonical_predicate),
-            ).fetchone()
-            if not existing:
-                existing = conn.execute(
-                    "SELECT id, invalid_at FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND invalid_at IS NOT NULL ORDER BY rowid DESC",
-                    (resolved_source, resolved_target, canonical_predicate),
-                ).fetchone()
-            if not existing:
-                return rejected(
-                    [envelope_error(error_codes.NOT_FOUND, "Error: relation not found")]
-                )
-
-            rel_id, existing_invalid_at = existing
-            if existing_invalid_at is not None:
-                message = (
-                    f"Relation already invalidated (no-op) at {existing_invalid_at} (ID: {rel_id})"
-                )
-                return envelope_ok(
-                    {"relation_id": rel_id, "message": message},
-                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
-                )
-
-            effective_invalid_at = invalid_at or now
-            conn.execute(
-                "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
-                (effective_invalid_at, effective_invalid_at, rel_id),
-            )
-            message = (
-                f"Relation invalidated: '{canonical_predicate}' between {resolved_source} "
-                f"and {resolved_target} at {effective_invalid_at} (ID: {rel_id}){note}"
-            )
-            return envelope_ok({"relation_id": rel_id, "message": message})
-
         if _in_transaction:
-            result_msg = _do_invalidate()
+            result_msg = _invalidate_relation_write(
+                conn, resolved_source, resolved_target, predicate, invalid_at, now
+            )
         else:
-
-            def _write(c):
-                return _do_invalidate()
-
-            result_msg = write_transaction_retrying(conn, _write)
+            result_msg = write_transaction_retrying(
+                conn,
+                lambda tx_conn: _invalidate_relation_write(
+                    tx_conn, resolved_source, resolved_target, predicate, invalid_at, now
+                ),
+            )
         if not _in_transaction:
             from saltmdb.domain.services.community_detection_service import (
                 trigger_community_detection,
@@ -767,7 +773,143 @@ def _dependency_cte_sql(
     )
 
 
-def analyze_dependencies(  # noqa: C901, PLR0912
+def _append_dependency_row(
+    conn,
+    direction: Literal["outbound", "inbound"],
+    row: tuple,
+    include_inspect: bool,
+    max_depth: int,
+    agent_id: str | None,
+    seen_nodes: set[str],
+    seen_edges: set[str],
+    nodes: list[dict],
+    edges: list[dict],
+) -> None:
+    rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path = row
+    # row[6] == depth
+    reached_id, reached_title = (
+        (tgt_id, tgt_title) if direction == "outbound" else (src_id, src_title)
+    )
+    # The node newly discovered by this hop is the target for an outbound row, but the
+    # *source* for an inbound row -- inbound walks backward along each edge, so the node
+    # moving away from root is the edge's source, not its target.
+    if reached_id not in seen_nodes:
+        node = {"id": reached_id, "title": reached_title, "depth": depth}
+        if include_inspect:
+            from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
+
+            inspected = _assemble_memory_record(
+                conn,
+                reached_id,
+                include_content=False,
+                include_lineage=False,
+                touch=False,
+                max_depth=max_depth,
+                agent_id=agent_id,
+            )
+            if inspected is not None:
+                node.update(inspected)
+        nodes.append(node)
+        seen_nodes.add(reached_id)
+    if rel_id in seen_edges:
+        # Multiple converging paths in a diamond-shaped graph can revisit the same
+        # relation once per incoming path (the CTE's cycle guard only stops a single
+        # path from looping, not distinct paths reconverging). Dedupe on the relation's
+        # own id, keeping the first (shallowest, per the sort above) occurrence.
+        return
+    seen_edges.add(rel_id)
+    edges.append(
+        {
+            "relation_id": rel_id,
+            "source_id": src_id,
+            "source_title": src_title,
+            "target_id": tgt_id,
+            "target_title": tgt_title,
+            "predicate": pred,
+            "depth": depth,
+        }
+    )
+
+
+def _build_dependency_result(
+    conn,
+    root_id: str,
+    root_info: dict,
+    tagged_rows: list,
+    include_inspect: bool,
+    max_depth: int,
+    agent_id: str | None,
+    point_in_time: str,
+) -> dict:
+    tagged_rows.sort(key=lambda item: item[1][6])
+    # Global shallowest-first ordering across both directions' independently-ordered result
+    # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
+    # direction's query happened to find a convergently-reachable relation first (matches
+    # the single-query ORDER BY dt.depth ASC invariant the pre-existing dedup comment below
+    # already documents for the outbound-only case).
+    nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
+    if include_inspect:
+        from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
+
+        root_inspect = _assemble_memory_record(
+            conn,
+            root_id,
+            include_content=False,
+            include_lineage=False,
+            touch=False,
+            max_depth=max_depth,
+            agent_id=agent_id,
+        )
+        if root_inspect is not None:
+            nodes[0].update(root_inspect)
+    seen_nodes = {root_id}
+    edges: list[dict] = []
+    seen_edges: set[str] = set()
+    for direction, row in tagged_rows:
+        _append_dependency_row(
+            conn,
+            direction,
+            row,
+            include_inspect,
+            max_depth,
+            agent_id,
+            seen_nodes,
+            seen_edges,
+            nodes,
+            edges,
+        )
+    return {
+        "root": root_info,
+        "total_dependencies_found": len(edges),
+        "graph_exhausted": len(edges) == 0
+        or max([e["depth"] for e in edges], default=0) < max_depth,
+        "dependencies": nodes,
+        "edges": edges,
+        "point_in_time": point_in_time,
+    }
+
+
+def _fetch_dependency_rows(
+    conn,
+    direction: Literal["outbound", "inbound", "both"],
+    root_id: str,
+    point_in_time: str,
+    max_depth: int,
+    agent_id: str | None,
+) -> list[tuple[Literal["outbound", "inbound"], tuple]]:
+    directions: tuple[Literal["outbound", "inbound"], ...] = (
+        ("outbound", "inbound") if direction == "both" else (direction,)
+    )
+    tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]] = []
+    for current_direction in directions:
+        sql, params = _dependency_cte_sql(
+            current_direction, root_id, point_in_time, max_depth, agent_id
+        )
+        tagged_rows.extend((current_direction, row) for row in conn.execute(sql, params).fetchall())
+    return tagged_rows
+
+
+def analyze_dependencies(
     root_entity_id: str = None,
     max_depth: int = 5,
     point_in_time: str = None,
@@ -828,103 +970,10 @@ def analyze_dependencies(  # noqa: C901, PLR0912
             else {"id": root_id, "title": "Root", "status": "raw"}
         )
 
-        directions_to_run: tuple[Literal["outbound", "inbound"], ...] = (
-            ("outbound", "inbound") if direction == "both" else (direction,)
+        tagged_rows = _fetch_dependency_rows(conn, direction, root_id, pit, max_depth, agent_id)
+        return _build_dependency_result(
+            conn, root_id, root_info, tagged_rows, include_inspect, max_depth, agent_id, pit
         )
-        tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]] = []
-        for d in directions_to_run:
-            sql, params = _dependency_cte_sql(d, root_id, pit, max_depth, agent_id)
-            tagged_rows.extend((d, row) for row in conn.execute(sql, params).fetchall())
-        # Global shallowest-first ordering across both directions' independently-ordered result
-        # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
-        # direction's query happened to find a convergently-reachable relation first (matches
-        # the single-query ORDER BY dt.depth ASC invariant the pre-existing dedup comment below
-        # already documents for the outbound-only case).
-        tagged_rows.sort(key=lambda item: item[1][6])  # row[6] == depth
-
-        nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
-        if include_inspect:
-            from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
-
-            root_inspect = _assemble_memory_record(
-                conn,
-                root_id,
-                include_content=False,
-                include_lineage=False,
-                touch=False,
-                max_depth=max_depth,
-                agent_id=agent_id,
-            )
-            if root_inspect is not None:
-                nodes[0].update(root_inspect)
-        seen_nodes = {root_id}
-
-        # dt.path (last column) is only needed by the SQL cycle guard (see CTE above) --
-        # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
-        edges = []
-        seen_edges = set()
-        for d, (
-            rel_id,
-            src_id,
-            src_title,
-            tgt_id,
-            tgt_title,
-            pred,
-            depth,
-            _raw_path,
-        ) in tagged_rows:
-            # The node newly discovered by this hop is the target for an outbound row, but the
-            # *source* for an inbound row -- inbound walks backward along each edge, so the node
-            # moving away from root is the edge's source, not its target.
-            reached_id, reached_title = (
-                (tgt_id, tgt_title) if d == "outbound" else (src_id, src_title)
-            )
-            if reached_id not in seen_nodes:
-                node = {"id": reached_id, "title": reached_title, "depth": depth}
-                if include_inspect:
-                    inspected = _assemble_memory_record(
-                        conn,
-                        reached_id,
-                        include_content=False,
-                        include_lineage=False,
-                        touch=False,
-                        max_depth=max_depth,
-                        agent_id=agent_id,
-                    )
-                    if inspected is not None:
-                        node.update(inspected)
-                nodes.append(node)
-                seen_nodes.add(reached_id)
-
-            # Multiple converging paths in a diamond-shaped graph can revisit the same
-            # relation once per incoming path (the CTE's cycle guard only stops a single
-            # path from looping, not distinct paths reconverging). Dedupe on the relation's
-            # own id, keeping the first (shallowest, per the sort above) occurrence.
-            if rel_id in seen_edges:
-                continue
-            seen_edges.add(rel_id)
-
-            edges.append(
-                {
-                    "relation_id": rel_id,
-                    "source_id": src_id,
-                    "source_title": src_title,
-                    "target_id": tgt_id,
-                    "target_title": tgt_title,
-                    "predicate": pred,
-                    "depth": depth,
-                }
-            )
-
-        return {
-            "root": root_info,
-            "total_dependencies_found": len(edges),
-            "graph_exhausted": len(edges) == 0
-            or max([e["depth"] for e in edges], default=0) < max_depth,
-            "dependencies": nodes,
-            "edges": edges,
-            "point_in_time": pit,
-        }
     except Exception as e:
         logger.error("Error analyzing dependencies: %s", e)
         return {"error": str(e)}
@@ -965,7 +1014,148 @@ def _lineage_node(conn, entity_id: str, depth: int = 0) -> dict:
     }
 
 
-def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _lineage_query(
+    direction: Literal["ancestors", "descendants"],
+    target_id: str,
+    max_depth: int,
+    point_in_time: str,
+    agent_id: str | None,
+) -> tuple[str, list[Any]]:
+    predicate_placeholders = ",".join("?" for _ in _LINEAGE_PREDICATES)
+    # The path is delimited so IDs cannot match as a substring of another ID.
+    # Predicate names are constants from _LINEAGE_PREDICATES, never caller input.
+    validity = """
+            AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
+            AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
+            AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
+            AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
+        """
+    visibility = (
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
+        "AND (e.agent_id = ? OR e.scope = 'shared')) "
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
+        "AND (e.agent_id = ? OR e.scope = 'shared'))"
+        if agent_id is not None
+        else ""
+    )
+    if direction == "ancestors":
+        seed_join = "r.source_id = ?"
+        next_join = "r.source_id = l.next_id"
+        next_expression = "r.target_id"
+    else:
+        seed_join = "r.target_id = ?"
+        next_join = "r.target_id = l.next_id"
+        next_expression = "r.source_id"
+    query = f"""
+            WITH RECURSIVE lineage(
+                relation_id, source_id, target_id, predicate, depth, next_id, path
+            ) AS (
+                SELECT r.id, r.source_id, r.target_id, r.predicate, 1,
+                       {next_expression}, '|' || ? || '|' || {next_expression} || '|'
+                FROM relations r
+                WHERE {seed_join} AND r.predicate IN ({predicate_placeholders})
+                  {validity} {visibility}
+                UNION ALL
+                SELECT r.id, r.source_id, r.target_id, r.predicate, l.depth + 1,
+                       {next_expression}, l.path || {next_expression} || '|'
+                FROM relations r JOIN lineage l ON {next_join}
+                WHERE l.depth < ? AND r.predicate IN ({predicate_placeholders})
+                  {validity} {visibility}
+                  AND instr(l.path, '|' || {next_expression} || '|') = 0
+            )
+            SELECT relation_id, source_id, target_id, predicate, depth, next_id
+            FROM lineage ORDER BY depth ASC, relation_id ASC
+        """
+    # Root is repeated in the path seed. Each validity predicate receives pit in
+    # SQL order; keep the parameter construction explicit to avoid binding drift.
+    params: list[Any] = [target_id, target_id, *_LINEAGE_PREDICATES, point_in_time]
+    params.extend([point_in_time, point_in_time, point_in_time])
+    if agent_id is not None:
+        params.extend([agent_id, agent_id])
+    params.extend([max_depth, *_LINEAGE_PREDICATES, point_in_time])
+    params.extend([point_in_time, point_in_time, point_in_time])
+    if agent_id is not None:
+        params.extend([agent_id, agent_id])
+    return query, params
+
+
+def _assemble_lineage_result(
+    conn,
+    target_id: str,
+    direction: Literal["ancestors", "descendants"],
+    root_info: dict,
+    rows: list,
+    max_depth: int,
+    point_in_time: str,
+) -> dict:
+    edges: list[dict[str, Any]] = []
+    seen_edges: set[str] = set()
+    nodes_by_id: dict[str, dict] = {target_id: root_info}
+    for relation_id, source_id, target_id_row, predicate, depth, next_id in rows:
+        # dt.path (last column) is only needed by the SQL cycle guard (see CTE above) --
+        # not serialized here. Callers reconstruct hierarchy from edges' source_id/target_id.
+        if relation_id in seen_edges:
+            continue
+        seen_edges.add(relation_id)
+        source_node = _lineage_node(conn, source_id, depth if source_id == next_id else 0)
+        target_node = _lineage_node(conn, target_id_row, depth if target_id_row == next_id else 0)
+        nodes_by_id.setdefault(source_id, source_node)
+        nodes_by_id.setdefault(target_id_row, target_node)
+        existing = nodes_by_id.get(next_id)
+        # The first path is ordered shallowest; preserve that depth when a diamond
+        # reaches a node through a second, longer path.
+        if existing is None or depth < existing["depth"]:
+            nodes_by_id[next_id] = _lineage_node(conn, next_id, depth)
+        edges.append(
+            {
+                "relation_id": relation_id,
+                "source_id": source_id,
+                "target_id": target_id_row,
+                "predicate": predicate,
+                "depth": depth,
+                "source_title": source_node["title"],
+                "source_status": source_node["status"],
+                "target_title": target_node["title"],
+                "target_status": target_node["status"],
+            }
+        )
+    nodes = sorted(nodes_by_id.values(), key=lambda n: (n["depth"], n["id"]))
+    return {
+        "entity_id": target_id,
+        "direction": direction,
+        "root": root_info,
+        "nodes": nodes,
+        "edges": edges,
+        "total": len(edges),
+        "total_nodes": len(nodes),
+        "graph_exhausted": not edges or max(e["depth"] for e in edges) < max_depth,
+        "point_in_time": point_in_time,
+        "max_depth": max_depth,
+    }
+
+
+def _lineage_root_result(
+    target_id: str,
+    direction: Literal["ancestors", "descendants"],
+    root_info: dict,
+    point_in_time: str,
+    max_depth: int,
+) -> dict:
+    return {
+        "entity_id": target_id,
+        "direction": direction,
+        "root": root_info,
+        "nodes": [root_info],
+        "edges": [],
+        "total": 0,
+        "total_nodes": 1,
+        "graph_exhausted": True,
+        "point_in_time": point_in_time,
+        "max_depth": max_depth,
+    }
+
+
+def _get_lineage_raw(  # noqa: PLR0911
     entity_id: str = None,
     direction: Literal["ancestors", "descendants"] = "ancestors",
     max_depth: int = 10,
@@ -991,12 +1181,7 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
         return {"error": "max_depth must be a non-negative integer"}
 
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
+    conn, db_path, should_close = _open_relation_connection(db_connection, db_path)
 
     target_id, _target_candidates, _target_truncated = resolve_entity_ref(
         conn, entity_id, agent_id=agent_id
@@ -1011,120 +1196,10 @@ def _get_lineage_raw(  # noqa: C901, PLR0911, PLR0912, PLR0915
     try:
         root_info = _lineage_node(conn, target_id)
         if max_depth == 0:
-            return {
-                "entity_id": target_id,
-                "direction": direction,
-                "root": root_info,
-                "nodes": [root_info],
-                "edges": [],
-                "total": 0,
-                "total_nodes": 1,
-                "graph_exhausted": True,
-                "point_in_time": pit,
-                "max_depth": max_depth,
-            }
-        predicate_placeholders = ",".join("?" for _ in _LINEAGE_PREDICATES)
-        validity = """
-            AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?))
-            AND (r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?))
-            AND (r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))
-            AND (r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?))
-        """
-        visibility = (
-            "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.source_id "
-            "AND (e.agent_id = ? OR e.scope = 'shared')) "
-            "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = r.target_id "
-            "AND (e.agent_id = ? OR e.scope = 'shared'))"
-            if agent_id is not None
-            else ""
-        )
-        if direction == "ancestors":
-            seed_join = "r.source_id = ?"
-            next_join = "r.source_id = l.next_id"
-            next_expression = "r.target_id"
-        else:
-            seed_join = "r.target_id = ?"
-            next_join = "r.target_id = l.next_id"
-            next_expression = "r.source_id"
-
-        # The path is delimited so IDs cannot match as a substring of another ID.
-        # Predicate names are constants from _LINEAGE_PREDICATES, never caller input.
-        query = f"""
-            WITH RECURSIVE lineage(
-                relation_id, source_id, target_id, predicate, depth, next_id, path
-            ) AS (
-                SELECT r.id, r.source_id, r.target_id, r.predicate, 1,
-                       {next_expression}, '|' || ? || '|' || {next_expression} || '|'
-                FROM relations r
-                WHERE {seed_join} AND r.predicate IN ({predicate_placeholders})
-                  {validity} {visibility}
-                UNION ALL
-                SELECT r.id, r.source_id, r.target_id, r.predicate, l.depth + 1,
-                       {next_expression}, l.path || {next_expression} || '|'
-                FROM relations r JOIN lineage l ON {next_join}
-                WHERE l.depth < ? AND r.predicate IN ({predicate_placeholders})
-                  {validity} {visibility}
-                  AND instr(l.path, '|' || {next_expression} || '|') = 0
-            )
-            SELECT relation_id, source_id, target_id, predicate, depth, next_id
-            FROM lineage ORDER BY depth ASC, relation_id ASC
-        """
-        # Root is repeated in the path seed. Each validity predicate receives pit in
-        # SQL order; keep the parameter construction explicit to avoid binding drift.
-        params: list[Any] = [target_id, target_id, *_LINEAGE_PREDICATES, pit, pit, pit, pit]
-        if agent_id is not None:
-            params.extend([agent_id, agent_id])
-        params.extend([max_depth, *_LINEAGE_PREDICATES, pit, pit, pit, pit])
-        if agent_id is not None:
-            params.extend([agent_id, agent_id])
+            return _lineage_root_result(target_id, direction, root_info, pit, max_depth)
+        query, params = _lineage_query(direction, target_id, max_depth, pit, agent_id)
         rows = conn.execute(query, params).fetchall()
-
-        edges: list[dict[str, Any]] = []
-        seen_edges: set[str] = set()
-        nodes_by_id: dict[str, dict] = {target_id: root_info}
-        for relation_id, source_id, target_id_row, predicate, depth, next_id in rows:
-            if relation_id in seen_edges:
-                continue
-            seen_edges.add(relation_id)
-            source_node = _lineage_node(conn, source_id, depth if source_id == next_id else 0)
-            target_node = _lineage_node(
-                conn, target_id_row, depth if target_id_row == next_id else 0
-            )
-            nodes_by_id.setdefault(source_id, source_node)
-            nodes_by_id.setdefault(target_id_row, target_node)
-            # The first path is ordered shallowest; preserve that depth when a diamond
-            # reaches a node through a second, longer path.
-            existing = nodes_by_id.get(next_id)
-            if existing is None or depth < existing["depth"]:
-                nodes_by_id[next_id] = _lineage_node(conn, next_id, depth)
-            edges.append(
-                {
-                    "relation_id": relation_id,
-                    "source_id": source_id,
-                    "target_id": target_id_row,
-                    "predicate": predicate,
-                    "depth": depth,
-                    "source_title": source_node["title"],
-                    "source_status": source_node["status"],
-                    "target_title": target_node["title"],
-                    "target_status": target_node["status"],
-                }
-            )
-
-        nodes = sorted(nodes_by_id.values(), key=lambda n: (n["depth"], n["id"]))
-        result = {
-            "entity_id": target_id,
-            "direction": direction,
-            "root": root_info,
-            "nodes": nodes,
-            "edges": edges,
-            "total": len(edges),
-            "total_nodes": len(nodes),
-            "graph_exhausted": not edges or max(e["depth"] for e in edges) < max_depth,
-            "point_in_time": pit,
-            "max_depth": max_depth,
-        }
-        return result
+        return _assemble_lineage_result(conn, target_id, direction, root_info, rows, max_depth, pit)
     except Exception as e:
         logger.error("Error analyzing lineage: %s", e)
         return {"error": str(e)}
@@ -1267,6 +1342,47 @@ def _resolve_and_filter_parent_ids(conn, parent_ids: list) -> list[str]:
     return resolved_parents
 
 
+def _validate_parent_reference(
+    conn, raw_parent: object, seen: set[str]
+) -> tuple[str | None, dict[str, str] | None]:
+    raw = str(raw_parent)
+    entity_id, candidates, truncated = resolve_entity_ref(conn, raw)
+    if not entity_id:
+        if candidates:
+            return None, {
+                "code": "AMBIGUOUS_PARENT_ID",
+                "message": (
+                    f"parent_id '{raw}' is ambiguous; it matches "
+                    f"{len(candidates)}{'+' if truncated else ''} memories."
+                ),
+            }
+        return None, {
+            "code": "UNKNOWN_PARENT_ID",
+            "message": f"could not resolve parent_id '{raw}'.",
+        }
+    if entity_id in seen:
+        return entity_id, None
+    seen.add(entity_id)
+    # Defensive: resolve_entity_ref should only return existing rows, but retain the
+    # hard-fail invariant if its implementation changes.
+    row = conn.execute("SELECT status FROM entities WHERE id = ?", (entity_id,)).fetchone()
+    if row is None:
+        return None, {
+            "code": "UNKNOWN_PARENT_ID",
+            "message": f"could not resolve parent_id '{raw}'.",
+        }
+    if row[0] != "raw":
+        return None, {
+            "code": "INACTIVE_PARENT",
+            "message": (
+                f"parent '{entity_id}' is inactive (status='{row[0]}'); inspect its "
+                "successor with get_lineage(direction='descendants') before retrying. "
+                f"To correct stale/wrong information on an inactive (consolidated/archived) memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{entity_id}') -- no consolidate_memories call is needed for a single correction."
+            ),
+        }
+    return entity_id, None
+
+
 def _resolve_and_validate_parent_ids(
     conn, parent_ids: list
 ) -> tuple[list[str], dict[str, str] | None]:
@@ -1280,43 +1396,11 @@ def _resolve_and_validate_parent_ids(
     resolved: list[str] = []
     seen: set[str] = set()
     for raw_parent in parent_ids or []:
-        raw = str(raw_parent)
-        entity_id, candidates, truncated = resolve_entity_ref(conn, raw)
-        if not entity_id:
-            if candidates:
-                return [], {
-                    "code": "AMBIGUOUS_PARENT_ID",
-                    "message": (
-                        f"parent_id '{raw}' is ambiguous; it matches "
-                        f"{len(candidates)}{'+' if truncated else ''} memories."
-                    ),
-                }
-            return [], {
-                "code": "UNKNOWN_PARENT_ID",
-                "message": f"could not resolve parent_id '{raw}'.",
-            }
-        if entity_id in seen:
-            continue
-        seen.add(entity_id)
-        row = conn.execute("SELECT status FROM entities WHERE id = ?", (entity_id,)).fetchone()
-        if row is None:
-            # Defensive: resolve_entity_ref should only return existing rows, but retain the
-            # hard-fail invariant if its implementation changes.
-            return [], {
-                "code": "UNKNOWN_PARENT_ID",
-                "message": f"could not resolve parent_id '{raw}'.",
-            }
-        if row[0] != "raw":
-            return [], {
-                "code": "INACTIVE_PARENT",
-                "message": (
-                    f"parent '{entity_id}' is inactive (status='{row[0]}'); inspect its "
-                    "successor with get_lineage(direction='descendants') before retrying. "
-                    f"To correct stale/wrong information on an inactive (consolidated/archived) memory without reviving it, store a new store_memory fact with the correction, then manage_relation(predicate='corrects', source_id=<new memory>, target_id='{entity_id}') -- no consolidate_memories call is needed for a single correction."
-                ),
-            }
-        resolved.append(entity_id)
-
+        entity_id, parent_error = _validate_parent_reference(conn, raw_parent, seen)
+        if parent_error is not None:
+            return [], parent_error
+        if entity_id is not None and entity_id not in resolved:
+            resolved.append(entity_id)
     if len(resolved) < 2:
         return [], {
             "code": "REJECT_PARENT_COUNT",
@@ -1900,7 +1984,109 @@ def commit_consolidation(*args, **kwargs) -> str:
     return str(result)
 
 
-def bulk_commit_consolidation(  # noqa: PLR0915
+def _commit_bulk_consolidation_item(
+    conn,
+    item: dict,
+    parent_ids: list[str],
+    centroids: dict,
+    unresolved: dict,
+    observed_state: dict,
+    agent_id: str | None,
+    context_id: str | None,
+    agent_session_id: str | None,
+) -> dict:
+    item_centroids = {pid: centroids[pid] for pid in parent_ids if pid in centroids}
+    item_unresolved = {pid: unresolved[pid] for pid in parent_ids if pid in unresolved}
+    item_observed_state = {pid: observed_state[pid] for pid in parent_ids if pid in observed_state}
+    result = consolidate_memories(
+        # Per-item ownership is an internal compatibility affordance.  Public MCP
+        # wrappers remove this field before crossing the adapter boundary; retaining
+        # the item-level override here supports trusted in-process callers.
+        parent_ids=parent_ids,
+        title=cast(str, item.get("title")),
+        content=cast(str, item.get("content")),
+        tags=item.get("tags", []),
+        scope=item.get("scope", "shared"),
+        weight=item.get("weight", 1),
+        is_core=item.get("is_core"),
+        agent_id=item.get("agent_id", agent_id),
+        context_id=item.get("context_id", context_id),
+        agent_session_id=agent_session_id,
+        override_justification=item.get("override_justification"),
+        core_reason=item.get("core_reason"),
+        core_exit_condition=item.get("core_exit_condition"),
+        core_review_after=item.get("core_review_after"),
+        detail_memory_ids=item.get("detail_memory_ids"),
+        db_connection=conn,
+        _in_transaction=True,
+        _precomputed_centroids=item_centroids,
+        _precomputed_unresolved=item_unresolved,
+        _precomputed_observed_state=item_observed_state,
+    )
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {result}")
+    data = result["data"]
+    return {
+        "status": "success",
+        "entity_id": data["entity_id"],
+        "title": item.get("title"),
+        "data": data,
+        "orphaned_relations": data.get("orphaned_relations", []),
+        "orphaned_edge_worklist": data.get("orphaned_edge_worklist", []),
+        "result": result,
+    }
+
+
+def _write_bulk_consolidations(
+    conn,
+    consolidations: list,
+    item_resolved_parents: list[list[str]],
+    centroids: dict,
+    unresolved: dict,
+    observed_state: dict,
+    results: list,
+    agent_id: str | None,
+    context_id: str | None,
+    agent_session_id: str | None,
+) -> None:
+    results.clear()
+    for item, parent_ids in zip(consolidations, item_resolved_parents):
+        results.append(
+            _commit_bulk_consolidation_item(
+                conn,
+                item,
+                parent_ids,
+                centroids,
+                unresolved,
+                observed_state,
+                agent_id,
+                context_id,
+                agent_session_id,
+            )
+        )
+
+
+def _prepare_bulk_consolidation_parents(
+    conn, consolidations: list
+) -> tuple[list[list[str]], list[str], dict[str, str] | None]:
+    item_resolved_parents: list[list[str]] = []
+    union_ids: list[str] = []
+    seen_union: set[str] = set()
+    for item in consolidations:
+        parent_ids, parent_error = _resolve_and_validate_parent_ids(
+            conn, item.get("parent_ids", [])
+        )
+        if parent_error is not None:
+            return [], [], parent_error
+        item_resolved_parents.append(parent_ids)
+        for parent_id in parent_ids:
+            if parent_id not in seen_union:
+                seen_union.add(parent_id)
+                union_ids.append(parent_id)
+    return item_resolved_parents, union_ids, None
+
+
+def bulk_commit_consolidation(
     consolidations: list,
     agent_id: str = None,
     context_id: str = None,
@@ -1947,90 +2133,35 @@ def bulk_commit_consolidation(  # noqa: PLR0915
 
     results: list[Any] = []
     try:
-        item_resolved_parents: list[list[str]] = []
-        union_ids: list[str] = []
-        seen_union: set[str] = set()
-        for item in consolidations:
-            p_ids, parent_error = _resolve_and_validate_parent_ids(conn, item.get("parent_ids", []))
-            if parent_error is not None:
-                return [
-                    {
-                        "status": "error",
-                        "error": f"{parent_error['code']}: {parent_error['message']}",
-                    }
-                ]
-            item_resolved_parents.append(p_ids)
-            for pid in p_ids:
-                if pid not in seen_union:
-                    seen_union.add(pid)
-                    union_ids.append(pid)
-
+        item_resolved_parents, union_ids, parent_error = _prepare_bulk_consolidation_parents(
+            conn, consolidations
+        )
+        if parent_error is not None:
+            return [
+                {
+                    "status": "error",
+                    "error": f"{parent_error['code']}: {parent_error['message']}",
+                }
+            ]
         centroids, unresolved, observed_state = get_fresh_entity_centroids(
             union_ids, conn, db_path or get_db_path()
         )
 
-        def _write(conn_arg):
-            results.clear()
-            for item, p_ids in zip(consolidations, item_resolved_parents):
-                t = item.get("title")
-                c = item.get("content")
-                tags = item.get("tags", [])
-                scope = item.get("scope", "shared")
-                w = item.get("weight", 1)
-                is_core = item.get("is_core")
-                override_justification = item.get("override_justification")
-                core_reason = item.get("core_reason")
-                core_exit_condition = item.get("core_exit_condition")
-                core_review_after = item.get("core_review_after")
-                detail_memory_ids = item.get("detail_memory_ids")
-                item_agent_id = item.get("agent_id", agent_id)
-                item_context_id = item.get("context_id", context_id)
-
-                item_centroids = {pid: centroids[pid] for pid in p_ids if pid in centroids}
-                item_unresolved = {pid: unresolved[pid] for pid in p_ids if pid in unresolved}
-                item_observed_state = {
-                    pid: observed_state[pid] for pid in p_ids if pid in observed_state
-                }
-
-                res = consolidate_memories(
-                    parent_ids=p_ids,
-                    title=t,
-                    content=c,
-                    tags=tags,
-                    scope=scope,
-                    weight=w,
-                    is_core=is_core,
-                    agent_id=item_agent_id,
-                    context_id=item_context_id,
-                    agent_session_id=agent_session_id,
-                    override_justification=override_justification,
-                    core_reason=core_reason,
-                    core_exit_condition=core_exit_condition,
-                    core_review_after=core_review_after,
-                    detail_memory_ids=detail_memory_ids,
-                    db_connection=conn,
-                    _in_transaction=True,
-                    _precomputed_centroids=item_centroids,
-                    _precomputed_unresolved=item_unresolved,
-                    _precomputed_observed_state=item_observed_state,
-                )
-                if not isinstance(res, dict) or res.get("status") != "ok":
-                    raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {res}")
-                data = res["data"]
-                new_id = data["entity_id"]
-                results.append(
-                    {
-                        "status": "success",
-                        "entity_id": new_id,
-                        "title": t,
-                        "data": data,
-                        "orphaned_relations": data.get("orphaned_relations", []),
-                        "orphaned_edge_worklist": data.get("orphaned_edge_worklist", []),
-                        "result": res,
-                    }
-                )
-
-        write_transaction_retrying(conn, _write)
+        write_transaction_retrying(
+            conn,
+            lambda tx_conn: _write_bulk_consolidations(
+                tx_conn,
+                consolidations,
+                item_resolved_parents,
+                centroids,
+                unresolved,
+                observed_state,
+                results,
+                agent_id,
+                context_id,
+                agent_session_id,
+            ),
+        )
         return results
     except Exception as e:
         logger.error(
@@ -2045,6 +2176,55 @@ def bulk_commit_consolidation(  # noqa: PLR0915
 # Canonical Phase 4 spelling for the bulk worker; the single-item operation above is the
 # response-envelope source of truth.  Keep the old name for in-process callers during migration.
 bulk_consolidate_memories = bulk_commit_consolidation
+
+
+def _store_relation_batch_item(
+    conn,
+    relation: dict,
+    agent_id: str | None,
+    invalidate: bool,
+) -> dict:
+    source_id = relation.get("source_id")
+    target_id = relation.get("target_id")
+    predicate = relation.get("predicate")
+    item_invalidate = bool(relation.get("invalidate", invalidate))
+    if item_invalidate:
+        result = invalidate_relation(
+            source_id=source_id,
+            target_id=target_id,
+            predicate=predicate,
+            invalid_at=relation.get("invalid_at"),
+            db_connection=conn,
+            _in_transaction=True,
+        )
+        action = "invalidate"
+    else:
+        result = store_relation(
+            source_id=source_id,
+            target_id=target_id,
+            predicate=predicate,
+            valid_at=relation.get("valid_at"),
+            override_justification=relation.get("override_justification"),
+            agent_id=relation.get("agent_id", agent_id),
+            db_connection=conn,
+            _in_transaction=True,
+        )
+        action = "store"
+    if envelope.is_rejected(result):
+        raise RuntimeError(
+            f"Bulk relation store aborted (all-or-nothing): {result['errors'][0]['message']}"
+        )
+    is_dup = any(
+        warning.get("code") == error_codes.ALREADY_DONE for warning in result.get("warnings", [])
+    )
+    return {
+        "status": "duplicate" if is_dup else "success",
+        "source": source_id,
+        "target": target_id,
+        "predicate": predicate,
+        "action": action,
+        "result": result["data"],
+    }
 
 
 def bulk_store_relations(
@@ -2093,76 +2273,10 @@ def bulk_store_relations(
     results: list[Any] = []
     try:
 
-        def _write(c):
+        def _write(tx_conn):
             results.clear()
-            for r in relations:
-                src = r.get("source_id")
-                tgt = r.get("target_id")
-                pred = r.get("predicate")
-                valid_at = r.get("valid_at")
-                # Per-item ownership is an internal compatibility affordance.  Public MCP
-                # wrappers remove this field before crossing the adapter boundary; retaining
-                # the item-level override here supports trusted in-process callers.
-                override_justification = r.get("override_justification")
-                item_agent_id = r.get("agent_id", agent_id)
-                item_invalidate = bool(r.get("invalidate", invalidate))
-                invalid_at = r.get("invalid_at")
-                if item_invalidate:
-                    res = invalidate_relation(
-                        source_id=src,
-                        target_id=tgt,
-                        predicate=pred,
-                        invalid_at=invalid_at,
-                        db_connection=conn,
-                        _in_transaction=True,
-                    )
-                    if envelope.is_rejected(res):
-                        raise RuntimeError(
-                            "Bulk relation store aborted (all-or-nothing): "
-                            f"{res['errors'][0]['message']}"
-                        )
-                    is_dup = any(
-                        w.get("code") == error_codes.ALREADY_DONE for w in res.get("warnings", [])
-                    )
-                    results.append(
-                        {
-                            "status": "duplicate" if is_dup else "success",
-                            "source": src,
-                            "target": tgt,
-                            "predicate": pred,
-                            "action": "invalidate",
-                            "result": res["data"],
-                        }
-                    )
-                    continue
-                res = store_relation(
-                    source_id=src,
-                    target_id=tgt,
-                    predicate=pred,
-                    valid_at=valid_at,
-                    override_justification=override_justification,
-                    agent_id=item_agent_id,
-                    db_connection=conn,
-                    _in_transaction=True,
-                )
-                if envelope.is_rejected(res):
-                    raise RuntimeError(
-                        "Bulk relation store aborted (all-or-nothing): "
-                        f"{res['errors'][0]['message']}"
-                    )
-                is_dup = any(
-                    w.get("code") == error_codes.ALREADY_DONE for w in res.get("warnings", [])
-                )
-                results.append(
-                    {
-                        "status": "duplicate" if is_dup else "success",
-                        "source": src,
-                        "target": tgt,
-                        "predicate": pred,
-                        "action": "store",
-                        "result": res["data"],
-                    }
-                )
+            for relation in relations:
+                results.append(_store_relation_batch_item(tx_conn, relation, agent_id, invalidate))
 
         write_transaction_retrying(conn, _write)
         return results

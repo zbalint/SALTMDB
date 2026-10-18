@@ -2475,6 +2475,28 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(shared_status, "raw")
 
+    def test_bulk_commit_consolidation_rejects_unknown_parent_before_write(self):
+        parent, _ = self._mk_vector_entity("Bulk Unknown Parent", _axis_vector(0))
+        results = bulk_commit_consolidation(
+            consolidations=[
+                {
+                    "parent_ids": [parent, "missing-parent-id"],
+                    "title": "Bulk Unknown Target",
+                    "content": _cons_content("bulk-unknown"),
+                }
+            ],
+            db_connection=self.conn,
+        )
+        self.assertEqual(
+            results,
+            [
+                {
+                    "status": "error",
+                    "error": "UNKNOWN_PARENT_ID: could not resolve parent_id 'missing-parent-id'.",
+                }
+            ],
+        )
+
     def test_get_fresh_entity_centroids_self_loads_extension_on_injected_connection(self):
         a, _ = self._mk_vector_entity("Self Load A", _axis_vector(0))
         raw_conn = sqlite3.connect(self.db_path)
@@ -3088,6 +3110,648 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
         self.assertEqual(invalidated["status"], "ok", invalidated)
         self.assertIn("Relation invalidated", invalidated["data"]["message"])
         trigger.assert_not_called()
+
+
+class TestRelationD14Pins(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.conn = init_db(self.db_path)
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _mk(self, title, agent_id="owner", scope="shared"):
+        return _memory_id(
+            store_memory(
+                content=f"D14 pin content for {title}",
+                title=title,
+                agent_id=agent_id,
+                scope=scope,
+                db_connection=self.conn,
+            )
+        )
+
+    def _edge(self, source, target, predicate="revises", relation_id=None):
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (relation_id or str(uuid.uuid4()), source, target, predicate, now, now, now),
+        )
+
+    def _dependency_chain(self):
+        root, mid, leaf = (
+            self._mk("D14 dep root"),
+            self._mk("D14 dep mid"),
+            self._mk("D14 dep leaf"),
+        )
+        store_relation(
+            source_id=root, target_id=mid, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=mid, target_id=leaf, predicate="depends_on", db_connection=self.conn
+        )
+        return root, mid, leaf
+
+    def _lineage_chain(self):
+        root, mid, leaf = (
+            self._mk("D14 lin root"),
+            self._mk("D14 lin mid"),
+            self._mk("D14 lin leaf"),
+        )
+        self._edge(mid, root, relation_id="lin-a")
+        self._edge(leaf, mid, relation_id="lin-b")
+        return root, mid, leaf
+
+    def _bulk_patches(self, *, consolidate, tx=None, centroids=True):
+        parents = [self._mk("D14 bulk parent 1"), self._mk("D14 bulk parent 2")]
+        centroid_map = {parent: [1.0] for parent in parents} if centroids else {}
+        return (
+            parents,
+            patch(
+                "saltmdb.domain.services.relation_service.get_fresh_entity_centroids",
+                return_value=(centroid_map, {}, {}),
+            ),
+            patch(
+                "saltmdb.domain.services.relation_service.consolidate_memories",
+                side_effect=consolidate,
+            ),
+            patch(
+                "saltmdb.domain.services.relation_service.write_transaction_retrying",
+                side_effect=tx or (lambda conn, fn: fn(conn)),
+            ),
+        )
+
+    def test_inv01_missing_parameters_have_validation_error(self):
+        result = invalidate_relation(db_connection=self.conn)
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "errors": [
+                    {
+                        "code": "VALIDATION_ERROR",
+                        "message": "Error: source_id, target_id, and predicate are mandatory parameters.",
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+    def test_inv06_and_inv07_canonicalization_note_is_exact(self):
+        source, target = self._mk("D14 inv source"), self._mk("D14 inv target")
+        store_relation(
+            source_id=source, target_id=target, predicate="related_to", db_connection=self.conn
+        )
+        result = invalidate_relation(
+            source_id=source, target_id=target, predicate="references", db_connection=self.conn
+        )
+        self.assertIn(
+            "[canonicalized: requested 'references', stored as 'related_to']",
+            result["data"]["message"],
+        )
+
+    def test_inv09_unresolved_target_message_is_exact(self):
+        source = self._mk("D14 inv known source")
+        result = invalidate_relation(
+            source_id=source,
+            target_id="missing-target",
+            predicate="related_to",
+            db_connection=self.conn,
+        )
+        self.assertEqual(
+            result["errors"][0]["message"],
+            "Error: UNKNOWN_ENTITY_ID - could not resolve target_id 'missing-target'.",
+        )
+
+    def test_inv12_and_inv13_exception_log_and_message_are_exact(self):
+        source, target = self._mk("D14 inv error source"), self._mk("D14 inv error target")
+        store_relation(
+            source_id=source, target_id=target, predicate="depends_on", db_connection=self.conn
+        )
+        with (
+            patch(
+                "saltmdb.domain.services.relation_service.write_transaction_retrying",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("saltmdb.domain.services.relation_service.logger.error") as logged,
+        ):
+            result = invalidate_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+        self.assertEqual(result["errors"][0]["message"], "Error invalidating relation: boom")
+        logged.assert_called_once()
+        self.assertEqual(logged.call_args.args[0], "Error invalidating relation: %s")
+        self.assertEqual(str(logged.call_args.args[1]), "boom")
+
+    def test_dep04_cycle_guard_accumulates_outbound_target_path(self):
+        root, mid, leaf = self._dependency_chain()
+        traces = []
+        self.conn.set_trace_callback(traces.append)
+        try:
+            analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        finally:
+            self.conn.set_trace_callback(None)
+        sql = "\n".join(traces)
+        self.assertIn("dt.path || '->' || r.target_id", sql)
+        self.assertNotIn("dt.path || '->' || r.source_id", sql)
+        self.assertNotEqual(root, mid)
+        self.assertNotEqual(mid, leaf)
+
+    def test_dep05_agent_visibility_keeps_shared_and_hides_private(self):
+        root = self._mk("D14 visibility root", agent_id="owner")
+        shared = self._mk("D14 visibility shared", agent_id="other", scope="shared")
+        private = self._mk("D14 visibility private", agent_id="other", scope="private")
+        store_relation(
+            source_id=root, target_id=shared, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=root, target_id=private, predicate="depends_on", db_connection=self.conn
+        )
+        result = analyze_dependencies(
+            root_entity_id=root, agent_id="owner", db_connection=self.conn
+        )
+        ids = {node["id"] for node in result["dependencies"]}
+        self.assertIn(shared, ids)
+        self.assertNotIn(private, ids)
+
+    def test_dep06_dep07_depth_boundary_is_exact(self):
+        root, mid, leaf = self._dependency_chain()
+        result = analyze_dependencies(root_entity_id=root, max_depth=1, db_connection=self.conn)
+        self.assertEqual(
+            [(edge["source_id"], edge["target_id"], edge["depth"]) for edge in result["edges"]],
+            [(root, mid, 1)],
+        )
+        self.assertNotIn(leaf, {node["id"] for node in result["dependencies"]})
+
+    def test_dep08_dep14_order_is_shallowest_first(self):
+        root, mid, leaf, side = (
+            self._mk("D14 dep root fixed"),
+            self._mk("D14 dep mid fixed"),
+            self._mk("D14 dep leaf fixed"),
+            self._mk("D14 dep side fixed"),
+        )
+        self._edge(root, mid, predicate="depends_on", relation_id="z-depth-one")
+        self._edge(mid, leaf, predicate="depends_on", relation_id="a-depth-two")
+        self._edge(root, side, predicate="depends_on", relation_id="y-depth-one")
+        result = analyze_dependencies(root_entity_id=root, max_depth=2, db_connection=self.conn)
+        self.assertEqual([edge["depth"] for edge in result["edges"]], [1, 1, 2])
+        self.assertEqual([node["depth"] for node in result["dependencies"]], [0, 1, 1, 2])
+        self.assertEqual(result["edges"][-1]["target_id"], leaf)
+
+    def test_dep11_nodes_are_deduplicated(self):
+        root = self._mk("D14 diamond root")
+        a, b, leaf = (
+            self._mk("D14 diamond a"),
+            self._mk("D14 diamond b"),
+            self._mk("D14 diamond leaf"),
+        )
+        for source, target in ((root, a), (root, b), (a, leaf), (b, leaf)):
+            store_relation(
+                source_id=source, target_id=target, predicate="depends_on", db_connection=self.conn
+            )
+        nodes = analyze_dependencies(root_entity_id=root, db_connection=self.conn)["dependencies"]
+        self.assertEqual(len(nodes), 4)
+        self.assertEqual(len({node["id"] for node in nodes}), 4)
+
+    def test_dep13_dep20_edge_and_node_depths_are_exact(self):
+        root, mid, leaf = self._dependency_chain()
+        result = analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        self.assertEqual([edge["depth"] for edge in result["edges"]], [1, 2])
+        self.assertEqual([node["depth"] for node in result["dependencies"]], [0, 1, 2])
+
+    def test_dep16_empty_graph_is_exhausted(self):
+        root = self._mk("D14 empty graph root")
+        result = analyze_dependencies(root_entity_id=root, max_depth=1, db_connection=self.conn)
+        self.assertTrue(result["graph_exhausted"])
+
+    def test_dep17_root_depth_is_zero(self):
+        root = self._mk("D14 root depth")
+        result = analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        self.assertEqual(
+            result["dependencies"], [{"id": root, "title": "D14 root depth", "depth": 0}]
+        )
+
+    def test_lin07_relation_id_tie_break_is_ascending(self):
+        root, a, b = (
+            self._mk("D14 lin tie root"),
+            self._mk("D14 lin tie a"),
+            self._mk("D14 lin tie b"),
+        )
+        self._edge(a, root, relation_id="z-rel")
+        self._edge(b, root, relation_id="a-rel")
+        result = _get_lineage_raw(root, direction="descendants", db_connection=self.conn)
+        self.assertEqual([edge["relation_id"] for edge in result["edges"]], ["a-rel", "z-rel"])
+
+    def test_lin09_max_depth_boundary_is_exact(self):
+        root, mid, leaf = self._lineage_chain()
+        result = _get_lineage_raw(
+            root, direction="descendants", max_depth=1, db_connection=self.conn
+        )
+        self.assertEqual([edge["depth"] for edge in result["edges"]], [1])
+        self.assertNotIn(leaf, {node["id"] for node in result["nodes"]})
+
+    def test_lin10_lin11_lin12_zero_depth_is_root_only(self):
+        root = self._mk("D14 zero depth root")
+        result = _get_lineage_raw(root, max_depth=0, db_connection=self.conn)
+        self.assertEqual(result["edges"], [])
+        self.assertEqual(result["nodes"], [result["root"]])
+        self.assertEqual(result["total_nodes"], 1)
+        self.assertTrue(result["graph_exhausted"])
+
+    def test_lin14_boolean_max_depth_is_rejected(self):
+        root = self._mk("D14 bool depth root")
+        result = _get_lineage_raw(root, max_depth=True, db_connection=self.conn)
+        self.assertEqual(result["error"], "max_depth must be a non-negative integer")
+
+    def test_lin15_lin16_unknown_lineage_node_shape_is_exact(self):
+        root = self._mk("D14 unknown root")
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        self._edge(root, "missing-lineage-node", relation_id="unknown-rel")
+        result = _get_lineage_raw(root, direction="ancestors", db_connection=self.conn)
+        unknown = next(node for node in result["nodes"] if node["id"] == "missing-lineage-node")
+        self.assertEqual(unknown["title"], "Unknown")
+        self.assertEqual(unknown["generation_depth"], 1)
+
+    def test_lin17_lineage_edges_are_deduplicated(self):
+        root, a, b, leaf = (
+            self._mk("D14 lineage diamond root"),
+            self._mk("D14 lineage diamond a"),
+            self._mk("D14 lineage diamond b"),
+            self._mk("D14 lineage diamond leaf"),
+        )
+        self._edge(root, a, relation_id="la")
+        self._edge(root, b, relation_id="lb")
+        self._edge(a, leaf, relation_id="lc")
+        self._edge(b, leaf, relation_id="ld")
+        x = self._mk("D14 lineage diamond x")
+        self._edge(leaf, x, relation_id="le")
+        result = _get_lineage_raw(root, direction="ancestors", db_connection=self.conn)
+        ids = [edge["relation_id"] for edge in result["edges"]]
+        self.assertEqual(ids, ["la", "lb", "lc", "ld", "le"])
+
+    def test_lin19_node_sort_tie_break_is_id_ascending(self):
+        root, a, b = (
+            self._mk("D14 node sort root"),
+            self._mk("D14 node sort a"),
+            self._mk("D14 node sort b"),
+        )
+        self._edge(b, root, relation_id="sort-b")
+        self._edge(a, root, relation_id="sort-a")
+        result = _get_lineage_raw(root, direction="descendants", db_connection=self.conn)
+        depth_one = [node["id"] for node in result["nodes"] if node["depth"] == 1]
+        self.assertEqual(depth_one, sorted(depth_one))
+
+    def test_par05_ambiguous_parent_count_message_is_exact(self):
+        first = self._mk("D14 ambiguous first")
+        second = self._mk("D14 ambiguous second")
+        first_id = "deadbeef-0000-0000-0000-000000000001"
+        second_id = "deadbeef-0000-0000-0000-000000000002"
+        self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (first_id, first))
+        self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (second_id, second))
+        result = commit_consolidation(
+            parent_ids=["deadbeef"],
+            title="D14 ambiguous output",
+            content=_cons_content("ambiguous"),
+            db_connection=self.conn,
+        )
+        self.assertEqual(
+            result,
+            "Error: AMBIGUOUS_PARENT_ID - parent_id 'deadbeef' is ambiguous; it matches 2 memories.",
+        )
+
+    def test_par07_parent_count_message_is_exact(self):
+        parent = self._mk("D14 one parent")
+        result = commit_consolidation(
+            parent_ids=[parent],
+            title="D14 one parent output",
+            content=_cons_content("one-parent"),
+            db_connection=self.conn,
+        )
+        self.assertEqual(
+            result,
+            "Error: REJECT_PARENT_COUNT - consolidate_memories requires at least 2 distinct active parents; use revise_memory for a single parent.",
+        )
+
+    def test_bc03_retry_clears_previous_results(self):
+        calls = []
+
+        def fake_consolidate(**kwargs):
+            calls.append(kwargs)
+            return {"status": "ok", "data": {"entity_id": "bulk-id", "message": "ok"}}
+
+        def retry_twice(conn, fn):
+            fn(conn)
+            fn(conn)
+
+        parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
+            consolidate=fake_consolidate, tx=retry_twice
+        )
+        with centroid_patch, consolidate_patch, tx_patch:
+            result = bulk_commit_consolidation(
+                [{"parent_ids": parents, "title": "bulk", "content": _cons_content("bc03")}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_bc04_per_item_agent_override_wins(self):
+        captured = []
+
+        def fake_consolidate(**kwargs):
+            captured.append(kwargs)
+            return {"status": "ok", "data": {"entity_id": "bulk-id", "message": "ok"}}
+
+        parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
+            consolidate=fake_consolidate
+        )
+        with centroid_patch, consolidate_patch, tx_patch:
+            bulk_commit_consolidation(
+                [
+                    {
+                        "parent_ids": parents,
+                        "title": "bulk",
+                        "content": _cons_content("bc04"),
+                        "agent_id": "item-agent",
+                    }
+                ],
+                agent_id="batch-agent",
+                db_connection=self.conn,
+            )
+        self.assertEqual(captured[0]["agent_id"], "item-agent")
+
+    def test_bc07_batch_abort_message_is_exact(self):
+        def reject(**_kwargs):
+            return {"status": "rejected", "errors": [{"message": "rejected detail"}]}
+
+        parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
+            consolidate=reject
+        )
+        with centroid_patch, consolidate_patch, tx_patch:
+            result = bulk_commit_consolidation(
+                [{"parent_ids": parents, "title": "bulk", "content": _cons_content("bc07")}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            result,
+            [
+                {
+                    "status": "error",
+                    "error": "Bulk consolidation aborted (all-or-nothing): {'status': 'rejected', 'errors': [{'message': 'rejected detail'}]}",
+                }
+            ],
+        )
+
+    def test_bc09_default_weight_is_one(self):
+        captured = []
+
+        def fake_consolidate(**kwargs):
+            captured.append(kwargs)
+            return {"status": "ok", "data": {"entity_id": "bulk-id", "message": "ok"}}
+
+        parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
+            consolidate=fake_consolidate
+        )
+        with centroid_patch, consolidate_patch, tx_patch:
+            bulk_commit_consolidation(
+                [{"parent_ids": parents, "title": "bulk", "content": _cons_content("bc09")}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(captured[0]["weight"], 1)
+
+    def test_bc11_missing_centroid_is_passed_as_empty_slice(self):
+        captured = []
+
+        def fake_consolidate(**kwargs):
+            captured.append(kwargs)
+            return {"status": "ok", "data": {"entity_id": "bulk-id", "message": "ok"}}
+
+        parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
+            consolidate=fake_consolidate, centroids=False
+        )
+        with centroid_patch, consolidate_patch, tx_patch:
+            result = bulk_commit_consolidation(
+                [{"parent_ids": parents, "title": "bulk", "content": _cons_content("bc11")}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(result[0]["status"], "success")
+        self.assertEqual(captured[0]["_precomputed_centroids"], {})
+
+    def test_bs03_store_action_label_is_exact(self):
+        source, target = self._mk("D14 bs source"), self._mk("D14 bs target")
+        with patch(
+            "saltmdb.domain.services.relation_service.store_relation",
+            return_value={"status": "ok", "data": {"relation_id": "r"}},
+        ):
+            result = bulk_store_relations(
+                [{"source_id": source, "target_id": target, "predicate": "depends_on"}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(result[0]["action"], "store")
+
+    def test_bs07_batch_abort_message_is_exact(self):
+        source, target = self._mk("D14 bs error source"), self._mk("D14 bs error target")
+        with patch(
+            "saltmdb.domain.services.relation_service.store_relation",
+            return_value={"status": "rejected", "errors": [{"message": "store detail"}]},
+        ):
+            result = bulk_store_relations(
+                [{"source_id": source, "target_id": target, "predicate": "depends_on"}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            result["errors"][0]["message"],
+            "Bulk relation store aborted (all-or-nothing): store detail",
+        )
+
+    def test_bs08_non_list_validation_is_exact(self):
+        result = bulk_store_relations("not-a-list", db_connection=self.conn)
+        self.assertEqual(
+            result["errors"][0]["message"], "relations must be a non-empty array of objects"
+        )
+
+    def test_bs09_per_item_agent_override_wins(self):
+        source, target = self._mk("D14 bs agent source"), self._mk("D14 bs agent target")
+        captured = []
+
+        def fake_store(**kwargs):
+            captured.append(kwargs)
+            return {"status": "ok", "data": {"relation_id": "r"}}
+
+        with patch(
+            "saltmdb.domain.services.relation_service.store_relation", side_effect=fake_store
+        ):
+            bulk_store_relations(
+                [
+                    {
+                        "source_id": source,
+                        "target_id": target,
+                        "predicate": "depends_on",
+                        "agent_id": "item-agent",
+                    }
+                ],
+                agent_id="batch-agent",
+                db_connection=self.conn,
+            )
+        self.assertEqual(captured[0]["agent_id"], "item-agent")
+
+    def test_bs10_per_item_invalid_at_is_forwarded(self):
+        source, target = self._mk("D14 bs invalid source"), self._mk("D14 bs invalid target")
+        captured = []
+
+        def fake_invalidate(**kwargs):
+            captured.append(kwargs)
+            return {"status": "ok", "data": {"relation_id": "r"}}
+
+        with patch(
+            "saltmdb.domain.services.relation_service.invalidate_relation",
+            side_effect=fake_invalidate,
+        ):
+            bulk_store_relations(
+                [
+                    {
+                        "source_id": source,
+                        "target_id": target,
+                        "predicate": "depends_on",
+                        "invalidate": True,
+                        "invalid_at": "2020-01-01T00:00:00+00:00",
+                    }
+                ],
+                db_connection=self.conn,
+            )
+        self.assertEqual(captured[0]["invalid_at"], "2020-01-01T00:00:00+00:00")
+
+    def test_inv07_store_canonicalization_note_is_preserved(self):
+        source, target = self._mk("D14 store note source"), self._mk("D14 store note target")
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), source, target, "canonical", now, now, now),
+        )
+        module = __import__(
+            "saltmdb.domain.services.relation_service", fromlist=["resolve_or_create_predicate"]
+        )
+        with patch.object(module, "resolve_or_create_predicate", return_value="canonical"):
+            result = store_relation(
+                source_id=source, target_id=target, predicate="depends_on", db_connection=self.conn
+            )
+        self.assertIn(
+            "[canonicalized: requested 'depends_on', stored as 'canonical']",
+            result["data"]["message"],
+        )
+
+    def test_inv09_fallback_resolution_message_is_exact(self):
+        with patch(
+            "saltmdb.domain.services.relation_service._resolve_relation_endpoint",
+            return_value=(None, None),
+        ):
+            result = invalidate_relation(
+                source_id="source",
+                target_id="target",
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            result["errors"][0]["message"], "Error: Could not resolve target entity IDs."
+        )
+
+    def test_dep05_private_source_is_hidden_on_inbound_walk(self):
+        root = self._mk("D14 private source root", agent_id="owner")
+        private_source = self._mk("D14 private source", agent_id="other", scope="private")
+        store_relation(
+            source_id=private_source,
+            target_id=root,
+            predicate="depends_on",
+            db_connection=self.conn,
+        )
+        result = analyze_dependencies(
+            root_entity_id=root, direction="inbound", agent_id="owner", db_connection=self.conn
+        )
+        self.assertNotIn(private_source, {node["id"] for node in result["dependencies"]})
+
+    def test_dep08_sql_orders_by_depth_ascending(self):
+        root = self._mk("D14 SQL order root")
+        traces = []
+        self.conn.set_trace_callback(traces.append)
+        try:
+            analyze_dependencies(root_entity_id=root, db_connection=self.conn)
+        finally:
+            self.conn.set_trace_callback(None)
+        sql = "\n".join(traces)
+        self.assertIn("ORDER BY dt.depth ASC;", sql)
+
+    def test_dep16_nonempty_graph_below_cap_is_exhausted(self):
+        root, target = self._mk("D14 cap root"), self._mk("D14 cap target")
+        store_relation(
+            source_id=root, target_id=target, predicate="depends_on", db_connection=self.conn
+        )
+        result = analyze_dependencies(root_entity_id=root, max_depth=2, db_connection=self.conn)
+        self.assertTrue(result["graph_exhausted"])
+
+    def test_lin10_zero_depth_short_circuits_query(self):
+        root = self._mk("D14 zero short circuit")
+        traces = []
+        self.conn.set_trace_callback(traces.append)
+        try:
+            result = _get_lineage_raw(root, max_depth=0, db_connection=self.conn)
+        finally:
+            self.conn.set_trace_callback(None)
+        self.assertEqual(result["total_nodes"], 1)
+        self.assertNotIn("WITH RECURSIVE lineage", "\n".join(traces))
+
+    def test_inv01_store_missing_parameters_have_validation_error(self):
+        result = store_relation(db_connection=self.conn)
+        self.assertEqual(
+            result,
+            {
+                "status": "rejected",
+                "errors": [
+                    {
+                        "code": "VALIDATION_ERROR",
+                        "message": "Error: source_id, target_id, and predicate are mandatory parameters.",
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+
+    def test_inv09_store_fallback_resolution_message_is_exact(self):
+        with patch(
+            "saltmdb.domain.services.relation_service._resolve_relation_endpoint",
+            return_value=(None, None),
+        ):
+            result = store_relation(
+                source_id="source",
+                target_id="target",
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            result["errors"][0]["message"], "Error: Could not resolve target entity IDs."
+        )
+
+    def test_lin_graph_exhausted_false_when_edge_reaches_depth_cap(self):
+        root, child = self._mk("D14 lineage cap root"), self._mk("D14 lineage cap child")
+        self._edge(root, child, relation_id="lin-cap")
+        result = _get_lineage_raw(root, direction="ancestors", max_depth=1, db_connection=self.conn)
+        self.assertFalse(result["graph_exhausted"])
+
+    def test_lin_graph_exhausted_true_when_edges_are_shallower_than_cap(self):
+        root, child = self._mk("D14 lineage shallow root"), self._mk("D14 lineage shallow child")
+        self._edge(root, child, relation_id="lin-shallow")
+        result = _get_lineage_raw(root, direction="ancestors", max_depth=2, db_connection=self.conn)
+        self.assertTrue(result["graph_exhausted"])
+
+    def test_lin_graph_exhausted_true_when_no_edges_exist(self):
+        root = self._mk("D14 lineage empty root")
+        result = _get_lineage_raw(root, direction="ancestors", max_depth=1, db_connection=self.conn)
+        self.assertTrue(result["graph_exhausted"])
 
 
 if __name__ == "__main__":
