@@ -174,6 +174,69 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         self.assertTrue(self._is_core(consolidated_id))
         self.assertTrue(self._has_core_tag(consolidated_id))
 
+    def test_core_result_stores_lifecycle_columns_and_core_tag_only_for_core(self):
+        core_parent = self._store_core_parent(
+            "Core Column Parent", "A core parent for lifecycle-column persistence."
+        )
+        plain_parent = self._store_plain(
+            "Plain Column Partner", "A plain partner for lifecycle-column persistence."
+        )
+        core_result = commit_consolidation(
+            parent_ids=[core_parent, plain_parent],
+            title="Core Column Result",
+            content="A core result with explicit lifecycle columns and tag.",
+            agent_id="agent_c",
+            is_core=True,
+            core_reason="Core result reason for lifecycle-column assertion coverage.",
+            core_exit_condition="Core result exit condition for lifecycle-column assertion coverage.",
+            override_justification="test override to isolate lifecycle-column persistence",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed consolidated memory with ID:", core_result)
+        core_id = core_result.split("ID: ")[1].strip()
+        core_row = self.conn.execute(
+            "SELECT is_core, core_reason, core_exit_condition FROM entities WHERE id = ?",
+            (core_id,),
+        ).fetchone()
+        self.assertEqual(
+            core_row,
+            (
+                1,
+                "Core result reason for lifecycle-column assertion coverage.",
+                "Core result exit condition for lifecycle-column assertion coverage.",
+            ),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM entity_tags et JOIN tags t ON et.tag_id = t.id "
+                "WHERE et.entity_id = ? AND t.name = '#core'",
+                (core_id,),
+            ).fetchone()[0],
+            1,
+        )
+
+        plain_a = self._store_plain("Plain Tag Parent A", "A plain tag parent A.")
+        plain_b = self._store_plain("Plain Tag Parent B", "A plain tag parent B.")
+        plain_result = commit_consolidation(
+            parent_ids=[plain_a, plain_b],
+            title="Plain Column Result",
+            content="A non-core result without a core tag.",
+            agent_id="agent_c",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed consolidated memory with ID:", plain_result)
+        plain_id = plain_result.split("ID: ")[1].strip()
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT is_core, COUNT(t.id) FROM entities e "
+                "LEFT JOIN entity_tags et ON et.entity_id = e.id "
+                "LEFT JOIN tags t ON t.id = et.tag_id AND t.name = '#core' "
+                "WHERE e.id = ? GROUP BY e.is_core",
+                (plain_id,),
+            ).fetchone(),
+            (0, 0),
+        )
+
     def test_explicit_is_core_false_demotes_core_parent(self):
         core_parent = self._store_core_parent(
             "Core Rule Parent Three", "A third core operational rule for the override test."
@@ -242,6 +305,77 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         )
         self.assertEqual(results[0]["status"], "success")
         self.assertTrue(self._is_core(results[0]["entity_id"]))
+
+    def test_core_consolidation_reconciles_declared_detail_relations(self):
+        core_parent = self._store_core_parent(
+            "Core Detail Parent",
+            "A core parent for detail relation reconciliation.",
+        )
+        plain_parent = self._store_plain(
+            "Core Detail Partner",
+            "A plain partner for detail relation reconciliation.",
+        )
+        detail = self._store_plain(
+            "Core Detail Memory",
+            "A non-core detail memory declared by the consolidated core.",
+        )
+
+        result = commit_consolidation(
+            parent_ids=[core_parent, plain_parent],
+            title="Core Detail Consolidation",
+            content=(
+                f"Core Detail Consolidation describes Core Detail Memory ({detail}) "
+                "as an elaborating detail memory."
+            ),
+            agent_id="agent_c",
+            is_core=True,
+            core_reason="Core detail relation test reason.",
+            core_exit_condition="Core detail relation test exit condition.",
+            detail_memory_ids=[detail],
+            override_justification="test override to isolate detail relation reconciliation",
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed consolidated memory with ID:", result)
+        consolidated_id = result.split("ID: ")[1].strip()
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT source_id, target_id, predicate "
+                "FROM relations WHERE predicate = 'elaborates_on'"
+            ).fetchall(),
+            [(detail, consolidated_id, "elaborates_on")],
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status FROM entities WHERE id IN (?, ?) ORDER BY id",
+                (core_parent, plain_parent),
+            ).fetchall(),
+            [("archived",), ("archived",)],
+        )
+
+    def test_non_core_consolidation_creates_no_detail_relations(self):
+        parent_a = self._store_plain(
+            "Plain Detail Parent A",
+            "A non-core parent for the no-detail-relation assertion.",
+        )
+        parent_b = self._store_plain(
+            "Plain Detail Parent B",
+            "Another non-core parent for the no-detail-relation assertion.",
+        )
+        result = commit_consolidation(
+            parent_ids=[parent_a, parent_b],
+            title="Plain Detail Consolidation",
+            content="A non-core result that must not create elaborating detail relations.",
+            agent_id="agent_c",
+            is_core=False,
+            db_connection=self.conn,
+        )
+        self.assertIn("Successfully committed consolidated memory with ID:", result)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM relations WHERE predicate = 'elaborates_on'"
+            ).fetchone()[0],
+            0,
+        )
 
 
 class TestConsolidationOverdueBoundary(unittest.TestCase):

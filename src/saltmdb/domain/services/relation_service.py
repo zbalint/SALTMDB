@@ -5,6 +5,7 @@ import re
 import sqlite3
 from datetime import datetime, UTC
 from typing import Any, Literal, cast
+from dataclasses import dataclass
 from saltmdb.config import (
     get_db_path,
     COHESION_MIN_PAIRWISE_THRESHOLD,
@@ -1577,12 +1578,779 @@ def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, s
     return {r[0]: (r[1], r[2]) for r in rows}
 
 
+@dataclass(frozen=True)
+class _ConsolidationCoreRequest:
+    scope: str
+    is_core_requested: bool | None
+    core_reason: str | None
+    core_exit_condition: str | None
+    core_review_after: str | None
+    detail_memory_ids: list[str] | None
+
+
+@dataclass(frozen=True)
+class _ConsolidationCohesionResult:
+    override_applied: bool
+    min_sim: float
+    offending_pair: Any
+    unresolved: dict[str, str]
+    justification: str
+
+
+@dataclass(frozen=True)
+class _ConsolidationEntityValues:
+    consolidated_id: str
+    clean_title: str
+    redacted_content: str
+    agent_val: str
+    scope: str
+    weight: int
+    context_id: str | None
+    agent_session_id: str | None
+    content_hash: str
+    quality_score: float
+    quality_status: str
+    quality_flags_str: str
+    metadata: dict[str, Any] | None
+    memory_type: str | None
+    now: str
+
+
 def _consolidation_rejected(code: str, message: str) -> dict:
     """Build the Phase 4 mutation envelope for a validation rejection."""
     return rejected([envelope_error(code, message)])
 
 
-def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
+def _consolidation_revalidate(conn, resolved_parents, observed_state):
+    # A4: TOCTOU revalidation, first statements, before any destructive write. Re-fetch
+    # content_hash/status for every resolved parent and compare against observed_state
+    # -- the dict returned from the EXACT read that produced (or failed to produce)
+    # each centroid, never a separately-later-taken snapshot. Any mismatch (content
+    # changed, status no longer eligible, or a resolved parent with no observed_state
+    # entry at all -- meaning it was unresolved/archived, or its read never completed
+    # cleanly) aborts the whole transaction. This is also what catches an earlier item
+    # in the same bulk batch having already archived a shared parent: that parent's
+    # current status reads back 'archived', mismatching its recorded observed_state.
+    # Resolved review finding #8: state revalidation must not be coupled to whether the
+    # cohesion gate ran -- only the cosine-similarity comparison itself is legitimately
+    # parent-count-gated. observed_state is now populated for every resolved parent
+    # regardless of parent count (get_fresh_entity_centroids for >=2 parents, the
+    # equivalent _observe_parent_state helper for a single parent), so this revalidation
+    # runs unconditionally whenever there are resolved parents at all.
+    if resolved_parents:
+        placeholders_reval = ",".join("?" for _ in resolved_parents)
+        current_rows = conn.execute(
+            f"SELECT id, content_hash, status FROM entities WHERE id IN ({placeholders_reval})",
+            resolved_parents,
+        ).fetchall()
+        current_state = {r[0]: (r[1], r[2]) for r in current_rows}
+        for pid in resolved_parents:
+            if observed_state.get(pid) != current_state.get(pid):
+                raise RuntimeError(
+                    f"Consolidation aborted: parent {pid} state changed since the "
+                    f"cohesion decision was made (observed={observed_state.get(pid)}, "
+                    f"current={current_state.get(pid)})"
+                )
+
+
+def _consolidation_core_state(
+    conn,
+    resolved_parents,
+    core_request,
+    redacted_content,
+    entity_values,
+):
+    # Core-memory governance (resolved gap #2): authoritative, in-transaction resolution
+    # -- fresh parent is_core/status read, never the outer-scope pre-transaction snapshot
+    # -- so a parent that turned core (or lost core status) between preflight and commit
+    # is always caught here, not silently missed. Raises ValueError on a lifecycle/
+    # validation failure or CoreGovernanceRejected on a capacity failure; either aborts
+    # this transaction before any destructive write below.
+    try:
+        core_state = core_governance_service.resolve_consolidation_core_state(
+            conn,
+            resolved_parents=resolved_parents,
+            is_core_requested=core_request.is_core_requested,
+            content=redacted_content,
+            scope=core_request.scope,
+            core_reason=core_request.core_reason,
+            core_exit_condition=core_request.core_exit_condition,
+            core_review_after=core_request.core_review_after,
+            detail_memory_ids=core_request.detail_memory_ids,
+        )
+        if core_state["is_core"]:
+            # Resolved review finding #2 / resolved follow-up review finding #2:
+            # core-producing consolidation must check the overdue-write boundary against
+            # EVERY active core, including a resolved parent this same transaction is
+            # about to archive -- silently replacing an overdue parent with a freshly
+            # created core would reset its lifecycle without recording review provenance
+            # through review_core_memory. The only sanctioned recovery paths remain an
+            # explicit non-core consolidation, or a prior review_core_memory
+            # (retain/demote/archive) of the overdue core.
+            core_governance_service.enforce_overdue_boundary(
+                conn,
+                entity_id=None,
+                effective_is_core=True,
+                is_new_core=core_state["is_new_core"],
+                review_after_changed=False,
+            )
+    except ValueError as e:
+        raise core_governance_service.CoreGovernanceRejected(str(e)) from e
+
+    if core_state["is_core"]:
+        rejection = core_governance_service.check_capacity_admission(
+            conn,
+            exclude_ids=resolved_parents,
+            new_entry={
+                "id": entity_values.consolidated_id,
+                "title": entity_values.clean_title,
+                "memory_type": entity_values.memory_type or "fact",
+                "core_reason": core_state["core_reason"],
+                "core_exit_condition": core_state["core_exit_condition"],
+                "core_review_after": core_state["core_review_after"],
+                "full_content": redacted_content,
+                "agent_id": entity_values.agent_val,
+            },
+        )
+        if rejection is not None:
+            raise core_governance_service.CoreGovernanceRejected(rejection)
+
+    return core_state
+
+
+def _consolidation_audit_override(
+    conn,
+    resolved_parents,
+    override_applied,
+    min_sim,
+    offending_pair,
+    unresolved,
+    justification,
+    consolidated_id,
+    agent_val,
+):
+    # A3: atomic audit trail for an override commit -- written as the first destructive
+    # step for fail-fast clarity. log_event catches its own exceptions and RETURNS an
+    # "Error: ..." string rather than raising, so the result must be checked and raised
+    # on here -- because this runs inside the surrounding write_transaction_retrying
+    # (directly for a single-item call, or one level up in bulk_commit_consolidation for
+    # a batch item), any exception raised anywhere in _do_commit rolls back the whole
+    # transaction, which is what actually makes this audit atomic with the merge itself.
+    if override_applied:
+        audit_result = log_event(
+            agent_id=agent_val,
+            type="consolidation_gate_override",
+            content=json.dumps(
+                {
+                    "parent_ids": resolved_parents,
+                    "min_pairwise_similarity": min_sim,
+                    "threshold": COHESION_MIN_PAIRWISE_THRESHOLD,
+                    "offending_pair": offending_pair,
+                    "unresolved": unresolved,
+                    "justification": justification,
+                    "consolidated_id": consolidated_id,
+                }
+            ),
+            db_connection=conn,
+            _in_transaction=True,
+        )
+        if envelope.is_rejected(audit_result):
+            raise RuntimeError(
+                "Failed to record consolidation override audit event: "
+                f"{audit_result['errors'][0]['message']}"
+            )
+
+
+def _consolidation_insert_entity(
+    conn,
+    resolved_parents,
+    core_state,
+    entity_values,
+):
+    is_core_val = 1 if core_state["is_core"] else 0
+    metadata_str = json.dumps(entity_values.metadata) if entity_values.metadata else None
+    conn.execute(
+        """
+                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
+            """,
+        (
+            entity_values.consolidated_id,
+            entity_values.now,
+            entity_values.now,
+            entity_values.now,
+            entity_values.agent_val,
+            entity_values.scope,
+            is_core_val,
+            entity_values.weight,
+            json.dumps(resolved_parents),
+            entity_values.clean_title,
+            entity_values.redacted_content,
+            entity_values.now,
+            entity_values.context_id,
+            entity_values.agent_session_id,
+            entity_values.agent_session_id,
+            entity_values.content_hash,
+            entity_values.quality_score,
+            entity_values.quality_status,
+            entity_values.quality_flags_str,
+            metadata_str,
+            entity_values.memory_type,
+            core_state["core_reason"],
+            core_state["core_exit_condition"],
+            core_state["core_review_after"],
+            json.dumps(core_state["core_detail_memory_ids"])
+            if core_state["core_detail_memory_ids"]
+            else None,
+        ),
+    )
+
+    if core_state["is_core"] and core_state["core_detail_memory_ids"]:
+        core_governance_service.reconcile_detail_relations(
+            conn,
+            core_id=entity_values.consolidated_id,
+            agent_id=entity_values.agent_val,
+            new_detail_ids=core_state["core_detail_memory_ids"],
+            previous_detail_ids=[],
+        )
+
+    return is_core_val
+
+
+def _consolidation_archive_parents(
+    conn,
+    resolved_parents,
+    consolidated_id,
+    clean_title,
+    redacted_content,
+    content_hash,
+    tags,
+    agent_val,
+    is_core_val,
+    now,
+    placeholders,
+):
+    # The new consolidated entity and all archived parents transition
+    # with their durable embedding work in this one transaction.
+    from saltmdb.domain.services.embedding_service import (
+        cancel_embedding_jobs_for_entity,
+        cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
+        enqueue_embedding_jobs_for_entity,
+    )
+
+    enqueue_embedding_jobs_for_entity(
+        conn, consolidated_id, clean_title, redacted_content, content_hash
+    )
+
+    if tags:
+        for tag_name in tags:
+            tag_id = resolve_or_create_tag(conn, tag_name, agent_id=agent_val)
+            if not tag_id:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                (consolidated_id, tag_id),
+            )
+
+    if is_core_val:
+        core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=agent_val)
+        if core_tag_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+                (consolidated_id, core_tag_id),
+            )
+
+    conn.execute(
+        f"""
+                UPDATE entities
+                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
+                WHERE id IN ({placeholders})
+            """,
+        [now, now] + resolved_parents,
+    )
+    for parent_id in resolved_parents:
+        cancel_embedding_jobs_for_entity(conn, parent_id)
+        clear_embedding_vectors_for_entity(conn, parent_id)
+        cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=True)
+
+
+def _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, placeholders):
+    parent_set = set(resolved_parents)
+    # Semantic relations remain historical claims about the archived parents.  Capture
+    # them as an optional replay worklist, but do not close, copy, or repoint them.
+    active_touching_rows = conn.execute(
+        f"""
+                SELECT id, source_id, target_id, predicate
+                FROM relations
+                WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
+                  AND valid_to IS NULL
+                  AND predicate NOT IN ({",".join("?" for _ in _LINEAGE_PREDICATES)})
+                """,
+        resolved_parents + resolved_parents + list(_LINEAGE_PREDICATES),
+    ).fetchall()
+    seen_relation_ids: set[str] = set()
+    for rel_id, src, tgt, pred in active_touching_rows:
+        if rel_id in seen_relation_ids:
+            continue
+        seen_relation_ids.add(rel_id)
+        originating_parent = src if src in parent_set else tgt
+        other_endpoint = tgt if src in parent_set else src
+        orphaned_edges.append(
+            {
+                "predicate": pred,
+                "other_endpoint": other_endpoint,
+                "originating_parent": originating_parent,
+                # Preserve direction so an agent can replay this item through
+                # manage_relation without guessing which side was the parent.
+                "source_id": src,
+                "target_id": tgt,
+            }
+        )
+
+
+def _consolidation_insert_lineage(conn, resolved_parents, consolidated_id, now):
+    for parent_id in resolved_parents:
+        rel_id = str(uuid.uuid4())
+        conn.execute(
+            """
+                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
+                    VALUES (?, ?, ?, 'consolidated_from', ?, ?)
+                """,
+            (rel_id, consolidated_id, parent_id, now, now),
+        )
+
+
+def _consolidation_commit(
+    conn,
+    resolved_parents,
+    observed_state,
+    core_request,
+    cohesion_result,
+    entity_values,
+    tags,
+    orphaned_edges,
+):
+    placeholders = ",".join("?" for _ in resolved_parents)
+    _consolidation_revalidate(conn, resolved_parents, observed_state)
+    core_state = _consolidation_core_state(
+        conn, resolved_parents, core_request, entity_values.redacted_content, entity_values
+    )
+    _consolidation_audit_override(
+        conn,
+        resolved_parents,
+        cohesion_result.override_applied,
+        cohesion_result.min_sim,
+        cohesion_result.offending_pair,
+        cohesion_result.unresolved,
+        cohesion_result.justification,
+        entity_values.consolidated_id,
+        entity_values.agent_val,
+    )
+    is_core_val = _consolidation_insert_entity(conn, resolved_parents, core_state, entity_values)
+    _consolidation_archive_parents(
+        conn,
+        resolved_parents,
+        entity_values.consolidated_id,
+        entity_values.clean_title,
+        entity_values.redacted_content,
+        entity_values.content_hash,
+        tags,
+        entity_values.agent_val,
+        is_core_val,
+        entity_values.now,
+        placeholders,
+    )
+    _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, placeholders)
+    _consolidation_insert_lineage(
+        conn, resolved_parents, entity_values.consolidated_id, entity_values.now
+    )
+
+
+def _consolidation_measure_cohesion(
+    conn,
+    resolved_parents,
+    db_path,
+    precomputed_centroids,
+    precomputed_unresolved,
+    precomputed_observed_state,
+):
+    # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
+    # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted
+    # outlier" failure mode that let `6a8fec3d` force-merge 37+ unrelated memories.
+    #
+    # P1 (Codex review, bf4qtkp7j / 7a5eba85): the gate is a no-op by contract for fewer than
+    # two parents -- there's no pairwise comparison to make. That must be a short-circuit BEFORE
+    # any centroid work, not just min_pairwise_cohesion's own len(centroids) < 2 trivial-pass:
+    # with only one parent, an `unresolved` entry (e.g. empty/unembeddable content) used to still
+    # force min_sim=0.0 below and reject the merge, even though there was nothing to compare it
+    # against. cohesion_gate_applicable also gates the TOCTOU revalidation in _do_commit below --
+    # no cohesion decision means no observed_state snapshot to revalidate against.
+    cohesion_gate_applicable = len(resolved_parents) >= 2
+    centroids: dict[str, list[float]]
+    unresolved: dict[str, str]
+    observed_state: dict[str, tuple[str, str]]
+    if not cohesion_gate_applicable:
+        centroids, unresolved = {}, {}
+        # Resolved review finding #8: single-parent consolidation still needs a TOCTOU
+        # observed_state snapshot even though it never runs the cohesion gate.
+        observed_state = _observe_parent_state(conn, resolved_parents)
+        min_sim, offending_pair = 1.0, None
+    else:
+        if (
+            precomputed_centroids is not None
+            and precomputed_unresolved is not None
+            and precomputed_observed_state is not None
+        ):
+            centroids = precomputed_centroids
+            unresolved = precomputed_unresolved
+            observed_state = precomputed_observed_state
+        else:
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(
+                resolved_parents, conn, db_path or get_db_path()
+            )
+        if unresolved:
+            min_sim, offending_pair = (
+                0.0,
+                (
+                    next(iter(unresolved)),
+                    f"<{next(iter(unresolved.values()))}>",
+                ),
+            )
+
+        else:
+            min_sim, offending_pair = min_pairwise_cohesion(centroids)
+
+    return min_sim, offending_pair, unresolved, observed_state
+
+
+def _consolidation_apply_cohesion_override(
+    conn,
+    content,
+    override_justification,
+    should_close,
+    min_sim,
+    offending_pair,
+    unresolved,
+):
+    justification = (override_justification or "").strip()
+    override_applied = min_sim < COHESION_MIN_PAIRWISE_THRESHOLD
+    if override_applied and len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected(
+            "REJECT_LOW_COHESION",
+            f"parent set fails pairwise similarity gate (min={min_sim:.4f} < "
+            f"{COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
+            f"{', unresolved=' + str(unresolved) if unresolved else ''}). Pass "
+            f"override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge.",
+        )
+
+    if override_applied:
+        # A3: baked into `content` BEFORE redact_secrets/compute_content_hash run below, so the
+        # override is part of the committed content_hash, not a side-channel annotation. Kept
+        # to plain prose sentences deliberately (no raw UUIDs/dict dumps): the full technical
+        # detail (parent_ids, offending_pair, unresolved) is already recorded precisely in the
+        # consolidation_gate_override audit event below -- packing long underscore-joined
+        # identifiers or raw UUID tokens into this annotation would itself skew the consolidated
+        # content's Coleman-Liau readability score (evaluate_memory_quality, run just below)
+        # high enough to trip its own quality gate on otherwise-unremarkable content.
+        content = (
+            f"{content}\n\n---\n"
+            f"[Consolidation Override] This merge was forced past the automatic cohesion gate. "
+            f"The minimum pairwise similarity between parents was {min_sim:.4f}, below the "
+            f"required threshold of {COHESION_MIN_PAIRWISE_THRESHOLD}. "
+            f"{'One or more parents had no usable content for scoring. ' if unresolved else ''}"
+            f"Justification: {justification}"
+        )
+
+    return content, justification, override_applied
+
+
+def _consolidation_cohesion(
+    conn,
+    resolved_parents,
+    db_path,
+    override_justification,
+    should_close,
+    precomputed_centroids,
+    precomputed_unresolved,
+    precomputed_observed_state,
+    content,
+):
+    min_sim, offending_pair, unresolved, observed_state = _consolidation_measure_cohesion(
+        conn,
+        resolved_parents,
+        db_path,
+        precomputed_centroids,
+        precomputed_unresolved,
+        precomputed_observed_state,
+    )
+    override_result = _consolidation_apply_cohesion_override(
+        conn,
+        content,
+        override_justification,
+        should_close,
+        min_sim,
+        offending_pair,
+        unresolved,
+    )
+    if isinstance(override_result, dict):
+        return override_result
+    content, justification, override_applied = override_result
+    return (
+        content,
+        justification,
+        override_applied,
+        min_sim,
+        offending_pair,
+        unresolved,
+        observed_state,
+    )
+
+
+def _consolidation_content_preflight(
+    conn,
+    title,
+    content,
+    is_core,
+    agent_id,
+    should_close,
+):
+    try:
+        core_governance_service.parse_is_core(is_core)
+    except ValueError as e:
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected("INVALID_CORE_REQUEST", str(e))
+
+    redacted_content = redact_secrets(content)
+    clean_title = redact_secrets(title)
+    agent_val = agent_id or "system"
+    # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
+    quality_res = evaluate_memory_quality(redacted_content, clean_title)
+    if quality_res["status"] == "REJECT":
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected(
+            "REJECT_QUALITY",
+            f"Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). "
+            f"Reason: {quality_res['reason']}",
+        )
+
+    content_hash = compute_content_hash(redacted_content)
+    quality_score = quality_res["quality_score"]
+    quality_status = quality_res["status"]
+    quality_flags_str = json.dumps(quality_res["quality_flags"])
+
+    return (
+        redacted_content,
+        clean_title,
+        agent_val,
+        content_hash,
+        quality_score,
+        quality_status,
+        quality_flags_str,
+    )
+
+
+def _consolidation_duplicate_preflight(
+    conn,
+    resolved_parents,
+    clean_title,
+    redacted_content,
+    content_hash,
+    agent_val,
+    should_close,
+):
+    # Stage A Exact Hash Collision Lookup (excluding resolved parent IDs)
+    try:
+        placeholders_p = ",".join("?" for _ in resolved_parents)
+        query_sql = f"""
+            SELECT id FROM entities
+            WHERE content_hash = ? AND agent_id = ? AND status != 'archived'
+              AND id NOT IN ({placeholders_p})
+        """
+        cursor = conn.execute(query_sql, [content_hash, agent_val] + resolved_parents)
+        row = cursor.fetchone()
+        if row:
+            if should_close:
+                close_connection(conn)
+            return _consolidation_rejected(
+                "REJECT_EXACT_DUPLICATE",
+                f"Consolidated memory exact hash matches existing entity ID: {row[0]}",
+            )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "Consolidation exact-hash lookup unavailable; continuing with duplicate checks: %s", exc
+        )
+
+    # Stage B Near-Duplicate Check (excluding resolved parent IDs)
+    try:
+        dup_check = check_duplicate_memories(
+            title=clean_title,
+            content=redacted_content,
+            agent_id=agent_val,
+            exclude_ids=resolved_parents,
+            db_connection=conn,
+        )
+        if dup_check.get("duplicate_found") and "error" not in dup_check:
+            top = dup_check["potential_duplicates"][0]
+            logger.warning(
+                "Consolidation potential near-duplicate detected against unrelated memory '%s' (ID: %s)",
+                top["title"],
+                top["id"],
+            )
+    except (sqlite3.Error, ValueError) as exc:
+        logger.warning("Consolidation near-duplicate check unavailable; continuing: %s", exc)
+
+    return None
+
+
+def _consolidation_validate_request(parent_ids, title, content):
+    if not parent_ids or not isinstance(parent_ids, list):
+        return _consolidation_rejected(
+            "INVALID_PARENT_IDS", "parent_ids must be a non-empty list of UUID strings."
+        )
+    if not title or not content:
+        return _consolidation_rejected(
+            "MISSING_REQUIRED_FIELDS", "title and content are mandatory."
+        )
+    if len(content) > MAX_MEMORY_CONTENT_CHARS:
+        return _consolidation_rejected(
+            "CONTENT_TOO_LONG",
+            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)}).",
+        )
+
+    return None
+
+
+def _consolidation_open_and_validate_parents(parent_ids, tags, db_connection, db_path):
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+
+    # This is deliberately before quality/dedup work and before BEGIN IMMEDIATE: all parent
+    # errors are deterministic validation failures with zero side effects.
+    resolved_parents, parent_error = _resolve_and_validate_parent_ids(conn, parent_ids)
+    if parent_error is not None:
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected(parent_error["code"], parent_error["message"])
+
+    # Same pre-BEGIN, zero-side-effects convention as the parent_ids check above.
+    from saltmdb.domain.services.memory_service.tags import validate_tag_names
+
+    tag_error = validate_tag_names(tags)
+    if tag_error is not None:
+        if should_close:
+            close_connection(conn)
+        return _consolidation_rejected("INVALID_TAG_NAME", tag_error)
+
+    return conn, should_close, resolved_parents
+
+
+def _consolidation_preflight(
+    parent_ids,
+    title,
+    content,
+    tags,
+    agent_id,
+    db_connection,
+    db_path,
+    override_justification,
+    core_request,
+    precomputed_centroids,
+    precomputed_unresolved,
+    precomputed_observed_state,
+):
+    validation_error = _consolidation_validate_request(parent_ids, title, content)
+    if validation_error is not None:
+        return validation_error
+    open_result = _consolidation_open_and_validate_parents(parent_ids, tags, db_connection, db_path)
+    if isinstance(open_result, dict):
+        return open_result
+    conn, should_close, resolved_parents = open_result
+
+    cohesion_result = _consolidation_cohesion(
+        conn,
+        resolved_parents,
+        db_path,
+        override_justification,
+        should_close,
+        precomputed_centroids,
+        precomputed_unresolved,
+        precomputed_observed_state,
+        content,
+    )
+    if isinstance(cohesion_result, dict):
+        return cohesion_result
+    (
+        content,
+        justification,
+        override_applied,
+        min_sim,
+        offending_pair,
+        unresolved,
+        observed_state,
+    ) = cohesion_result
+
+    content_result = _consolidation_content_preflight(
+        conn,
+        title,
+        content,
+        core_request.is_core_requested,
+        agent_id,
+        should_close,
+    )
+    if isinstance(content_result, dict):
+        return content_result
+    (
+        redacted_content,
+        clean_title,
+        agent_val,
+        content_hash,
+        quality_score,
+        quality_status,
+        quality_flags_str,
+    ) = content_result
+
+    duplicate_result = _consolidation_duplicate_preflight(
+        conn,
+        resolved_parents,
+        clean_title,
+        redacted_content,
+        content_hash,
+        agent_val,
+        should_close,
+    )
+    if duplicate_result is not None:
+        return duplicate_result
+
+    return (
+        conn,
+        should_close,
+        resolved_parents,
+        justification,
+        override_applied,
+        min_sim,
+        offending_pair,
+        unresolved,
+        observed_state,
+        redacted_content,
+        clean_title,
+        agent_val,
+        content_hash,
+        quality_score,
+        quality_status,
+        quality_flags_str,
+    )
+
+
+def consolidate_memories(
     parent_ids: list[str],
     title: str,
     content: str,
@@ -1635,453 +2403,94 @@ def consolidate_memories(  # noqa: C901, PLR0911, PLR0912, PLR0915
     including capacity admission, happens fresh inside `_do_commit`'s own TOCTOU revalidation --
     a pre-transaction check would not catch a parent whose core/status changed concurrently.
     """
-    if not parent_ids or not isinstance(parent_ids, list):
-        return _consolidation_rejected(
-            "INVALID_PARENT_IDS", "parent_ids must be a non-empty list of UUID strings."
-        )
-    if not title or not content:
-        return _consolidation_rejected(
-            "MISSING_REQUIRED_FIELDS", "title and content are mandatory."
-        )
-    if len(content) > MAX_MEMORY_CONTENT_CHARS:
-        return _consolidation_rejected(
-            "CONTENT_TOO_LONG",
-            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)}).",
-        )
-
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
-    # This is deliberately before quality/dedup work and before BEGIN IMMEDIATE: all parent
-    # errors are deterministic validation failures with zero side effects.
-    resolved_parents, parent_error = _resolve_and_validate_parent_ids(conn, parent_ids)
-    if parent_error is not None:
-        if should_close:
-            close_connection(conn)
-        return _consolidation_rejected(parent_error["code"], parent_error["message"])
-
-    # Same pre-BEGIN, zero-side-effects convention as the parent_ids check above.
-    from saltmdb.domain.services.memory_service.tags import validate_tag_names
-
-    tag_error = validate_tag_names(tags)
-    if tag_error is not None:
-        if should_close:
-            close_connection(conn)
-        return _consolidation_rejected("INVALID_TAG_NAME", tag_error)
-
-    # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
-    # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted
-    # outlier" failure mode that let `6a8fec3d` force-merge 37+ unrelated memories.
-    #
-    # P1 (Codex review, bf4qtkp7j / 7a5eba85): the gate is a no-op by contract for fewer than
-    # two parents -- there's no pairwise comparison to make. That must be a short-circuit BEFORE
-    # any centroid work, not just min_pairwise_cohesion's own len(centroids) < 2 trivial-pass:
-    # with only one parent, an `unresolved` entry (e.g. empty/unembeddable content) used to still
-    # force min_sim=0.0 below and reject the merge, even though there was nothing to compare it
-    # against. cohesion_gate_applicable also gates the TOCTOU revalidation in _do_commit below --
-    # no cohesion decision means no observed_state snapshot to revalidate against.
-    cohesion_gate_applicable = len(resolved_parents) >= 2
-    centroids: dict[str, list[float]]
-    unresolved: dict[str, str]
-    observed_state: dict[str, tuple[str, str]]
-    if not cohesion_gate_applicable:
-        centroids, unresolved = {}, {}
-        # Resolved review finding #8: single-parent consolidation still needs a TOCTOU
-        # observed_state snapshot even though it never runs the cohesion gate.
-        observed_state = _observe_parent_state(conn, resolved_parents)
-        min_sim, offending_pair = 1.0, None
-    else:
-        if (
-            _precomputed_centroids is not None
-            and _precomputed_unresolved is not None
-            and _precomputed_observed_state is not None
-        ):
-            centroids = _precomputed_centroids
-            unresolved = _precomputed_unresolved
-            observed_state = _precomputed_observed_state
-        else:
-            centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                resolved_parents, conn, db_path or get_db_path()
-            )
-        if unresolved:
-            min_sim, offending_pair = (
-                0.0,
-                (
-                    next(iter(unresolved)),
-                    f"<{next(iter(unresolved.values()))}>",
-                ),
-            )
-
-        else:
-            min_sim, offending_pair = min_pairwise_cohesion(centroids)
-
-    justification = (override_justification or "").strip()
-    override_applied = min_sim < COHESION_MIN_PAIRWISE_THRESHOLD
-    if override_applied and len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
-        if should_close:
-            close_connection(conn)
-        return _consolidation_rejected(
-            "REJECT_LOW_COHESION",
-            f"parent set fails pairwise similarity gate (min={min_sim:.4f} < "
-            f"{COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
-            f"{', unresolved=' + str(unresolved) if unresolved else ''}). Pass "
-            f"override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge.",
-        )
-
-    if override_applied:
-        # A3: baked into `content` BEFORE redact_secrets/compute_content_hash run below, so the
-        # override is part of the committed content_hash, not a side-channel annotation. Kept
-        # to plain prose sentences deliberately (no raw UUIDs/dict dumps): the full technical
-        # detail (parent_ids, offending_pair, unresolved) is already recorded precisely in the
-        # consolidation_gate_override audit event below -- packing long underscore-joined
-        # identifiers or raw UUID tokens into this annotation would itself skew the consolidated
-        # content's Coleman-Liau readability score (evaluate_memory_quality, run just below)
-        # high enough to trip its own quality gate on otherwise-unremarkable content.
-        content = (
-            f"{content}\n\n---\n"
-            f"[Consolidation Override] This merge was forced past the automatic cohesion gate. "
-            f"The minimum pairwise similarity between parents was {min_sim:.4f}, below the "
-            f"required threshold of {COHESION_MIN_PAIRWISE_THRESHOLD}. "
-            f"{'One or more parents had no usable content for scoring. ' if unresolved else ''}"
-            f"Justification: {justification}"
-        )
-
-    try:
-        is_core_requested = core_governance_service.parse_is_core(is_core)
-    except ValueError as e:
-        if should_close:
-            close_connection(conn)
-        return _consolidation_rejected("INVALID_CORE_REQUEST", str(e))
-
-    redacted_content = redact_secrets(content)
-    clean_title = redact_secrets(title)
-    agent_val = agent_id or "system"
-
-    # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
-    quality_res = evaluate_memory_quality(redacted_content, clean_title)
-    if quality_res["status"] == "REJECT":
-        if should_close:
-            close_connection(conn)
-        return _consolidation_rejected(
-            "REJECT_QUALITY",
-            f"Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). "
-            f"Reason: {quality_res['reason']}",
-        )
-
-    content_hash = compute_content_hash(redacted_content)
-    quality_score = quality_res["quality_score"]
-    quality_status = quality_res["status"]
-    quality_flags_str = json.dumps(quality_res["quality_flags"])
-
-    # Stage A Exact Hash Collision Lookup (excluding resolved parent IDs)
-    try:
-        placeholders_p = ",".join("?" for _ in resolved_parents)
-        query_sql = f"""
-            SELECT id FROM entities
-            WHERE content_hash = ? AND agent_id = ? AND status != 'archived'
-              AND id NOT IN ({placeholders_p})
-        """
-        cursor = conn.execute(query_sql, [content_hash, agent_val] + resolved_parents)
-        row = cursor.fetchone()
-        if row:
-            if should_close:
-                close_connection(conn)
-            return _consolidation_rejected(
-                "REJECT_EXACT_DUPLICATE",
-                f"Consolidated memory exact hash matches existing entity ID: {row[0]}",
-            )
-    except sqlite3.Error as exc:
-        logger.warning(
-            "Consolidation exact-hash lookup unavailable; continuing with duplicate checks: %s", exc
-        )
-
-    # Stage B Near-Duplicate Check (excluding resolved parent IDs)
-    try:
-        dup_check = check_duplicate_memories(
-            title=clean_title,
-            content=redacted_content,
-            agent_id=agent_val,
-            exclude_ids=resolved_parents,
-            db_connection=conn,
-        )
-        if dup_check.get("duplicate_found") and "error" not in dup_check:
-            top = dup_check["potential_duplicates"][0]
-            logger.warning(
-                "Consolidation potential near-duplicate detected against unrelated memory '%s' (ID: %s)",
-                top["title"],
-                top["id"],
-            )
-    except (sqlite3.Error, ValueError) as exc:
-        logger.warning("Consolidation near-duplicate check unavailable; continuing: %s", exc)
+    core_request = _ConsolidationCoreRequest(
+        scope,
+        is_core,
+        core_reason,
+        core_exit_condition,
+        core_review_after,
+        detail_memory_ids,
+    )
+    preflight_result = _consolidation_preflight(
+        parent_ids,
+        title,
+        content,
+        tags,
+        agent_id,
+        db_connection,
+        db_path,
+        override_justification,
+        core_request,
+        _precomputed_centroids,
+        _precomputed_unresolved,
+        _precomputed_observed_state,
+    )
+    if isinstance(preflight_result, dict):
+        return preflight_result
+    (
+        conn,
+        should_close,
+        resolved_parents,
+        justification,
+        override_applied,
+        min_sim,
+        offending_pair,
+        unresolved,
+        observed_state,
+        redacted_content,
+        clean_title,
+        agent_val,
+        content_hash,
+        quality_score,
+        quality_status,
+        quality_flags_str,
+    ) = preflight_result
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     orphaned_edges: list[dict[str, str]] = []
+    cohesion = _ConsolidationCohesionResult(
+        override_applied=override_applied,
+        min_sim=min_sim,
+        offending_pair=offending_pair,
+        unresolved=unresolved,
+        justification=justification,
+    )
+    entity_values = _ConsolidationEntityValues(
+        consolidated_id=consolidated_id,
+        clean_title=clean_title,
+        redacted_content=redacted_content,
+        agent_val=agent_val,
+        scope=scope,
+        weight=weight,
+        context_id=context_id,
+        agent_session_id=agent_session_id,
+        content_hash=content_hash,
+        quality_score=quality_score,
+        quality_status=quality_status,
+        quality_flags_str=quality_flags_str,
+        metadata=metadata,
+        memory_type=memory_type,
+        now=now,
+    )
 
     try:
 
-        def _do_commit():  # noqa: C901, PLR0912, PLR0915
-            # A4: TOCTOU revalidation, first statements, before any destructive write. Re-fetch
-            # content_hash/status for every resolved parent and compare against observed_state
-            # -- the dict returned from the EXACT read that produced (or failed to produce)
-            # each centroid, never a separately-later-taken snapshot. Any mismatch (content
-            # changed, status no longer eligible, or a resolved parent with no observed_state
-            # entry at all -- meaning it was unresolved/archived, or its read never completed
-            # cleanly) aborts the whole transaction. This is also what catches an earlier item
-            # in the same bulk batch having already archived a shared parent: that parent's
-            # current status reads back 'archived', mismatching its recorded observed_state.
-            # Resolved review finding #8: state revalidation must not be coupled to whether the
-            # cohesion gate ran -- only the cosine-similarity comparison itself is legitimately
-            # parent-count-gated. observed_state is now populated for every resolved parent
-            # regardless of parent count (get_fresh_entity_centroids for >=2 parents, the
-            # equivalent _observe_parent_state helper for a single parent), so this revalidation
-            # runs unconditionally whenever there are resolved parents at all.
-            if resolved_parents:
-                placeholders_reval = ",".join("?" for _ in resolved_parents)
-                current_rows = conn.execute(
-                    f"SELECT id, content_hash, status FROM entities WHERE id IN ({placeholders_reval})",
-                    resolved_parents,
-                ).fetchall()
-                current_state = {r[0]: (r[1], r[2]) for r in current_rows}
-                for pid in resolved_parents:
-                    if observed_state.get(pid) != current_state.get(pid):
-                        raise RuntimeError(
-                            f"Consolidation aborted: parent {pid} state changed since the "
-                            f"cohesion decision was made (observed={observed_state.get(pid)}, "
-                            f"current={current_state.get(pid)})"
-                        )
-
-            # Core-memory governance (resolved gap #2): authoritative, in-transaction resolution
-            # -- fresh parent is_core/status read, never the outer-scope pre-transaction snapshot
-            # -- so a parent that turned core (or lost core status) between preflight and commit
-            # is always caught here, not silently missed. Raises ValueError on a lifecycle/
-            # validation failure or CoreGovernanceRejected on a capacity failure; either aborts
-            # this transaction before any destructive write below.
-            try:
-                core_state = core_governance_service.resolve_consolidation_core_state(
-                    conn,
-                    resolved_parents=resolved_parents,
-                    is_core_requested=is_core_requested,
-                    content=redacted_content,
-                    scope=scope,
-                    core_reason=core_reason,
-                    core_exit_condition=core_exit_condition,
-                    core_review_after=core_review_after,
-                    detail_memory_ids=detail_memory_ids,
-                )
-                if core_state["is_core"]:
-                    # Resolved review finding #2 / resolved follow-up review finding #2:
-                    # core-producing consolidation must check the overdue-write boundary against
-                    # EVERY active core, including a resolved parent this same transaction is
-                    # about to archive -- silently replacing an overdue parent with a freshly
-                    # created core would reset its lifecycle without recording review provenance
-                    # through review_core_memory. The only sanctioned recovery paths remain an
-                    # explicit non-core consolidation, or a prior review_core_memory
-                    # (retain/demote/archive) of the overdue core.
-                    core_governance_service.enforce_overdue_boundary(
-                        conn,
-                        entity_id=None,
-                        effective_is_core=True,
-                        is_new_core=core_state["is_new_core"],
-                        review_after_changed=False,
-                    )
-            except ValueError as e:
-                raise core_governance_service.CoreGovernanceRejected(str(e)) from e
-
-            if core_state["is_core"]:
-                rejection = core_governance_service.check_capacity_admission(
-                    conn,
-                    exclude_ids=resolved_parents,
-                    new_entry={
-                        "id": consolidated_id,
-                        "title": clean_title,
-                        "memory_type": memory_type or "fact",
-                        "core_reason": core_state["core_reason"],
-                        "core_exit_condition": core_state["core_exit_condition"],
-                        "core_review_after": core_state["core_review_after"],
-                        "full_content": redacted_content,
-                        "agent_id": agent_val,
-                    },
-                )
-                if rejection is not None:
-                    raise core_governance_service.CoreGovernanceRejected(rejection)
-
-            # A3: atomic audit trail for an override commit -- written as the first destructive
-            # step for fail-fast clarity. log_event catches its own exceptions and RETURNS an
-            # "Error: ..." string rather than raising, so the result must be checked and raised
-            # on here -- because this runs inside the surrounding write_transaction_retrying
-            # (directly for a single-item call, or one level up in bulk_commit_consolidation for
-            # a batch item), any exception raised anywhere in _do_commit rolls back the whole
-            # transaction, which is what actually makes this audit atomic with the merge itself.
-            if override_applied:
-                audit_result = log_event(
-                    agent_id=agent_val,
-                    type="consolidation_gate_override",
-                    content=json.dumps(
-                        {
-                            "parent_ids": resolved_parents,
-                            "min_pairwise_similarity": min_sim,
-                            "threshold": COHESION_MIN_PAIRWISE_THRESHOLD,
-                            "offending_pair": offending_pair,
-                            "unresolved": unresolved,
-                            "justification": justification,
-                            "consolidated_id": consolidated_id,
-                        }
-                    ),
-                    db_connection=conn,
-                    _in_transaction=True,
-                )
-                if envelope.is_rejected(audit_result):
-                    raise RuntimeError(
-                        "Failed to record consolidation override audit event: "
-                        f"{audit_result['errors'][0]['message']}"
-                    )
-
-            is_core_val = 1 if core_state["is_core"] else 0
-            metadata_str = json.dumps(metadata) if metadata else None
-            conn.execute(
-                """
-                INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'consolidated', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'fact'), ?, ?, ?, ?)
-            """,
-                (
-                    consolidated_id,
-                    now,
-                    now,
-                    now,
-                    agent_val,
-                    scope,
-                    is_core_val,
-                    weight,
-                    json.dumps(resolved_parents),
-                    clean_title,
-                    redacted_content,
-                    now,
-                    context_id,
-                    agent_session_id,
-                    agent_session_id,
-                    content_hash,
-                    quality_score,
-                    quality_status,
-                    quality_flags_str,
-                    metadata_str,
-                    memory_type,
-                    core_state["core_reason"],
-                    core_state["core_exit_condition"],
-                    core_state["core_review_after"],
-                    json.dumps(core_state["core_detail_memory_ids"])
-                    if core_state["core_detail_memory_ids"]
-                    else None,
-                ),
+        def _write(c):
+            _consolidation_commit(
+                c,
+                resolved_parents,
+                observed_state,
+                core_request,
+                cohesion,
+                entity_values,
+                tags,
+                orphaned_edges,
             )
-
-            if core_state["is_core"] and core_state["core_detail_memory_ids"]:
-                core_governance_service.reconcile_detail_relations(
-                    conn,
-                    core_id=consolidated_id,
-                    agent_id=agent_val,
-                    new_detail_ids=core_state["core_detail_memory_ids"],
-                    previous_detail_ids=[],
-                )
-
-            # The new consolidated entity and all archived parents transition
-            # with their durable embedding work in this one transaction.
-            from saltmdb.domain.services.embedding_service import (
-                cancel_embedding_jobs_for_entity,
-                cancel_retrieval_embedding_jobs_for_entity,
-                clear_embedding_vectors_for_entity,
-                enqueue_embedding_jobs_for_entity,
-            )
-
-            enqueue_embedding_jobs_for_entity(
-                conn, consolidated_id, clean_title, redacted_content, content_hash
-            )
-
-            if tags:
-                for tag_name in tags:
-                    tag_id = resolve_or_create_tag(conn, tag_name, agent_id=agent_val)
-                    if not tag_id:
-                        continue
-                    conn.execute(
-                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                        (consolidated_id, tag_id),
-                    )
-
-            if is_core_val:
-                core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=agent_val)
-                if core_tag_id:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                        (consolidated_id, core_tag_id),
-                    )
-
-            placeholders = ",".join("?" for _ in resolved_parents)
-            conn.execute(
-                f"""
-                UPDATE entities
-                SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
-                WHERE id IN ({placeholders})
-            """,
-                [now, now] + resolved_parents,
-            )
-            for parent_id in resolved_parents:
-                cancel_embedding_jobs_for_entity(conn, parent_id)
-                clear_embedding_vectors_for_entity(conn, parent_id)
-                cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=True)
-
-            # Semantic relations remain historical claims about the archived parents.  Capture
-            # them as an optional replay worklist, but do not close, copy, or repoint them.
-            parent_set = set(resolved_parents)
-            active_touching_rows = conn.execute(
-                f"""
-                SELECT id, source_id, target_id, predicate
-                FROM relations
-                WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
-                  AND valid_to IS NULL
-                  AND predicate NOT IN ({",".join("?" for _ in _LINEAGE_PREDICATES)})
-                """,
-                resolved_parents + resolved_parents + list(_LINEAGE_PREDICATES),
-            ).fetchall()
-            seen_relation_ids: set[str] = set()
-            for rel_id, src, tgt, pred in active_touching_rows:
-                if rel_id in seen_relation_ids:
-                    continue
-                seen_relation_ids.add(rel_id)
-                originating_parent = src if src in parent_set else tgt
-                other_endpoint = tgt if src in parent_set else src
-                orphaned_edges.append(
-                    {
-                        "predicate": pred,
-                        "other_endpoint": other_endpoint,
-                        "originating_parent": originating_parent,
-                        # Preserve direction so an agent can replay this item through
-                        # manage_relation without guessing which side was the parent.
-                        "source_id": src,
-                        "target_id": tgt,
-                    }
-                )
-
-            for parent_id in resolved_parents:
-                rel_id = str(uuid.uuid4())
-                conn.execute(
-                    """
-                    INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from)
-                    VALUES (?, ?, ?, 'consolidated_from', ?, ?)
-                """,
-                    (rel_id, consolidated_id, parent_id, now, now),
-                )
 
         if _in_transaction:
-            _do_commit()
+            _write(conn)
         else:
-
-            def _write(c):
-                _do_commit()
-
             write_transaction_retrying(conn, _write)
 
         return envelope_ok(
