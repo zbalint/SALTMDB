@@ -11,6 +11,7 @@ direction).
 
 import math
 from datetime import datetime, UTC
+from typing import Any, cast
 
 from saltmdb.config import SUPERSESSION_CHAIN_MAX_DEPTH
 from saltmdb.db.connection import get_connection, close_connection
@@ -155,26 +156,8 @@ def _apply_supersession_demotion(ordered_ids: list, conn) -> list:
     ]
 
 
-def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
-    ordered_ids: list[str], conn
-) -> list[str]:
-    """Collapse eligible broad-mode ``supersedes`` chains without injecting rows.
-
-    A family is eligible only when its active, full-bitemporal supersedes component is an
-    acyclic, nonforking chain, all of its members are live, and every member (including the
-    newest head) is already present in ``ordered_ids`` after the caller's filters.  The scan is
-    intentionally left-to-right: the first family member emits the head's own id at that exact
-    position, while subsequent members are skipped.  Because the head must already be in the
-    pool, this operation never bypasses a filter or fabricates a row/score.
-
-    This helper is deliberately separate from strict/history behavior.  Strict resolves and
-    substitutes each matched predecessor through its existing relevance gate; history preserves
-    every matched row and tags it.  Neither mode calls this family-collapse operation.
-    """
-    if not ordered_ids:
-        return []
-    now = datetime.now(UTC).isoformat()
-    rows = conn.execute(
+def _fetch_current_supersedes_rows(conn, now: str) -> list[tuple[str, str]]:
+    return conn.execute(
         """
         SELECT r.source_id, r.target_id
         FROM relations r
@@ -186,9 +169,11 @@ def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
         """,
         (now, now, now, now),
     ).fetchall()
-    if not rows:
-        return list(ordered_ids)
 
+
+def _build_supersedes_maps(
+    rows: list[tuple[str, str]],
+) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
     source_to_targets: dict[str, set[str]] = {}
     target_to_sources: dict[str, set[str]] = {}
     undirected: dict[str, set[str]] = {}
@@ -197,7 +182,77 @@ def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
         target_to_sources.setdefault(target_id, set()).add(source_id)
         undirected.setdefault(source_id, set()).add(target_id)
         undirected.setdefault(target_id, set()).add(source_id)
+    return source_to_targets, target_to_sources, undirected
 
+
+def _supersedes_component(seed: str, undirected: dict[str, set[str]]) -> set[str]:
+    component: set[str] = set()
+    stack = [seed]
+    while stack:
+        node = stack.pop()
+        if node in component:
+            continue
+        component.add(node)
+        stack.extend(undirected.get(node, ()))
+    return component
+
+
+def _supersedes_component_is_live(component: set[str], pool: set[str], conn) -> bool:
+    if not component <= pool:
+        return False
+    placeholders = ",".join("?" for _ in component)
+    rows = conn.execute(
+        f"SELECT id, status FROM entities WHERE id IN ({placeholders})", list(component)
+    ).fetchall()
+    info = {row[0]: row[1] for row in rows}
+    return len(info) == len(component) and all(status != "archived" for status in info.values())
+
+
+def _supersedes_chain_head(
+    component: set[str],
+    source_to_targets: dict[str, set[str]],
+    target_to_sources: dict[str, set[str]],
+) -> str | None:
+    # A nonforking chain has at most one older target per newer source and at most one newer
+    # source per older target.  The live head is the newest node with no newer source pointing
+    # at it (no incoming edge); the scan emits this head in the first member's position.
+    if not all(
+        len(source_to_targets.get(node, ())) <= 1 and len(target_to_sources.get(node, ())) <= 1
+        for node in component
+    ):
+        return None
+    heads = [node for node in component if not target_to_sources.get(node)]
+    if len(heads) != 1:
+        return None
+    head = heads[0]
+    walked: set[str] = set()
+    node = head
+    while node not in walked:
+        walked.add(node)
+        successors = source_to_targets.get(node, set())
+        if not successors:
+            break
+        node = next(iter(successors))
+    return head if walked == component and node not in source_to_targets else None
+
+
+def _validate_supersedes_component(
+    component: set[str],
+    pool: set[str],
+    conn,
+    source_to_targets: dict[str, set[str]],
+    target_to_sources: dict[str, set[str]],
+) -> tuple[set[str], str] | None:
+    if not _supersedes_component_is_live(component, pool, conn):
+        return None
+    head = _supersedes_chain_head(component, source_to_targets, target_to_sources)
+    return (component, head) if head is not None else None
+
+
+def _collapse_supersedes_components(
+    ordered_ids: list[str], conn, rows: list[tuple[str, str]]
+) -> dict[str, tuple[set[str], str] | None]:
+    source_to_targets, target_to_sources, undirected = _build_supersedes_maps(rows)
     pool = set(ordered_ids)
     touched = set()
     components: dict[str, tuple[set[str], str] | None] = {}
@@ -206,54 +261,19 @@ def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
     for seed in pool:
         if seed not in undirected or seed in touched:
             continue
-        component: set[str] = set()
-        stack = [seed]
-        while stack:
-            node = stack.pop()
-            if node in component:
-                continue
-            component.add(node)
-            stack.extend(undirected.get(node, ()))
+        component = _supersedes_component(seed, undirected)
         touched.update(component)
-
-        eligible = component <= pool
-        info_rows = []
-        if eligible:
-            placeholders = ",".join("?" for _ in component)
-            info_rows = conn.execute(
-                f"SELECT id, status FROM entities WHERE id IN ({placeholders})", list(component)
-            ).fetchall()
-            info = {row[0]: row[1] for row in info_rows}
-            eligible = len(info) == len(component) and all(
-                status != "archived" for status in info.values()
-            )
-        # A nonforking chain has at most one older target per newer source and at most one newer
-        # source per older target.  The live head is the newest node with no newer source pointing
-        # at it (no incoming edge); the scan emits this head in the first member's position.
-        if eligible:
-            eligible = all(
-                len(source_to_targets.get(node, ())) <= 1
-                and len(target_to_sources.get(node, ())) <= 1
-                for node in component
-            )
-            heads = [node for node in component if not target_to_sources.get(node)]
-            eligible = eligible and len(heads) == 1
-            head = heads[0] if eligible else ""
-            if eligible:
-                walked: set[str] = set()
-                node = head
-                while node not in walked:
-                    walked.add(node)
-                    successors = source_to_targets.get(node, set())
-                    if not successors:
-                        break
-                    node = next(iter(successors))
-                eligible = walked == component and node not in source_to_targets
-        else:
-            head = ""
+        family = _validate_supersedes_component(
+            component, pool, conn, source_to_targets, target_to_sources
+        )
         for member in component:
-            components[member] = (component, head) if eligible else None
+            components[member] = family
+    return components
 
+
+def _emit_collapsed_supersedes(
+    ordered_ids: list[str], components: dict[str, tuple[set[str], str] | None]
+) -> list[str]:
     emitted: list[str] = []
     skipped: set[str] = set()
     for entity_id in ordered_ids:
@@ -269,24 +289,32 @@ def _collapse_supersedes_families(  # noqa: C901, PLR0912, PLR0915
     return emitted
 
 
-def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
-    query_text: str,
-    candidate_ids: list[str],
-    conn,
-    db_path: str,
-) -> dict[str, str]:
-    """Build CE inputs from title + the best fresh query-matching chunk.
+def _collapse_supersedes_families(ordered_ids: list[str], conn) -> list[str]:
+    """Collapse eligible broad-mode ``supersedes`` chains without injecting rows.
 
-    ``entity_chunk_embeddings`` is read only for the capped candidate prefix.  A chunk is
-    eligible only when its content hash matches the live entity hash and the entity is not
-    archived.  If no fresh chunk exists, the authoritative entity title plus leading content is
-    returned.  The final character cap remains in ``reranker_service.score_pairs`` so direct
-    callers and benchmark probes share one truncation rule.
+    A family is eligible only when its active, full-bitemporal supersedes component is an
+    acyclic, nonforking chain, all of its members are live, and every member (including the
+    newest head) is already present in ``ordered_ids`` after the caller's filters.  The scan is
+    intentionally left-to-right: the first family member emits the head's own id at that exact
+    position, while subsequent members are skipped.  Because the head must already be in the
+    pool, this operation never bypasses a filter or fabricates a row/score.
+
+    This helper is deliberately separate from strict/history behavior.  Strict resolves and
+    substitutes each matched predecessor through its existing relevance gate; history preserves
+    every matched row and tags it.  Neither mode calls this family-collapse operation.
     """
-    if not candidate_ids:
-        return {}
+    if not ordered_ids:
+        return []
+    rows = _fetch_current_supersedes_rows(conn, datetime.now(UTC).isoformat())
+    if not rows:
+        return list(ordered_ids)
+    components = _collapse_supersedes_components(ordered_ids, conn, rows)
+    return _emit_collapsed_supersedes(ordered_ids, components)
+
+
+def _load_cross_encoder_bases(candidate_ids: list[str], conn) -> dict[str, tuple[str, str]]:
     placeholders = ",".join("?" for _ in candidate_ids)
-    entity_rows = conn.execute(
+    rows = conn.execute(
         f"""
         SELECT id, title, full_content, content_hash
         FROM entities
@@ -294,10 +322,12 @@ def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
         """,
         list(candidate_ids),
     ).fetchall()
-    base = {row[0]: (row[1] or "", row[2] or "", row[3]) for row in entity_rows}
-    if not base:
-        return {}
+    return {row[0]: (row[1] or "", row[2] or "") for row in rows}
 
+
+def _collect_best_cross_encoder_chunks(
+    query_text: str, base: dict[str, tuple[str, str]], db_path: str
+) -> dict[str, tuple[float, int | None, int | None, str]]:
     best_chunks: dict[str, tuple[float, int | None, int | None, str]] = {}
     chunk_conn = None
     try:
@@ -323,7 +353,14 @@ def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
             """,
             [sqlite_vec.serialize_float32(query_vector)] + fresh_ids,
         ).fetchall()
-        for entity_id, chunk_index, char_start, char_end, content, distance in rows:
+        for row in rows:
+            entity_id, char_start, char_end, content, distance = (
+                row[0],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+            )
             try:
                 distance_value = float(distance)
             except (TypeError, ValueError):
@@ -332,12 +369,7 @@ def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
                 continue
             prior = best_chunks.get(entity_id)
             if prior is None or distance_value < prior[0]:
-                best_chunks[entity_id] = (
-                    distance_value,
-                    char_start,
-                    char_end,
-                    str(content or ""),
-                )
+                best_chunks[entity_id] = (distance_value, char_start, char_end, str(content or ""))
     except Exception as exc:
         # CE text construction is an optional enhancement.  A missing sqlite_vec/chunk table
         # must fall back to authoritative leading content, never suppress an otherwise valid CE
@@ -346,27 +378,63 @@ def _build_cross_encoder_candidate_texts(  # noqa: C901, PLR0912, PLR0915
     finally:
         if chunk_conn:
             close_connection(chunk_conn)
+    return best_chunks
 
+
+def _cross_encoder_evidence(
+    content: str, best: tuple[float, int | None, int | None, str] | None
+) -> str:
+    if best is None:
+        return content[:2000]
+    char_start, char_end, chunk_content = best[1:]
+    if char_start is not None and char_end is not None:
+        try:
+            chunk_text = content[int(char_start) : int(char_end)]
+        except (TypeError, ValueError):
+            chunk_text = chunk_content
+    else:
+        chunk_text = chunk_content
+    return chunk_text or content[:2000]
+
+
+def _render_cross_encoder_texts(
+    candidate_ids: list[str],
+    base: dict[str, tuple[str, str]],
+    best_chunks: dict[str, tuple[float, int | None, int | None, str]],
+) -> dict[str, str]:
     result: dict[str, str] = {}
     for entity_id in candidate_ids:
         if entity_id not in base:
             continue
-        title, content, _content_hash = base[entity_id]
-        best = best_chunks.get(entity_id)
-        if best is not None:
-            _distance, char_start, char_end, chunk_content = best
-            if char_start is not None and char_end is not None:
-                try:
-                    chunk_text = content[int(char_start) : int(char_end)]
-                except (TypeError, ValueError):
-                    chunk_text = chunk_content
-            else:
-                chunk_text = chunk_content
-            evidence = chunk_text or content[:2000]
-        else:
-            evidence = content[:2000]
-        result[entity_id] = f"{title}\n\n{evidence}"
+        title = base[entity_id][0]
+        content = base[entity_id][1]
+        result[entity_id] = (
+            f"{title}\n\n{_cross_encoder_evidence(content, best_chunks.get(entity_id))}"
+        )
     return result
+
+
+def _build_cross_encoder_candidate_texts(
+    query_text: str,
+    candidate_ids: list[str],
+    conn,
+    db_path: str,
+) -> dict[str, str]:
+    """Build CE inputs from title + the best fresh query-matching chunk.
+
+    ``entity_chunk_embeddings`` is read only for the capped candidate prefix.  A chunk is
+    eligible only when its content hash matches the live entity hash and the entity is not
+    archived.  If no fresh chunk exists, the authoritative entity title plus leading content is
+    returned.  The final character cap remains in ``reranker_service.score_pairs`` so direct
+    callers and benchmark probes share one truncation rule.
+    """
+    if not candidate_ids:
+        return {}
+    base = _load_cross_encoder_bases(candidate_ids, conn)
+    if not base:
+        return {}
+    best_chunks = _collect_best_cross_encoder_chunks(query_text, base, db_path)
+    return _render_cross_encoder_texts(candidate_ids, base, best_chunks)
 
 
 def _apply_strict_ranking_defaults(ordered_ids: list, conn) -> list:
@@ -410,7 +478,122 @@ def _apply_strict_ranking_defaults(ordered_ids: list, conn) -> list:
     ]
 
 
-def _resolve_supersession_chains(  # noqa: C901
+_CHAIN_ABSTAIN = object()
+
+
+def _build_supersession_chain_query(
+    candidate_ids: list[str], max_depth: int, now: str
+) -> tuple[str, list[Any]]:
+    validity_sql = (
+        "(r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?)) AND "
+        "(r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?)) AND "
+        "(r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?)) AND "
+        "(r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))"
+    )
+    placeholders = ",".join("?" for _ in candidate_ids)
+    query = f"""
+        WITH RECURSIVE chain(root_id, current_id, next_id, depth) AS (
+            SELECT r.target_id, r.target_id, r.source_id, 1
+            FROM relations r
+            WHERE r.target_id IN ({placeholders}) AND r.predicate = 'supersedes'
+              AND {validity_sql}
+
+            UNION ALL
+
+            SELECT c.root_id, c.next_id, r.source_id, c.depth + 1
+            FROM relations r
+            JOIN chain c ON r.target_id = c.next_id
+            WHERE r.predicate = 'supersedes' AND c.depth <= ?
+              AND {validity_sql}
+        )
+        SELECT DISTINCT root_id, current_id, next_id FROM chain
+    """
+    params = list(candidate_ids) + [now, now, now, now, max_depth, now, now, now, now]
+    return query, params
+
+
+def _build_supersession_graph(
+    edge_rows: list[tuple[str, str, str]], candidate_ids: list[str]
+) -> tuple[dict[str, set[str]], set[str], set[str]]:
+    adjacency: dict[str, set[str]] = {}
+    touched_ids: set[str] = set(candidate_ids)
+    roots_with_edges: set[str] = set()
+    for row in edge_rows:
+        root_id, current_id, next_id = row
+        adjacency.setdefault(current_id, set()).add(next_id)
+        touched_ids.add(current_id)
+        touched_ids.add(next_id)
+        roots_with_edges.add(root_id)
+    return adjacency, touched_ids, roots_with_edges
+
+
+def _load_supersession_entity_info(conn, touched_ids: set[str]) -> dict[str, dict[str, str | None]]:
+    placeholders = ",".join("?" for _ in touched_ids)
+    rows = conn.execute(
+        f"SELECT id, status, updated_at, created_at FROM entities WHERE id IN ({placeholders})",
+        list(touched_ids),
+    ).fetchall()
+    return {row[0]: {"status": row[1], "updated_at": row[2], "created_at": row[3]} for row in rows}
+
+
+def _supersession_sort_key(
+    next_id: str, entity_info: dict[str, dict[str, str | None]]
+) -> tuple[str, str, str]:
+    info = entity_info.get(next_id, {})
+    return (info.get("updated_at") or "", info.get("created_at") or "", next_id)
+
+
+def _choose_supersession_successor(
+    next_ids: set[str], entity_info: dict[str, dict[str, str | None]]
+) -> str:
+    return max(next_ids, key=lambda next_id: _supersession_sort_key(next_id, entity_info))
+
+
+def _walk_supersession_chain(
+    root_id: str,
+    adjacency: dict[str, set[str]],
+    entity_info: dict[str, dict[str, str | None]],
+    max_depth: int,
+):
+    node = root_id
+    visited = {root_id}
+    depth = 0
+    while True:
+        next_ids = adjacency.get(node)
+        if not next_ids:
+            break  # terminal: node has no further live supersessor
+        if depth + 1 > max_depth:
+            return _CHAIN_ABSTAIN  # chain continues beyond the allowed cap
+        chosen = _choose_supersession_successor(next_ids, entity_info)
+        info = entity_info.get(chosen)
+        if not info or info["status"] == "archived":
+            return _CHAIN_ABSTAIN  # inaccessible/archived intermediate (or terminal) node
+        if chosen in visited:
+            return _CHAIN_ABSTAIN  # cycle
+        visited.add(chosen)
+        node = chosen
+        depth += 1
+    return node if node != root_id else None
+
+
+def _reapply_supersession_filters(
+    conn, resolved: dict[str, str], where_clauses: list[str], params: list[Any]
+) -> dict[str, str]:
+    # Filter-reapplication: the resolved head must independently satisfy the ORIGINAL query's own
+    # where_clauses/params -- a resolved head is not necessarily visible to this particular caller
+    # (owner/scope/context/is_core/memory_type/tags filters all still apply).
+    heads = set(resolved.values())
+    head_placeholders = ",".join("?" for _ in heads)
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    rows = conn.execute(
+        f"SELECT e.id FROM entities e WHERE e.id IN ({head_placeholders}) AND {where_sql}",
+        list(heads) + list(params),
+    ).fetchall()
+    passing_heads = {row[0] for row in rows}
+    return {cid: head for cid, head in resolved.items() if head in passing_heads}
+
+
+def _resolve_supersession_chains(
     conn,
     candidate_ids: list[str],
     where_clauses: list[str],
@@ -461,123 +644,37 @@ def _resolve_supersession_chains(  # noqa: C901
       valid_to alongside status='archived'; a live entity's own valid_to is always NULL), so a
       separate check would be redundant, not additive. This matches search_memory's own existing
       liveness precedent (`e.status != 'archived'` in its where_clauses).
-    - Tie-break at a fork (two-plus currently-valid edges targeting the same node -- the relations
-      table's partial unique index only guarantees uniqueness per (source, target) pair, not per
-      target) is the successor's updated_at, then created_at, then id, all descending -- applied
-      greedily at EVERY hop of the walk, not just the final target, so a fork mid-chain resolves
-      the same deterministic way as a fork at the seed.
+    - Tie-break at a fork (two-plus currently-valid edges targeting the same node -- the
+      relations table's partial unique index only guarantees uniqueness per (source, target) pair,
+      not per target) is the successor's updated_at, then created_at, then id, all descending --
+      applied greedily at EVERY hop of the walk, not just the final target, so a fork mid-chain
+      resolves the same deterministic way as a fork at the seed.
     - Cycle, depth-cap breach (a chain that needs more than max_depth hops to terminate), or an
       inaccessible/archived intermediate node anywhere in the chain: abstain on that candidate
       entirely (see module docstring above for what "abstain" means to the caller).
     - The resolved head is re-checked against the ORIGINAL query's own where_clauses/params
       (agent_id/scope, context_id, is_core, memory_type_filter, tags_filter) before being
-      returned -- analyze_lineage/analyze_dependencies are unfiltered admin tools, search_memory is
-      not, and a resolved head is not necessarily visible to this particular caller.
+      returned -- analyze_lineage/analyze_dependencies are unfiltered admin tools, search_memory
+      is not, and a resolved head is not necessarily visible to this particular caller.
     """
     if not candidate_ids:
         return {}
-
-    now = datetime.now(UTC).isoformat()
-    validity_sql = (
-        "(r.valid_from IS NULL OR datetime(r.valid_from) <= datetime(?)) AND "
-        "(r.valid_to IS NULL OR datetime(r.valid_to) > datetime(?)) AND "
-        "(r.valid_at IS NULL OR datetime(r.valid_at) <= datetime(?)) AND "
-        "(r.invalid_at IS NULL OR datetime(r.invalid_at) > datetime(?))"
+    query, exec_params = _build_supersession_chain_query(
+        candidate_ids, max_depth, datetime.now(UTC).isoformat()
     )
-    placeholders = ",".join("?" for _ in candidate_ids)
-    query = f"""
-        WITH RECURSIVE chain(root_id, current_id, next_id, depth) AS (
-            SELECT r.target_id, r.target_id, r.source_id, 1
-            FROM relations r
-            WHERE r.target_id IN ({placeholders}) AND r.predicate = 'supersedes'
-              AND {validity_sql}
-
-            UNION ALL
-
-            SELECT c.root_id, c.next_id, r.source_id, c.depth + 1
-            FROM relations r
-            JOIN chain c ON r.target_id = c.next_id
-            WHERE r.predicate = 'supersedes' AND c.depth <= ?
-              AND {validity_sql}
-        )
-        SELECT DISTINCT root_id, current_id, next_id FROM chain
-    """
-    exec_params = list(candidate_ids) + [now, now, now, now, max_depth, now, now, now, now]
     edge_rows = conn.execute(query, exec_params).fetchall()
     if not edge_rows:
         return {}
-
-    adjacency: dict[str, set] = {}
-    touched_ids: set = set(candidate_ids)
-    roots_with_edges: set = set()
-    for root_id, current_id, next_id in edge_rows:
-        adjacency.setdefault(current_id, set()).add(next_id)
-        touched_ids.add(current_id)
-        touched_ids.add(next_id)
-        roots_with_edges.add(root_id)
-
-    entity_placeholders = ",".join("?" for _ in touched_ids)
-    entity_rows = conn.execute(
-        f"SELECT id, status, updated_at, created_at FROM entities WHERE id IN ({entity_placeholders})",
-        list(touched_ids),
-    ).fetchall()
-    entity_info = {
-        row[0]: {"status": row[1], "updated_at": row[2], "created_at": row[3]}
-        for row in entity_rows
-    }
-
-    def _tie_break(next_ids: set) -> str:
-        def key(nid: str):
-            info = entity_info.get(nid, {})
-            return (info.get("updated_at") or "", info.get("created_at") or "", nid)
-
-        return max(next_ids, key=key)
-
-    _ABSTAIN = object()
-
-    def _walk(root_id: str):
-        node = root_id
-        visited = {root_id}
-        depth = 0
-        while True:
-            next_ids = adjacency.get(node)
-            if not next_ids:
-                break  # terminal: node has no further live supersessor
-            if depth + 1 > max_depth:
-                return _ABSTAIN  # chain continues beyond the allowed cap
-            chosen = _tie_break(next_ids)
-            info = entity_info.get(chosen)
-            if not info or info["status"] == "archived":
-                return _ABSTAIN  # inaccessible/archived intermediate (or terminal) node
-            if chosen in visited:
-                return _ABSTAIN  # cycle
-            visited.add(chosen)
-            node = chosen
-            depth += 1
-        return node if node != root_id else None
-
+    adjacency, touched_ids, roots_with_edges = _build_supersession_graph(edge_rows, candidate_ids)
+    entity_info = _load_supersession_entity_info(conn, touched_ids)
     resolved: dict[str, str] = {}
     for root_id in roots_with_edges:
-        outcome = _walk(root_id)
-        if outcome is not None and outcome is not _ABSTAIN:
-            resolved[root_id] = outcome
-
+        outcome = _walk_supersession_chain(root_id, adjacency, entity_info, max_depth)
+        if outcome is not None and outcome is not _CHAIN_ABSTAIN:
+            resolved[root_id] = cast(str, outcome)
     if not resolved:
         return {}
-
-    # Filter-reapplication: the resolved head must independently satisfy the ORIGINAL query's own
-    # where_clauses/params -- a resolved head is not necessarily visible to this particular caller
-    # (owner/scope/context/is_core/memory_type/tags filters all still apply).
-    heads = set(resolved.values())
-    head_placeholders = ",".join("?" for _ in heads)
-    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-    passing_rows = conn.execute(
-        f"SELECT e.id FROM entities e WHERE e.id IN ({head_placeholders}) AND {where_sql}",
-        list(heads) + list(params),
-    ).fetchall()
-    passing_heads = {row[0] for row in passing_rows}
-
-    return {cid: head for cid, head in resolved.items() if head in passing_heads}
+    return _reapply_supersession_filters(conn, resolved, where_clauses, params)
 
 
 def _substitute_resolved_heads(

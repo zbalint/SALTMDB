@@ -315,6 +315,77 @@ def semantic_search(
             close_connection(conn)
 
 
+def _empty_chunk_candidate_diagnostics(
+    candidate_window: int, oversampling_multiplier: int
+) -> dict[str, int]:
+    return {
+        "requested_chunk_rows": 0,
+        "candidate_window": candidate_window,
+        "oversampling_multiplier": oversampling_multiplier,
+        "raw_chunk_rows": 0,
+        "unique_fresh_entities": 0,
+        "candidate_shortfall": candidate_window,
+    }
+
+
+def _fetch_chunk_entity_info(
+    conn, rows: list[tuple[Any, ...]], where_clauses: list[str], params: list[Any]
+) -> dict[str, tuple[str | None, str | None]]:
+    entity_ids = list({row[0] for row in rows})
+    if not entity_ids:
+        return {}
+    placeholders = ",".join("?" for _ in entity_ids)
+    where_sql = _SQL_AND.join(where_clauses) if where_clauses else "1=1"
+    entity_rows = conn.execute(
+        f"SELECT e.id, e.content_hash, e.status FROM entities e "
+        f"WHERE e.id IN ({placeholders}) AND {where_sql}",
+        entity_ids + list(params),
+    ).fetchall()
+    return {row[0]: (row[1], row[2]) for row in entity_rows}
+
+
+def _dedupe_fresh_chunk_rows(
+    rows: list[tuple[Any, ...]], entity_info: dict[str, tuple[str | None, str | None]]
+) -> dict[str, float]:
+    best_distance: dict[str, float] = {}
+    for row in rows:
+        entity_id, distance, chunk_hash = row
+        current = entity_info.get(entity_id)
+        if current is None or current[1] == "archived" or chunk_hash != current[0]:
+            continue
+        # sqlite_vec returns numeric distances, but keep a defensive finite check here so a
+        # malformed extension row cannot poison sorting/RRF with NaN.
+        try:
+            distance_value = float(distance)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(distance_value):
+            continue
+        previous = best_distance.get(entity_id)
+        if previous is None or distance_value < previous:
+            best_distance[entity_id] = distance_value
+    return best_distance
+
+
+def _chunk_search_diagnostics(
+    requested_rows: int,
+    candidate_window: int,
+    oversampling_multiplier: int,
+    raw_rows: int,
+    best_distance: dict[str, float],
+    ranked: list[tuple[str, float]],
+) -> dict[str, int]:
+    return {
+        "requested_chunk_rows": requested_rows,
+        "candidate_window": candidate_window,
+        "oversampling_multiplier": oversampling_multiplier,
+        "raw_chunk_rows": raw_rows,
+        "unique_fresh_entities": len(best_distance),
+        "returned_entities": len(ranked),
+        "candidate_shortfall": max(0, candidate_window - len(ranked)),
+    }
+
+
 def chunk_candidate_search(
     query: str,
     where_clauses: list[str],
@@ -338,19 +409,11 @@ def chunk_candidate_search(
     full one.
     """
     if not query:
-        return [], {
-            "requested_chunk_rows": 0,
-            "candidate_window": candidate_window,
-            "oversampling_multiplier": oversampling_multiplier,
-            "raw_chunk_rows": 0,
-            "unique_fresh_entities": 0,
-            "candidate_shortfall": candidate_window,
-        }
+        return [], _empty_chunk_candidate_diagnostics(candidate_window, oversampling_multiplier)
     conn = None
     requested_rows = candidate_window * oversampling_multiplier
     try:
         import sqlite_vec
-
         from saltmdb.domain.services import embedding_service
 
         conn = get_connection(db_path)
@@ -371,45 +434,19 @@ def chunk_candidate_search(
             sql,
             [sqlite_vec.serialize_float32(query_vector), requested_rows],
         ).fetchall()
-        entity_ids = list({row[0] for row in rows})
-        entity_info: dict[str, tuple[str | None, str | None]] = {}
-        if entity_ids:
-            placeholders = ",".join("?" for _ in entity_ids)
-            where_sql = _SQL_AND.join(where_clauses) if where_clauses else "1=1"
-            entity_rows = conn.execute(
-                f"SELECT e.id, e.content_hash, e.status FROM entities e "
-                f"WHERE e.id IN ({placeholders}) AND {where_sql}",
-                entity_ids + list(params),
-            ).fetchall()
-            entity_info = {row[0]: (row[1], row[2]) for row in entity_rows}
-        best_distance: dict[str, float] = {}
-        for entity_id, distance, chunk_hash in rows:
-            current = entity_info.get(entity_id)
-            if current is None or current[1] == "archived" or chunk_hash != current[0]:
-                continue
-            # sqlite_vec returns numeric distances, but keep a defensive finite check here so a
-            # malformed extension row cannot poison sorting/RRF with NaN.
-            try:
-                distance_value = float(distance)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(distance_value):
-                continue
-            previous = best_distance.get(entity_id)
-            if previous is None or distance_value < previous:
-                best_distance[entity_id] = distance_value
+        entity_info = _fetch_chunk_entity_info(conn, rows, where_clauses, params)
+        best_distance = _dedupe_fresh_chunk_rows(rows, entity_info)
         ranked = sorted(best_distance.items(), key=lambda item: (item[1], item[0]))[
             :candidate_window
         ]
-        diagnostics = {
-            "requested_chunk_rows": requested_rows,
-            "candidate_window": candidate_window,
-            "oversampling_multiplier": oversampling_multiplier,
-            "raw_chunk_rows": len(rows),
-            "unique_fresh_entities": len(best_distance),
-            "returned_entities": len(ranked),
-            "candidate_shortfall": max(0, candidate_window - len(ranked)),
-        }
+        diagnostics = _chunk_search_diagnostics(
+            requested_rows,
+            candidate_window,
+            oversampling_multiplier,
+            len(rows),
+            best_distance,
+            ranked,
+        )
         return ranked, diagnostics
     finally:
         if conn:
@@ -600,6 +637,66 @@ def _select_relevance_preview_text(
     return SNIPPET_ELLIPSIS.join(full_content[s:e] for s, e in merged)
 
 
+def _prepare_preview_vectors(query_text: str):
+    from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS
+    from saltmdb.utils.chunking import chunk_text
+    from saltmdb.domain.services import embedding_service
+
+    query_chunks = chunk_text(query_text or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
+    if not query_chunks:
+        query_chunks = [{"text": query_text or ""}]
+    return embedding_service.embed_query_texts([chunk["text"] for chunk in query_chunks])
+
+
+def _fetch_preview_best_chunks(
+    conn, sqlite_vec, candidate_ids: list[str], query_vectors: list[Any]
+) -> dict[tuple[str, int], tuple[float, int, int]]:
+    placeholders = ",".join("?" for _ in candidate_ids)
+    sql = f"""
+            SELECT c.entity_id, c.chunk_index, c.char_start, c.char_end,
+                   vec_distance_cosine(c.embedding, ?) AS distance
+            FROM entity_chunk_embeddings c
+            JOIN entities e ON e.id = c.entity_id
+            WHERE c.entity_id IN ({placeholders})
+              AND e.status != 'archived'
+              AND c.content_hash IS e.content_hash
+        """
+    # best[(entity_id, chunk_index)] = (min_distance_seen, char_start, char_end) -- min
+    # across every query chunk, mirroring rerank_candidates_by_topic's per-candidate
+    # MIN(distance) reduction but keyed per CHUNK, not aggregated per entity, since every
+    # individual chunk's own span is needed here, not just one rolled-up score.
+    best: dict[tuple[str, int], tuple[float, int, int]] = {}
+    for query_vector in query_vectors:
+        exec_params = [sqlite_vec.serialize_float32(query_vector)] + list(candidate_ids)
+        rows = conn.execute(sql, exec_params).fetchall()
+        for row in rows:
+            key = (row[0], row[1])
+            distance = row[4]
+            if key not in best or distance < best[key][0]:
+                best[key] = (distance, row[2], row[3])
+    return best
+
+
+def _group_preview_chunks(
+    best: dict[tuple[str, int], tuple[float, int, int]],
+) -> dict[str, list[tuple[int, int, int, float]]]:
+    by_entity: dict[str, list[tuple[int, int, int, float]]] = {}
+    for (entity_id, chunk_index), (distance, char_start, char_end) in best.items():
+        by_entity.setdefault(entity_id, []).append((chunk_index, char_start, char_end, distance))
+    return by_entity
+
+
+def _load_preview_contents(
+    conn, by_entity: dict[str, list[tuple[int, int, int, float]]]
+) -> dict[str, str]:
+    placeholders = ",".join("?" for _ in by_entity)
+    rows = conn.execute(
+        f"SELECT id, full_content FROM entities WHERE id IN ({placeholders})",
+        list(by_entity.keys()),
+    ).fetchall()
+    return {row[0]: row[1] or "" for row in rows}
+
+
 def get_relevance_preview_data(
     query_text: str,
     candidate_ids: list[str],
@@ -630,67 +727,23 @@ def get_relevance_preview_data(
     conn = None
     try:
         import sqlite_vec
-        from saltmdb.config import CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS
-        from saltmdb.utils.chunking import chunk_text
-        from saltmdb.domain.services import embedding_service
 
-        query_chunks = chunk_text(query_text or "", CHUNK_SIZE_CHARS, CHUNK_OVERLAP_CHARS)
-        if not query_chunks:
-            query_chunks = [{"text": query_text or ""}]
-        query_vectors = embedding_service.embed_query_texts([c["text"] for c in query_chunks])
+        query_vectors = _prepare_preview_vectors(query_text)
         if not query_vectors:
             return {}
-
         conn = get_connection(db_path)
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-
-        placeholders = ",".join("?" for _ in candidate_ids)
-        sql = f"""
-            SELECT c.entity_id, c.chunk_index, c.char_start, c.char_end,
-                   vec_distance_cosine(c.embedding, ?) AS distance
-            FROM entity_chunk_embeddings c
-            JOIN entities e ON e.id = c.entity_id
-            WHERE c.entity_id IN ({placeholders})
-              AND e.status != 'archived'
-              AND c.content_hash IS e.content_hash
-        """
-        # best[(entity_id, chunk_index)] = (min_distance_seen, char_start, char_end) -- min
-        # across every query chunk, mirroring rerank_candidates_by_topic's per-candidate
-        # MIN(distance) reduction but keyed per CHUNK, not aggregated per entity, since every
-        # individual chunk's own span is needed here, not just one rolled-up score.
-        best: dict[tuple[str, int], tuple[float, int, int]] = {}
-        for qv in query_vectors:
-            exec_params = [sqlite_vec.serialize_float32(qv)] + list(candidate_ids)
-            for entity_id, chunk_index, char_start, char_end, distance in conn.execute(
-                sql, exec_params
-            ).fetchall():
-                key = (entity_id, chunk_index)
-                if key not in best or distance < best[key][0]:
-                    best[key] = (distance, char_start, char_end)
-
+        best = _fetch_preview_best_chunks(conn, sqlite_vec, candidate_ids, query_vectors)
         if not best:
             return {}
-
-        by_entity: dict[str, list[tuple[int, int, int, float]]] = {}
-        for (entity_id, chunk_index), (distance, char_start, char_end) in best.items():
-            by_entity.setdefault(entity_id, []).append(
-                (chunk_index, char_start, char_end, distance)
-            )
-
-        content_placeholders = ",".join("?" for _ in by_entity)
-        content_rows = conn.execute(
-            f"SELECT id, full_content FROM entities WHERE id IN ({content_placeholders})",
-            list(by_entity.keys()),
-        ).fetchall()
-        full_content_by_id = {row[0]: row[1] or "" for row in content_rows}
-
+        by_entity = _group_preview_chunks(best)
+        full_content_by_id = _load_preview_contents(conn, by_entity)
         results: dict[str, dict[str, str]] = {}
         for entity_id, chunks in by_entity.items():
             full_content = full_content_by_id.get(entity_id, "")
             results[entity_id] = {"text": _select_relevance_preview_text(full_content, chunks)}
-
         return results
     except Exception as e:
         logger.warning("Relevance-preview chunk selection failed, falling back: %s", e)

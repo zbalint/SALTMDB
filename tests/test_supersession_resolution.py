@@ -133,6 +133,49 @@ class TestSupersessionChainResolution(unittest.TestCase):
         result = _resolve_supersession_chains(self.conn, ["oldest"], ["e.status != 'archived'"], [])
         self.assertEqual(result, {"oldest": "candidate_b"})
 
+    def test_updated_at_only_differential_beats_id_order(self):
+        self._insert_entity("old")
+        self._insert_entity(
+            "z_candidate",
+            updated_at="2026-01-02T00:00:00+00:00",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        self._insert_entity(
+            "a_candidate",
+            updated_at="2026-01-03T00:00:00+00:00",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        self._insert_supersedes("z_candidate", "old")
+        self._insert_supersedes("a_candidate", "old")
+        result = _resolve_supersession_chains(self.conn, ["old"], ["e.status != 'archived'"], [])
+        assert result == {"old": "a_candidate"}
+
+    def test_created_at_only_differential_beats_id_order(self):
+        self._insert_entity("old")
+        self._insert_entity(
+            "z_candidate",
+            updated_at="2026-01-02T00:00:00+00:00",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        self._insert_entity(
+            "a_candidate",
+            updated_at="2026-01-02T00:00:00+00:00",
+            created_at="2026-01-03T00:00:00+00:00",
+        )
+        self._insert_supersedes("z_candidate", "old")
+        self._insert_supersedes("a_candidate", "old")
+        result = _resolve_supersession_chains(self.conn, ["old"], ["e.status != 'archived'"], [])
+        assert result == {"old": "a_candidate"}
+
+    def test_falsey_timestamp_values_still_fall_through_to_id(self):
+        self._insert_entity("old")
+        self._insert_entity("z_candidate", updated_at="", created_at="")
+        self._insert_entity("a_candidate", updated_at="", created_at="")
+        self._insert_supersedes("z_candidate", "old")
+        self._insert_supersedes("a_candidate", "old")
+        result = _resolve_supersession_chains(self.conn, ["old"], ["e.status != 'archived'"], [])
+        assert result == {"old": "z_candidate"}
+
     def test_fork_tie_break_falls_back_to_created_at_then_id(self):
         self._insert_entity("old")
         # Same updated_at -- tie-break falls through to created_at.
