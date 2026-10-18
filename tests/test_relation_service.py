@@ -3646,6 +3646,46 @@ class TestRelationD14Pins(unittest.TestCase):
             result["data"]["message"],
         )
 
+    def test_inv07_store_success_message_preserves_canonicalization_note(self):
+        source, target = (
+            self._mk("D14 store success note source"),
+            self._mk("D14 store success note target"),
+        )
+        module = __import__(
+            "saltmdb.domain.services.relation_service", fromlist=["resolve_or_create_predicate"]
+        )
+        with patch.object(module, "resolve_or_create_predicate", return_value="canonical"):
+            result = store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+        relation_id = result["data"]["relation_id"]
+        self.assertEqual(
+            result["data"]["message"],
+            f"Relation successfully stored: 'canonical' between {source} and {target} "
+            f"(ID: {relation_id}) [canonicalized: requested 'depends_on', stored as 'canonical']",
+        )
+
+        plain_source, plain_target = (
+            self._mk("D14 store plain source"),
+            self._mk("D14 store plain target"),
+        )
+        with patch.object(module, "resolve_or_create_predicate", return_value="depends_on"):
+            plain_result = store_relation(
+                source_id=plain_source,
+                target_id=plain_target,
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+        plain_relation_id = plain_result["data"]["relation_id"]
+        self.assertEqual(
+            plain_result["data"]["message"],
+            f"Relation successfully stored: 'depends_on' between {plain_source} and {plain_target} "
+            f"(ID: {plain_relation_id})",
+        )
+
     def test_inv09_fallback_resolution_message_is_exact(self):
         with patch(
             "saltmdb.domain.services.relation_service._resolve_relation_endpoint",
@@ -3752,6 +3792,679 @@ class TestRelationD14Pins(unittest.TestCase):
         root = self._mk("D14 lineage empty root")
         result = _get_lineage_raw(root, direction="ancestors", max_depth=1, db_connection=self.conn)
         self.assertTrue(result["graph_exhausted"])
+
+
+class TestStoreRelationBoundaries(unittest.TestCase):
+    source = "11111111-1111-4111-8111-111111111111"
+    target = "22222222-2222-4222-8222-222222222222"
+    other = "33333333-3333-4333-8333-333333333333"
+    relation = "44444444-4444-4444-8444-444444444444"
+    now = "2026-01-02T03:04:05+00:00"
+    module = "saltmdb.domain.services.relation_service."
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db_path = os.path.join(self.temp_dir.name, "test.db")
+        self.conn = init_db(self.db_path)
+        self.addCleanup(self.conn.close)
+        for entity_id, title in (
+            (self.source, "Boundary Source"),
+            (self.target, "Boundary Target"),
+            (self.other, "Boundary Other"),
+        ):
+            self.conn.execute(
+                "INSERT INTO entities (id, created_at, updated_at, last_accessed_at, title, "
+                "full_content, content_hash, agent_id, scope) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'another-owner', 'private')",
+                (
+                    entity_id,
+                    self.now,
+                    self.now,
+                    self.now,
+                    title,
+                    f"Content for {title}",
+                    f"hash-{entity_id}",
+                ),
+            )
+        self.conn.commit()
+        frozen = patch(self.module + "datetime")
+        frozen.start().now.return_value.isoformat.return_value = self.now
+        self.addCleanup(frozen.stop)
+        identifier = patch(self.module + "uuid.uuid4", return_value=self.relation)
+        identifier.start()
+        self.addCleanup(identifier.stop)
+        centroids = patch(
+            self.module + "get_fresh_entity_centroids",
+            return_value=({self.source: [1.0], self.target: [1.0]}, {}, {}),
+        )
+        centroids.start()
+        self.addCleanup(centroids.stop)
+        similarity = patch(self.module + "min_pairwise_cohesion", return_value=(1.0, None))
+        similarity.start()
+        self.addCleanup(similarity.stop)
+
+    def _store(self, **kwargs):
+        arguments = {
+            "source_id": self.source,
+            "target_id": self.target,
+            "predicate": "depends_on",
+            "db_connection": self.conn,
+            "db_path": self.db_path,
+        }
+        arguments.update(kwargs)
+        return store_relation(**arguments)
+
+    def _rejection(self, code, message, field=None):
+        error = {"code": code, "message": message}
+        if field is not None:
+            error["field"] = field
+        return {"status": "rejected", "errors": [error], "warnings": []}
+
+    def _success(self, predicate="depends_on", relation_id=None, duplicate=False, note=""):
+        relation_id = relation_id or self.relation
+        action = "already exists (no-op)" if duplicate else "successfully stored"
+        message = (
+            f"Relation {action}: '{predicate}' between {self.source} and {self.target} "
+            f"(ID: {relation_id}){note}"
+        )
+        warnings = [{"code": "ALREADY_DONE", "message": message}] if duplicate else []
+        return {
+            "status": "ok",
+            "data": {"relation_id": relation_id, "message": message},
+            "warnings": warnings,
+        }
+
+    def _edge(self, predicate, target=None, source=None, valid_to=None):
+        self.conn.execute(
+            "INSERT INTO relations (id, source_id, target_id, predicate, valid_from, valid_at, "
+            "valid_to) VALUES ('existing', ?, ?, ?, ?, ?, ?)",
+            (source or self.source, target or self.target, predicate, self.now, self.now, valid_to),
+        )
+        self.conn.commit()
+
+    def _rows(self):
+        return self.conn.execute(
+            "SELECT id, source_id, target_id, predicate, valid_from, valid_at, invalid_at, "
+            "valid_to FROM relations ORDER BY id"
+        ).fetchall()
+
+    def test_mandatory_fields_reject_before_opening_connection(self):
+        for key in ("source_id", "target_id", "predicate"):
+            with self.subTest(key=key), patch(self.module + "get_connection") as connect:
+                self.assertEqual(
+                    self._store(**{key: ""}, db_connection=None),
+                    self._rejection(
+                        "VALIDATION_ERROR",
+                        "Error: source_id, target_id, and predicate are mandatory parameters.",
+                    ),
+                )
+                connect.assert_not_called()
+
+    def test_resolution_error_order_and_self_reference_precede_predicate_gate(self):
+        self.assertEqual(
+            self._store(
+                source_id="missing-source", target_id="missing-target", predicate="supersedes"
+            ),
+            self._rejection(
+                "UNKNOWN_ENTITY_ID",
+                "Error: UNKNOWN_ENTITY_ID - could not resolve source_id 'missing-source'.",
+            ),
+        )
+        self.assertEqual(
+            self._store(target_id="missing-target"),
+            self._rejection(
+                "UNKNOWN_ENTITY_ID",
+                "Error: UNKNOWN_ENTITY_ID - could not resolve target_id 'missing-target'.",
+            ),
+        )
+        self.assertEqual(
+            self._store(target_id=self.source, predicate="supersedes"),
+            self._rejection(
+                "VALIDATION_ERROR",
+                "Error: Self-referential relations (source_id == target_id) are forbidden.",
+            ),
+        )
+        self.assertEqual(self._rows(), [])
+
+    def test_predicate_rejections_have_exact_envelopes(self):
+        cases = (
+            (
+                "supersedes",
+                "RESERVED_PREDICATE",
+                "Error: RESERVED_PREDICATE - 'supersedes' is reserved; it is created only by "
+                "supersede_memory, never directly via manage_relation.",
+            ),
+            (
+                "similar_to",
+                "LEGACY_READONLY_PREDICATE",
+                "Error: LEGACY_READONLY_PREDICATE - 'similar_to' edges are legacy; existing ones "
+                "remain readable but no new ones may be created.",
+            ),
+            (
+                "references",
+                "NONCANONICAL_PREDICATE",
+                "Error: NONCANONICAL_PREDICATE - 'references' is not canonical; the canonical "
+                "form is 'related_to'. Retry with predicate='related_to'.",
+            ),
+            (
+                "partially_overlaps",
+                "UNKNOWN_PREDICATE",
+                "Error: UNKNOWN_PREDICATE - 'partially_overlaps' is not part of the closed predicate "
+                "vocabulary. Valid predicates: ['caused_by', 'contradicts', 'corrects', 'depends_on', "
+                "'derived_from', 'distinguishes_from', 'elaborates_on', 'part_of', 'related_to', "
+                "'resolves', 'verifies'].",
+            ),
+        )
+        for predicate, code, message in cases:
+            with self.subTest(predicate=predicate):
+                self.assertEqual(
+                    self._store(predicate=predicate), self._rejection(code, message, "predicate")
+                )
+        self.assertEqual(self._rows(), [])
+
+    def test_swapped_alias_rejection_has_exact_direction(self):
+        self.assertEqual(
+            self._store(predicate="affects"),
+            self._rejection(
+                "NONCANONICAL_PREDICATE",
+                "Error: NONCANONICAL_PREDICATE - 'affects' is not canonical; the canonical "
+                "form is 'caused_by' with source_id/target_id swapped (canonical direction is "
+                "'caused_by' from the current target to the current source). Retry with "
+                "predicate='caused_by'.",
+                "predicate",
+            ),
+        )
+
+    def test_owned_connection_closes_for_all_validation_exits_and_success(self):
+        cases = (
+            {"source_id": "missing-source"},
+            {"target_id": self.source},
+            {"predicate": "supersedes"},
+            {"predicate": "similar_to"},
+            {"predicate": "references"},
+            {"predicate": "unknown"},
+            {},
+        )
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                opened = []
+                from saltmdb.db.connection import get_connection, close_connection
+
+                def connect(path):
+                    connection = get_connection(path)
+                    opened.append(connection)
+                    return connection
+
+                with (
+                    patch(self.module + "get_connection", side_effect=connect),
+                    patch(self.module + "close_connection", wraps=close_connection) as close,
+                ):
+                    self._store(db_connection=None, **arguments)
+                self.assertEqual(len(opened), 1)
+                close.assert_called_once_with(opened[0])
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    opened[0].execute("SELECT 1")
+
+    def test_success_defaults_prefix_resolution_and_private_endpoints(self):
+        self.assertEqual(
+            self._store(source_id=self.source[:8], target_id=self.target[:8], agent_id="caller"),
+            self._success(),
+        )
+        self.assertEqual(
+            self._rows(),
+            [
+                (
+                    self.relation,
+                    self.source,
+                    self.target,
+                    "depends_on",
+                    self.now,
+                    self.now,
+                    None,
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(self.conn.execute("SELECT agent_id FROM events").fetchall(), [])
+
+    def test_explicit_valid_at_and_empty_valid_at_fallback(self):
+        for valid_at, expected in (
+            ("2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00"),
+            ("", self.now),
+        ):
+            with self.subTest(valid_at=valid_at):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.commit()
+                self.assertEqual(self._store(valid_at=valid_at), self._success())
+                self.assertEqual(
+                    self.conn.execute(
+                        "SELECT created_at, valid_from, valid_at FROM relations"
+                    ).fetchall(),
+                    [(self.now, self.now, expected)],
+                )
+
+    def test_duplicate_short_circuits_core_similarity_and_preserves_event_time(self):
+        self._edge("elaborates_on")
+        self.conn.execute("UPDATE entities SET is_core=1 WHERE id=?", (self.target,))
+        self.conn.commit()
+        with patch(
+            self.module + "get_fresh_entity_centroids", side_effect=AssertionError("gate ran")
+        ):
+            self.assertEqual(
+                self._store(predicate="elaborates_on", valid_at="2099-01-01"),
+                self._success("elaborates_on", "existing", duplicate=True),
+            )
+        self.assertEqual(
+            self._rows(),
+            [
+                (
+                    "existing",
+                    self.source,
+                    self.target,
+                    "elaborates_on",
+                    self.now,
+                    self.now,
+                    None,
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(self.conn.execute("SELECT content FROM events").fetchall(), [])
+
+    def test_expired_duplicate_does_not_block_new_relation(self):
+        self._edge("depends_on", valid_to="2025-01-01")
+        self.assertEqual(self._store(), self._success())
+        self.assertEqual(
+            self._rows(),
+            [
+                (
+                    self.relation,
+                    self.source,
+                    self.target,
+                    "depends_on",
+                    self.now,
+                    self.now,
+                    None,
+                    None,
+                ),
+                (
+                    "existing",
+                    self.source,
+                    self.target,
+                    "depends_on",
+                    self.now,
+                    self.now,
+                    None,
+                    "2025-01-01",
+                ),
+            ],
+        )
+
+    def test_core_gate_status_and_internal_permission(self):
+        for is_core, status, allow, rejected in (
+            (1, "raw", False, True),
+            (1, "consolidated", False, True),
+            (1, "archived", False, False),
+            (0, "raw", False, False),
+            (1, "raw", True, False),
+        ):
+            with self.subTest(is_core=is_core, status=status, allow=allow):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.execute(
+                    "UPDATE entities SET is_core=?, status=? WHERE id=?",
+                    (is_core, status, self.target),
+                )
+                self.conn.commit()
+                result = self._store(predicate="elaborates_on", _allow_core_elaborates_on=allow)
+                expected = self._success("elaborates_on")
+                if rejected:
+                    expected = self._rejection(
+                        "REJECT_CORE_ELABORATES_ON",
+                        "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                        "core memory are governed exclusively by that core's own "
+                        "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                        "-- manage_relation cannot create them directly.",
+                        "predicate",
+                    )
+                self.assertEqual(result, expected)
+
+    def test_similarity_equality_passes_and_below_rejects_exactly(self):
+        with (
+            patch(self.module + "RELATION_GATE_MIN_SIMILARITY_THRESHOLD", 0.5),
+            patch(self.module + "min_pairwise_cohesion", return_value=(0.5, None)),
+        ):
+            self.assertEqual(self._store(predicate="resolves"), self._success("resolves"))
+        self.conn.execute("DELETE FROM relations")
+        self.conn.commit()
+        with (
+            patch(self.module + "RELATION_GATE_MIN_SIMILARITY_THRESHOLD", 0.5),
+            patch(
+                self.module + "min_pairwise_cohesion", return_value=(0.4999, ("source", "target"))
+            ),
+        ):
+            self.assertEqual(
+                self._store(predicate="resolves"),
+                self._rejection(
+                    "REJECT_LOW_RELATION_SIMILARITY",
+                    "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.4999 < 0.5, "
+                    "offending=('source', 'target')) Pass override_justification (>= 20 chars) "
+                    "to force this relation.",
+                ),
+            )
+        self.assertEqual(self._rows(), [])
+
+    def test_unresolved_gate_exact_message_and_weak_predicate_bypass(self):
+        with patch(
+            self.module + "get_fresh_entity_centroids",
+            return_value=({}, {self.target: "archived"}, {}),
+        ):
+            self.assertEqual(
+                self._store(predicate="resolves"),
+                self._rejection(
+                    "REJECT_LOW_RELATION_SIMILARITY",
+                    "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.0000 < 0.6505, "
+                    f"offending=('{self.target}', '<archived>'), "
+                    f"unresolved={{'{self.target}': 'archived'}}) Pass override_justification "
+                    "(>= 20 chars) to force this relation.",
+                ),
+            )
+        with patch(
+            self.module + "get_fresh_entity_centroids", side_effect=AssertionError("strong only")
+        ):
+            self.assertEqual(self._store(), self._success())
+
+    def test_contradiction_canonicalization_direction_and_expiration(self):
+        for source, target, valid_to, conflict in (
+            (self.source, self.target, None, True),
+            (self.target, self.source, None, False),
+            (self.source, self.other, None, False),
+            (self.other, self.target, None, False),
+            (self.source, self.target, "2025-01-01", False),
+        ):
+            with self.subTest(source=source, target=target, valid_to=valid_to):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.commit()
+                self._edge("supersedes", source=source, target=target, valid_to=valid_to)
+                result = self._store(predicate="elaborates_on")
+                expected = self._success("elaborates_on")
+                if conflict:
+                    expected = self._rejection(
+                        "REJECT_CONTRADICTORY_PREDICATE",
+                        "Error: REJECT_CONTRADICTORY_PREDICATE (predicate='elaborates_on' "
+                        "conflicts with existing ['supersedes'] on this edge) Pass "
+                        "override_justification (>= 20 chars) to force this relation.",
+                    )
+                self.assertEqual(result, expected)
+
+    def test_override_trim_boundary_audit_payload_and_owner_default(self):
+        for owner, justification in ((None, "x" * 20), ("caller", "  " + "x" * 20 + "  ")):
+            with (
+                self.subTest(owner=owner),
+                patch(self.module + "min_pairwise_cohesion", return_value=(0.0, ("a", "b"))),
+            ):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.execute("DELETE FROM events")
+                self.conn.commit()
+                self.assertEqual(
+                    self._store(
+                        predicate="resolves", agent_id=owner, override_justification=justification
+                    ),
+                    self._success("resolves"),
+                )
+                events = self.conn.execute("SELECT agent_id, type, content FROM events").fetchall()
+                self.assertEqual(
+                    [(row[0], row[1]) for row in events],
+                    [(owner or "system", "relation_gate_override")],
+                )
+                self.assertEqual(
+                    json.loads(events[0][2]),
+                    {
+                        "source_id": self.source,
+                        "target_id": self.target,
+                        "predicate": "resolves",
+                        "violations": ["low_similarity"],
+                        "similarity": 0.0,
+                        "similarity_threshold": 0.6505,
+                        "contradicting_predicates": [],
+                        "justification": "x" * 20,
+                        "relation_id": self.relation,
+                    },
+                )
+
+    def test_override_audit_payload_pins_nonzero_similarity_and_default_agent(self):
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.4, ("source", "target"))):
+            self.assertEqual(
+                self._store(predicate="resolves", override_justification="  " + "x" * 20 + "  "),
+                self._success("resolves"),
+            )
+        event = self.conn.execute(
+            "SELECT agent_id, type, content FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "system")
+        self.assertEqual(event[1], "relation_gate_override")
+        self.assertEqual(
+            json.loads(event[2]),
+            {
+                "source_id": self.source,
+                "target_id": self.target,
+                "predicate": "resolves",
+                "violations": ["low_similarity"],
+                "similarity": 0.4,
+                "similarity_threshold": 0.6505,
+                "contradicting_predicates": [],
+                "justification": "x" * 20,
+                "relation_id": self.relation,
+            },
+        )
+
+    def test_override_audit_payload_pins_contradiction_and_explicit_agent(self):
+        self._edge("supersedes")
+        with patch(self.module + "min_pairwise_cohesion", return_value=(1.0, None)):
+            self.assertEqual(
+                self._store(
+                    predicate="elaborates_on",
+                    agent_id="caller",
+                    override_justification="justification for contradiction",
+                ),
+                self._success("elaborates_on"),
+            )
+        event = self.conn.execute(
+            "SELECT agent_id, type, content FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "caller")
+        self.assertEqual(event[1], "relation_gate_override")
+        self.assertEqual(
+            json.loads(event[2]),
+            {
+                "source_id": self.source,
+                "target_id": self.target,
+                "predicate": "elaborates_on",
+                "violations": ["contradictory_predicate"],
+                "similarity": 1.0,
+                "similarity_threshold": 0.6505,
+                "contradicting_predicates": ["supersedes"],
+                "justification": "justification for contradiction",
+                "relation_id": self.relation,
+            },
+        )
+
+    def test_override_audit_payload_pins_combined_violation_order(self):
+        self._edge("supersedes")
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.4, ("source", "target"))):
+            self.assertEqual(
+                self._store(
+                    predicate="elaborates_on",
+                    override_justification="combined violation justification",
+                ),
+                self._success("elaborates_on"),
+            )
+        event = self.conn.execute(
+            "SELECT agent_id, type, content FROM events WHERE type = 'relation_gate_override'"
+        ).fetchone()
+        self.assertEqual(event[0], "system")
+        self.assertEqual(event[1], "relation_gate_override")
+        self.assertEqual(
+            json.loads(event[2]),
+            {
+                "source_id": self.source,
+                "target_id": self.target,
+                "predicate": "elaborates_on",
+                "violations": ["low_similarity", "contradictory_predicate"],
+                "similarity": 0.4,
+                "similarity_threshold": 0.6505,
+                "contradicting_predicates": ["supersedes"],
+                "justification": "combined violation justification",
+                "relation_id": self.relation,
+            },
+        )
+
+    def test_short_trimmed_override_preserves_stale_edge_and_reports_both_violations(self):
+        self._edge("resolves", target=self.other)
+        self.conn.execute(
+            "INSERT INTO relations (id,source_id,target_id,predicate) VALUES ('contradiction',?,?,"
+            "'supersedes')",
+            (self.source, self.target),
+        )
+        self.conn.commit()
+        before = self._rows()
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.0, None)):
+            self.assertEqual(
+                self._store(
+                    predicate="elaborates_on", override_justification="  " + "x" * 19 + "  "
+                ),
+                self._rejection(
+                    "REJECT_LOW_RELATION_SIMILARITY",
+                    "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.0000 < 0.6505, "
+                    "offending=None) REJECT_CONTRADICTORY_PREDICATE (predicate='elaborates_on' "
+                    "conflicts with existing ['supersedes'] on this edge) Pass "
+                    "override_justification (>= 20 chars) to force this relation.",
+                ),
+            )
+        self.assertEqual(self._rows(), before)
+        self.assertEqual(self.conn.execute("SELECT content FROM events").fetchall(), [])
+
+    def test_repoint_only_expires_matching_strong_direction_after_gate(self):
+        for predicate in ("resolves", "depends_on"):
+            with self.subTest(predicate=predicate):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.commit()
+                self._edge(predicate, target=self.other)
+                self.assertEqual(self._store(predicate=predicate), self._success(predicate))
+                expiry = self.now if predicate == "resolves" else None
+                self.assertEqual(
+                    self._rows(),
+                    [
+                        (
+                            self.relation,
+                            self.source,
+                            self.target,
+                            predicate,
+                            self.now,
+                            self.now,
+                            None,
+                            None,
+                        ),
+                        (
+                            "existing",
+                            self.source,
+                            self.other,
+                            predicate,
+                            self.now,
+                            self.now,
+                            expiry,
+                            expiry,
+                        ),
+                    ],
+                )
+
+    def test_audit_rejection_and_insert_failure_roll_back_before_repoint(self):
+        self._edge("resolves", target=self.other)
+        before = self._rows()
+        with (
+            patch(self.module + "min_pairwise_cohesion", return_value=(0.0, None)),
+            patch(
+                self.module + "log_event",
+                return_value=self._rejection("INTERNAL_ERROR", "audit failed"),
+            ),
+        ):
+            self.assertEqual(
+                self._store(predicate="resolves", override_justification="x" * 20),
+                self._rejection(
+                    "INTERNAL_ERROR",
+                    "Error storing relation: Failed to record relation gate override audit event: audit failed",
+                ),
+            )
+        self.assertEqual(self._rows(), before)
+        self.conn.execute(
+            "CREATE TRIGGER fail_relation BEFORE INSERT ON relations BEGIN "
+            "SELECT RAISE(ABORT, 'insert failed'); END"
+        )
+        self.conn.commit()
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.0, None)):
+            self.assertEqual(
+                self._store(predicate="resolves", override_justification="x" * 20),
+                self._rejection("INTERNAL_ERROR", "Error storing relation: insert failed"),
+            )
+        self.assertEqual(self._rows(), before)
+        self.assertEqual(self.conn.execute("SELECT content FROM events").fetchall(), [])
+
+    def test_insert_ignored_defensive_noop_uses_existing_or_generated_id(self):
+        for create_existing in (False, True):
+            with self.subTest(create_existing=create_existing):
+                self.conn.execute("DROP TRIGGER IF EXISTS ignore_relation")
+                self.conn.execute("DELETE FROM relations")
+                body = ""
+                if create_existing:
+                    body = (
+                        "INSERT INTO relations (id,source_id,target_id,predicate) "
+                        "VALUES ('raced',NEW.source_id,NEW.target_id,NEW.predicate); "
+                    )
+                self.conn.execute(
+                    "CREATE TRIGGER ignore_relation BEFORE INSERT ON relations "
+                    f"WHEN NEW.id != 'raced' BEGIN {body}SELECT RAISE(IGNORE); END"
+                )
+                self.conn.commit()
+                self.assertEqual(
+                    self._store(),
+                    self._success(
+                        relation_id="raced" if create_existing else self.relation, duplicate=True
+                    ),
+                )
+
+    def test_insert_ignored_backstop_prefers_active_over_expired_twin(self):
+        self._edge("depends_on", valid_to="2025-01-01")
+        self.conn.execute(
+            "CREATE TRIGGER ignore_relation BEFORE INSERT ON relations "
+            "WHEN NEW.id != 'raced' BEGIN "
+            "INSERT INTO relations (id,source_id,target_id,predicate,created_at,valid_from,valid_at) "
+            "VALUES ('raced',NEW.source_id,NEW.target_id,NEW.predicate,NEW.created_at,"
+            "NEW.valid_from,NEW.valid_at); "
+            "SELECT RAISE(IGNORE); END"
+        )
+        self.conn.commit()
+        self.assertEqual(
+            self._store(),
+            self._success(
+                relation_id="raced",
+                duplicate=True,
+            ),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT id, valid_to FROM relations "
+                "WHERE source_id=? AND target_id=? AND predicate=? ORDER BY id",
+                (self.source, self.target, "depends_on"),
+            ).fetchall(),
+            [("existing", "2025-01-01"), ("raced", None)],
+        )
+
+    def test_outer_transaction_does_not_commit_or_rollback_its_callers_work(self):
+        self.conn.execute("BEGIN")
+        self.assertEqual(self._store(_in_transaction=True), self._success())
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self._rows(), [])
 
 
 if __name__ == "__main__":

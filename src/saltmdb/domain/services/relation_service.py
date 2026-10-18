@@ -160,7 +160,455 @@ def _resolve_relation_endpoint(conn, raw_id: str, label: str) -> tuple[str | Non
     return None, f"Error: UNKNOWN_ENTITY_ID - could not resolve {label} '{raw_id}'."
 
 
-def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
+def _relation_gate_rejection(
+    canonical_predicate: str,
+    sim: float,
+    offending,
+    unresolved: dict[str, str],
+    contradictions: list[str],
+    violations: list[str],
+):
+    reasons = []
+    if "low_similarity" in violations:
+        reasons.append(
+            f"REJECT_LOW_RELATION_SIMILARITY (similarity={sim:.4f} < "
+            f"{RELATION_GATE_MIN_SIMILARITY_THRESHOLD}, offending={offending}"
+            f"{', unresolved=' + str(unresolved) if unresolved else ''})"
+        )
+    if "contradictory_predicate" in violations:
+        reasons.append(
+            f"REJECT_CONTRADICTORY_PREDICATE (predicate='{canonical_predicate}' "
+            f"conflicts with existing {contradictions} on this edge)"
+        )
+    message = (
+        "Error: "
+        + " ".join(reasons)
+        + f" Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} "
+        "chars) to force this relation."
+    )
+    code = (
+        "REJECT_LOW_RELATION_SIMILARITY"
+        if "low_similarity" in violations
+        else "REJECT_CONTRADICTORY_PREDICATE"
+    )
+    return rejected([envelope_error(code, message)])
+
+
+def _apply_relation_gate(
+    conn,
+    resolved_source: str,
+    resolved_target: str,
+    canonical_predicate: str,
+    sim: float,
+    offending,
+    unresolved: dict[str, str],
+    contradictions: list[str],
+    override_justification: str | None,
+    agent_val: str,
+    relation_id: str,
+):
+    # D5: one unified override, one audit event covering both checks.
+    violations = []
+    if (
+        canonical_predicate in RELATION_GATE_STRONG_PREDICATES
+        and sim < RELATION_GATE_MIN_SIMILARITY_THRESHOLD
+    ):
+        violations.append("low_similarity")
+    if contradictions:
+        violations.append("contradictory_predicate")
+
+    justification = (override_justification or "").strip()
+    if violations:
+        if len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
+            return _relation_gate_rejection(
+                canonical_predicate,
+                sim,
+                offending,
+                unresolved,
+                contradictions,
+                violations,
+            )
+
+        # Atomic audit trail -- written as the first write for this call, before the
+        # relation itself, so any log_event failure rolls back the whole transaction
+        # (same fail-fast-atomicity reasoning as commit_consolidation's override audit).
+        audit_result = log_event(
+            agent_id=agent_val,
+            type="relation_gate_override",
+            content=json.dumps(
+                {
+                    "source_id": resolved_source,
+                    "target_id": resolved_target,
+                    "predicate": canonical_predicate,
+                    "violations": violations,
+                    "similarity": sim,
+                    "similarity_threshold": RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
+                    "contradicting_predicates": contradictions,
+                    "justification": justification,
+                    "relation_id": relation_id,
+                }
+            ),
+            db_connection=conn,
+            _in_transaction=True,
+        )
+        if envelope.is_rejected(audit_result):
+            raise RuntimeError(
+                "Failed to record relation gate override audit event: "
+                f"{audit_result['errors'][0]['message']}"
+            )
+    return None
+
+
+def _relation_gate_measurements(
+    conn,
+    resolved_source: str,
+    resolved_target: str,
+    canonical_predicate: str,
+    db_path: str | None,
+):
+    # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
+    # (archived, no usable content) forces a gate failure requiring override -- same
+    # convention as Phase 3/4's unresolved-centroid handling, not a silent pass.
+    sim, offending = 1.0, None
+    unresolved: dict[str, str] = {}
+    if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
+        centroids, unresolved, _ = get_fresh_entity_centroids(
+            [resolved_source, resolved_target], conn, db_path or get_db_path()
+        )
+        if unresolved:
+            sim, offending = (
+                0.0,
+                (next(iter(unresolved)), f"<{next(iter(unresolved.values()))}>"),
+            )
+        else:
+            sim, offending = min_pairwise_cohesion(centroids)
+
+    # D4: contradictory-predicate check, same directional edge only (MVP scope).
+    # Existing predicates are canonicalized (Phase 5 R2 fix #3) before comparison, so a
+    # pre-canonicalization-era row holding a raw legacy-alias string (e.g. "references",
+    # which aliases to elaborates_on) is still caught. Applies regardless of predicate
+    # strength -- a contradictory pair is a structural problem, not a similarity one.
+    existing_raw = {
+        r[0]
+        for r in conn.execute(
+            "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
+            (resolved_source, resolved_target),
+        ).fetchall()
+    }
+    existing_predicates = {resolve_or_create_predicate(conn, ep) or ep for ep in existing_raw}
+    contradictions = [
+        ep
+        for ep in existing_predicates
+        if frozenset({ep, canonical_predicate}) in RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS
+    ]
+    return sim, offending, unresolved, contradictions
+
+
+def _check_core_relation_guard(
+    conn,
+    resolved_target: str,
+    canonical_predicate: str,
+    allow_core_elaborates_on: bool,
+):
+    # D1b (core-memory governance, resolved gap #1): a NEW elaborates_on edge into an
+    # active core is governed exclusively by that core's own core_detail_memory_ids
+    # declaration -- reject any other path from creating one. Checked after the no-op
+    # short-circuit above (rule 39: repeating the relation remains a no-op) and before
+    # the ordinary similarity/contradiction gates below.
+    if canonical_predicate == "elaborates_on" and not allow_core_elaborates_on:
+        target_row = conn.execute(
+            "SELECT is_core, status FROM entities WHERE id = ?", (resolved_target,)
+        ).fetchone()
+        if target_row and bool(target_row[0]) and target_row[1] != "archived":
+            return rejected(
+                [
+                    envelope_error(
+                        "REJECT_CORE_ELABORATES_ON",
+                        (
+                            "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                            "core memory are governed exclusively by that core's own "
+                            "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                            "-- manage_relation cannot create them directly."
+                        ),
+                        "predicate",
+                    )
+                ]
+            )
+    return None
+
+
+def _insert_relation_write(
+    conn,
+    resolved_source: str,
+    resolved_target: str,
+    canonical_predicate: str,
+    valid_at: str | None,
+    relation_id: str,
+    now: str,
+    repoint_stale_edge_id,
+    note: str,
+):
+    # C-fix (continued): every gate above has now passed without an early return, so the
+    # new edge is confirmed about to be created below -- safe to invalidate the stale
+    # repoint target now, in the same transaction. See the detection comment above for
+    # why this must happen here and not earlier.
+    if repoint_stale_edge_id:
+        conn.execute(
+            "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
+            (now, now, repoint_stale_edge_id),
+        )
+
+    effective_valid_at = valid_at or now
+    cursor = conn.execute(
+        """
+        INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
+    """,
+        (
+            relation_id,
+            resolved_source,
+            resolved_target,
+            canonical_predicate,
+            now,
+            now,
+            effective_valid_at,
+        ),
+    )
+    if cursor.rowcount == 0:
+        # Defensive backstop only now (D1 above already handles the primary no-op path)
+        # -- a same-transaction race where a concurrent writer resolved this exact edge
+        # between the D1 check and this INSERT.
+        existing = conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
+            (resolved_source, resolved_target, canonical_predicate),
+        ).fetchone()
+        existing_id = existing[0] if existing else relation_id
+        message = (
+            f"Relation already exists (no-op): '{canonical_predicate}' between "
+            f"{resolved_source} and {resolved_target} (ID: {existing_id}){note}"
+        )
+        return envelope_ok(
+            {"relation_id": existing_id, "message": message},
+            warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
+        )
+    return envelope_ok(
+        {
+            "relation_id": relation_id,
+            "message": (
+                f"Relation successfully stored: '{canonical_predicate}' between "
+                f"{resolved_source} and {resolved_target} (ID: {relation_id}){note}"
+            ),
+        }
+    )
+
+
+def _store_relation_write(
+    conn,
+    resolved_source: str,
+    resolved_target: str,
+    predicate: str,
+    valid_at: str | None,
+    override_justification: str | None,
+    agent_id: str | None,
+    db_path: str | None,
+    relation_id: str,
+    now: str,
+    allow_core_elaborates_on: bool,
+):
+    normalized_requested = _normalize_predicate_name(predicate)
+    canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+    note = (
+        f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
+        if predicate and normalized_requested and normalized_requested != canonical_predicate
+        else ""
+    )
+    agent_val = agent_id or "system"
+
+    # D1 (Phase 5 R2 fix #4): an existing active identical edge is a legitimate no-op --
+    # short-circuit BEFORE any gate check runs, so re-submitting an already-active edge
+    # (e.g. a low-similarity strong-predicate edge accepted before this gate existed)
+    # never demands an override for creating nothing. Same match shape as the
+    # ON CONFLICT(...) WHERE valid_to IS NULL constraint the INSERT below relies on.
+    existing_edge = conn.execute(
+        "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
+        (resolved_source, resolved_target, canonical_predicate),
+    ).fetchone()
+    if existing_edge:
+        message = (
+            f"Relation already exists (no-op): '{canonical_predicate}' between "
+            f"{resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+        )
+        return envelope_ok(
+            {"relation_id": existing_edge[0], "message": message},
+            warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
+        )
+
+    # C-fix (cold-start agent-experience review, Issue C): detect whether this call is a
+    # manual repoint -- same source + a single-active-target-invariant predicate, but a
+    # different existing active target (e.g. re-linking an elaborates_on edge after the
+    # old target was superseded) -- so the stale edge can be invalidated once the new one
+    # is confirmed about to be created. Scoped to RELATION_GATE_STRONG_PREDICATES: the
+    # other agent-selectable predicates (related_to, depends_on, part_of, etc.) are
+    # legitimately many-to-many, and auto-invalidating on any new same-source/same-
+    # predicate call there would silently destroy a valid second edge, not fix a repoint.
+    # Detection only happens here (cheap, no write); the actual invalidation is deferred
+    # until every gate below has already passed, immediately alongside the INSERT --
+    # invalidating here instead would silently destroy a live edge even when a later gate
+    # (D3/D4) rejects the new one, since gate rejections `return` rather than `raise` and
+    # write_transaction commits on any normal return, not only a raised exception.
+    repoint_stale_edge_id = None
+    if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
+        repoint_row = conn.execute(
+            "SELECT id FROM relations WHERE source_id = ? AND predicate = ? AND target_id != ? AND valid_to IS NULL",
+            (resolved_source, canonical_predicate, resolved_target),
+        ).fetchone()
+        repoint_stale_edge_id = repoint_row[0] if repoint_row else None
+    core_rejection = _check_core_relation_guard(
+        conn, resolved_target, canonical_predicate, allow_core_elaborates_on
+    )
+    if core_rejection is not None:
+        return core_rejection
+    sim, offending, unresolved, contradictions = _relation_gate_measurements(
+        conn, resolved_source, resolved_target, canonical_predicate, db_path
+    )
+
+    gate_result = _apply_relation_gate(
+        conn,
+        resolved_source,
+        resolved_target,
+        canonical_predicate,
+        sim,
+        offending,
+        unresolved,
+        contradictions,
+        override_justification,
+        agent_val,
+        relation_id,
+    )
+    if gate_result is not None:
+        return gate_result
+
+    return _insert_relation_write(
+        conn,
+        resolved_source,
+        resolved_target,
+        canonical_predicate,
+        valid_at,
+        relation_id,
+        now,
+        repoint_stale_edge_id,
+        note,
+    )
+
+
+def _resolve_store_relation_endpoints(
+    conn,
+    source_id: str,
+    target_id: str,
+):
+    resolved_source, source_error = _resolve_relation_endpoint(conn, source_id, "source_id")
+    resolved_target, target_error = _resolve_relation_endpoint(conn, target_id, "target_id")
+
+    if not resolved_source or not resolved_target:
+        error_message = (
+            source_error or target_error or "Error: Could not resolve target entity IDs."
+        )
+        error_code = _entity_ref_error_code(error_message)
+        return None, None, rejected([envelope_error(error_code, error_message)])
+
+    if resolved_source == resolved_target:
+        return (
+            None,
+            None,
+            rejected(
+                [
+                    envelope_error(
+                        error_codes.VALIDATION_ERROR,
+                        "Error: Self-referential relations (source_id == target_id) are forbidden.",
+                    )
+                ]
+            ),
+        )
+    return resolved_source, resolved_target, None
+
+
+def _store_relation_predicate_error(predicate: str):
+    # Closed predicate vocabulary write-time gate (plan §5.8, Phase 6 item 25). This is the
+    # domain-layer backstop -- mcp/tools.py's manage_relation runs the same classification
+    # earlier, before any backend call, so it can emit a schema-derived corrected_call (this
+    # layer cannot: it has no reference to the MCP tool_func to build one from). Both layers
+    # exist so a caller that bypasses the adapter (an internal service, a direct domain-layer
+    # test) still cannot create a non-canonical predicate row.
+    disposition = classify_predicate(predicate)
+    if disposition.status == "reserved":
+        return rejected(
+            [
+                envelope_error(
+                    "RESERVED_PREDICATE",
+                    (
+                        f"Error: RESERVED_PREDICATE - '{predicate}' is reserved; it is created only by "
+                        f"{disposition.lifecycle_tool}, never directly via manage_relation."
+                    ),
+                    "predicate",
+                )
+            ]
+        )
+    if disposition.status == "legacy_readonly":
+        return rejected(
+            [
+                envelope_error(
+                    "LEGACY_READONLY_PREDICATE",
+                    (
+                        f"Error: LEGACY_READONLY_PREDICATE - '{predicate}' edges are legacy; existing ones "
+                        "remain readable but no new ones may be created."
+                    ),
+                    "predicate",
+                )
+            ]
+        )
+    if disposition.status == "alias":
+        swap_note = (
+            f" with source_id/target_id swapped (canonical direction is "
+            f"'{disposition.canonical}' from the current target to the current source)"
+            if disposition.swap
+            else ""
+        )
+        return rejected(
+            [
+                envelope_error(
+                    "NONCANONICAL_PREDICATE",
+                    (
+                        f"Error: NONCANONICAL_PREDICATE - '{predicate}' is not canonical; the canonical "
+                        f"form is '{disposition.canonical}'{swap_note}. Retry with predicate="
+                        f"'{disposition.canonical}'."
+                    ),
+                    "predicate",
+                )
+            ]
+        )
+    if disposition.status == "unknown":
+        return rejected(
+            [
+                envelope_error(
+                    "UNKNOWN_PREDICATE",
+                    (
+                        f"Error: UNKNOWN_PREDICATE - '{predicate}' is not part of the closed predicate "
+                        f"vocabulary. Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
+                    ),
+                    "predicate",
+                )
+            ]
+        )
+    return None
+
+
+def _close_owned_relation_connection(conn, should_close: bool) -> None:
+    if should_close:
+        close_connection(conn)
+
+
+def store_relation(
     source_id: str = None,
     target_id: str = None,
     predicate: str = None,
@@ -208,360 +656,56 @@ def store_relation(  # noqa: C901, PLR0915, PLR0911, PLR0912
             ]
         )
 
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
+    conn, db_path, should_close = _open_relation_connection(db_connection, db_path)
 
-    resolved_source, source_error = _resolve_relation_endpoint(conn, source_id, "source_id")
-    resolved_target, target_error = _resolve_relation_endpoint(conn, target_id, "target_id")
+    resolved_source, resolved_target, validation_error = _resolve_store_relation_endpoints(
+        conn, source_id, target_id
+    )
+    if validation_error is not None:
+        _close_owned_relation_connection(conn, should_close)
+        return validation_error
 
-    if not resolved_source or not resolved_target:
-        if should_close:
-            close_connection(conn)
-        error_message = (
-            source_error or target_error or "Error: Could not resolve target entity IDs."
-        )
-        error_code = _entity_ref_error_code(error_message)
-        return rejected([envelope_error(error_code, error_message)])
-
-    if resolved_source == resolved_target:
-        if should_close:
-            close_connection(conn)
-        return rejected(
-            [
-                envelope_error(
-                    error_codes.VALIDATION_ERROR,
-                    "Error: Self-referential relations (source_id == target_id) are forbidden.",
-                )
-            ]
-        )
-
-    # Closed predicate vocabulary write-time gate (plan §5.8, Phase 6 item 25). This is the
-    # domain-layer backstop -- mcp/tools.py's manage_relation runs the same classification
-    # earlier, before any backend call, so it can emit a schema-derived corrected_call (this
-    # layer cannot: it has no reference to the MCP tool_func to build one from). Both layers
-    # exist so a caller that bypasses the adapter (an internal service, a direct domain-layer
-    # test) still cannot create a non-canonical predicate row.
-    disposition = classify_predicate(predicate)
-    if disposition.status == "reserved":
-        if should_close:
-            close_connection(conn)
-        return rejected(
-            [
-                envelope_error(
-                    "RESERVED_PREDICATE",
-                    (
-                        f"Error: RESERVED_PREDICATE - '{predicate}' is reserved; it is created only by "
-                        f"{disposition.lifecycle_tool}, never directly via manage_relation."
-                    ),
-                    "predicate",
-                )
-            ]
-        )
-    if disposition.status == "legacy_readonly":
-        if should_close:
-            close_connection(conn)
-        return rejected(
-            [
-                envelope_error(
-                    "LEGACY_READONLY_PREDICATE",
-                    (
-                        f"Error: LEGACY_READONLY_PREDICATE - '{predicate}' edges are legacy; existing ones "
-                        "remain readable but no new ones may be created."
-                    ),
-                    "predicate",
-                )
-            ]
-        )
-    if disposition.status == "alias":
-        if should_close:
-            close_connection(conn)
-        swap_note = (
-            f" with source_id/target_id swapped (canonical direction is "
-            f"'{disposition.canonical}' from the current target to the current source)"
-            if disposition.swap
-            else ""
-        )
-        return rejected(
-            [
-                envelope_error(
-                    "NONCANONICAL_PREDICATE",
-                    (
-                        f"Error: NONCANONICAL_PREDICATE - '{predicate}' is not canonical; the canonical "
-                        f"form is '{disposition.canonical}'{swap_note}. Retry with predicate="
-                        f"'{disposition.canonical}'."
-                    ),
-                    "predicate",
-                )
-            ]
-        )
-    if disposition.status == "unknown":
-        if should_close:
-            close_connection(conn)
-        return rejected(
-            [
-                envelope_error(
-                    "UNKNOWN_PREDICATE",
-                    (
-                        f"Error: UNKNOWN_PREDICATE - '{predicate}' is not part of the closed predicate "
-                        f"vocabulary. Valid predicates: {sorted(AGENT_SELECTABLE_PREDICATES)}."
-                    ),
-                    "predicate",
-                )
-            ]
-        )
+    predicate_error = _store_relation_predicate_error(predicate)
+    if predicate_error is not None:
+        _close_owned_relation_connection(conn, should_close)
+        return predicate_error
+    resolved_source = cast(str, resolved_source)
+    resolved_target = cast(str, resolved_target)
 
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     try:
-
-        def _do_store():  # noqa: C901, PLR0912, PLR0915
-            normalized_requested = _normalize_predicate_name(predicate)
-            canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
-            note = (
-                f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
-                if predicate
-                and normalized_requested
-                and normalized_requested != canonical_predicate
-                else ""
+        if _in_transaction:
+            result_msg = _store_relation_write(
+                conn,
+                resolved_source,
+                resolved_target,
+                predicate,
+                valid_at,
+                override_justification,
+                agent_id,
+                db_path,
+                relation_id,
+                now,
+                _allow_core_elaborates_on,
             )
-            agent_val = agent_id or "system"
-
-            # D1 (Phase 5 R2 fix #4): an existing active identical edge is a legitimate no-op --
-            # short-circuit BEFORE any gate check runs, so re-submitting an already-active edge
-            # (e.g. a low-similarity strong-predicate edge accepted before this gate existed)
-            # never demands an override for creating nothing. Same match shape as the
-            # ON CONFLICT(...) WHERE valid_to IS NULL constraint the INSERT below relies on.
-            existing_edge = conn.execute(
-                "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-                (resolved_source, resolved_target, canonical_predicate),
-            ).fetchone()
-            if existing_edge:
-                message = (
-                    f"Relation already exists (no-op): '{canonical_predicate}' between "
-                    f"{resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
-                )
-                return envelope_ok(
-                    {"relation_id": existing_edge[0], "message": message},
-                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
-                )
-
-            # C-fix (cold-start agent-experience review, Issue C): detect whether this call is a
-            # manual repoint -- same source + a single-active-target-invariant predicate, but a
-            # different existing active target (e.g. re-linking an elaborates_on edge after the
-            # old target was superseded) -- so the stale edge can be invalidated once the new one
-            # is confirmed about to be created. Scoped to RELATION_GATE_STRONG_PREDICATES: the
-            # other agent-selectable predicates (related_to, depends_on, part_of, etc.) are
-            # legitimately many-to-many, and auto-invalidating on any new same-source/same-
-            # predicate call there would silently destroy a valid second edge, not fix a repoint.
-            # Detection only happens here (cheap, no write); the actual invalidation is deferred
-            # until every gate below has already passed, immediately alongside the INSERT --
-            # invalidating here instead would silently destroy a live edge even when a later gate
-            # (D3/D4) rejects the new one, since gate rejections `return` rather than `raise` and
-            # write_transaction commits on any normal return, not only a raised exception.
-            repoint_stale_edge_id = None
-            if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
-                repoint_row = conn.execute(
-                    "SELECT id FROM relations WHERE source_id = ? AND predicate = ? AND target_id != ? AND valid_to IS NULL",
-                    (resolved_source, canonical_predicate, resolved_target),
-                ).fetchone()
-                repoint_stale_edge_id = repoint_row[0] if repoint_row else None
-
-            # D1b (core-memory governance, resolved gap #1): a NEW elaborates_on edge into an
-            # active core is governed exclusively by that core's own core_detail_memory_ids
-            # declaration -- reject any other path from creating one. Checked after the no-op
-            # short-circuit above (rule 39: repeating the relation remains a no-op) and before
-            # the ordinary similarity/contradiction gates below.
-            if canonical_predicate == "elaborates_on" and not _allow_core_elaborates_on:
-                target_row = conn.execute(
-                    "SELECT is_core, status FROM entities WHERE id = ?", (resolved_target,)
-                ).fetchone()
-                if target_row and bool(target_row[0]) and target_row[1] != "archived":
-                    return rejected(
-                        [
-                            envelope_error(
-                                "REJECT_CORE_ELABORATES_ON",
-                                (
-                                    "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
-                                    "core memory are governed exclusively by that core's own "
-                                    "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
-                                    "-- manage_relation cannot create them directly."
-                                ),
-                                "predicate",
-                            )
-                        ]
-                    )
-
-            # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
-            # (archived, no usable content) forces a gate failure requiring override -- same
-            # convention as Phase 3/4's unresolved-centroid handling, not a silent pass.
-            sim, offending = 1.0, None
-            unresolved: dict[str, str] = {}
-            if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
-                centroids, unresolved, _observed_state = get_fresh_entity_centroids(
-                    [resolved_source, resolved_target], conn, db_path or get_db_path()
-                )
-                if unresolved:
-                    sim, offending = (
-                        0.0,
-                        (next(iter(unresolved)), f"<{next(iter(unresolved.values()))}>"),
-                    )
-                else:
-                    sim, offending = min_pairwise_cohesion(centroids)
-
-            # D4: contradictory-predicate check, same directional edge only (MVP scope).
-            # Existing predicates are canonicalized (Phase 5 R2 fix #3) before comparison, so a
-            # pre-canonicalization-era row holding a raw legacy-alias string (e.g. "references",
-            # which aliases to elaborates_on) is still caught. Applies regardless of predicate
-            # strength -- a contradictory pair is a structural problem, not a similarity one.
-            existing_raw = {
-                r[0]
-                for r in conn.execute(
-                    "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
-                    (resolved_source, resolved_target),
-                ).fetchall()
-            }
-            existing_predicates = {
-                resolve_or_create_predicate(conn, ep) or ep for ep in existing_raw
-            }
-            contradictions = [
-                ep
-                for ep in existing_predicates
-                if frozenset({ep, canonical_predicate})
-                in RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS
-            ]
-
-            # D5: one unified override, one audit event covering both checks.
-            violations = []
-            if (
-                canonical_predicate in RELATION_GATE_STRONG_PREDICATES
-                and sim < RELATION_GATE_MIN_SIMILARITY_THRESHOLD
-            ):
-                violations.append("low_similarity")
-            if contradictions:
-                violations.append("contradictory_predicate")
-
-            justification = (override_justification or "").strip()
-            if violations:
-                if len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
-                    reasons = []
-                    if "low_similarity" in violations:
-                        reasons.append(
-                            f"REJECT_LOW_RELATION_SIMILARITY (similarity={sim:.4f} < "
-                            f"{RELATION_GATE_MIN_SIMILARITY_THRESHOLD}, offending={offending}"
-                            f"{', unresolved=' + str(unresolved) if unresolved else ''})"
-                        )
-                    if "contradictory_predicate" in violations:
-                        reasons.append(
-                            f"REJECT_CONTRADICTORY_PREDICATE (predicate='{canonical_predicate}' "
-                            f"conflicts with existing {contradictions} on this edge)"
-                        )
-                    message = (
-                        "Error: "
-                        + " ".join(reasons)
-                        + f" Pass override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} "
-                        "chars) to force this relation."
-                    )
-                    code = (
-                        "REJECT_LOW_RELATION_SIMILARITY"
-                        if "low_similarity" in violations
-                        else "REJECT_CONTRADICTORY_PREDICATE"
-                    )
-                    return rejected([envelope_error(code, message)])
-
-                # Atomic audit trail -- written as the first write for this call, before the
-                # relation itself, so any log_event failure rolls back the whole transaction
-                # (same fail-fast-atomicity reasoning as commit_consolidation's override audit).
-                audit_result = log_event(
-                    agent_id=agent_val,
-                    type="relation_gate_override",
-                    content=json.dumps(
-                        {
-                            "source_id": resolved_source,
-                            "target_id": resolved_target,
-                            "predicate": canonical_predicate,
-                            "violations": violations,
-                            "similarity": sim,
-                            "similarity_threshold": RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
-                            "contradicting_predicates": contradictions,
-                            "justification": justification,
-                            "relation_id": relation_id,
-                        }
-                    ),
-                    db_connection=conn,
-                    _in_transaction=True,
-                )
-                if envelope.is_rejected(audit_result):
-                    raise RuntimeError(
-                        "Failed to record relation gate override audit event: "
-                        f"{audit_result['errors'][0]['message']}"
-                    )
-
-            # C-fix (continued): every gate above has now passed without an early return, so the
-            # new edge is confirmed about to be created below -- safe to invalidate the stale
-            # repoint target now, in the same transaction. See the detection comment above for
-            # why this must happen here and not earlier.
-            if repoint_stale_edge_id:
-                conn.execute(
-                    "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
-                    (now, now, repoint_stale_edge_id),
-                )
-
-            effective_valid_at = valid_at or now
-            cursor = conn.execute(
-                """
-                INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
-            """,
-                (
-                    relation_id,
+        else:
+            result_msg = write_transaction_retrying(
+                conn,
+                lambda tx_conn: _store_relation_write(
+                    tx_conn,
                     resolved_source,
                     resolved_target,
-                    canonical_predicate,
+                    predicate,
+                    valid_at,
+                    override_justification,
+                    agent_id,
+                    db_path,
+                    relation_id,
                     now,
-                    now,
-                    effective_valid_at,
+                    _allow_core_elaborates_on,
                 ),
             )
-            if cursor.rowcount == 0:
-                # Defensive backstop only now (D1 above already handles the primary no-op path)
-                # -- a same-transaction race where a concurrent writer resolved this exact edge
-                # between the D1 check and this INSERT.
-                existing = conn.execute(
-                    "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-                    (resolved_source, resolved_target, canonical_predicate),
-                ).fetchone()
-                existing_id = existing[0] if existing else relation_id
-                message = (
-                    f"Relation already exists (no-op): '{canonical_predicate}' between "
-                    f"{resolved_source} and {resolved_target} (ID: {existing_id}){note}"
-                )
-                return envelope_ok(
-                    {"relation_id": existing_id, "message": message},
-                    warnings=[envelope_warning(error_codes.ALREADY_DONE, message)],
-                )
-            return envelope_ok(
-                {
-                    "relation_id": relation_id,
-                    "message": (
-                        f"Relation successfully stored: '{canonical_predicate}' between "
-                        f"{resolved_source} and {resolved_target} (ID: {relation_id}){note}"
-                    ),
-                }
-            )
-
-        if _in_transaction:
-            result_msg = _do_store()
-        else:
-
-            def _write(c):
-                return _do_store()
-
-            result_msg = write_transaction_retrying(conn, _write)
         if not _in_transaction:
             from saltmdb.domain.services.community_detection_service import (
                 trigger_community_detection,
