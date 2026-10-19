@@ -87,3 +87,11 @@ Claims checked:
 | Snapshot via `saltmdb-cli snapshot --dest-dir` goes through the daemon | `cli.py:136-151, 599-606` | read; used earlier in this cleanup |
 | `scratch/` and `reports/` are gitignored | `.gitignore:20, 43` | `git check-ignore -v` |
 | Old option-matrix script keeps `use_cross_encoder` / `rerank_by_topic` only as labels | `benchmark_search_option_matrix.py:208-224` | consultant read |
+
+## Amendment 1 (2026-10-19): header provenance of the imported tree
+
+Developer BLOCKED on D7 (confirmed): `git status --porcelain` run in the imported tree reports repository-wide state, so in the main checkout it lists the untracked gate files and, during a refactor, the candidate's own changes, while the baseline worktree is clean. Requiring it to match is impossible for any real candidate, and D4b (main checkout vs worktree at the same HEAD) would never pass.
+
+- A1. The header records, for the imported tree, `src_realpath`, `src_head` (`git rev-parse HEAD`), `src_status_full` (`git status --porcelain` of the whole tree) and `src_status_src` (`git status --porcelain -- src` of the imported tree). All four are provenance: the comparer prints them and never compares them between the two runs. They replace the "expected `src` and `HEAD` fields" exception of D7 (the header-mismatch rule keeps every other field).
+- A2. The comparer takes `--baseline <file>` and `--candidate <file>`. It fails unless the BASELINE header has `src_status_full` empty and its `src_head` equals the sha the caller passes as `--baseline-sha` (so a dirty or wrong baseline is rejected). For the candidate it only requires `src_realpath` to equal the run's `--expect-src`; a candidate whose `src_status_src` is empty and whose `src_head` equals the baseline sha is allowed (that is the D4 identical-code case) and is reported as `candidate tree is unchanged from baseline` in the summary line, so an accidentally unchanged candidate in a refactor run is visible.
+- A3. D8 gains tests: baseline header with a dirty `src_status_full` is rejected; wrong `--baseline-sha` is rejected; candidate headers differing in the four provenance fields compare equal on every other field; a candidate whose `src_realpath` differs from the baseline in a non-provenance way is not special-cased.
