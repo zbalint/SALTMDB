@@ -72,3 +72,10 @@ Owner requirement: search results must stay exactly the same after the refactor.
 - A2. The developer runs the gate on the small trial subset the gate spec describes after each extraction step whenever the SEARCH-1 characterization tests pass but behavior on real data is in doubt, and must report that run's result. The developer does not edit the gate scripts; a suspected gate defect is reported to the architect.
 - A3. The gate does not replace D14: boundaries stay pinned by repo tests, and a mutation pass on the new helpers uses repo tests only. A mutant that the gate would catch but no repo test catches is still a survivor to be pinned.
 - A4. Lessons from SEARCH-1 (hold for this spec): a kill claim needs a passing baseline plus a named assertion failure, rerun by the architect; a loop-condition mutant can hang the suite, so loop tests need an iteration guard; a constant that the refactor captures at definition time (default argument, module-level alias) is a hazard when tests patch the constant, so keep reading `STRICT_OVERFETCH_CANDIDATE_CAP` and similar names at call time.
+
+## Amendment 2 (2026-10-19): the hoisted closure takes the post-fusion helpers
+
+Adjudication at the plan gate (D2). `_compute_pool` is hoisted whole (D3) and D7 caps every new helper at 12, so its post-fusion stages (predecessor resolution, gap debug log, rerank, strict-mode gate, ordering, candidate recording) are extracted in this spec too, although section 1 names only the front half. They follow the same rules (call-time lookups, D13, D14, the equivalence gate).
+
+- A5. The closure becomes a module-level helper with explicit parameters; read-only captured controls travel in one frozen module-level dataclass returned by the controls helper, every field of which is read; the shared mutable `diagnostics` dict is passed as is; no nonlocal rebinding, no default arguments for patched constants.
+- A6. SPEC-SONAR-CX-SEARCH-3 starts from the commit that includes this work and covers only what remains of `search_memory` after the pool computation (result assembly, diagnostics, whatever the proxy still shows above the target); its D6 target is unchanged.
