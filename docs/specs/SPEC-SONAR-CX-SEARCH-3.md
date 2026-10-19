@@ -63,3 +63,12 @@ Everything outside `search_memory`'s body in `orchestrator.py`; S107.
 ## 9. Pre-lock gate notes
 
 Reviewed by a consultant before lock (function table, tests per function, coupling, patch targets, extraction needs); see the assignment event. The plan gate (D2) replaces guessing stage boundaries from a 1,015-line function at spec time.
+
+## Amendment 1 (2026-10-19): the search equivalence gate
+
+Owner requirement: search results must stay exactly the same after the refactor. SPEC-SONAR-CX-SEARCH-EQUIV-GATE (`scripts/benchmarking/search_equivalence_gate.py` and `compare_search_equivalence.py`, LOCKED at `1600b91`, committed before this spec is assigned) compares the full `search_memory` outputs of a baseline and a candidate tree over about 390 real queries and a fixed configuration matrix, on a daemon snapshot with the real embedding and cross-encoder models.
+
+- A1. Added acceptance item 7: the architect runs the gate with the baseline being the commit this spec starts from (a `git worktree` at that sha) and the candidate being the developer's uncommitted working tree, back to back, on one snapshot, and the comparer exits 0 with matching headers. Any difference blocks the commit; the architect sends the first differing cases to the developer, who fixes the refactor (never the gate, the allowlist or the comparer).
+- A2. The developer runs the gate on the small trial subset the gate spec describes after each extraction step whenever the SEARCH-1 characterization tests pass but behavior on real data is in doubt, and must report that run's result. The developer does not edit the gate scripts; a suspected gate defect is reported to the architect.
+- A3. The gate does not replace D14: boundaries stay pinned by repo tests, and a mutation pass on the new helpers uses repo tests only. A mutant that the gate would catch but no repo test catches is still a survivor to be pinned.
+- A4. Lessons from SEARCH-1 (hold for this spec): a kill claim needs a passing baseline plus a named assertion failure, rerun by the architect; a loop-condition mutant can hang the suite, so loop tests need an iteration guard; a constant that the refactor captures at definition time (default argument, module-level alias) is a hazard when tests patch the constant, so keep reading `STRICT_OVERFETCH_CANDIDATE_CAP` and similar names at call time.
