@@ -1,6 +1,7 @@
 """Write path (create/update) for memory_service: entity resolution and persistence."""
 
 import json
+from dataclasses import dataclass
 from functools import partial
 import re
 import sqlite3
@@ -442,30 +443,32 @@ def _raw_retrieval_values(
     return final_retrieval_text, final_retrieval_hash
 
 
-def _insert_raw_entity(
-    conn,
-    *,
-    entity_id: str,
-    now: str,
-    agent_id: str,
-    scope: str,
-    is_core_val: int,
-    weight: int,
-    title: str,
-    redacted_content: str,
-    metadata_str: str | None,
-    context_id: str | None,
-    agent_session_id: str | None,
-    content_hash: str,
-    quality_score: int,
-    quality_status: str,
-    quality_flags_str: str,
-    memory_type: str | None,
-    final_retrieval_text: str | None,
-    final_retrieval_hash: str | None,
-    core_state: dict,
-    core_detail_ids_str: str | None,
-) -> None:
+@dataclass(frozen=True, slots=True)
+class _RawEntityRow:
+    # Contains mutable state; must not be hashed or cached.
+    entity_id: str
+    now: str
+    agent_id: str
+    scope: str
+    is_core_val: int
+    weight: int
+    title: str
+    redacted_content: str
+    metadata_str: str | None
+    context_id: str | None
+    agent_session_id: str | None
+    content_hash: str
+    quality_score: int
+    quality_status: str
+    quality_flags_str: str
+    memory_type: str | None
+    final_retrieval_text: str | None
+    final_retrieval_hash: str | None
+    core_state: dict
+    core_detail_ids_str: str | None
+
+
+def _insert_raw_entity(conn, row: _RawEntityRow) -> None:
     conn.execute(
         """
         INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, valid_to, metadata, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, memory_type, retrieval_text, retrieval_text_hash, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
@@ -499,34 +502,34 @@ def _insert_raw_entity(
             core_detail_memory_ids = excluded.core_detail_memory_ids
     """,
         (
-            entity_id,
-            now,
-            now,
-            now,
-            agent_id,
-            scope,
-            is_core_val,
-            weight,
+            row.entity_id,
+            row.now,
+            row.now,
+            row.now,
+            row.agent_id,
+            row.scope,
+            row.is_core_val,
+            row.weight,
             json.dumps([]),
-            title,
-            redacted_content,
-            now,
-            metadata_str,
-            context_id,
-            agent_session_id,
-            agent_session_id,
-            content_hash,
-            quality_score,
-            quality_status,
-            quality_flags_str,
-            memory_type,
-            final_retrieval_text,
-            final_retrieval_hash,
-            core_state["core_reason"],
-            core_state["core_exit_condition"],
-            core_state["core_review_after"],
-            core_detail_ids_str,
-            memory_type,
+            row.title,
+            row.redacted_content,
+            row.now,
+            row.metadata_str,
+            row.context_id,
+            row.agent_session_id,
+            row.agent_session_id,
+            row.content_hash,
+            row.quality_score,
+            row.quality_status,
+            row.quality_flags_str,
+            row.memory_type,
+            row.final_retrieval_text,
+            row.final_retrieval_hash,
+            row.core_state["core_reason"],
+            row.core_state["core_exit_condition"],
+            row.core_state["core_review_after"],
+            row.core_detail_ids_str,
+            row.memory_type,
         ),
     )
 
@@ -679,26 +682,28 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
     )
     _insert_raw_entity(
         conn,
-        entity_id=entity_id,
-        now=now,
-        agent_id=agent_id,
-        scope=scope,
-        is_core_val=is_core_val,
-        weight=weight,
-        title=title,
-        redacted_content=redacted_content,
-        metadata_str=metadata_str,
-        context_id=context_id,
-        agent_session_id=agent_session_id,
-        content_hash=content_hash,
-        quality_score=quality_score,
-        quality_status=quality_status,
-        quality_flags_str=quality_flags_str,
-        memory_type=memory_type,
-        final_retrieval_text=final_retrieval_text,
-        final_retrieval_hash=final_retrieval_hash,
-        core_state=core_state,
-        core_detail_ids_str=core_detail_ids_str,
+        _RawEntityRow(
+            entity_id=entity_id,
+            now=now,
+            agent_id=agent_id,
+            scope=scope,
+            is_core_val=is_core_val,
+            weight=weight,
+            title=title,
+            redacted_content=redacted_content,
+            metadata_str=metadata_str,
+            context_id=context_id,
+            agent_session_id=agent_session_id,
+            content_hash=content_hash,
+            quality_score=quality_score,
+            quality_status=quality_status,
+            quality_flags_str=quality_flags_str,
+            memory_type=memory_type,
+            final_retrieval_text=final_retrieval_text,
+            final_retrieval_hash=final_retrieval_hash,
+            core_state=core_state,
+            core_detail_ids_str=core_detail_ids_str,
+        ),
     )
     core_governance_service.reconcile_detail_relations(
         conn,

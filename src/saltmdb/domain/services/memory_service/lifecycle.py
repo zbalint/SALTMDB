@@ -5,6 +5,7 @@ within this package.
 """
 
 import json
+from dataclasses import dataclass
 from functools import partial
 import sqlite3
 import uuid
@@ -714,24 +715,28 @@ def _replacement_response(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ReplacementRequest:
+    # Contains mutable state; must not be hashed or cached.
+    entity_id: str | None = None
+    title: str | None = None
+    tags: list | None = None
+    content: str | None = None
+    reason: str | None = None
+    agent_id: str | None = None
+    context_id: str | None = None
+    scope: Literal["private", "shared"] | None = None
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None
+    agent_session_id: str | None = None
+    metadata: dict | None = None
+    repoint_relations: bool = False
+    db_connection: sqlite3.Connection | None = None
+    db_path: str | None = None
+    in_transaction: bool = False
+
+
 def _replacement_operation(
-    operation: Literal["revises", "supersedes"],
-    *,
-    entity_id: str | None = None,
-    title: str | None = None,
-    tags: list | None = None,
-    content: str | None = None,
-    reason: str | None = None,
-    agent_id: str | None = None,
-    context_id: str | None = None,
-    scope: Literal["private", "shared"] | None = None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    agent_session_id: str | None = None,
-    metadata: dict | None = None,
-    repoint_relations: bool = False,
-    db_connection=None,
-    db_path: str | None = None,
-    _in_transaction: bool = False,
+    operation: Literal["revises", "supersedes"], request: _ReplacementRequest
 ) -> dict:
     """Atomically create an immutable replacement and archive its predecessor.
 
@@ -759,21 +764,27 @@ def _replacement_operation(
     un-invalidated) that this flag closes for any caller who opts into it.
     """
     validation_error = _validate_replacement_inputs(
-        entity_id, title, tags, content, reason, scope, memory_type
+        request.entity_id,
+        request.title,
+        request.tags,
+        request.content,
+        request.reason,
+        request.scope,
+        request.memory_type,
     )
     if validation_error is not None:
         return validation_error
     # The validator above establishes these invariants. Casts carry that fact to static checking
     # without runtime assertions that disappear under optimized Python.
-    entity_id = cast(str, entity_id)
-    title = cast(str, title)
-    content = cast(str, content)
-    reason = cast(str, reason)
-    should_close = False
-    conn = db_connection
-    if conn is None:
-        conn = get_connection(db_path or get_db_path())
-        should_close = True
+    entity_id = cast(str, request.entity_id)
+    title = cast(str, request.title)
+    content = cast(str, request.content)
+    reason = cast(str, request.reason)
+    conn = (
+        get_connection(request.db_path or get_db_path())
+        if request.db_connection is None
+        else request.db_connection
+    )
     try:
         resolved_id, target_error = _replacement_target(conn, entity_id)
         if target_error is not None:
@@ -784,15 +795,15 @@ def _replacement_operation(
             entity_id,
             resolved_id,
             title,
-            tags,
+            request.tags,
             content,
             reason,
-            agent_id,
-            context_id,
-            scope,
-            memory_type,
-            agent_session_id,
-            metadata,
+            request.agent_id,
+            request.context_id,
+            request.scope,
+            request.memory_type,
+            request.agent_session_id,
+            request.metadata,
         )
         if preparation_error is not None:
             return preparation_error
@@ -802,10 +813,10 @@ def _replacement_operation(
             operation=operation,
             resolved_id=resolved_id,
             context=context,
-            repoint_relations=repoint_relations,
+            repoint_relations=request.repoint_relations,
         )
         try:
-            if _in_transaction:
+            if request.in_transaction:
                 new_id, relation_id, repointed_relations, still_orphaned_ids = callback(conn)
             else:
                 new_id, relation_id, repointed_relations, still_orphaned_ids = (
@@ -822,13 +833,13 @@ def _replacement_operation(
             relation_id,
             repointed_relations,
             still_orphaned_ids,
-            repoint_relations,
+            request.repoint_relations,
         )
     except Exception as exc:
         logger.error("Error %sing memory: %s", operation, exc)
         return rejected([envelope_error("LIFECYCLE_WRITE_FAILED", str(exc))])
     finally:
-        if should_close:
+        if request.db_connection is None:
             close_connection(conn)
 
 
@@ -855,21 +866,23 @@ def revise_memory(
     """
     return _replacement_operation(
         "revises",
-        entity_id=entity_id,
-        title=title,
-        tags=tags,
-        content=content,
-        reason=reason,
-        agent_id=agent_id,
-        context_id=context_id,
-        scope=scope,
-        memory_type=memory_type,
-        agent_session_id=agent_session_id,
-        metadata=metadata,
-        repoint_relations=repoint_relations,
-        db_connection=db_connection,
-        db_path=db_path,
-        _in_transaction=_in_transaction,
+        _ReplacementRequest(
+            entity_id=entity_id,
+            title=title,
+            tags=tags,
+            content=content,
+            reason=reason,
+            agent_id=agent_id,
+            context_id=context_id,
+            scope=scope,
+            memory_type=memory_type,
+            agent_session_id=agent_session_id,
+            metadata=metadata,
+            repoint_relations=repoint_relations,
+            db_connection=db_connection,
+            db_path=db_path,
+            in_transaction=_in_transaction,
+        ),
     )
 
 
@@ -895,20 +908,22 @@ def supersede_memory(
     """
     return _replacement_operation(
         "supersedes",
-        entity_id=entity_id,
-        title=title,
-        tags=tags,
-        content=content,
-        reason=reason,
-        agent_id=agent_id,
-        context_id=context_id,
-        scope=scope,
-        memory_type=memory_type,
-        agent_session_id=agent_session_id,
-        metadata=metadata,
-        repoint_relations=repoint_relations,
-        db_connection=db_connection,
-        db_path=db_path,
+        _ReplacementRequest(
+            entity_id=entity_id,
+            title=title,
+            tags=tags,
+            content=content,
+            reason=reason,
+            agent_id=agent_id,
+            context_id=context_id,
+            scope=scope,
+            memory_type=memory_type,
+            agent_session_id=agent_session_id,
+            metadata=metadata,
+            repoint_relations=repoint_relations,
+            db_connection=db_connection,
+            db_path=db_path,
+        ),
     )
 
 
