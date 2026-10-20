@@ -327,7 +327,7 @@ class _DaemonState:
             )
         try:
             if method == "tool_call":
-                return self._handle_tool_call(request_id, params, session_id)
+                return self._handle_tool_call(request_id, params)
             elif method == "run_librarian_now":
                 return self._handle_run_librarian(request_id, params)
             elif method == "run_backfill_chunk_embeddings_now":
@@ -472,21 +472,10 @@ class _DaemonState:
         self,
         request_id: str | None,
         params: dict[str, Any],
-        transport_session_id: int | None,  # noqa: ARG002 -- kept for call-site stability; see note below
     ) -> tuple[_AgentSession | None, dict[str, Any] | None]:  # noqa: PLR0911
-        # Fix (2026-08-26 second-pass review finding): a `transport_session_id in self._sessions`
-        # branch used to sit here, meant to require caller metadata "for an active adapter
-        # session". It was dead code: `self._sessions` only ever gains an entry for the socket
-        # that carried a `hello` (see `_handle_session_method`), while every `tool_call` arrives
-        # on a brand-new one-shot socket opened by daemon/client.py's `call_method()` -- it never
-        # reuses the persistent hello socket -- so `transport_session_id` (that one-shot socket's
-        # own id()) could never equal a live hello session's id. The branch never fired for any
-        # real caller, and even where a test forced it to fire (by reusing a hello's session_id
-        # for a later `handle_request` call), the very next check below already produces the same
-        # MALFORMED_REQUEST outcome whenever caller metadata is present-but-invalid. Real
-        # enforcement is exactly what remains: caller metadata is optional (metadata-free
-        # one-shot CLI calls stay allowed), but when supplied it must be a well-formed pair whose
-        # capability actually matches a live, non-closing `_agent_sessions` record (checked below).
+        # The former transport-session identity branch was dead: tool calls arrive on one-shot
+        # sockets rather than the persistent hello socket. Caller metadata remains optional, but
+        # when supplied it must be a well-formed pair whose capability matches a live session.
         caller_field_present = "caller_agent_session_id" in params
         capability_field_present = "caller_agent_session_capability" in params
         caller_session_id = params.get("caller_agent_session_id")
@@ -540,7 +529,6 @@ class _DaemonState:
         self,
         request_id: str | None,
         params: dict[str, Any],
-        transport_session_id: int | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool_call RPC method."""
         tool = params.get("tool")
@@ -564,9 +552,7 @@ class _DaemonState:
                 "tool kwarg 'owner_id' was renamed 'agent_id'; "
                 "restart the MCP adapter on the current SALTMDB version",
             )
-        caller_record, validation_error = self._validate_caller_session(
-            request_id, params, transport_session_id
-        )
+        caller_record, validation_error = self._validate_caller_session(request_id, params)
         if validation_error is not None:
             return validation_error
         if caller_record is not None:

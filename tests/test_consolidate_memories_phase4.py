@@ -38,7 +38,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]
 
-    def _cohesion(self, ids, _conn, _db_path):
+    def _cohesion(self, ids, _conn):
         state = {
             row[0]: (row[1], row[2])
             for row in self.conn.execute(
@@ -874,23 +874,20 @@ class TestConsolidationBoundaries(unittest.TestCase):
             ],
         )
 
-    def test_db_path_none_uses_database_path_fallback_for_cohesion(self):
-        with (
-            patch.object(relations, "get_db_path", return_value="/fallback/db") as fallback,
-            patch.object(
-                relations,
-                "get_fresh_entity_centroids",
-                return_value=(
-                    {parent: [1.0, 0.0] for parent in self.parents},
-                    {},
-                    self.state,
-                ),
-            ) as centroids,
-        ):
+    def test_db_path_none_resolves_cohesion_without_a_fallback_path(self):
+        with patch.object(
+            relations,
+            "get_fresh_entity_centroids",
+            return_value=(
+                {parent: [1.0, 0.0] for parent in self.parents},
+                {},
+                self.state,
+            ),
+        ) as centroids:
             result = self.call(db_path=None)
         self.assertEqual(result["status"], "ok")
-        fallback.assert_called_once_with()
-        self.assertEqual(centroids.call_args.args[2], "/fallback/db")
+        centroids.assert_called_once()
+        self.assertEqual(len(centroids.call_args.args), 2)
 
     def test_override_annotation_omits_unresolved_sentence_when_all_parents_resolve(self):
         with patch.object(
@@ -968,7 +965,6 @@ class TestConsolidationBoundaries(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         quality.assert_called_once_with(
             "Canonical [REDACTED_SECRET] content.",
-            "Canonical [REDACTED_SECRET]",
         )
 
     def test_worklist_returns_exact_full_relation_rows(self):

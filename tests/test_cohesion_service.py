@@ -105,9 +105,7 @@ class TestCohesionService(unittest.TestCase):
         self._insert_chunk("e1", 0, _axis_vector(0), content_hash="hash-a")
         self._insert_chunk("e1", 1, _axis_vector(1), content_hash="hash-a")
 
-        centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            ["e1"], self.conn, self.db_path
-        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(["e1"], self.conn)
 
         self.assertEqual(unresolved, {})
         self.assertIn("e1", centroids)
@@ -121,9 +119,7 @@ class TestCohesionService(unittest.TestCase):
         self._insert_entity("e2", content_hash="hash-b", full_content="short raw content")
 
         with patch.object(embedding_service, "embed_texts", return_value=[_axis_vector(0)]):
-            centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                ["e2"], self.conn, self.db_path
-            )
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(["e2"], self.conn)
 
         self.assertEqual(unresolved, {})
         self.assertIn("e2", centroids)
@@ -141,9 +137,7 @@ class TestCohesionService(unittest.TestCase):
         all. An unscorable-but-active entity must remain override-eligible."""
         self._insert_entity("e3", content_hash="hash-c", full_content="")
 
-        centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            ["e3"], self.conn, self.db_path
-        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(["e3"], self.conn)
 
         self.assertNotIn("e3", centroids)
         self.assertIn("e3", unresolved)
@@ -160,7 +154,7 @@ class TestCohesionService(unittest.TestCase):
         )
 
         centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            ["e3-archived"], self.conn, self.db_path
+            ["e3-archived"], self.conn
         )
 
         self.assertNotIn("e3-archived", centroids)
@@ -181,7 +175,7 @@ class TestCohesionService(unittest.TestCase):
             content_hash="archived-hash",
         )
         centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            ["archived-fresh"], self.conn, self.db_path
+            ["archived-fresh"], self.conn
         )
         self.assertNotIn("archived-fresh", centroids)
         self.assertEqual(
@@ -208,7 +202,7 @@ class TestCohesionService(unittest.TestCase):
             side_effect=RuntimeError("centroid failed"),
         ):
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                ["exception-fresh"], self.conn, self.db_path
+                ["exception-fresh"], self.conn
             )
         self.assertNotIn("exception-fresh", centroids)
         self.assertNotIn("exception-fresh", observed_state)
@@ -222,7 +216,7 @@ class TestCohesionService(unittest.TestCase):
         )
         with patch.object(embedding_service, "embed_texts", return_value=[_axis_vector(0)]):
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                ["consolidated-fallback"], self.conn, self.db_path
+                ["consolidated-fallback"], self.conn
             )
         self.assertIn("consolidated-fallback", centroids)
         self.assertNotIn("consolidated-fallback", unresolved)
@@ -241,7 +235,7 @@ class TestCohesionService(unittest.TestCase):
             side_effect=RuntimeError("embedding failed"),
         ):
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                ["exception-fallback"], self.conn, self.db_path
+                ["exception-fallback"], self.conn
             )
         self.assertNotIn("exception-fallback", centroids)
         self.assertEqual(
@@ -252,9 +246,7 @@ class TestCohesionService(unittest.TestCase):
     def test_get_fresh_entity_centroids_omits_observed_state_when_entity_not_found(self):
         """An id with no entities row at all must stay fully unresolved with no observed_state
         entry -- there is no successful row read to recover state from."""
-        centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            ["ghost-id"], self.conn, self.db_path
-        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(["ghost-id"], self.conn)
 
         self.assertNotIn("ghost-id", centroids)
         self.assertEqual(unresolved.get("ghost-id"), "entity not found")
@@ -275,7 +267,7 @@ class TestCohesionService(unittest.TestCase):
         ):
             with patch.object(embedding_service, "embed_texts", return_value=[_axis_vector(0)]):
                 centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                    ["fresh-ext"], self.conn, self.db_path
+                    ["fresh-ext"], self.conn
                 )
 
         # The fresh-join path was skipped entirely, but the fallback path still recovers a
@@ -295,7 +287,7 @@ class TestCohesionService(unittest.TestCase):
 
         with patch.object(embedding_service, "embed_texts", return_value=[_axis_vector(1)]):
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                ["fresh1", "fallback1"], self.conn, self.db_path
+                ["fresh1", "fallback1"], self.conn
             )
 
         self.assertEqual(observed_state["fresh1"], ("fresh-hash", "raw"))

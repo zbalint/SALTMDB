@@ -710,7 +710,7 @@ def _quality_finalize(score, hard_errors, warnings):
     return status, score
 
 
-def evaluate_memory_quality(content: str, title: str = None) -> dict:
+def evaluate_memory_quality(content: str) -> dict:
     """Evaluate content while reporting every blocking and advisory quality finding.
 
     ``quality_flags`` remains the compatibility view used by persistence and the viewer.  The

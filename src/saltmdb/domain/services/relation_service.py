@@ -265,7 +265,6 @@ def _relation_gate_measurements(
     resolved_source: str,
     resolved_target: str,
     canonical_predicate: str,
-    db_path: str | None,
 ):
     # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
     # (archived, no usable content) forces a gate failure requiring override -- same
@@ -274,7 +273,7 @@ def _relation_gate_measurements(
     unresolved: dict[str, str] = {}
     if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
         centroids, unresolved, _ = get_fresh_entity_centroids(
-            [resolved_source, resolved_target], conn, db_path or get_db_path()
+            [resolved_source, resolved_target], conn
         )
         if unresolved:
             sim, offending = (
@@ -412,7 +411,6 @@ def _store_relation_write(
     valid_at: str | None,
     override_justification: str | None,
     agent_id: str | None,
-    db_path: str | None,
     relation_id: str,
     now: str,
     allow_core_elaborates_on: bool,
@@ -471,7 +469,7 @@ def _store_relation_write(
     if core_rejection is not None:
         return core_rejection
     sim, offending, unresolved, contradictions = _relation_gate_measurements(
-        conn, resolved_source, resolved_target, canonical_predicate, db_path
+        conn, resolved_source, resolved_target, canonical_predicate
     )
 
     gate_result = _apply_relation_gate(
@@ -685,7 +683,6 @@ def store_relation(
                 valid_at,
                 override_justification,
                 agent_id,
-                db_path,
                 relation_id,
                 now,
                 _allow_core_elaborates_on,
@@ -701,7 +698,6 @@ def store_relation(
                     valid_at,
                     override_justification,
                     agent_id,
-                    db_path,
                     relation_id,
                     now,
                     _allow_core_elaborates_on,
@@ -1970,7 +1966,6 @@ def _consolidation_commit(
 def _consolidation_measure_cohesion(
     conn,
     resolved_parents,
-    db_path,
     precomputed_centroids,
     precomputed_unresolved,
     precomputed_observed_state,
@@ -2007,7 +2002,7 @@ def _consolidation_measure_cohesion(
             observed_state = precomputed_observed_state
         else:
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
-                resolved_parents, conn, db_path or get_db_path()
+                resolved_parents, conn
             )
         if unresolved:
             min_sim, offending_pair = (
@@ -2070,7 +2065,6 @@ def _consolidation_apply_cohesion_override(
 def _consolidation_cohesion(
     conn,
     resolved_parents,
-    db_path,
     override_justification,
     should_close,
     precomputed_centroids,
@@ -2081,7 +2075,6 @@ def _consolidation_cohesion(
     min_sim, offending_pair, unresolved, observed_state = _consolidation_measure_cohesion(
         conn,
         resolved_parents,
-        db_path,
         precomputed_centroids,
         precomputed_unresolved,
         precomputed_observed_state,
@@ -2128,7 +2121,7 @@ def _consolidation_content_preflight(
     clean_title = redact_secrets(title)
     agent_val = agent_id or "system"
     # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
-    quality_res = evaluate_memory_quality(redacted_content, clean_title)
+    quality_res = evaluate_memory_quality(redacted_content)
     if quality_res["status"] == "REJECT":
         if should_close:
             close_connection(conn)
@@ -2278,7 +2271,6 @@ def _consolidation_preflight(
     cohesion_result = _consolidation_cohesion(
         conn,
         resolved_parents,
-        db_path,
         override_justification,
         should_close,
         precomputed_centroids,
@@ -2696,9 +2688,7 @@ def bulk_commit_consolidation(
                     "error": f"{parent_error['code']}: {parent_error['message']}",
                 }
             ]
-        centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            union_ids, conn, db_path or get_db_path()
-        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids(union_ids, conn)
 
         write_transaction_retrying(
             conn,

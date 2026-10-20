@@ -174,9 +174,7 @@ def _validate_cross_encoder_controls(
     return cap, text_cap
 
 
-def validate_memory_input(
-    title: str, content: str, metadata: dict | None, tags: list[str] | None = None
-) -> None:
+def validate_memory_input(title: str, content: str, tags: list[str] | None = None) -> None:
     """Validates memory input to enforce title length bounds and tag-name shape."""
     if title:
         stripped_title = title.strip()

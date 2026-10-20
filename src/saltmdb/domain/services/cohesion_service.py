@@ -165,7 +165,7 @@ def _fallback_centroid(
 
 
 def get_fresh_entity_centroids(
-    entity_ids: list[str], conn: sqlite3.Connection, db_path: str
+    entity_ids: list[str], conn: sqlite3.Connection
 ) -> tuple[dict[str, list[float]], dict[str, str], dict[str, tuple[str, str]]]:
     """Returns (centroids, unresolved, observed_state).
 

@@ -836,7 +836,7 @@ def _normalize_store_inputs(
     if not title or not title.strip():
         return "Error: title is mandatory and cannot be empty.", {}
     try:
-        validation.validate_memory_input(title, redacted_content, metadata, tags)
+        validation.validate_memory_input(title, redacted_content, tags)
     except ValueError as e:
         return str(e), {}
     # Stage 1: Auto-Formatting (Idempotent cleanup: f(f(x)) = f(x))
@@ -854,11 +854,9 @@ def _normalize_store_inputs(
     }
 
 
-def _evaluate_store_quality(
-    redacted_content: str, title: str
-) -> tuple[dict | None, dict, str, str, str]:
+def _evaluate_store_quality(redacted_content: str) -> tuple[dict | None, dict, str, str, str]:
     # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
-    quality_res = evaluate_memory_quality(redacted_content, title)
+    quality_res = evaluate_memory_quality(redacted_content)
     if quality_res["status"] == "REJECT":
         return (
             rejected(
@@ -1006,7 +1004,6 @@ def _probe_store_duplicates(
         title=title,
         content=redacted_content,
         agent_id=agent_id,
-        tags=cast(list, tags),
         context_id=cast(str, context_id),
         exclude_ids=[entity_id_out],
         db_connection=conn,
@@ -1055,7 +1052,7 @@ def _prepare_store_content(request: dict) -> tuple[str | dict | None, dict]:
     redacted_content = normalized["content"]
     title = normalized["title"]
     quality_error, quality_res, content_hash, quality_status, quality_flags_str = (
-        _evaluate_store_quality(redacted_content, title)
+        _evaluate_store_quality(redacted_content)
     )
     if quality_error is not None:
         return quality_error, {}
@@ -1362,7 +1359,6 @@ def apply_duplicate_probe(envelope: dict[str, Any], request: dict[str, Any]) -> 
         title=request["title"],
         content=request["content"],
         agent_id=request["agent_id"],
-        tags=request["tags"],
         context_id=request["context_id"],
         exclude_ids=request["exclude_ids"],
         db_connection=None,

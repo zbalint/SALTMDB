@@ -323,7 +323,6 @@ class TestDaemonStateConcurrency(unittest.TestCase):
                     "caller_agent_session_id": "session-fenced",
                     "caller_agent_session_capability": capability,
                 },
-                None,
             )
             self.assertIsNone(error)
             self.assertIsNotNone(record)

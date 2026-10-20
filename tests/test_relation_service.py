@@ -2242,8 +2242,8 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
 
         real_get_centroids = get_fresh_entity_centroids
 
-        def _racy_get_centroids(entity_ids, conn, db_path):
-            result = real_get_centroids(entity_ids, conn, db_path)
+        def _racy_get_centroids(entity_ids, conn):
+            result = real_get_centroids(entity_ids, conn)
             # Simulate a concurrent edit landing in the gap between centroid computation and
             # the in-transaction revalidation read inside _do_commit.
             conn.execute("UPDATE entities SET content_hash = 'mutated-mid-call' WHERE id = ?", (a,))
@@ -2361,9 +2361,9 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         real_get_centroids = get_fresh_entity_centroids
         call_count = {"n": 0}
 
-        def _counting_get_centroids(entity_ids, conn, db_path):
+        def _counting_get_centroids(entity_ids, conn):
             call_count["n"] += 1
-            return real_get_centroids(entity_ids, conn, db_path)
+            return real_get_centroids(entity_ids, conn)
 
         def _raising_write_transaction(conn, fn):
             raise RuntimeError("write_transaction_retrying should not run yet in this assertion")
@@ -2404,9 +2404,9 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         real_get_centroids = get_fresh_entity_centroids
         captured = {}
 
-        def _capturing_get_centroids(entity_ids, conn, db_path):
+        def _capturing_get_centroids(entity_ids, conn):
             captured["ids"] = list(entity_ids)
-            return real_get_centroids(entity_ids, conn, db_path)
+            return real_get_centroids(entity_ids, conn)
 
         batch = [
             {
@@ -2501,9 +2501,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         a, _ = self._mk_vector_entity("Self Load A", _axis_vector(0))
         raw_conn = sqlite3.connect(self.db_path)
         try:
-            centroids, unresolved, _observed_state = get_fresh_entity_centroids(
-                [a], raw_conn, self.db_path
-            )
+            centroids, unresolved, _observed_state = get_fresh_entity_centroids([a], raw_conn)
         finally:
             raw_conn.close()
         self.assertIn(a, centroids)
@@ -2521,9 +2519,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
         )
         self.conn.commit()
 
-        centroids, unresolved, observed_state = get_fresh_entity_centroids(
-            [entity_id], self.conn, self.db_path
-        )
+        centroids, unresolved, observed_state = get_fresh_entity_centroids([entity_id], self.conn)
         self.assertNotIn(entity_id, centroids)
         self.assertIn(entity_id, unresolved)
         self.assertIn("archived", unresolved[entity_id].lower())

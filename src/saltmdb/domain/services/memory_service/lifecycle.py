@@ -331,26 +331,25 @@ def _replacement_target(conn, entity_id: str) -> tuple[str | None, dict | None]:
 
 
 def _replacement_content(
-    before: dict, title: str, content: str, tags: list | None, metadata: dict | None
+    title: str, content: str, tags: list | None
 ) -> tuple[dict | None, dict | None]:
     new_title = redact_secrets(title.strip())
     new_content = redact_secrets(content)
-    # validate_memory_input raises only for title bounds/metadata shape; its error is safe to
-    # return before BEGIN and therefore guarantees zero side effects on malformed requests.
+    # validate_memory_input checks title bounds and tag-name shape; its error is safe to return
+    # before BEGIN and therefore guarantees zero side effects on malformed requests.
     try:
         from .validation import validate_memory_input
 
         validate_memory_input(
             new_title,
             new_content,
-            metadata if metadata is not None else before.get("metadata"),
             tags,
         )
     except ValueError as exc:
         return None, _replacement_error("INVALID_MEMORY", str(exc))
     now = datetime.now(UTC).isoformat()
     content_hash = compute_content_hash(new_content)
-    quality = evaluate_memory_quality(new_content, new_title)
+    quality = evaluate_memory_quality(new_content)
     if quality.get("status") == "REJECT":
         return None, _replacement_error(
             "MEMORY_QUALITY_REJECTED",
@@ -448,7 +447,7 @@ def _replacement_prepare(
             "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
         )
     orphaned_edges = _semantic_edge_worklist(conn, resolved_id)
-    content_data, content_error = _replacement_content(before, title, content, tags, metadata)
+    content_data, content_error = _replacement_content(title, content, tags)
     if content_error is not None:
         return None, content_error
     content_data = cast(dict, content_data)

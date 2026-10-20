@@ -182,7 +182,6 @@ def check_duplicate_memories(
     title: str = None,
     content: str = None,
     agent_id: str = None,
-    tags: list = None,
     context_id: str = None,
     exclude_ids: list = None,
     db_connection=None,

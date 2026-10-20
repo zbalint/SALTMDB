@@ -789,16 +789,15 @@ def _build_candidate_evidence(
     return evidence
 
 
-def accept_or_abstain(evidence: dict, policy: dict | None = None) -> tuple[bool, str]:  # noqa: PLR0911
+def accept_or_abstain(evidence: dict) -> tuple[bool, str]:  # noqa: PLR0911
     """Part B: pure function deciding whether ONE candidate's evidence record clears the
     relevance-abstention gate. Called per-candidate (not just against top-1) by search_memory's
     mode="strict" path; an empty resulting pool after filtering every candidate is the `[]` case
-    (SALTMDB memory `c27792a1`). `policy` is accepted for future extension/testability but unused
-    today -- this function consumes only the precomputed categorical `semantic_verdict` already
-    attached to `evidence` (see `_build_candidate_evidence`); it reads no config.py threshold of
-    its own (unlike `_rrf_gap_confident`'s own direct RERANK_GAP_SKIP_RATIO import) -- the
-    SAME_SPECIFIC_TOPIC/BROADLY_RELATED_THEMES/DIFFERENT_TOPICS classification and its underlying
-    RERANK_SAME_TOPIC_THRESHOLD/RERANK_BROAD_THEME_THRESHOLD live in rerank_candidates_by_topic.
+    (SALTMDB memory `c27792a1`). This function consumes only the precomputed categorical
+    semantic_verdict already attached to `evidence` (see `_build_candidate_evidence`); it reads no
+    config.py threshold of its own (unlike `_rrf_gap_confident`'s own direct RERANK_GAP_SKIP_RATIO
+    import) -- the SAME_SPECIFIC_TOPIC/BROADLY_RELATED_THEMES/DIFFERENT_TOPICS classification and its
+    underlying RERANK_SAME_TOPIC_THRESHOLD/RERANK_BROAD_THEME_THRESHOLD live in rerank_candidates_by_topic.
 
     Acceptance requires a positive grounding signal -- a real, non-phantom match this codebase can
     already produce:
