@@ -852,7 +852,439 @@ def _compute_search_pool(
     }
 
 
-def search_memory(  # noqa: C901, PLR0912, PLR0915
+def _normalize_search_mode(mode):
+    if mode not in ("strict", "broad", "history"):
+        logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
+        mode = "broad"
+    return mode
+
+
+def _search_connection(db_connection, db_path):
+    should_close = False
+    conn = db_connection
+    if not conn:
+        db_path = db_path or get_db_path()
+        conn = get_connection(db_path)
+        should_close = True
+    return conn, db_path, should_close
+
+
+def _search_offset(cursor):
+    offset = 0
+    if cursor and cursor.startswith("offset:"):
+        try:
+            offset = int(cursor.split(":")[1])
+        except ValueError:
+            pass
+    return offset
+
+
+def _append_and_search_tags(tag_groups, where_clauses, params):
+    for tname, grp in tag_groups:
+        if grp:
+            placeholders = ",".join("?" for _ in grp)
+            where_clauses.append(
+                f"e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({placeholders}))"
+            )
+            params.extend(list(grp))
+        else:
+            where_clauses.append(
+                "e.id IN (SELECT et.entity_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE lower(t.name) = lower(?))"
+            )
+            params.append(tname)
+
+
+def _append_or_search_tags(tag_groups, where_clauses, params):
+    all_ids = set()
+    missing_tnames = []
+    for tname, grp in tag_groups:
+        if grp:
+            all_ids.update(grp)
+        else:
+            missing_tnames.append(tname)
+
+    sub_clauses = []
+    sub_params = []
+    if all_ids:
+        placeholders = ",".join("?" for _ in all_ids)
+        sub_clauses.append(f"et.tag_id IN ({placeholders})")
+        sub_params.extend(list(all_ids))
+    if missing_tnames:
+        placeholders = ",".join("?" for _ in missing_tnames)
+        sub_clauses.append(f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})")
+        sub_params.extend(missing_tnames)
+
+    if sub_clauses:
+        where_clauses.append(
+            f"e.id IN (SELECT et.entity_id FROM entity_tags et LEFT JOIN tags t ON et.tag_id = t.id WHERE {' OR '.join(sub_clauses)})"
+        )
+        params.extend(sub_params)
+
+
+def _append_search_tag_filters(tags_filter, tag_operator, tag_groups, where_clauses, params):
+    if tags_filter:
+        if tag_operator == "AND":
+            _append_and_search_tags(tag_groups, where_clauses, params)
+        else:
+            _append_or_search_tags(tag_groups, where_clauses, params)
+
+
+def _find_exact_search_title(conn, query_keywords, mode, where_clauses, params):
+    exact_title_id = None
+    if query_keywords and mode in {"broad", "history"}:
+        # A partial index on active titles keeps this bounded lookup independent of corpus
+        # size. LIMIT 2 distinguishes a unique visible identity from a collision without
+        # loading every duplicate; existing caller filters define the visible corpus.
+        exact_title_rows = conn.execute(
+            f"SELECT e.id FROM entities e WHERE e.title = ? "
+            f"AND {' AND '.join(where_clauses)} LIMIT 2",
+            [query_keywords, *params],
+        ).fetchall()
+        if len(exact_title_rows) == 1:
+            exact_title_id = exact_title_rows[0][0]
+    return exact_title_id
+
+
+def _fetch_exact_search_title(conn, exact_title_id, offset, limit, mode, rows, superseded_ids):
+    if offset == 0 and limit > 0:
+        rows = conn.execute(
+            """
+                    SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                           0.0 as rank_score,
+                           e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata,
+                           e.context_id, e.memory_type, 0 as rel_count, NULL as fts_snippet
+                    FROM entities e
+                    WHERE e.id = ?
+                    """,
+            (exact_title_id,),
+        ).fetchall()
+        if mode == "history":
+            superseded_ids = ranking._compute_superseded_ids_bitemporal([exact_title_id], conn)
+    return rows, superseded_ids
+
+
+def _semantic_search_db_path(db_path, disable_semantic):
+    from saltmdb.config import is_semantic_search_enabled
+
+    if is_semantic_search_enabled() and not disable_semantic:
+        if not db_path:
+            db_path = get_db_path()
+        return db_path
+    else:
+        # Part 0 (SALTMDB memory 870a1d4e follow-on): FTS-only query retrieval is
+        # retired, not silently substituted -- search_memory is a hybrid FTS+dense-vector
+        # tool, and returning lower-quality FTS-only results as if nothing changed hid a
+        # real precision regression from the caller. Fails loud via the function's own
+        # existing except-Exception handler below instead. Empty-query browsing (no
+        # query_keywords, the final `else` further down) is unaffected -- it never reaches
+        # this branch.
+        raise RuntimeError(
+            "Semantic search is disabled (SALTMDB_ENABLE_SEMANTIC=false); search_memory "
+            "requires the hybrid FTS+dense-vector pipeline for query-based search. Unset "
+            "SALTMDB_ENABLE_SEMANTIC (or set it to true), or call search_memory without "
+            "query_keywords to browse via tags/filters only."
+        )
+
+
+def _search_window_pool(conn, where_clauses, params, controls, diagnostics, offset, limit, mode):
+    # Widen the pool: the cross-encoder is unconditionally always on (see the
+    # forcing-block comment near the top of this function), so this branch is now
+    # always taken -- there's nothing meaningful to reorder/resolve/gate within
+    # otherwise (a plain search's pool is just offset+limit, often smaller than
+    # what's worth considering).
+    from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
+
+    base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
+
+    if mode == "strict":
+        # Part C2 pagination redesign: resolution/dedup/the relevance gate can all
+        # shrink the raw candidate_window's survivor count below offset+limit even
+        # after the widening above. Re-run the WHOLE pass (from scratch, same
+        # candidate_window semantics as every other mode -- see _run_fts_search's own
+        # LIMIT candidate_window OFFSET 0, then this function's own final
+        # `[offset:offset+limit]` Python slice below) with a doubled window until
+        # enough survivors exist, the underlying corpus is exhausted, or the cap is
+        # hit. Because every pass recomputes the full pool deterministically from
+        # scratch (not an incremental DB offset), a later cursor call with a larger
+        # `offset` reproduces a stable superset of this same computation -- cursor
+        # continuity across a rejection/substitution/dedup collapse holds as long as
+        # the underlying corpus doesn't change between calls, exactly like this
+        # function's pre-existing offset:N cursor already assumed for every other mode.
+        # No early "no-progress" stop here (Codex review P1 finding, correctly
+        # rejected during re-review): an earlier version broke out after a single
+        # doubling found zero additional accepted survivors, on the theory that a
+        # genuinely relevant query should keep surfacing more matches as the window
+        # grows. That's false in general -- real accepted candidates can legitimately
+        # sit beyond the NEXT window too (e.g. ranks 41-80 when the window just grew
+        # from 20 to 40), so that guard could return a prematurely short/empty page for
+        # a genuinely satisfiable query. The plan's own spec is exactly "grow until
+        # enough survivors, exhaustion, or cap" -- STRICT_OVERFETCH_CANDIDATE_CAP is
+        # already the sole, deliberate safety valve on how far this is allowed to
+        # search (see its own config.py docstring); a nonsense query scanning further
+        # toward that cap in search of a real match is the accepted, documented
+        # trade-off (see accept_or_abstain's docstring and
+        # run_relevance_gate_holdout.py's held-out cases), not a bug to work around
+        # with a second, undocumented early-exit heuristic.
+        # Clamp the STARTING window to the cap too (Codex review round-2 P2 finding):
+        # base_window is max(offset+limit, RERANK_CANDIDATE_POOL_SIZE), which can
+        # itself already exceed STRICT_OVERFETCH_CANDIDATE_CAP for a large `limit` or a
+        # deep `offset` cursor -- the loop's own `window < CAP` condition only guards
+        # the DOUBLING step, not this initial value, so without this clamp the very
+        # first _compute_pool() call could silently run past the "absolute cap" the
+        # config/docs promise.
+        window = min(base_window, STRICT_OVERFETCH_CANDIDATE_CAP)
+        pool_result = _compute_search_pool(
+            window, conn, where_clauses, params, controls, diagnostics
+        )
+        while (
+            len(pool_result["ordered_ids"]) < offset + limit
+            and not pool_result["exhausted"]
+            and window < STRICT_OVERFETCH_CANDIDATE_CAP
+        ):
+            window = min(window * 2, STRICT_OVERFETCH_CANDIDATE_CAP)
+            pool_result = _compute_search_pool(
+                window, conn, where_clauses, params, controls, diagnostics
+            )
+    else:
+        pool_result = _compute_search_pool(
+            base_window, conn, where_clauses, params, controls, diagnostics
+        )
+    return pool_result
+
+
+def _fetch_ranked_search_rows(conn, merged_ids, fts_rows, rrf_score_map):
+    if merged_ids:
+        placeholders = ",".join("?" for _ in merged_ids)
+        id_order = {eid: i for i, eid in enumerate(merged_ids)}
+        fetch_sql = f"""
+                        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                               0.0 as rank_score,
+                               e.created_at, e.updated_at, e.agent_id, e.scope,
+                               e.metadata, e.context_id, e.memory_type, 0 as rel_count,
+                               NULL as fts_snippet
+                        FROM entities e
+                        WHERE e.id IN ({placeholders})
+                    """
+        fetched = conn.execute(fetch_sql, merged_ids).fetchall()
+        sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
+        # Rows that matched via FTS5 already carry a real query-centered excerpt in
+        # fts_rows (computed in the same query as bm25()); rows that only surfaced via
+        # semantic_search() never went through entities_fts MATCH at all, so they keep
+        # fts_snippet = None here and fall back to the heuristic extractor below.
+        fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
+        rows = []
+        for r in sorted_fetched:
+            r_list = list(r)
+            r_list[5] = rrf_score_map.get(r[0], 0.0)
+            r_list[-1] = fts_snippet_map.get(r[0])
+            rows.append(r_list)
+    else:
+        rows = []
+    return rows
+
+
+def _fetch_browse_search_rows(conn, where_clauses, params, limit, offset):
+    sql = f"""
+                SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
+                       0.0 as rank_score,
+                       e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata, e.context_id,
+                       e.memory_type, 0 as rel_count, NULL as fts_snippet
+                FROM entities e
+                WHERE {" AND ".join(where_clauses)}
+                ORDER BY e.is_core DESC, e.updated_at DESC
+                LIMIT ? OFFSET ?
+            """
+    exec_params = params + [limit, offset]
+    cursor_obj = conn.execute(sql, exec_params)
+    return cursor_obj.fetchall()
+
+
+def _record_search_result_diagnostics(diagnostics, rows):
+    diagnostics["result_count"] = len(rows)
+    diagnostics["cross_encoder"]["execution_rate"] = (
+        1.0 if diagnostics["cross_encoder"].get("execution_count", 0) > 0 else 0.0
+    )
+    validation._set_search_diagnostics(diagnostics)
+
+
+def _fetch_related_search_entities(conn, rows, include_related):
+    # Batch-fetch all related entities in a single query to avoid N+1. Ordering invariant:
+    # this always runs on the FINAL rows/merged_ids-derived set -- Part B's candidate-window
+    # widening and Stage-2 rerank both happen strictly before merged_ids is computed above, so
+    # the wider pre-rerank pool never reaches this step. A future refactor that moves the
+    # widening later could break this silently -- keep it upstream of this block.
+    related_map: dict[str, list[Any]] = {}  # {entity_id: [related items]}
+    if include_related and rows:
+        all_eids = [r[0] for r in rows]
+        placeholders_r = ",".join("?" for _ in all_eids)
+        # Two unambiguous, direction-explicit selects (unioned) rather than one OR-join:
+        # an OR-join (`ON (r.target_id = e.id OR r.source_id = e.id)`) matches an anchor
+        # entity against itself whenever both endpoints of a relation are on the current
+        # result page, and previously relied on `e.id NOT IN (all_eids)` to discard that
+        # self-match -- which also silently discarded the case we actually want (two
+        # co-resident page entities correctly showing each other as related). Each half of
+        # this union resolves deterministically to the *other* endpoint, so co-resident
+        # partners are now surfaced correctly and a self-match can never occur.
+        batch_rel_cursor = conn.execute(
+            f"""
+                SELECT r.source_id AS anchor, r.predicate, e.id, e.title
+                FROM relations r
+                JOIN entities e ON e.id = r.target_id
+                WHERE r.source_id IN ({placeholders_r})
+                  AND e.status != 'archived'
+                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
+                UNION ALL
+                SELECT r.target_id AS anchor, r.predicate, e.id, e.title
+                FROM relations r
+                JOIN entities e ON e.id = r.source_id
+                WHERE r.target_id IN ({placeholders_r})
+                  AND e.status != 'archived'
+                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
+            """,
+            all_eids * 2,
+        )
+        for anchor, bpred, beid, betitle in batch_rel_cursor.fetchall():
+            if len(related_map.get(anchor, [])) < 5:
+                related_map.setdefault(anchor, []).append(
+                    {"predicate": bpred, "id": beid, "title": betitle}
+                )
+    return related_map
+
+
+def _fetch_search_previews(sanitized_query, rows, query_keywords, db_path):
+    preview_map: dict[str, dict[str, str]] = {}
+    if sanitized_query and rows and query_keywords is not None:
+        preview_map = search_primitives.get_relevance_preview_data(
+            query_keywords, [r[0] for r in rows], db_path or get_db_path()
+        )
+    return preview_map
+
+
+def _search_drift_flag(meta):
+    drift_flag = None
+    if meta:
+        try:
+            meta_dict = json.loads(meta)
+            if isinstance(meta_dict, dict):
+                drift_flag = meta_dict.get("drift_flag")
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return drift_flag
+
+
+def _base_search_item(r, offset, limit):
+    (
+        eid,
+        etitle,
+        econtent,
+        eweight,
+        eis_core,
+        score,
+        _created,
+        _updated,
+        _owner,
+        _scope,
+        meta,
+        _ctx,
+        ememory_type,
+        _rel_c,
+        fts_snippet_raw,
+    ) = r
+    drift_flag = _search_drift_flag(meta)
+
+    if fts_snippet_raw:
+        snippet = fts_snippet_raw
+    else:
+        _, snippet = extract_title_and_snippet(econtent)
+
+    item = {
+        "id": eid,
+        "title": etitle,
+        "snippet": snippet,
+        "score": round(abs(score), 6),
+        "weight": eweight,
+        "is_core": bool(eis_core),
+        "memory_type": ememory_type,
+        "cursor": f"offset:{offset + limit}",
+    }
+    return item, drift_flag, eid
+
+
+def _attach_search_preview(item, eid, preview_map, cumulative_preview_chars):
+    if eid in preview_map and cumulative_preview_chars < RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS:
+        preview_text = preview_map[eid]["text"]
+        item["relevance_preview"] = RELEVANCE_PREVIEW_WARNING_PREFIX + preview_text
+        item["relevance_preview_meta"] = {
+            "auto_generated": True,
+            "extractive": True,
+            "query_specific": True,
+            "complete": False,
+        }
+        cumulative_preview_chars += len(preview_text)
+    return cumulative_preview_chars
+
+
+def _assemble_search_results(
+    rows,
+    offset,
+    limit,
+    include_related,
+    related_map,
+    cross_encoder_scores_map,
+    mode,
+    superseded_ids,
+    preview_map,
+):
+    cumulative_preview_chars = 0
+    results = []
+    for r in rows:
+        item, drift_flag, eid = _base_search_item(r, offset, limit)
+        if include_related:
+            item["related_entities"] = related_map.get(eid, [])
+        if eid in cross_encoder_scores_map:
+            item["cross_encoder_score"] = round(cross_encoder_scores_map[eid], 6)
+        if mode == "history" and eid in superseded_ids:
+            item["is_superseded"] = True
+        if drift_flag:
+            item["drift_flag"] = drift_flag
+
+        cumulative_preview_chars = _attach_search_preview(
+            item, eid, preview_map, cumulative_preview_chars
+        )
+        results.append(item)
+    return results
+
+
+def _attach_search_trace_counts(conn, results):
+    trace_counts = {item["id"]: 0 for item in results}
+    if results:
+        trace_ids = list(trace_counts)
+        trace_placeholders = ",".join("?" for _ in trace_ids)
+        trace_rows = conn.execute(
+            f"""
+                SELECT entity_id, COUNT(DISTINCT trace_id)
+                FROM trace_memory_links
+                WHERE entity_id IN ({trace_placeholders})
+                GROUP BY entity_id
+                """,
+            trace_ids,
+        ).fetchall()
+        for trace_entity_id, count in trace_rows:
+            trace_counts[trace_entity_id] = count
+    for item in results:
+        item["trace_evidence_count"] = trace_counts[item["id"]]
+
+
+def _search_error_result(e, diagnostics, return_diagnostics):
+    logger.error("Error searching memory: %s", e)
+    diagnostics["error"] = str(e)
+    validation._set_search_diagnostics(diagnostics)
+    if return_diagnostics:
+        return {"results": [], "diagnostics": diagnostics, "error": str(e)}
+    return [{"error": str(e)}]
+
+
+def search_memory(
     agent_id: str = None,
     query_keywords: str = None,
     tags_filter: list = None,
@@ -941,9 +1373,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
     `explain_mode` (which returns before retrieval) or on empty-query filter/tag-only browsing
     (there is no retrieval evidence to gate or chain to resolve there).
     """
-    if mode not in ("strict", "broad", "history"):
-        logger.warning("search_memory: unknown mode=%r, falling back to 'broad'.", mode)
-        mode = "broad"
+    mode = _normalize_search_mode(mode)
 
     # candidate/search-ce-final-reranker (merged d1655d2): the cross-encoder occupies the fixed
     # final-reranker slot and is no longer a caller opt-in. When enabled by deployment config it
@@ -1003,19 +1433,8 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         "candidate_pool_size": 0,
     }
 
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
-    offset = 0
-    if cursor and cursor.startswith("offset:"):
-        try:
-            offset = int(cursor.split(":")[1])
-        except ValueError:
-            pass
+    conn, db_path, should_close = _search_connection(db_connection, db_path)
+    offset = _search_offset(cursor)
 
     try:
         where_clauses, params = _build_search_filters(
@@ -1027,47 +1446,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
             metadata_filter,
         )
         tag_groups = _search_tag_groups(conn, tags_filter)
-        if tags_filter:
-            if tag_operator == "AND":
-                for tname, grp in tag_groups:
-                    if grp:
-                        placeholders = ",".join("?" for _ in grp)
-                        where_clauses.append(
-                            f"e.id IN (SELECT et.entity_id FROM entity_tags et WHERE et.tag_id IN ({placeholders}))"
-                        )
-                        params.extend(list(grp))
-                    else:
-                        where_clauses.append(
-                            "e.id IN (SELECT et.entity_id FROM entity_tags et JOIN tags t ON et.tag_id = t.id WHERE lower(t.name) = lower(?))"
-                        )
-                        params.append(tname)
-            else:
-                all_ids = set()
-                missing_tnames = []
-                for tname, grp in tag_groups:
-                    if grp:
-                        all_ids.update(grp)
-                    else:
-                        missing_tnames.append(tname)
-
-                sub_clauses = []
-                sub_params = []
-                if all_ids:
-                    placeholders = ",".join("?" for _ in all_ids)
-                    sub_clauses.append(f"et.tag_id IN ({placeholders})")
-                    sub_params.extend(list(all_ids))
-                if missing_tnames:
-                    placeholders = ",".join("?" for _ in missing_tnames)
-                    sub_clauses.append(
-                        f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})"
-                    )
-                    sub_params.extend(missing_tnames)
-
-                if sub_clauses:
-                    where_clauses.append(
-                        f"e.id IN (SELECT et.entity_id FROM entity_tags et LEFT JOIN tags t ON et.tag_id = t.id WHERE {' OR '.join(sub_clauses)})"
-                    )
-                    params.extend(sub_params)
+        _append_search_tag_filters(tags_filter, tag_operator, tag_groups, where_clauses, params)
 
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
 
@@ -1082,18 +1461,7 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
                 diagnostics,
             )
 
-        exact_title_id = None
-        if query_keywords and mode in {"broad", "history"}:
-            # A partial index on active titles keeps this bounded lookup independent of corpus
-            # size. LIMIT 2 distinguishes a unique visible identity from a collision without
-            # loading every duplicate; existing caller filters define the visible corpus.
-            exact_title_rows = conn.execute(
-                f"SELECT e.id FROM entities e WHERE e.title = ? "
-                f"AND {' AND '.join(where_clauses)} LIMIT 2",
-                [query_keywords, *params],
-            ).fetchall()
-            if len(exact_title_rows) == 1:
-                exact_title_id = exact_title_rows[0][0]
+        exact_title_id = _find_exact_search_title(conn, query_keywords, mode, where_clauses, params)
 
         rows: list[Any] = []
         # topic_score/semantic_verdict are never exposed in result items -- the topic-rerank
@@ -1105,324 +1473,66 @@ def search_memory(  # noqa: C901, PLR0912, PLR0915
         # currently-valid `supersedes` edge, tagged (not hidden/reordered) in the result item.
         superseded_ids: set = set()
         if exact_title_id is not None and not collapse_supersedes_families:
-            if offset == 0 and limit > 0:
-                rows = conn.execute(
-                    """
-                    SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                           0.0 as rank_score,
-                           e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata,
-                           e.context_id, e.memory_type, 0 as rel_count, NULL as fts_snippet
-                    FROM entities e
-                    WHERE e.id = ?
-                    """,
-                    (exact_title_id,),
-                ).fetchall()
-                if mode == "history":
-                    superseded_ids = ranking._compute_superseded_ids_bitemporal(
-                        [exact_title_id], conn
-                    )
+            rows, superseded_ids = _fetch_exact_search_title(
+                conn, exact_title_id, offset, limit, mode, rows, superseded_ids
+            )
         elif sanitized_query:
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
-            from saltmdb.config import is_semantic_search_enabled
-
-            if is_semantic_search_enabled() and not disable_semantic:
-                if not db_path:
-                    db_path = get_db_path()
-                controls = _SearchControls(
-                    sanitized_query=sanitized_query,
-                    query_keywords=query_keywords,
-                    db_path=db_path,
-                    mode=mode,
-                    chunk_window=chunk_window,
-                    chunk_oversampling=chunk_oversampling,
-                    use_chunk_candidates=use_chunk_candidates,
-                    use_retrieval_text_candidates=use_retrieval_text_candidates,
-                    configured_chunk_weight=configured_chunk_weight,
-                    configured_retrieval_fts_weight=configured_retrieval_fts_weight,
-                    configured_retrieval_vector_weight=configured_retrieval_vector_weight,
-                    ce_candidate_cap=ce_candidate_cap,
-                    ce_text_cap=ce_text_cap,
-                    cross_encoder_candidate_cap=cross_encoder_candidate_cap,
-                    cross_encoder_text_cap_chars=cross_encoder_text_cap_chars,
-                    prefer_durable_types=prefer_durable_types,
-                    demote_superseded=demote_superseded,
-                    collapse_supersedes_families=collapse_supersedes_families,
-                    return_diagnostics=return_diagnostics,
-                )
-
-                # Widen the pool: the cross-encoder is unconditionally always on (see the
-                # forcing-block comment near the top of this function), so this branch is now
-                # always taken -- there's nothing meaningful to reorder/resolve/gate within
-                # otherwise (a plain search's pool is just offset+limit, often smaller than
-                # what's worth considering).
-                from saltmdb.config import RERANK_CANDIDATE_POOL_SIZE
-
-                base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
-
-                if mode == "strict":
-                    # Part C2 pagination redesign: resolution/dedup/the relevance gate can all
-                    # shrink the raw candidate_window's survivor count below offset+limit even
-                    # after the widening above. Re-run the WHOLE pass (from scratch, same
-                    # candidate_window semantics as every other mode -- see _run_fts_search's own
-                    # LIMIT candidate_window OFFSET 0, then this function's own final
-                    # `[offset:offset+limit]` Python slice below) with a doubled window until
-                    # enough survivors exist, the underlying corpus is exhausted, or the cap is
-                    # hit. Because every pass recomputes the full pool deterministically from
-                    # scratch (not an incremental DB offset), a later cursor call with a larger
-                    # `offset` reproduces a stable superset of this same computation -- cursor
-                    # continuity across a rejection/substitution/dedup collapse holds as long as
-                    # the underlying corpus doesn't change between calls, exactly like this
-                    # function's pre-existing offset:N cursor already assumed for every other mode.
-                    # No early "no-progress" stop here (Codex review P1 finding, correctly
-                    # rejected during re-review): an earlier version broke out after a single
-                    # doubling found zero additional accepted survivors, on the theory that a
-                    # genuinely relevant query should keep surfacing more matches as the window
-                    # grows. That's false in general -- real accepted candidates can legitimately
-                    # sit beyond the NEXT window too (e.g. ranks 41-80 when the window just grew
-                    # from 20 to 40), so that guard could return a prematurely short/empty page for
-                    # a genuinely satisfiable query. The plan's own spec is exactly "grow until
-                    # enough survivors, exhaustion, or cap" -- STRICT_OVERFETCH_CANDIDATE_CAP is
-                    # already the sole, deliberate safety valve on how far this is allowed to
-                    # search (see its own config.py docstring); a nonsense query scanning further
-                    # toward that cap in search of a real match is the accepted, documented
-                    # trade-off (see accept_or_abstain's docstring and
-                    # run_relevance_gate_holdout.py's held-out cases), not a bug to work around
-                    # with a second, undocumented early-exit heuristic.
-                    # Clamp the STARTING window to the cap too (Codex review round-2 P2 finding):
-                    # base_window is max(offset+limit, RERANK_CANDIDATE_POOL_SIZE), which can
-                    # itself already exceed STRICT_OVERFETCH_CANDIDATE_CAP for a large `limit` or a
-                    # deep `offset` cursor -- the loop's own `window < CAP` condition only guards
-                    # the DOUBLING step, not this initial value, so without this clamp the very
-                    # first _compute_pool() call could silently run past the "absolute cap" the
-                    # config/docs promise.
-                    window = min(base_window, STRICT_OVERFETCH_CANDIDATE_CAP)
-                    pool_result = _compute_search_pool(
-                        window, conn, where_clauses, params, controls, diagnostics
-                    )
-                    while (
-                        len(pool_result["ordered_ids"]) < offset + limit
-                        and not pool_result["exhausted"]
-                        and window < STRICT_OVERFETCH_CANDIDATE_CAP
-                    ):
-                        window = min(window * 2, STRICT_OVERFETCH_CANDIDATE_CAP)
-                        pool_result = _compute_search_pool(
-                            window, conn, where_clauses, params, controls, diagnostics
-                        )
-                else:
-                    pool_result = _compute_search_pool(
-                        base_window, conn, where_clauses, params, controls, diagnostics
-                    )
-
-                fts_rows = pool_result["fts_rows"]
-                cross_encoder_scores_map = pool_result["cross_encoder_scores_map"]
-                superseded_ids = pool_result["superseded_ids"]
-                rrf_score_map = pool_result["rrf_score_map"]
-                merged_ids = pool_result["ordered_ids"][offset : offset + limit]
-
-                if merged_ids:
-                    placeholders = ",".join("?" for _ in merged_ids)
-                    id_order = {eid: i for i, eid in enumerate(merged_ids)}
-                    fetch_sql = f"""
-                        SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                               0.0 as rank_score,
-                               e.created_at, e.updated_at, e.agent_id, e.scope,
-                               e.metadata, e.context_id, e.memory_type, 0 as rel_count,
-                               NULL as fts_snippet
-                        FROM entities e
-                        WHERE e.id IN ({placeholders})
-                    """
-                    fetched = conn.execute(fetch_sql, merged_ids).fetchall()
-                    sorted_fetched = sorted(fetched, key=lambda r: id_order.get(r[0], 9999))
-                    # Rows that matched via FTS5 already carry a real query-centered excerpt in
-                    # fts_rows (computed in the same query as bm25()); rows that only surfaced via
-                    # semantic_search() never went through entities_fts MATCH at all, so they keep
-                    # fts_snippet = None here and fall back to the heuristic extractor below.
-                    fts_snippet_map = {row[0]: row[-1] for row in fts_rows if row[-1]}
-                    rows = []
-                    for r in sorted_fetched:
-                        r_list = list(r)
-                        r_list[5] = rrf_score_map.get(r[0], 0.0)
-                        r_list[-1] = fts_snippet_map.get(r[0])
-                        rows.append(r_list)
-                else:
-                    rows = []
-            else:
-                # Part 0 (SALTMDB memory 870a1d4e follow-on): FTS-only query retrieval is
-                # retired, not silently substituted -- search_memory is a hybrid FTS+dense-vector
-                # tool, and returning lower-quality FTS-only results as if nothing changed hid a
-                # real precision regression from the caller. Fails loud via the function's own
-                # existing except-Exception handler below instead. Empty-query browsing (no
-                # query_keywords, the final `else` further down) is unaffected -- it never reaches
-                # this branch.
-                raise RuntimeError(
-                    "Semantic search is disabled (SALTMDB_ENABLE_SEMANTIC=false); search_memory "
-                    "requires the hybrid FTS+dense-vector pipeline for query-based search. Unset "
-                    "SALTMDB_ENABLE_SEMANTIC (or set it to true), or call search_memory without "
-                    "query_keywords to browse via tags/filters only."
-                )
+            db_path = _semantic_search_db_path(db_path, disable_semantic)
+            controls = _SearchControls(
+                sanitized_query=sanitized_query,
+                query_keywords=query_keywords,
+                db_path=db_path,
+                mode=mode,
+                chunk_window=chunk_window,
+                chunk_oversampling=chunk_oversampling,
+                use_chunk_candidates=use_chunk_candidates,
+                use_retrieval_text_candidates=use_retrieval_text_candidates,
+                configured_chunk_weight=configured_chunk_weight,
+                configured_retrieval_fts_weight=configured_retrieval_fts_weight,
+                configured_retrieval_vector_weight=configured_retrieval_vector_weight,
+                ce_candidate_cap=ce_candidate_cap,
+                ce_text_cap=ce_text_cap,
+                cross_encoder_candidate_cap=cross_encoder_candidate_cap,
+                cross_encoder_text_cap_chars=cross_encoder_text_cap_chars,
+                prefer_durable_types=prefer_durable_types,
+                demote_superseded=demote_superseded,
+                collapse_supersedes_families=collapse_supersedes_families,
+                return_diagnostics=return_diagnostics,
+            )
+            pool_result = _search_window_pool(
+                conn, where_clauses, params, controls, diagnostics, offset, limit, mode
+            )
+            fts_rows = pool_result["fts_rows"]
+            cross_encoder_scores_map = pool_result["cross_encoder_scores_map"]
+            superseded_ids = pool_result["superseded_ids"]
+            rrf_score_map = pool_result["rrf_score_map"]
+            merged_ids = pool_result["ordered_ids"][offset : offset + limit]
+            rows = _fetch_ranked_search_rows(conn, merged_ids, fts_rows, rrf_score_map)
         else:
-            sql = f"""
-                SELECT e.id, e.title, e.full_content, e.weight, e.is_core,
-                       0.0 as rank_score,
-                       e.created_at, e.updated_at, e.agent_id, e.scope, e.metadata, e.context_id,
-                       e.memory_type, 0 as rel_count, NULL as fts_snippet
-                FROM entities e
-                WHERE {" AND ".join(where_clauses)}
-                ORDER BY e.is_core DESC, e.updated_at DESC
-                LIMIT ? OFFSET ?
-            """
-            exec_params = params + [limit, offset]
-            cursor_obj = conn.execute(sql, exec_params)
-            rows = cursor_obj.fetchall()
+            rows = _fetch_browse_search_rows(conn, where_clauses, params, limit, offset)
 
-        diagnostics["result_count"] = len(rows)
-        diagnostics["cross_encoder"]["execution_rate"] = (
-            1.0 if diagnostics["cross_encoder"].get("execution_count", 0) > 0 else 0.0
+        _record_search_result_diagnostics(diagnostics, rows)
+        related_map = _fetch_related_search_entities(conn, rows, include_related)
+        preview_map = _fetch_search_previews(sanitized_query, rows, query_keywords, db_path)
+        results = _assemble_search_results(
+            rows,
+            offset,
+            limit,
+            include_related,
+            related_map,
+            cross_encoder_scores_map,
+            mode,
+            superseded_ids,
+            preview_map,
         )
-        validation._set_search_diagnostics(diagnostics)
-
-        # Batch-fetch all related entities in a single query to avoid N+1. Ordering invariant:
-        # this always runs on the FINAL rows/merged_ids-derived set -- Part B's candidate-window
-        # widening and Stage-2 rerank both happen strictly before merged_ids is computed above, so
-        # the wider pre-rerank pool never reaches this step. A future refactor that moves the
-        # widening later could break this silently -- keep it upstream of this block.
-        related_map: dict[str, list[Any]] = {}  # {entity_id: [related items]}
-        if include_related and rows:
-            all_eids = [r[0] for r in rows]
-            placeholders_r = ",".join("?" for _ in all_eids)
-            # Two unambiguous, direction-explicit selects (unioned) rather than one OR-join:
-            # an OR-join (`ON (r.target_id = e.id OR r.source_id = e.id)`) matches an anchor
-            # entity against itself whenever both endpoints of a relation are on the current
-            # result page, and previously relied on `e.id NOT IN (all_eids)` to discard that
-            # self-match -- which also silently discarded the case we actually want (two
-            # co-resident page entities correctly showing each other as related). Each half of
-            # this union resolves deterministically to the *other* endpoint, so co-resident
-            # partners are now surfaced correctly and a self-match can never occur.
-            batch_rel_cursor = conn.execute(
-                f"""
-                SELECT r.source_id AS anchor, r.predicate, e.id, e.title
-                FROM relations r
-                JOIN entities e ON e.id = r.target_id
-                WHERE r.source_id IN ({placeholders_r})
-                  AND e.status != 'archived'
-                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
-                UNION ALL
-                SELECT r.target_id AS anchor, r.predicate, e.id, e.title
-                FROM relations r
-                JOIN entities e ON e.id = r.source_id
-                WHERE r.target_id IN ({placeholders_r})
-                  AND e.status != 'archived'
-                  AND (r.valid_to IS NULL OR datetime(r.valid_to) > datetime('now'))
-            """,
-                all_eids * 2,
-            )
-            for anchor, bpred, beid, betitle in batch_rel_cursor.fetchall():
-                if len(related_map.get(anchor, [])) < 5:
-                    related_map.setdefault(anchor, []).append(
-                        {"predicate": bpred, "id": beid, "title": betitle}
-                    )
-
-        preview_map: dict[str, dict[str, str]] = {}
-        if sanitized_query and rows and query_keywords is not None:
-            preview_map = search_primitives.get_relevance_preview_data(
-                query_keywords, [r[0] for r in rows], db_path or get_db_path()
-            )
-        cumulative_preview_chars = 0
-        results = []
-        for r in rows:
-            (
-                eid,
-                etitle,
-                econtent,
-                eweight,
-                eis_core,
-                score,
-                created,
-                updated,
-                owner,
-                scope,
-                meta,
-                ctx,
-                ememory_type,
-                rel_c,
-                fts_snippet_raw,
-            ) = r
-            drift_flag = None
-            if meta:
-                try:
-                    meta_dict = json.loads(meta)
-                    if isinstance(meta_dict, dict):
-                        drift_flag = meta_dict.get("drift_flag")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            if fts_snippet_raw:
-                snippet = fts_snippet_raw
-            else:
-                _, snippet = extract_title_and_snippet(econtent)
-
-            item = {
-                "id": eid,
-                "title": etitle,
-                "snippet": snippet,
-                "score": round(abs(score), 6),
-                "weight": eweight,
-                "is_core": bool(eis_core),
-                "memory_type": ememory_type,
-                "cursor": f"offset:{offset + limit}",
-            }
-            if include_related:
-                item["related_entities"] = related_map.get(eid, [])
-            if eid in cross_encoder_scores_map:
-                item["cross_encoder_score"] = round(cross_encoder_scores_map[eid], 6)
-            if mode == "history" and eid in superseded_ids:
-                item["is_superseded"] = True
-            if drift_flag:
-                item["drift_flag"] = drift_flag
-
-            if (
-                eid in preview_map
-                and cumulative_preview_chars < RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS
-            ):
-                preview_text = preview_map[eid]["text"]
-                item["relevance_preview"] = RELEVANCE_PREVIEW_WARNING_PREFIX + preview_text
-                item["relevance_preview_meta"] = {
-                    "auto_generated": True,
-                    "extractive": True,
-                    "query_specific": True,
-                    "complete": False,
-                }
-                cumulative_preview_chars += len(preview_text)
-            results.append(item)
-
-        trace_counts = {item["id"]: 0 for item in results}
-        if results:
-            trace_ids = list(trace_counts)
-            trace_placeholders = ",".join("?" for _ in trace_ids)
-            trace_rows = conn.execute(
-                f"""
-                SELECT entity_id, COUNT(DISTINCT trace_id)
-                FROM trace_memory_links
-                WHERE entity_id IN ({trace_placeholders})
-                GROUP BY entity_id
-                """,
-                trace_ids,
-            ).fetchall()
-            for trace_entity_id, count in trace_rows:
-                trace_counts[trace_entity_id] = count
-        for item in results:
-            item["trace_evidence_count"] = trace_counts[item["id"]]
+        _attach_search_trace_counts(conn, results)
 
         if return_diagnostics:
             return {"results": results, "diagnostics": diagnostics}
         return results
     except Exception as e:
-        logger.error("Error searching memory: %s", e)
-        diagnostics["error"] = str(e)
-        validation._set_search_diagnostics(diagnostics)
-        if return_diagnostics:
-            return {"results": [], "diagnostics": diagnostics, "error": str(e)}
-        return [{"error": str(e)}]
+        return _search_error_result(e, diagnostics, return_diagnostics)
     finally:
         if should_close:
             close_connection(conn)

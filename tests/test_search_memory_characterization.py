@@ -589,6 +589,14 @@ class TestSearchMemoryCharacterization:
         assert "relevance_preview" not in result[1]
         assert "relevance_preview" not in result[2]
 
+    def test_preview_budget_exact_boundary_stops_at_equality(self, search_db):
+        conn, path = search_db
+        with patch.object(orchestrator, "RELEVANCE_PREVIEW_TOTAL_BUDGET_CHARS", 13):
+            result = _search_case(conn, path, {"limit": 3, "preview": True})
+        assert "relevance_preview" in result[0]
+        assert "relevance_preview" not in result[1]
+        assert "relevance_preview" not in result[2]
+
     def test_direct_db_path_connection_is_closed(self, search_db):
         _, path = search_db
         with patch("saltmdb.domain.services.memory_service.orchestrator.close_connection") as close:
@@ -3211,3 +3219,452 @@ def test_search2_cursor_requires_offset_prefix(search_db):
     conn, path = search_db
     result = _search_case(conn, path, {"cursor": "xoffset:3", "limit": 1})
     assert result[0]["id"] == "a"
+
+
+def test_valid_modes_do_not_emit_unknown_mode_warning(search_db, caplog):
+    conn, path = search_db
+    caplog.set_level("WARNING")
+    for mode in ("broad", "strict", "history"):
+        _search_case(conn, path, {"mode": mode, "limit": 1})
+    assert not any("unknown mode" in record.message for record in caplog.records)
+
+
+def test_case_insensitive_stored_tag_matches_filter(search_db):
+    conn, path = search_db
+    rows = memory_service.search_memory(
+        tags_filter=["#NEEDLE-TAG"],
+        query_keywords=None,
+        limit=10,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert [row["id"] for row in rows] == ["b", "a"]
+
+
+def test_empty_query_does_not_take_unique_empty_title_identity_path(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+        "memory_type,is_core,created_at,updated_at,last_accessed_at) "
+        "VALUES ('empty-title','','empty body','hash-empty','owner','private','raw','fact',0,"
+        "'2020-01-01','2020-01-01','2020-01-01')"
+    )
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords="",
+        limit=1,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert [row["id"] for row in result] == ["b"]
+
+
+def test_exact_title_identity_keeps_caller_filters_as_and(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+        "memory_type,is_core,created_at,updated_at,last_accessed_at) "
+        "VALUES ('filtered','Filtered title','filtered body','hash-filtered','owner','private',"
+        "'raw','fact',0,'2020-01-01','2020-01-01','2020-01-01')"
+    )
+    conn.execute("UPDATE entities SET status = 'archived' WHERE id != 'filtered'")
+    conn.commit()
+    with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
+        result = memory_service.search_memory(
+            query_keywords="Filtered title",
+            context_id="missing-context",
+            limit=1,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert result[0]["error"].startswith("Semantic search is disabled")
+
+
+def test_exact_title_identity_uses_equality_for_like_metacharacters(search_db):
+    conn, path = search_db
+    for eid, title in (("percent", "100%_done"), ("like-match", "100X_done")):
+        conn.execute(
+            "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+            "memory_type,is_core,created_at,updated_at,last_accessed_at) "
+            "VALUES (?,?,?,?,?,'private','raw','fact',0,'2020-01-01','2020-01-01','2020-01-01')",
+            (eid, title, "body", f"hash-{eid}", "owner"),
+        )
+    conn.commit()
+    with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
+        result = memory_service.search_memory(
+            query_keywords="100%_done",
+            limit=1,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert [row["id"] for row in result] == ["percent"]
+
+
+def test_semantic_pipeline_uses_fallback_db_path_when_none(search_db):
+    conn, _path = search_db
+    with (
+        patch.object(orchestrator, "get_db_path", return_value="/fallback/search.db"),
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=([], False)),
+        patch.object(search_primitives, "semantic_search", return_value=[]) as semantic,
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+    ):
+        result = memory_service.search_memory(
+            query_keywords="needle",
+            limit=1,
+            include_related=False,
+            db_connection=conn,
+            db_path=None,
+        )
+    assert result == []
+    assert semantic.call_args.args[4] == "/fallback/search.db"
+
+
+def test_include_related_false_skips_relation_sql(search_db):
+    conn, path = search_db
+    recording_conn = Mock(wraps=conn)
+    result = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        limit=1,
+        include_related=False,
+        db_connection=recording_conn,
+        db_path=path,
+    )
+    assert result[0]["id"] == "b"
+    assert not any(
+        "FROM relations r" in call.args[0] for call in recording_conn.execute.call_args_list
+    )
+
+
+def test_history_exact_title_marks_superseded_target(search_db):
+    conn, path = search_db
+    with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
+        result = memory_service.search_memory(
+            query_keywords="Title a",
+            mode="history",
+            limit=1,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert result[0]["id"] == "a"
+    assert result[0]["is_superseded"] is True
+
+
+def test_related_archived_endpoints_are_excluded_in_both_directions(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+        "memory_type,is_core,created_at,updated_at,last_accessed_at) "
+        "VALUES ('archived-related','Archived related','body','hash-archived-related','other',"
+        "'shared','archived','fact',0,'2020-01-01','2020-01-01','2020-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO relations (id,source_id,target_id,predicate) VALUES "
+        "('archived-out','a','archived-related','related_to'),"
+        "('archived-in','archived-related','a','related_to')"
+    )
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        context_id="ctx",
+        is_core=False,
+        limit=1,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert result[0]["id"] == "a"
+    assert all(item["id"] != "archived-related" for item in result[0]["related_entities"])
+
+
+def test_related_expired_endpoints_are_excluded_in_both_directions(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+        "memory_type,is_core,created_at,updated_at,last_accessed_at) "
+        "VALUES ('expired-related','Expired related','body','hash-expired-related','other',"
+        "'shared','raw','fact',0,'2020-01-01','2020-01-01','2020-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO relations (id,source_id,target_id,predicate,valid_to) VALUES "
+        "('expired-out','a','expired-related','related_to','2000-01-01'),"
+        "('expired-in','expired-related','a','related_to','2000-01-01')"
+    )
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        context_id="ctx",
+        is_core=False,
+        limit=1,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert result[0]["id"] == "a"
+    assert all(item["id"] != "expired-related" for item in result[0]["related_entities"])
+
+
+def test_result_item_key_order_is_stable_across_optional_fields(search_db):
+    conn, path = search_db
+    conn.execute("UPDATE entities SET metadata = ? WHERE id = 'a'", ('{"drift_flag":"review"}',))
+    conn.commit()
+    result = _search_case(
+        conn,
+        path,
+        {
+            "mode": "history",
+            "limit": 3,
+            "include_related": True,
+            "ce": True,
+            "preview": True,
+        },
+    )
+    item = next(row for row in result if row["id"] == "a")
+    assert list(item) == [
+        "id",
+        "title",
+        "snippet",
+        "score",
+        "weight",
+        "is_core",
+        "memory_type",
+        "cursor",
+        "related_entities",
+        "cross_encoder_score",
+        "is_superseded",
+        "drift_flag",
+        "relevance_preview",
+        "relevance_preview_meta",
+        "trace_evidence_count",
+    ]
+
+
+def test_is_core_result_value_is_bool(search_db):
+    conn, path = search_db
+    result = memory_service.search_memory(
+        query_keywords=None,
+        limit=2,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert next(row for row in result if row["id"] == "b")["is_core"] is True
+    assert next(row for row in result if row["id"] == "a")["is_core"] is False
+
+
+def test_result_count_diagnostics_pin_zero_one_and_many_rows(search_db):
+    conn, path = search_db
+    empty = memory_service.search_memory(
+        query_keywords=None,
+        limit=0,
+        return_diagnostics=True,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    one = memory_service.search_memory(
+        query_keywords=None,
+        limit=1,
+        return_diagnostics=True,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    many = memory_service.search_memory(
+        query_keywords=None,
+        limit=3,
+        return_diagnostics=True,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert empty["diagnostics"]["result_count"] == 0
+    assert one["diagnostics"]["result_count"] == 1
+    assert many["diagnostics"]["result_count"] == 3
+    with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
+        exact = memory_service.search_memory(
+            query_keywords="Title a",
+            limit=1,
+            return_diagnostics=True,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert exact["diagnostics"]["result_count"] == 1
+
+
+def test_search_diagnostics_are_published_on_success_and_error(search_db):
+    conn, path = search_db
+    with patch.object(validation, "_set_search_diagnostics") as publish:
+        success = memory_service.search_memory(
+            query_keywords=None,
+            limit=1,
+            return_diagnostics=True,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+        assert publish.call_count == 1
+        assert publish.call_args.args[0] is success["diagnostics"]
+        publish.reset_mock()
+        error = memory_service.search_memory(
+            query_keywords=None,
+            metadata_filter={"bad.key": "x"},
+            return_diagnostics=True,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert publish.call_count == 1
+    assert publish.call_args.args[0] is error["diagnostics"]
+
+
+def test_duplicate_trace_links_count_one_distinct_trace(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO conversation_traces (id,agent_session_id,agent_id,harness,harness_session_id,"
+        "harness_turn_id,status,user_prompt,user_prompt_hash,created_at,updated_at) VALUES "
+        "('trace-distinct','session','owner','omp','hs','ht-distinct','completed','p','h-distinct',"
+        "'2020-01-01','2020-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO trace_memory_links (id,trace_id,entity_id,content_hash,write_operation,created_at) "
+        "VALUES ('link-distinct-1','trace-distinct','a','hash-1','store_memory_new','2020-01-01'),"
+        "('link-distinct-2','trace-distinct','a','hash-2','store_memory_new','2020-01-01')"
+    )
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        limit=2,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert next(row for row in result if row["id"] == "a")["trace_evidence_count"] == 1
+
+
+def test_trace_links_count_each_returned_entity_independently(search_db):
+    conn, path = search_db
+    conn.execute(
+        "INSERT INTO conversation_traces (id,agent_session_id,agent_id,harness,harness_session_id,"
+        "harness_turn_id,status,user_prompt,user_prompt_hash,created_at,updated_at) VALUES "
+        "('trace-two-entities','session','owner','omp','hs','ht-two','completed','p','h-two',"
+        "'2020-01-01','2020-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO trace_memory_links (id,trace_id,entity_id,content_hash,write_operation,created_at) "
+        "VALUES ('link-two-a','trace-two-entities','a','hash-a','store_memory_new','2020-01-01'),"
+        "('link-two-b','trace-two-entities','b','hash-b','store_memory_new','2020-01-01')"
+    )
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        limit=2,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert {row["id"]: row["trace_evidence_count"] for row in result} == {"b": 1, "a": 1}
+
+
+def test_search_error_logs_without_exception_info(search_db, caplog):
+    conn, path = search_db
+    caplog.set_level("ERROR")
+    result = memory_service.search_memory(
+        query_keywords=None,
+        metadata_filter={"bad.key": "x"},
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert result[0]["error"]
+    records = [record for record in caplog.records if "Error searching memory" in record.message]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert records[0].exc_info is None
+
+
+def test_null_metadata_skips_drift_extraction(search_db):
+    conn, path = search_db
+    conn.execute("UPDATE entities SET metadata = NULL WHERE id = 'a'")
+    conn.commit()
+    result = memory_service.search_memory(
+        query_keywords=None,
+        limit=10,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    row = next(item for item in result if item["id"] == "a")
+    assert "drift_flag" not in row
+
+
+def test_cursor_offset_uses_first_numeric_segment_and_invalid_falls_back(search_db):
+    conn, path = search_db
+    for index in range(5):
+        conn.execute(
+            "INSERT INTO entities (id,title,full_content,content_hash,agent_id,scope,status,"
+            "memory_type,is_core,context_id,created_at,updated_at,last_accessed_at,metadata) "
+            "VALUES (?,?,?,?,?,'shared','raw','fact',0,'cursor-context',?,?,?, '{}')",
+            (
+                f"cursor-{index}",
+                f"Cursor {index}",
+                "body",
+                f"cursor-hash-{index}",
+                "owner",
+                "2020-01-01",
+                f"2020-01-{index + 1:02d}",
+                "2020-01-01",
+            ),
+        )
+    conn.commit()
+    page = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        context_id="cursor-context",
+        cursor="offset:3:4",
+        limit=1,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    invalid = memory_service.search_memory(
+        query_keywords=None,
+        agent_id="owner",
+        context_id="cursor-context",
+        cursor="offset:abc",
+        limit=1,
+        include_related=False,
+        db_connection=conn,
+        db_path=path,
+    )
+    assert page[0]["id"] == "cursor-1"
+    assert page[0]["cursor"] == "offset:4"
+    assert invalid[0]["id"] == "cursor-4"
+    assert invalid[0]["cursor"] == "offset:1"
+
+
+def test_cross_encoder_score_is_rounded_to_six_decimals(search_db):
+    conn, path = search_db
+    result = _search_case(
+        conn,
+        path,
+        {
+            "limit": 3,
+            "ce": True,
+            "scores": [0.123456789, 0.223456789, 0.323456789],
+        },
+    )
+    assert {item["cross_encoder_score"] for item in result} == {
+        0.123457,
+        0.223457,
+        0.323457,
+    }
