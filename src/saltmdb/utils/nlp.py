@@ -448,9 +448,105 @@ def _validate_table_rows(text):
     return None
 
 
+def _line_end(text, pos):
+    end = text.find("\n", pos)
+    return len(text) if end == -1 else end
+
+
+def _tail_after_marker(text, pos):
+    """Emulate `\\s+(.+)$` (MULTILINE) starting at pos."""
+    n = len(text)
+    run_end = pos
+    while run_end < n and text[run_end].isspace():
+        run_end += 1
+    if run_end == pos:
+        return None
+    if run_end < n:
+        return run_end, _line_end(text, run_end)
+    k = run_end - 1
+    while k > pos and text[k] == "\n":
+        k -= 1
+    if k == pos:
+        return None
+    return k, _line_end(text, k)
+
+
+def _scan_line_matches(text, match_at):
+    """Emulate re.findall with a MULTILINE `^...` pattern."""
+    n = len(text)
+    out = []
+    pos = 0
+    while pos <= n:
+        if pos != 0 and text[pos - 1] != "\n":
+            nl = text.find("\n", pos)
+            if nl == -1:
+                break
+            pos = nl + 1
+        hit = match_at(text, pos)
+        if hit is None:
+            pos += 1
+        else:
+            record, pos = hit
+            out.append(record)
+    return out
+
+
+def _atx_header_at(text, start):
+    n = len(text)
+    q = start
+    while q < n and q - start < 6 and text[q] == "#":
+        q += 1
+    if q == start:
+        return None
+    tail = _tail_after_marker(text, q)
+    if tail is None:
+        return None
+    g2, end = tail
+    return (text[start:q], text[g2:end]), end
+
+
+def _ordered_marker_end(text, pos):
+    """End offset of `\\d+.` at pos, else None."""
+    n = len(text)
+    d = pos
+    while d < n and text[d].isdecimal():
+        d += 1
+    if d == pos or d >= n or text[d] != ".":
+        return None
+    return d + 1
+
+
+def _list_item_at(text, start):
+    n = len(text)
+    q = start
+    while q < n and text[q].isspace() and text[q] != "\n":
+        q += 1
+    if q >= n:
+        return None
+    if text[q] in "-*+":
+        q += 1
+    else:
+        q = _ordered_marker_end(text, q)
+        if q is None:
+            return None
+    tail = _tail_after_marker(text, q)
+    if tail is None:
+        return None
+    g1, end = tail
+    return text[g1:end], end
+
+
+def _atx_headers(text):
+    return _scan_line_matches(text, _atx_header_at)
+
+
+def _list_item_texts(text):
+    return _scan_line_matches(text, _list_item_at)
+
+
 def _markdown_headers(text):
     text_no_code = _replace_code_fences(text, "")
-    headers = re.findall(r"^(#{1,6})\s+(.+)$", text_no_code, re.MULTILINE)
+    headers = _atx_headers(text_no_code)
     header_levels = [len(header[0]) for header in headers]
     has_skip = any(
         header_levels[i + 1] > header_levels[i] + 1 for i in range(len(header_levels) - 1)
@@ -465,7 +561,7 @@ def _markdown_metrics(text, headers):
     words = re.findall(_WORD_TOKEN_RE, text)
     total_words = len(words)
     header_words = sum(len(re.findall(_WORD_TOKEN_RE, header[1])) for header in headers)
-    list_items = re.findall(r"^[^\S\n]*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
+    list_items = _list_item_texts(text)
     list_item_words = sum(len(re.findall(_WORD_TOKEN_RE, item)) for item in list_items)
     code_blocks = [text[start:end] for start, end in _code_fence_spans(text)]
     code_block_words = sum(len(re.findall(_WORD_TOKEN_RE, block)) for block in code_blocks)
