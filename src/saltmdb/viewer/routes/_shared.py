@@ -13,17 +13,14 @@ MAX_RELATION_LIMIT = 50
 MAX_SESSION_LIMIT = 100
 MAX_TRACE_LIMIT = 100
 
+_CSS_TYPE = "text/css; charset=utf-8"
+_JS_TYPE = "text/javascript; charset=utf-8"
+
 STATIC_ASSETS = {
-    "/static/viewer.css": ("viewer.css", "text/css; charset=utf-8"),
-    "/static/viewer.js": ("viewer.js", "text/javascript; charset=utf-8"),
-    "/static/vendor/marked-18.0.7.umd.js": (
-        "vendor/marked-18.0.7.umd.js",
-        "text/javascript; charset=utf-8",
-    ),
-    "/static/vendor/dompurify-3.4.16.min.js": (
-        "vendor/dompurify-3.4.16.min.js",
-        "text/javascript; charset=utf-8",
-    ),
+    "/static/viewer.css": ("viewer.css", _CSS_TYPE),
+    "/static/viewer.js": ("viewer.js", _JS_TYPE),
+    "/static/vendor/marked-18.0.7.umd.js": ("vendor/marked-18.0.7.umd.js", _JS_TYPE),
+    "/static/vendor/dompurify-3.4.16.min.js": ("vendor/dompurify-3.4.16.min.js", _JS_TYPE),
 }
 
 _ENTITY_SORTS = {
