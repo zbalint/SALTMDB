@@ -10,7 +10,6 @@ endpoint group; every ``self.get_*`` call below is resolved through that class's
 import http.server
 import json
 import logging
-import mimetypes
 import os
 import urllib.parse
 from pathlib import Path
@@ -84,15 +83,16 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
     def send_static_asset(self, path):
         """Serve one local Viewer asset without exposing arbitrary filesystem paths."""
         root = (Path(__file__).resolve().parent.parent / "static").resolve()
-        relative_path = STATIC_ASSETS.get(path)
-        if relative_path is None:
+        asset = STATIC_ASSETS.get(path)
+        if asset is None:
             self.send_json({"error": "Asset not found"}, 404)
             return
+        relative_path, content_type = asset
         candidate = root / relative_path
-        mime_type, _ = mimetypes.guess_type(candidate.name)
         self.send_response(200)
-        self.send_header("Content-Type", mime_type or "application/octet-stream")
+        self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(candidate.read_bytes())
