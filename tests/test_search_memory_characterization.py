@@ -4,7 +4,7 @@ import json
 import sqlite_vec
 
 from contextlib import ExitStack
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -72,6 +72,8 @@ def _search_case(conn, path, options):
     scores = options.pop("scores", [1.0, 1.0, 3.0])
     external_ce = options.pop("external_ce", False)
     fallback = options.pop("fallback", False)
+    topic_fallback_mock = options.pop("_topic_fallback_mock", None)
+    fts_mock = options.pop("_fts_mock", None)
     preview = options.pop("preview", False)
     fts = [
         (
@@ -105,19 +107,34 @@ def _search_case(conn, path, options):
     options.setdefault("include_related", False)
     with ExitStack() as stack:
         stack.enter_context(patch("saltmdb.config.is_semantic_search_enabled", return_value=True))
-        stack.enter_context(
-            patch.object(search_primitives, "_run_fts_search", return_value=(fts, fallback))
-        )
+        if fts_mock is None:
+            stack.enter_context(
+                patch.object(search_primitives, "_run_fts_search", return_value=(fts, fallback))
+            )
+        else:
+            stack.enter_context(
+                patch.object(search_primitives, "_run_fts_search", side_effect=fts_mock)
+            )
         stack.enter_context(
             patch.object(search_primitives, "semantic_search", return_value=semantic)
         )
-        stack.enter_context(
-            patch.object(
-                search_primitives,
-                "_score_topics_with_fallback",
-                return_value={"c": {"topic_score": 0.9, "semantic_verdict": "SAME_TOPIC"}},
+        if topic_fallback_mock is None:
+            stack.enter_context(
+                patch.object(
+                    search_primitives,
+                    "_score_topics_with_fallback",
+                    return_value={"c": {"topic_score": 0.9, "semantic_verdict": "SAME_TOPIC"}},
+                )
             )
-        )
+        else:
+            stack.enter_context(
+                patch.object(
+                    search_primitives,
+                    "_score_topics_with_fallback",
+                    side_effect=topic_fallback_mock,
+                )
+            )
+
         stack.enter_context(
             patch.object(reranker_service, "is_cross_encoder_enabled", return_value=enabled)
         )
@@ -2524,3 +2541,673 @@ class TestSearchMemoryCharacterization:
 
     def test_dangling_supersession_sort_key_defaults_missing_entity(self, search_db):
         assert ranking._supersession_sort_key("deleted", {}) == ("", "", "deleted")
+
+
+def _search2_controls(**overrides):
+    values = {
+        "sanitized_query": "needle",
+        "query_keywords": "needle",
+        "db_path": None,
+        "mode": "broad",
+        "chunk_window": 10,
+        "chunk_oversampling": 2,
+        "use_chunk_candidates": False,
+        "use_retrieval_text_candidates": False,
+        "configured_chunk_weight": 1.0,
+        "configured_retrieval_fts_weight": 0.25,
+        "configured_retrieval_vector_weight": 0.75,
+        "ce_candidate_cap": 10,
+        "ce_text_cap": 100,
+        "cross_encoder_candidate_cap": None,
+        "cross_encoder_text_cap_chars": None,
+        "prefer_durable_types": False,
+        "demote_superseded": False,
+        "collapse_supersedes_families": False,
+        "return_diagnostics": False,
+    }
+    values.update(overrides)
+    return orchestrator._SearchControls(**values)
+
+
+def test_search2_policy_gate_and_candidate_snapshot_keep_ce_order(search_db):
+    conn, path = search_db
+    result = _search_case(conn, path, {"mode": "strict", "limit": 2})
+    assert [item["id"] for item in result] == ["b", "c"]
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_apply_search_pool_policies"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_policy_gate_and_candidate_snapshot_helper_pin(search_db):
+    _search2_policy_pin(search_db)
+
+
+def _search2_policy_pin(search_db):
+    conn, _path = search_db
+    controls = _search2_controls(mode="strict", return_diagnostics=True)
+    diagnostics = {"cross_encoder": {}}
+    reranked = ["b", "a"]
+    with (
+        patch.object(orchestrator, "_log_search_gap"),
+        patch.object(
+            orchestrator,
+            "_rerank_search_pool",
+            return_value=(reranked, {"b": 0.9, "a": 0.1}),
+        ),
+        patch.object(
+            ranking,
+            "_build_candidate_evidence",
+            return_value={"a": {"id": "a"}, "b": {"id": "b"}},
+        ),
+        patch.object(
+            orchestrator,
+            "_gate_search_pool",
+            side_effect=lambda _mode, pool, _evidence, _db: (pool, set()),
+        ) as gate,
+        patch.object(orchestrator, "_order_search_pool", return_value=["a", "b"]),
+        patch.object(orchestrator, "_record_search_candidates") as record,
+    ):
+        result = orchestrator._apply_search_pool_policies(
+            {"a": 0.2, "b": 0.1},
+            [],
+            [],
+            set(),
+            set(),
+            set(),
+            False,
+            conn,
+            {},
+            {},
+            controls,
+            2,
+            diagnostics,
+        )
+    assert result[:2] == (["a", "b"], {"b": 0.9, "a": 0.1})
+    assert gate.call_args.args[1] == reranked
+    assert record.call_args.args[:2] == (["a", "b"], ["b", "a"])
+    assert record.call_args.args[4] is True
+
+
+def test_search2_collapse_diagnostics_snapshot_and_order(search_db):
+    conn, path = search_db
+    result = _search_case(
+        conn,
+        path,
+        {"collapse_supersedes_families": True, "return_diagnostics": True, "limit": 3},
+    )
+    assert result["diagnostics"]["supersedes_collapse"] == {
+        "executed": True,
+        "before_count": 3,
+        "after_count": 2,
+    }
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_order_search_pool"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_collapse_diagnostics_helper_pin(search_db):
+    conn, _path = search_db
+    diagnostics = {}
+    with patch.object(ranking, "_collapse_supersedes_families", return_value=["b"]) as collapse:
+        result = orchestrator._order_search_pool(
+            ["a", "b"], conn, False, False, "broad", True, diagnostics
+        )
+    assert collapse.call_args.args[0] == ["a", "b"]
+    assert result == ["b"]
+    assert diagnostics["supersedes_collapse"] == {
+        "executed": True,
+        "before_count": 2,
+        "after_count": 1,
+    }
+
+
+def test_search2_type_bias_precedes_supersession_demotion(search_db):
+    conn, path = search_db
+    result = _search_case(
+        conn,
+        path,
+        {"limit": 3, "prefer_durable_types": True, "demote_superseded": True},
+    )
+    assert [item["id"] for item in result] == ["c", "b", "a"]
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_order_search_pool"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_type_bias_helper_pin(search_db):
+    _search2_type_pin(search_db)
+
+
+def _search2_type_pin(search_db):
+    conn, _path = search_db
+    calls = []
+
+    def bias(_pool, _conn):
+        calls.append("bias")
+        return ["b", "a"]
+
+    def demotion(_pool, _conn):
+        calls.append("demotion")
+        return ["a", "b"]
+
+    with (
+        patch.object(ranking, "_apply_type_bias", side_effect=bias),
+        patch.object(ranking, "_apply_supersession_demotion", side_effect=demotion),
+    ):
+        result = orchestrator._order_search_pool(
+            ["a", "b"],
+            conn,
+            True,
+            True,
+            "broad",
+            False,
+            {},
+        )
+    assert calls == ["bias", "demotion"]
+    assert result == ["a", "b"]
+
+
+def test_search2_gate_history_only_marks_superseded(search_db):
+    conn, path = search_db
+    with patch.object(
+        ranking,
+        "_compute_superseded_ids_bitemporal",
+        return_value=set(),
+    ) as history:
+        strict = _search_case(
+            conn, path, {"mode": "strict", "return_diagnostics": True, "limit": 3}
+        )
+        assert history.call_count == 0
+        broad = _search_case(conn, path, {"mode": "broad", "return_diagnostics": True, "limit": 3})
+        assert history.call_count == 0
+        historical = _search_case(
+            conn, path, {"mode": "history", "return_diagnostics": True, "limit": 3}
+        )
+        assert history.call_count == 1
+        assert history.call_args.args[0] == ["a", "c", "b"]
+        assert history.call_args.args[1] is conn
+    assert isinstance(strict, dict)
+    assert isinstance(broad, dict)
+    assert isinstance(historical, dict)
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_gate_search_pool"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_gate_history_helper_pin(search_db):
+    _search2_gate_pin(search_db)
+
+
+def _search2_gate_pin(search_db):
+    conn, _path = search_db
+    evidence = {"a": {"in_fts": True, "in_semantic": True, "rrf_score": 1.0}}
+    with (
+        patch.object(ranking, "accept_or_abstain", return_value=(True, "direct")),
+        patch.object(
+            ranking,
+            "_compute_superseded_ids_bitemporal",
+            return_value={"a"},
+        ) as history,
+    ):
+        strict = orchestrator._gate_search_pool("strict", ["a"], evidence, conn)
+        history.assert_not_called()
+        broad = orchestrator._gate_search_pool("broad", ["a"], evidence, conn)
+        history.assert_not_called()
+        historical = orchestrator._gate_search_pool("history", ["a"], evidence, conn)
+    assert strict == (["a"], set())
+    assert broad == (["a"], set())
+    assert historical == (["a"], {"a"})
+    history.assert_called_once_with(["a"], conn)
+
+
+def test_search2_grounding_uses_any_and_skips_missing_chain_children(search_db):
+    conn, path = search_db
+    result = _search_case(
+        conn,
+        path,
+        {"mode": "strict", "return_diagnostics": True, "limit": 3},
+    )
+    assert all("entity_id" in item for item in result["diagnostics"]["candidates"])
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_accumulate_resolved_predecessors"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_grounding_helper_pin():
+    _search2_grounding_pin()
+
+
+def _search2_grounding_pin():
+    evidence = {
+        "accepted": {"in_fts": True, "in_semantic": True, "rrf_score": 1.0},
+        "rejected": {"in_fts": False, "in_semantic": False, "rrf_score": 0.0},
+    }
+    with patch.object(
+        ranking,
+        "accept_or_abstain",
+        side_effect=[(False, "weak"), (True, "direct")],
+    ):
+        result = orchestrator._accumulate_resolved_predecessors(
+            {"rejected": "head", "missing": "head", "accepted": "head"},
+            evidence,
+        )
+    assert result == ({"head": ["rejected", "missing", "accepted"]}, {"head": True})
+
+
+def test_search2_predecessor_topic_fallback_guard_is_call_time_sensitive(search_db):
+    conn, path = search_db
+    topic_mock = Mock(return_value={})
+    result = _search_case(
+        conn,
+        path,
+        {
+            "mode": "strict",
+            "fallback": True,
+            "return_diagnostics": True,
+            "_topic_fallback_mock": topic_mock,
+        },
+    )
+    assert isinstance(result, dict)
+    assert topic_mock.call_args_list == [
+        call("needle", ["a", "c", "b"], path),
+        call("needle", ["b", "c"], path),
+    ]
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_resolve_predecessor_evidence"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_predecessor_topic_helper_pin():
+    _search2_predecessor_topic_pin()
+
+
+def _search2_predecessor_topic_pin():
+    with patch.object(
+        search_primitives,
+        "_score_topics_with_fallback",
+        return_value={},
+    ) as score_topics:
+        orchestrator._resolve_predecessor_evidence(
+            ["a", "b"],
+            {"a": 1.0, "b": 0.5},
+            [("a", "t", "c", 1, 0, -1.0)],
+            [("b", 0.2)],
+            {"a"},
+            True,
+            "needle",
+            "/tmp/search.db",
+        )
+        assert score_topics.call_args.args == ("needle", ["a"], "/tmp/search.db")
+        score_topics.reset_mock()
+        orchestrator._resolve_predecessor_evidence(
+            ["a", "b"],
+            {"a": 1.0, "b": 0.5},
+            [("a", "t", "c", 1, 0, -1.0)],
+            [("b", 0.2)],
+            {"a"},
+            False,
+            "needle",
+            "/tmp/search.db",
+        )
+        score_topics.assert_not_called()
+
+
+def test_search2_chain_resolution_preserves_caller_filters(search_db):
+    conn, path = search_db
+    with patch.object(
+        ranking,
+        "_resolve_supersession_chains",
+        return_value={},
+    ) as resolve:
+        result = _search_case(
+            conn,
+            path,
+            {"mode": "strict", "agent_id": "owner", "return_diagnostics": True},
+        )
+    assert isinstance(result, dict)
+    assert resolve.call_args.args[2] == [
+        "e.status != 'archived'",
+        "(e.agent_id = ? OR e.scope = 'shared')",
+    ]
+    assert resolve.call_args.args[3] == ["owner"]
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_resolve_search_predecessors"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_chain_resolution_helper_pin(search_db):
+    _search2_filter_pin(search_db)
+
+
+def _search2_filter_pin(search_db):
+    conn, _path = search_db
+    with (
+        patch.object(
+            ranking,
+            "_resolve_supersession_chains",
+            return_value={"a": "b"},
+        ) as resolve,
+        patch.object(orchestrator, "_resolve_predecessor_evidence", return_value={}),
+        patch.object(
+            orchestrator,
+            "_accumulate_resolved_predecessors",
+            return_value=({}, {}),
+        ),
+        patch.object(ranking, "_substitute_resolved_heads", return_value={"b": 1.0}),
+    ):
+        result = orchestrator._resolve_search_predecessors(
+            conn,
+            "strict",
+            {"a": 1.0},
+            ["e.agent_id = ?"],
+            ["owner"],
+            [],
+            [],
+            {"a"},
+            False,
+            "needle",
+            "/tmp/search.db",
+        )
+    assert result[0] == {"b": 1.0}
+    assert resolve.call_args.args[2:] == (["e.agent_id = ?"], ["owner"])
+
+
+def test_search2_cross_encoder_retry_count_and_failed_diagnostics(search_db):
+    conn, path = search_db
+    fts_rows = [
+        (
+            eid,
+            "t",
+            "c",
+            1,
+            0,
+            -2.0 - index,
+            "",
+            "",
+            "owner",
+            "private",
+            "{}",
+            None,
+            "fact",
+            0,
+            f"<mark>needle</mark> {eid}",
+        )
+        for index, eid in enumerate(("a", "b", "c"))
+    ]
+    with (
+        patch("saltmdb.config.RERANK_CANDIDATE_POOL_SIZE", 1),
+        patch("saltmdb.config.STRICT_OVERFETCH_CANDIDATE_CAP", 4),
+        patch.object(
+            ranking,
+            "accept_or_abstain",
+            side_effect=lambda e: (e["entity_id"] == "a", "test"),
+        ),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        patch.object(reranker_service, "score_pairs", return_value=[0.5]),
+        patch.object(
+            reranker_service,
+            "get_last_score_diagnostics",
+            return_value={"model": "test"},
+        ),
+    ):
+        result = _search_case(
+            conn,
+            path,
+            {
+                "mode": "strict",
+                "ce": True,
+                "candidate_window": 3,
+                "limit": 3,
+                "return_diagnostics": True,
+                "_fts_mock": [(fts_rows, False), (fts_rows, False)],
+            },
+        )
+    assert result["diagnostics"]["cross_encoder"]["executed"] is True
+    assert result["diagnostics"]["cross_encoder"]["execution_count"] == 2
+
+
+@pytest.mark.skipif(
+    not hasattr(orchestrator, "_rerank_search_pool"),
+    reason="SEARCH-2 helper seam is absent on SEARCH-1 HEAD",
+)
+def test_search2_cross_encoder_helper_pin(search_db):
+    _search2_cross_encoder_pin(search_db)
+
+
+def _search2_cross_encoder_pin(search_db):
+    conn, path = search_db
+    diagnostics = {"cross_encoder": {}}
+    with (
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        patch.object(
+            ranking,
+            "_build_cross_encoder_candidate_texts",
+            return_value={"a": "text"},
+        ),
+        patch.object(reranker_service, "score_pairs", return_value=[0.5]),
+        patch.object(
+            reranker_service, "get_last_score_diagnostics", return_value={"model": "test"}
+        ),
+    ):
+        orchestrator._rerank_search_pool(
+            "needle", ["a"], conn, path, 10, 100, None, None, diagnostics
+        )
+        orchestrator._rerank_search_pool(
+            "needle", ["a"], conn, path, 10, 100, None, None, diagnostics
+        )
+    assert diagnostics["cross_encoder"]["execution_count"] == 2
+    assert diagnostics["cross_encoder"]["executed"] is True
+
+    failed = {"cross_encoder": {}}
+    with (
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        patch.object(ranking, "_build_cross_encoder_candidate_texts", return_value={"a": "text"}),
+        patch.object(reranker_service, "score_pairs", return_value=None),
+        patch.object(
+            reranker_service,
+            "get_last_score_diagnostics",
+            return_value={"failure": "runner_failed"},
+        ),
+    ):
+        orchestrator._rerank_search_pool("needle", ["a"], conn, path, 10, 100, None, None, failed)
+    assert failed["cross_encoder"] == {"failure": "runner_failed"}
+
+
+def test_search2_public_explain_echoes_archive_clause(search_db):
+    conn, path = search_db
+    result = memory_service.search_memory(
+        explain_mode=True,
+        query_keywords="missing",
+        db_connection=conn,
+        db_path=path,
+        include_related=False,
+        return_diagnostics=False,
+    )
+    assert result["explain"]["searched_terms_found"] == {"missing": False}
+    assert result["explain"]["sanitized_query"] == "missing"
+    assert result["explain"]["where_clauses"] == ["e.status != 'archived'"]
+    assert "diagnostics" not in result
+    with patch.object(validation, "_set_search_diagnostics") as reset:
+        detailed = memory_service.search_memory(
+            explain_mode=True,
+            query_keywords="missing",
+            db_connection=conn,
+            db_path=path,
+            include_related=False,
+            return_diagnostics=True,
+        )
+    assert detailed["explain"]["where_clauses"] == ["e.status != 'archived'"]
+    assert detailed["diagnostics"] == reset.call_args.args[0]
+    reset.assert_called_once()
+
+
+def test_search2_public_tag_filter_is_case_insensitive(search_db):
+    conn, path = search_db
+    result = memory_service.search_memory(
+        query_keywords=None,
+        tags_filter=["#NEEDLE-TAG"],
+        db_connection=conn,
+        db_path=path,
+        include_related=False,
+        limit=5,
+    )
+    assert [item["id"] for item in result] == ["b", "a"]
+
+
+def test_search2_public_retrieval_diagnostics_report_channels(search_db):
+    conn, path = search_db
+    with (
+        patch.object(
+            search_primitives,
+            "_run_retrieval_fts_search",
+            return_value=[("a", 1.0)],
+        ) as fts_search,
+        patch.object(
+            search_primitives,
+            "retrieval_vector_search",
+            return_value=[("b", 0.5), ("c", 0.25)],
+        ) as vector_search,
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=([], False)),
+        patch.object(search_primitives, "semantic_search", return_value=[]),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+    ):
+        result = memory_service.search_memory(
+            query_keywords="needle",
+            db_connection=conn,
+            db_path=path,
+            include_related=False,
+            use_retrieval_text_candidates=True,
+            return_diagnostics=True,
+            limit=3,
+        )
+    assert fts_search.call_args.args[5] == 0
+    assert vector_search.call_args.args[5] == 0
+    retrieval_diag = result["diagnostics"]["retrieval_text"]
+    assert retrieval_diag["executed"] is True
+    assert retrieval_diag["fts_candidate_count"] == 1
+    assert retrieval_diag["vector_candidate_count"] == 2
+    assert {
+        eid: {key: evidence[key] for key in ("present", "hash", "fts_rank", "vector_rank")}
+        for eid, evidence in retrieval_diag["candidate_evidence"].items()
+    } == {
+        "a": {"present": True, "hash": None, "fts_rank": 0, "vector_rank": None},
+        "b": {"present": True, "hash": None, "fts_rank": None, "vector_rank": 0},
+        "c": {"present": True, "hash": None, "fts_rank": None, "vector_rank": 1},
+    }
+
+
+def test_search2_public_candidate_diagnostics_expose_pool_and_final_ranks(search_db):
+    conn, path = search_db
+    with patch.object(
+        ranking,
+        "accept_or_abstain",
+        side_effect=lambda evidence: (evidence["entity_id"] != "c", "test"),
+    ):
+        result = _search_case(
+            conn,
+            path,
+            {
+                "return_diagnostics": True,
+                "mode": "strict",
+                "limit": 3,
+                "candidate_window": 3,
+                "prefer_durable_types": True,
+                "demote_superseded": True,
+            },
+        )
+    candidates = result["diagnostics"]["candidates"]
+    assert result["diagnostics"]["candidate_pool_size"] == len(candidates)
+    assert [item["pool_rank"] for item in candidates] == list(range(len(candidates)))
+    final_ranks = [item["final_rank"] for item in candidates]
+    assert sorted(rank for rank in final_ranks if rank is not None) == list(
+        range(len(candidates) - final_ranks.count(None))
+    )
+    assert any(rank is not None for rank in final_ranks)
+    assert all("entity_id" in item and "dual_channel" in item for item in candidates)
+
+
+def test_search2_asymmetric_retrieval_weights_are_not_swapped(search_db):
+    conn, path = search_db
+    fts = [("a", "t", "c", 1, 0, -1.0, "", "", "owner", "private", "{}", None, "fact", 0, "")]
+    semantic = [("a", 0.2)]
+    with (
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=(fts, False)),
+        patch.object(search_primitives, "semantic_search", return_value=semantic),
+        patch.object(search_primitives, "_run_retrieval_fts_search", return_value=[("a", 0.1)]),
+        patch.object(search_primitives, "retrieval_vector_search", return_value=[("a", 0.2)]),
+        patch.object(
+            search_primitives,
+            "weighted_reciprocal_rank_fusion",
+            return_value={"a": 1.0},
+        ) as fuse,
+        patch.object(search_primitives, "_score_topics_with_fallback", return_value={}),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+    ):
+        memory_service.search_memory(
+            query_keywords="needle",
+            limit=1,
+            db_path=path,
+            db_connection=conn,
+            include_related=False,
+            use_retrieval_text_candidates=True,
+            retrieval_fts_weight=0.5,
+            retrieval_vector_weight=1.5,
+        )
+    assert fuse.call_args.kwargs["retrieval_fts_results"] == [("a", 0.1)]
+    assert fuse.call_args.kwargs["retrieval_vector_results"] == [("a", 0.2)]
+    assert fuse.call_args.kwargs["retrieval_fts_weight"] == 0.5
+    assert fuse.call_args.kwargs["retrieval_vector_weight"] == 1.5
+
+
+def test_search2_full_fts_window_does_not_mark_pool_exhausted(search_db):
+    conn, path = search_db
+    fts = [
+        ("a", "t", "c", 1, 0, -1.0, "", "", "owner", "private", "{}", None, "fact", 0, ""),
+        ("b", "t", "c", 1, 0, -2.0, "", "", "owner", "private", "{}", None, "fact", 0, ""),
+        ("c", "t", "c", 1, 0, -3.0, "", "", "owner", "private", "{}", None, "fact", 0, ""),
+    ]
+    semantic = [("a", 0.1), ("b", 0.2)]
+    with (
+        patch("saltmdb.config.RERANK_CANDIDATE_POOL_SIZE", 3),
+        patch("saltmdb.config.STRICT_OVERFETCH_CANDIDATE_CAP", 6),
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=(fts, False)) as run_fts,
+        patch.object(search_primitives, "semantic_search", return_value=semantic),
+        patch.object(
+            search_primitives,
+            "weighted_reciprocal_rank_fusion",
+            return_value={"a": 1.0, "b": 0.9, "c": 0.8},
+        ),
+        patch.object(search_primitives, "_score_topics_with_fallback", return_value={}),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+        patch.object(
+            ranking,
+            "accept_or_abstain",
+            side_effect=lambda ev: (ev["entity_id"] != "c", "test"),
+        ),
+    ):
+        memory_service.search_memory(
+            query_keywords="needle",
+            limit=3,
+            db_path=path,
+            db_connection=conn,
+            include_related=False,
+            mode="strict",
+            candidate_window=3,
+        )
+    assert run_fts.call_count == 2
+
+
+def test_search2_cursor_requires_offset_prefix(search_db):
+    conn, path = search_db
+    result = _search_case(conn, path, {"cursor": "xoffset:3", "limit": 1})
+    assert result[0]["id"] == "a"
