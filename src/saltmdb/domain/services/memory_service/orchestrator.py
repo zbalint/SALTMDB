@@ -910,7 +910,6 @@ def _append_or_search_tags(tag_groups, where_clauses, params):
         sub_clauses.append(f"et.tag_id IN ({placeholders})")
         sub_params.extend(list(all_ids))
     if missing_tnames:
-        placeholders = ",".join("?" for _ in missing_tnames)
         sub_clauses.append(f"lower(t.name) IN ({','.join('lower(?)' for _ in missing_tnames)})")
         sub_params.extend(missing_tnames)
 
