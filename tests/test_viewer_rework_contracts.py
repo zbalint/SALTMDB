@@ -347,7 +347,7 @@ class TestViewerReworkContracts(unittest.TestCase):
             "source?.title || edge.source",
             "button('Apply filters', 'primary', undefined, 'submit')",
             "const resetFilters = button('Reset filters'",
-            "state.explorerPreset = {}; state.explorerPage = 1; render();",
+            "state.explorerPreset = {}; state.explorerPage = 1; void render();",
             "button('Explore graph', 'primary', undefined, 'submit')",
             "type = 'button'",
             "focusRelationshipInput",
@@ -385,7 +385,7 @@ class TestViewerReworkContracts(unittest.TestCase):
             "Primary database size",
             "data.agent_session_liveness_available",
             "state.sessionsPreset = { state: 'active' }",
-            "state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();",
+            "state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; void render();",
         ):
             self.assertIn(expected, script)
         self.assertNotIn("source_id", script)

@@ -48,6 +48,23 @@ def _run(module, home: Path, transcript: Path, session: str = "s") -> tuple[obje
     return value, fires
 
 
+def test_session_cap_uses_system_random_once(tmp_path):
+    module = _load()
+    calls = []
+
+    class StubRandom:
+        def randint(self, lower, upper):
+            calls.append((lower, upper))
+            return 3
+
+    cap_path = tmp_path / "cap"
+    with patch.object(module.random, "SystemRandom", return_value=StubRandom()):
+        assert module.get_or_roll_session_cap(cap_path) == 3
+        assert cap_path.read_text() == "3"
+        assert module.get_or_roll_session_cap(cap_path) == 3
+    assert calls == [(1, 4)]
+
+
 def test_missing_transcript_exits_without_output(tmp_path):
     module = _load()
     with patch("sys.stdin", io.StringIO('{"session_id":"s"}')):

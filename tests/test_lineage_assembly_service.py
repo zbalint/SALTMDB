@@ -133,6 +133,36 @@ class TestLineageAssemblyService(unittest.TestCase):
             ["ancestor-a", "ancestor-z"],
         )
 
+    def test_depth_is_primary_sort_key_after_recency_and_id(self):
+        head = "head-fixed"
+        nodes = [
+            {
+                "id": "ancestor-z",
+                "title": "Ancestor Z",
+                "depth": 1,
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "ancestor-a",
+                "title": "Ancestor A",
+                "depth": 2,
+                "updated_at": "2026-02-01T00:00:00+00:00",
+            },
+        ]
+        with patch(
+            "saltmdb.domain.services.lineage_assembly_service._get_lineage_raw",
+            return_value={"root": {"title": "Fixed head"}, "nodes": [*nodes, {"id": head}]},
+        ):
+            result = assemble_lineage(
+                self._expansion([]),
+                [{"id": head, "score": 1.0}],
+                db_connection=self.conn,
+            )
+        self.assertEqual(
+            [entry["id"] for entry in result[head]["historical"]],
+            ["ancestor-z", "ancestor-a"],
+        )
+
     def test_no_head_candidates_returns_empty_without_opening_connection(self):
         with patch(
             "saltmdb.domain.services.lineage_assembly_service.get_connection",

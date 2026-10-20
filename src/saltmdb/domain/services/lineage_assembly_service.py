@@ -19,13 +19,10 @@ logger = logging.getLogger(__name__)
 
 def _sort_ancestor_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort nodes by depth, updated time descending, and id ascending."""
-    by_id = sorted(nodes, key=lambda node: node["id"])
-    by_updated_at = sorted(
-        by_id,
-        key=lambda node: node["updated_at"] or "",
-        reverse=True,
-    )
-    return sorted(by_updated_at, key=lambda node: node["depth"])
+    ordered = sorted(nodes, key=lambda node: node["id"])
+    ordered.sort(key=lambda node: node["updated_at"] or "", reverse=True)
+    ordered.sort(key=lambda node: node["depth"])
+    return ordered
 
 
 def _add_contradiction_flags(

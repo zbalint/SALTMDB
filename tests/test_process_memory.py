@@ -72,10 +72,10 @@ class TestProcessMemory(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "Windows-only process memory read")
     def test_real_windows_process_memory_read(self):
-        from saltmdb.utils.process_memory import _PROCESS_MEMORY_COUNTERS, read_process_memory
+        from saltmdb.utils.process_memory import _ProcessMemoryCounters, read_process_memory
         import ctypes
 
-        self.assertEqual(ctypes.sizeof(_PROCESS_MEMORY_COUNTERS), 72)
+        self.assertEqual(ctypes.sizeof(_ProcessMemoryCounters), 72)
         result = read_process_memory()
         if result is None:
             self.fail("Windows process-memory read was unavailable")

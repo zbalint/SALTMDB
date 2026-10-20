@@ -129,9 +129,11 @@ def install_service(
         else:
             changed = "installed"
         if previous != unit:
-            with open(path, "w", encoding="utf-8") as unit_file:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as unit_file:
+                os.fchmod(unit_file.fileno(), 0o600)
                 unit_file.write(unit)
-        os.chmod(path, 0o644)
+        os.chmod(path, 0o600)
     except OSError as exc:
         return ServiceResult(1, f"cannot write {path}: {exc}")
 

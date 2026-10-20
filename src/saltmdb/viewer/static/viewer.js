@@ -73,8 +73,8 @@
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
       await navigator.clipboard.writeText(value);
       setNotice(`${label} copied to clipboard.`);
-    } catch (_) { // Clipboard failures are intentionally reduced to a user-facing notice.
-      setNotice(`Could not copy ${label.toLowerCase()}.`);
+    } catch (err) {
+      setNotice(`Could not copy ${label.toLowerCase()}: ${err.message || String(err)}`);
     }
   };
   const select = (label, options, value = '') => {
@@ -314,7 +314,7 @@
       activeSessions.title = 'Live session status is unavailable.';
     }
     sessions.append(activeSessions, button('All sessions', 'filter-link', () => {
-      state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; render();
+      state.sessionsPreset = {}; state.sessionsPage = 1; state.sessionDetailId = ''; state.view = 'sessions'; void render();
     }));
     actions.append(lifecycle, sessions); fragment.append(actions); view.replaceChildren(fragment);
   };
@@ -362,7 +362,7 @@
     const dateFrom = inputField('From date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_from || ''); dateFrom.element.type = 'date';
     const dateTo = inputField('To date (UTC)', 'YYYY-MM-DD', state.explorerPreset.date_to || ''); dateTo.element.type = 'date';
     const resetFilters = button('Reset filters', '', () => {
-      state.explorerPreset = {}; state.explorerPage = 1; render();
+      state.explorerPreset = {}; state.explorerPage = 1; void render();
     });
     form.append(mode.wrap, search.wrap, prefixField.wrap, tagField.wrap, sessionField.wrap, lifecycle.wrap, type.wrap, core.wrap, sort.wrap, dateField.wrap, dateFrom.wrap, dateTo.wrap, button('Apply filters', 'primary', undefined, 'submit'), resetFilters);
     let currentParams = new URLSearchParams(state.explorerPreset);
@@ -778,7 +778,7 @@
   const SESSION_COLORS = 6;
   const sessionColorClass = (sessionId) => {
     let hash = 5381;
-    for (const character of String(sessionId || '')) hash = ((hash * 33) ^ character.charCodeAt(0)) >>> 0;
+    for (const character of String(sessionId || '')) hash = ((hash * 33) ^ character.codePointAt(0)) >>> 0;
     return `session-color-${hash % SESSION_COLORS}`;
   };
   const FEED_MAX_ROWS = 200;

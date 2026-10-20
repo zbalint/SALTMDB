@@ -125,7 +125,7 @@ def get_or_roll_session_cap(cap_state: Path) -> int:
     existing = read_count(cap_state)
     if existing > 0:
         return existing
-    cap = random.randint(MIN_SESSION_CAP, MAX_SESSION_CAP)
+    cap = random.SystemRandom().randint(MIN_SESSION_CAP, MAX_SESSION_CAP)
     write_count(cap_state, cap)
     return cap
 

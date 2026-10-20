@@ -62,7 +62,18 @@ def rows_text(rows) -> str:
     return "".join(f"{memory_id}\t{title}\n" for memory_id, title in rows)
 
 
-class HookCase(unittest.TestCase):
+class HookHelpers:
+    def calls(self):
+        if not self.record.exists():
+            return []
+        return [json.loads(line) for line in self.record.read_text("utf-8").splitlines()]
+
+    def log_text(self):
+        path = self.home / ".saltmdb" / "hooks" / "related-memories.log"
+        return path.read_text("utf-8") if path.exists() else ""
+
+
+class HookCase(HookHelpers, unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -107,11 +118,6 @@ class HookCase(unittest.TestCase):
         out = result.stdout.decode("utf-8").strip()
         return json.loads(out) if out else None
 
-    def calls(self):
-        if not self.record.exists():
-            return []
-        return [json.loads(line) for line in self.record.read_text("utf-8").splitlines()]
-
     def state_file(self, session=SESSION):
         return self.home / ".saltmdb" / "hooks" / ".state" / f"related-memories-{session}.json"
 
@@ -124,10 +130,6 @@ class HookCase(unittest.TestCase):
         base = {"prompts": 0, "pending_continuation": False, "shown_ids": [], "logged": []}
         base.update(values)
         path.write_text(json.dumps(base), encoding="utf-8")
-
-    def log_text(self):
-        path = self.home / ".saltmdb" / "hooks" / "related-memories.log"
-        return path.read_text("utf-8") if path.exists() else ""
 
     def listed_ids(self, result):
         return [line.split()[1] for line in result["reason"].splitlines() if line.startswith("- ")]

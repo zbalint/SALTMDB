@@ -1,5 +1,6 @@
 import os
 import signal
+import stat
 import tempfile
 import time as real_time
 import unittest
@@ -107,6 +108,7 @@ class TestDaemonService(unittest.TestCase):
         self.assertIn("loginctl enable-linger", result.message)
         self.assertIn("daemon status", result.message)
         path = Path(self.temp_dir.name) / "systemd" / "user" / "saltmdb-daemon.service"
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         self.assertEqual(
             path.read_text(), service.render_unit(service.sys.executable, self.canonical_db_path)
         )
@@ -136,9 +138,14 @@ class TestDaemonService(unittest.TestCase):
             patch.object(service.shutil, "which", return_value="/usr/bin/systemctl"),
         ):
             first = service.install_service(self.db_path, runner=_Runner())
+            unit = Path(self.temp_dir.name) / "systemd" / "user" / "saltmdb-daemon.service"
+            os.chmod(unit, 0o644)
             same = service.install_service(self.db_path, runner=_Runner())
+            self.assertEqual(stat.S_IMODE(os.stat(unit).st_mode), 0o600)
+            os.chmod(unit, 0o644)
             changed_path = os.path.join(self.temp_dir.name, "other.db")
             changed = service.install_service(changed_path, runner=_Runner())
+            self.assertEqual(stat.S_IMODE(os.stat(unit).st_mode), 0o600)
         self.assertIn("installed", first.message)
         self.assertIn("unchanged", same.message)
         self.assertIn("updated", changed.message)

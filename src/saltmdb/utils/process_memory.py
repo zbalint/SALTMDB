@@ -18,7 +18,7 @@ if sys.platform == "win32":
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
-    class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    class _ProcessMemoryCounters(ctypes.Structure):
         _fields_ = [
             ("cb", wintypes.DWORD),
             ("PageFaultCount", wintypes.DWORD),
@@ -37,7 +37,7 @@ if sys.platform == "win32":
     kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
     kernel32.K32GetProcessMemoryInfo.argtypes = [
         wintypes.HANDLE,
-        ctypes.POINTER(_PROCESS_MEMORY_COUNTERS),
+        ctypes.POINTER(_ProcessMemoryCounters),
         wintypes.DWORD,
     ]
 else:
@@ -60,7 +60,7 @@ def _read_windows() -> tuple[float, float] | None:
     """Read Windows working-set and peak-working-set sizes in bytes."""
     if sys.platform != "win32":
         return None
-    counters_type = globals().get("_PROCESS_MEMORY_COUNTERS")
+    counters_type = globals().get("_ProcessMemoryCounters")
     if ctypes is None or kernel32 is None or counters_type is None:
         return None
     counters = counters_type()
