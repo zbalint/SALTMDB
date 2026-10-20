@@ -271,6 +271,34 @@ def calculate_ngram_duplicate_ratio(text: str, n: int) -> float:
     return 1.0 - (unique_count / total_count)
 
 
+def _code_fence_spans(text: str, *, unclosed_to_end: bool = False) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    i = text.find("```")
+    while i != -1:
+        j = text.find("```", i + 3)
+        if j == -1:
+            if unclosed_to_end:
+                spans.append((i, len(text)))
+            break
+        spans.append((i, j + 3))
+        i = text.find("```", j + 3)
+    return spans
+
+
+def _replace_code_fences(text: str, replacement: str, *, unclosed_to_end: bool = False) -> str:
+    spans = _code_fence_spans(text, unclosed_to_end=unclosed_to_end)
+    if not spans:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(text[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def extract_prose_content(text: str) -> str:
     """
     Strips code fences, inline backticks, file paths, and URLs to isolate pure prose text.
@@ -279,7 +307,7 @@ def extract_prose_content(text: str) -> str:
     if not text:
         return ""
     # Strip triple-backtick code blocks
-    cleaned = re.sub(r"```[\s\S]*?(?:```|\Z)", " ", text)
+    cleaned = _replace_code_fences(text, " ", unclosed_to_end=True)
     # Strip inline backticks
     cleaned = re.sub(r"`[^`\n]+`", " ", cleaned)
     # Strip URLs
@@ -421,7 +449,7 @@ def _validate_table_rows(text):
 
 
 def _markdown_headers(text):
-    text_no_code = re.sub(r"```[\s\S]*?```", "", text)
+    text_no_code = _replace_code_fences(text, "")
     headers = re.findall(r"^(#{1,6})\s+(.+)$", text_no_code, re.MULTILINE)
     header_levels = [len(header[0]) for header in headers]
     has_skip = any(
@@ -439,7 +467,7 @@ def _markdown_metrics(text, headers):
     header_words = sum(len(re.findall(_WORD_TOKEN_RE, header[1])) for header in headers)
     list_items = re.findall(r"^[^\S\n]*(?:[\-\*\+]|\d+\.)\s+(.+)$", text, re.MULTILINE)
     list_item_words = sum(len(re.findall(_WORD_TOKEN_RE, item)) for item in list_items)
-    code_blocks = re.findall(r"```[\s\S]*?```", text)
+    code_blocks = [text[start:end] for start, end in _code_fence_spans(text)]
     code_block_words = sum(len(re.findall(_WORD_TOKEN_RE, block)) for block in code_blocks)
     msdi = (
         (header_words + list_item_words + code_block_words) / total_words
