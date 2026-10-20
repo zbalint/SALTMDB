@@ -11,7 +11,7 @@ def cmd_bootstrap_digest(args):
 
     db_path = args.db_path or get_db_path()
     if not os.path.exists(db_path):
-        return 0  # nothing to report yet, not an error
+        return  # nothing to report yet, not an error
 
     # Core-memory bootstrap governance (see core_governance_service.py, the sole owner of digest
     # rendering): a single daemon call returns the already-rendered, already-fail-closed-checked
@@ -23,10 +23,9 @@ def cmd_bootstrap_digest(args):
         digest = daemon_client.call(db_path, "get_core_bootstrap_digest", {})
     except Exception as e:
         print(f"# Warning: Failed to fetch core-memory bootstrap digest: {e}", file=sys.stderr)
-        return 0
+        return
 
     print(digest if isinstance(digest, str) else "<saltmdb-digest>\n\n</saltmdb-digest>")
-    return 0
 
 
 def cmd_session_digest(args):
@@ -37,7 +36,7 @@ def cmd_session_digest(args):
 
     db_path = args.db_path or get_db_path()
     if not os.path.exists(db_path):
-        return 0
+        return
 
     cwd = os.path.realpath(os.getcwd())
     env_budget = get_handover_max_chars()
@@ -66,14 +65,13 @@ def cmd_session_digest(args):
         digest = daemon_client.call(db_path, "get_last_session_digest", params)
     except Exception as e:
         print(f"# Warning: Failed to fetch last-session digest: {e}", file=sys.stderr)
-        return 0
+        return
 
     print(
         digest
         if isinstance(digest, str)
         else "<saltmdb-last-session-digest>\n\n</saltmdb-last-session-digest>"
     )
-    return 0
 
 
 def cmd_related_memories(args):
@@ -82,7 +80,7 @@ def cmd_related_memories(args):
 
     db_path = args.db_path or get_db_path()
     if not os.path.exists(db_path):
-        return 0
+        return
 
     text = sys.stdin.read(100000)
     raw_agent_id = os.environ.get("SALTMDB_AGENT_ID", "").strip()
@@ -118,19 +116,18 @@ def cmd_related_memories(args):
 
     if "error" in outcome:
         print(f"# SALTMDB related-memories error: {outcome['error']}", file=sys.stderr)
-        return 0
+        return
     results = outcome.get("result")
     if not isinstance(results, list):
         results = []
     if args.json:
         print(json.dumps(results))
-        return 0
+        return
     for row in results:
         if not isinstance(row, dict):
             continue
         title = str(row.get("title", "")).replace("\t", " ").replace("\n", " ").replace("\r", " ")
         print(f"{row.get('id', '')}\t{title[:150]}")
-    return 0
 
 
 def cmd_create_snapshot(args):
@@ -504,12 +501,11 @@ def cmd_corpus_health(args):
     db_path = args.db_path or get_db_path()
     if not os.path.exists(db_path):
         print("# No database found yet -- nothing to report.", file=sys.stderr)
-        return 0
+        return
 
     with managed_connection(db_path=db_path) as conn:
         report = _corpus_health_data(conn, days=args.days, telemetry_limit=args.telemetry_limit)
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
 
 
 def _print_daemon_result(result):

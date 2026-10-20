@@ -38,8 +38,27 @@ class TestBootstrapDigestCli(unittest.TestCase):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = cmd_bootstrap_digest(_Args(db_path=missing_path))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertEqual(buf.getvalue(), "")
+
+    def test_main_missing_db_exits_zero_without_calling_daemon(self):
+        from saltmdb.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.db")
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch("sys.argv", ["saltmdb-cli", "--db-path", missing, "bootstrap-digest"]),
+                patch("saltmdb.daemon.client.call") as call,
+                redirect_stdout(out),
+                redirect_stderr(err),
+            ):
+                with self.assertRaises(SystemExit) as exit_info:
+                    main()
+            self.assertEqual(exit_info.exception.code, 0)
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(err.getvalue(), "")
+            call.assert_not_called()
 
     def test_prints_daemon_digest_verbatim(self):
         with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
@@ -48,7 +67,7 @@ class TestBootstrapDigestCli(unittest.TestCase):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = cmd_bootstrap_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn(fake_digest, buf.getvalue())
             mock_call.assert_called_once_with(tmp.name, "get_core_bootstrap_digest", {})
 
@@ -61,7 +80,7 @@ class TestBootstrapDigestCli(unittest.TestCase):
 
                 with redirect_stdout(buf), redirect_stderr(err):
                     rc = cmd_bootstrap_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn("Warning", err.getvalue())
 
     def test_non_string_daemon_response_falls_back_to_empty_digest(self):
@@ -70,7 +89,7 @@ class TestBootstrapDigestCli(unittest.TestCase):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = cmd_bootstrap_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn("<saltmdb-digest>", buf.getvalue())
 
 
@@ -85,8 +104,27 @@ class TestSessionDigestCli(unittest.TestCase):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = cmd_session_digest(_Args(db_path=missing_path))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertEqual(buf.getvalue(), "")
+
+    def test_main_missing_db_exits_zero_without_calling_daemon(self):
+        from saltmdb.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.db")
+            out, err = io.StringIO(), io.StringIO()
+            with (
+                patch("sys.argv", ["saltmdb-cli", "--db-path", missing, "session-digest"]),
+                patch("saltmdb.daemon.client.call") as call,
+                redirect_stdout(out),
+                redirect_stderr(err),
+            ):
+                with self.assertRaises(SystemExit) as exit_info:
+                    main()
+            self.assertEqual(exit_info.exception.code, 0)
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(err.getvalue(), "")
+            call.assert_not_called()
 
     def test_prints_daemon_digest_verbatim_and_passes_cwd(self):
         with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
@@ -95,7 +133,7 @@ class TestSessionDigestCli(unittest.TestCase):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = cmd_session_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn(fake_digest, buf.getvalue())
             mock_call.assert_called_once_with(
                 tmp.name,
@@ -110,7 +148,7 @@ class TestSessionDigestCli(unittest.TestCase):
                 err = io.StringIO()
                 with redirect_stdout(buf), redirect_stderr(err):
                     rc = cmd_session_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn("Warning", err.getvalue())
 
     def test_non_string_daemon_response_falls_back_to_empty_digest(self):
@@ -119,7 +157,7 @@ class TestSessionDigestCli(unittest.TestCase):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = cmd_session_digest(_Args(db_path=tmp.name))
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             self.assertIn("<saltmdb-last-session-digest>", buf.getvalue())
 
     def test_max_chars_and_before_are_forwarded_normalized(self):
@@ -130,7 +168,7 @@ class TestSessionDigestCli(unittest.TestCase):
                 patch("saltmdb.daemon.client.call", return_value="<digest>") as mock_call,
             ):
                 rc = cmd_session_digest(args)
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(
             mock_call.call_args.args[2],
             {
@@ -150,7 +188,7 @@ class TestSessionDigestCli(unittest.TestCase):
                 redirect_stderr(err),
             ):
                 rc = cmd_session_digest(args)
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertIn("Ignoring invalid --before", err.getvalue())
         self.assertNotIn("before", mock_call.call_args.args[2])
 
@@ -319,12 +357,29 @@ class TestCorpusHealthCli(unittest.TestCase):
         buf, err = io.StringIO(), io.StringIO()
         with redirect_stdout(buf), redirect_stderr(err):
             rc = cmd_corpus_health(_CorpusHealthArgs(db_path=missing))
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(buf.getvalue(), "")
+
+    def test_main_missing_db_exits_zero_without_calling_daemon(self):
+        from saltmdb.cli import main
+
+        missing = os.path.join(self.temp_dir, "missing.db")
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            patch("sys.argv", ["saltmdb-cli", "--db-path", missing, "corpus-health"]),
+            patch("saltmdb.daemon.client.call") as call,
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            with self.assertRaises(SystemExit) as exit_info:
+                main()
+        self.assertEqual(exit_info.exception.code, 0)
+        self.assertEqual(out.getvalue(), "")
+        call.assert_not_called()
 
     def test_empty_db_reports_all_zeros(self):
         rc, report = self._run()
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(report["entities"]["total"], 0)
         self.assertEqual(report["flagged_stale"]["count"], 0)
         self.assertEqual(report["orphaned_memories"]["total_orphans"], 0)
@@ -379,7 +434,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.conn.commit()
 
         rc, report = self._run()
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(report["flagged_stale"]["count"], 1)
 
     def test_core_count_excludes_archived_former_cores(self):
@@ -397,7 +452,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.conn.commit()
 
         rc, report = self._run()
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(report["entities"]["core"], 1)
 
     def test_reports_orphans_overdue_cores_and_predicate_drift(self):
@@ -416,7 +471,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.conn.commit()
 
         rc, report = self._run()
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(report["entities"]["raw"], 4)
         self.assertEqual(report["entities"]["core"], 1)
 
@@ -445,7 +500,7 @@ class TestCorpusHealthCli(unittest.TestCase):
                 _CorpusHealthArgs(db_path=self.db_path, days=7, telemetry_limit=2)
             )
         report = json.loads(buf.getvalue())
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(report["telemetry"]["total_calls"], 3)
         self.assertEqual(len(report["telemetry"]["top_error_codes"]), 2)
 
@@ -469,7 +524,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=0))
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         self.assertEqual(
             json.loads(buf.getvalue())["corrections"],
             {
@@ -494,7 +549,7 @@ class TestCorpusHealthCli(unittest.TestCase):
 
         with self.subTest(corpus="empty"):
             rc, report = self._run()
-            self.assertEqual(rc, 0)
+            self.assertIsNone(rc)
             corrections = report["corrections"]
             self.assertEqual(corrections["total"], 0)
             self.assertEqual(corrections["memories_created"], 0)
@@ -557,7 +612,7 @@ class TestCorpusHealthCli(unittest.TestCase):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=days))
-                self.assertEqual(rc, 0)
+                self.assertIsNone(rc)
                 corrections = json.loads(buf.getvalue())["corrections"]
                 self.assertEqual(corrections["window_days"], days)
                 self.assertEqual(
@@ -623,7 +678,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         self.conn.commit()
 
         rc, report = self._run()
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         corrections = report["corrections"]
         self.assertEqual(corrections["total"], 0)
         self.assertEqual(corrections["unparsed_rows"], 2)
@@ -652,7 +707,7 @@ class TestCorpusHealthCli(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = cmd_corpus_health(_CorpusHealthArgs(db_path=self.db_path, days=0))
-        self.assertEqual(rc, 0)
+        self.assertIsNone(rc)
         freshness = json.loads(buf.getvalue())["freshness"]
         self.assertEqual(freshness["window_days"], 30)
         self.assertEqual(freshness["active"], 3)
