@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from saltmdb.db.schema import init_db
+from saltmdb.domain.services.memory_service import Provenance
 from saltmdb.domain.services.memory_service import lifecycle
 
 
@@ -118,8 +119,7 @@ def test_inheritance_and_explicit_overrides_preserve_field_order(replacement_db)
         replacement_db,
         first["new_id"],
         tags=["#explicit"],
-        agent_id="new-owner",
-        context_id="new-context",
+        provenance=Provenance(agent_id="new-owner", context_id="new-context"),
         scope="shared",
         memory_type="fact",
         metadata={"source": "new"},
@@ -360,7 +360,11 @@ def test_successor_lifecycle_columns_and_quality_are_pinned(replacement_db):
             return_value=None,
         ),
     ):
-        result = replace(replacement_db, old_id, agent_session_id="session-123")
+        result = replace(
+            replacement_db,
+            old_id,
+            provenance=Provenance(agent_session_id="session-123"),
+        )
     assert result["status"] == "ok"
     new_id = result["data"]["new_id"]
     new_row = replacement_db.execute(

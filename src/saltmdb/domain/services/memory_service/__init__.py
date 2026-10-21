@@ -27,7 +27,13 @@ external blast radius (including private-name and mock.patch dotted-path reach-i
 is categorically larger.
 """
 
-from ._shared import logger, _embed_pool, _search_pool, RETRIEVAL_TEXT_UNSET
+from ._shared import (
+    logger,
+    _embed_pool,
+    _search_pool,
+    RETRIEVAL_TEXT_UNSET,
+    Provenance,
+)
 from .validation import (
     normalize_retrieval_text,
     get_last_search_diagnostics,
@@ -100,6 +106,7 @@ __all__ = [
     "_embed_pool",
     "_search_pool",
     "RETRIEVAL_TEXT_UNSET",
+    "Provenance",
     "normalize_retrieval_text",
     "get_last_search_diagnostics",
     "validate_memory_input",

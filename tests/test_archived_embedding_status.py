@@ -2,7 +2,12 @@ import unittest
 import tempfile
 import os
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import archive_memory, revise_memory, store_memory
+from saltmdb.domain.services.memory_service import (
+    Provenance,
+    archive_memory,
+    revise_memory,
+    store_memory,
+)
 
 
 class TestArchivedEmbeddingStatus(unittest.TestCase):
@@ -97,7 +102,7 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
             tags=["#updated"],
             reason="Correct the representation.",
             entity_id=entity_id,
-            agent_id="test_user",
+            provenance=Provenance(agent_id="test_user"),
             db_path=self.db_path,
         )
         self.assertEqual(result["status"], "ok")

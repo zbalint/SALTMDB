@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
+from saltmdb.domain.services.memory_service import Provenance
 from saltmdb.domain.services.memory_service.lifecycle import revise_memory, supersede_memory
 from saltmdb.daemon import dispatch, protocol
 from saltmdb.mcp import tools
@@ -150,11 +151,9 @@ class TestPhase4McpSurface(unittest.TestCase):
             content="content",
             tags=["#api"],
             reason="representation repair",
-            agent_id=None,
-            context_id=None,
+            provenance=Provenance(agent_id=None, context_id=None, agent_session_id=None),
             scope=None,
             memory_type=None,
-            agent_session_id=None,
             repoint_relations=False,
         )
 

@@ -21,6 +21,15 @@ regardless of which submodule under this package a given log call physically liv
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    agent_id: str | None = None
+    context_id: str | None = None
+    agent_session_id: str | None = None
+
 
 logger = logging.getLogger("saltmdb.domain.services.memory_service")
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")

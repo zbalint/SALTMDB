@@ -28,6 +28,7 @@ from saltmdb.domain.services import (
     telemetry_service,
     trace_service,
 )
+from saltmdb.domain.services.memory_service import Provenance
 from typing import Any, Literal
 
 from saltmdb.utils import error_codes
@@ -432,11 +433,13 @@ def _dispatch_replacement(**kw):
         content=kw["content"],
         tags=tags,
         reason=kw["reason"],
-        agent_id=kw.get("agent_id"),
-        context_id=kw.get("context_id"),
+        provenance=Provenance(
+            agent_id=kw.get("agent_id"),
+            context_id=kw.get("context_id"),
+            agent_session_id=kw.get("agent_session_id"),
+        ),
         scope=kw.get("scope"),
         memory_type=kw.get("memory_type"),
-        agent_session_id=kw.get("agent_session_id"),
         repoint_relations=bool(kw.get("repoint_relations", False)),
     )
 

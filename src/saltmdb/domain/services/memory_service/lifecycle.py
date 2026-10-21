@@ -32,7 +32,7 @@ from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.text import compute_content_hash
 
-from ._shared import logger
+from ._shared import Provenance, logger
 
 
 _MEMORY_TYPES = ("fact", "event", "procedure", "decision", "preference")
@@ -849,19 +849,19 @@ def revise_memory(
     tags: list = None,
     content: str = None,
     reason: str = None,
-    agent_id: str = None,
-    context_id: str = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    agent_session_id: str | None = None,
     metadata: dict = None,
     repoint_relations: bool = False,
     db_connection=None,
     db_path: str = None,
     _in_transaction: bool = False,
+    *,
+    provenance: Provenance | None = None,
 ) -> dict:
     """Create a corrected representation with ``new --revises--> old`` lineage.
 
+    ``provenance`` groups the optional writer, context, and session attribution values.
     See ``_replacement_operation`` for ``repoint_relations``.
     """
     return _replacement_operation(
@@ -872,11 +872,11 @@ def revise_memory(
             tags=tags,
             content=content,
             reason=reason,
-            agent_id=agent_id,
-            context_id=context_id,
+            agent_id=provenance.agent_id if provenance else None,
+            context_id=provenance.context_id if provenance else None,
             scope=scope,
             memory_type=memory_type,
-            agent_session_id=agent_session_id,
+            agent_session_id=provenance.agent_session_id if provenance else None,
             metadata=metadata,
             repoint_relations=repoint_relations,
             db_connection=db_connection,
@@ -892,18 +892,18 @@ def supersede_memory(
     tags: list = None,
     content: str = None,
     reason: str = None,
-    agent_id: str = None,
-    context_id: str = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    agent_session_id: str | None = None,
     metadata: dict = None,
     repoint_relations: bool = False,
     db_connection=None,
     db_path: str = None,
+    *,
+    provenance: Provenance | None = None,
 ) -> dict:
     """Create newer knowledge with ``new --supersedes--> old`` lineage.
 
+    ``provenance`` groups the optional writer, context, and session attribution values.
     See ``_replacement_operation`` for ``repoint_relations``.
     """
     return _replacement_operation(
@@ -914,11 +914,11 @@ def supersede_memory(
             tags=tags,
             content=content,
             reason=reason,
-            agent_id=agent_id,
-            context_id=context_id,
+            agent_id=provenance.agent_id if provenance else None,
+            context_id=provenance.context_id if provenance else None,
             scope=scope,
             memory_type=memory_type,
-            agent_session_id=agent_session_id,
+            agent_session_id=provenance.agent_session_id if provenance else None,
             metadata=metadata,
             repoint_relations=repoint_relations,
             db_connection=db_connection,
