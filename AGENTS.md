@@ -13,7 +13,10 @@ Run before calling a change done; it must exit 0:
 ```
 
 - Use the repo `.venv` (`uv sync --extra dev`), never the system Python.
-- Before pushing, also run `scripts/prepush-fast.sh` (needs `gitleaks`, `actionlint` and `zizmor` on PATH); CI runs the same script in its `hygiene` job. A CI run cancelled because a newer push replaced it is not a failure; read the latest run for the pushed commit.
+- Before pushing, also run `scripts/prepush-fast.sh` (needs `gitleaks`, `actionlint`, `zizmor` and
+  `semgrep` on PATH); CI runs the same script in its `hygiene` job. Custom Semgrep rules live in
+  `.semgrep/rules/`; fix a hit, never silence it. A CI run cancelled because a newer push
+  replaced it is not a failure; read the latest run for the pushed commit.
 - `scripts/prepush-sonar.sh` runs the slow full suite under coverage and uploads an optional SonarQube scan; it needs `SONAR_TOKEN` and `sonar-scanner`, and is optional for now.
 - Other processes may run test suites on the same host. Do not start parallel full runs.
 

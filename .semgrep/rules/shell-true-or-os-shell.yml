@@ -1,0 +1,12 @@
+rules:
+  - id: shell-true-or-os-shell
+    languages: [python]
+    severity: ERROR
+    message: Use subprocess argument lists with shell=False; do not invoke a shell through subprocess, os, or asyncio.
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+      - pattern: asyncio.create_subprocess_shell(...)
+    metadata:
+      invariant: Subprocesses use argument lists and never shell execution.

@@ -98,7 +98,7 @@ jobs:
         run: uv run --no-sync deptry src
 
   # The same fast checks as scripts/prepush-fast.sh: secrets in history, workflow lint, workflow
-  # audit. Versions are pinned; bump them on purpose.
+  # audit, and repository-local Semgrep invariants. Versions are pinned; bump them on purpose.
   hygiene:
     permissions:
       contents: read
@@ -108,6 +108,7 @@ jobs:
       GITLEAKS_VERSION: 8.30.1
       ACTIONLINT_VERSION: 1.7.12
       ZIZMOR_VERSION: 1.30.1
+      SEMGREP_VERSION: 1.181.0
 
     steps:
       - name: Check out repository
@@ -135,6 +136,14 @@ jobs:
 
       - name: Install zizmor
         run: pipx install "zizmor==${ZIZMOR_VERSION}"
+
+      - name: Install semgrep
+        env:
+          SEMGREP_ENABLE_VERSION_CHECK: "0"
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          # pipx pins semgrep but not its transitive dependencies, as with zizmor.
+          pipx install "semgrep==${SEMGREP_VERSION}"
 
       - name: Fast hygiene checks
         run: scripts/prepush-fast.sh

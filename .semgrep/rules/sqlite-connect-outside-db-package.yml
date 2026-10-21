@@ -1,0 +1,19 @@
+rules:
+  - id: sqlite-connect-outside-db-package
+    languages: [python]
+    severity: ERROR
+    message: SQLite connections belong only in src/saltmdb/db; move this connection into the database package.
+    pattern-either:
+      - pattern: sqlite3.connect(...)
+      - patterns:
+          - pattern: connect(...)
+          - pattern-inside: |
+              from sqlite3 import connect
+              ...
+      - patterns:
+          - pattern: $CALL(...)
+          - pattern-inside: |
+              from sqlite3 import connect as $CALL
+              ...
+    metadata:
+      invariant: SQLite connections are opened only by src/saltmdb/db/.

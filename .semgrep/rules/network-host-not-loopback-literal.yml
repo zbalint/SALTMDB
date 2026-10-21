@@ -1,0 +1,20 @@
+rules:
+  - id: network-host-not-loopback-literal
+    languages: [python]
+    severity: ERROR
+    message: Keep daemon and viewer network hosts on the literal 127.0.0.1; review any variable or other host before changing it.
+    pattern-either:
+      - patterns:
+          - pattern: socket.create_connection(($HOST, ...), ...)
+          - pattern-not: socket.create_connection(("127.0.0.1", ...), ...)
+      - patterns:
+          - pattern: $SOCKET.bind(($HOST, ...), ...)
+          - pattern-not: $SOCKET.bind(("127.0.0.1", ...), ...)
+      - patterns:
+          - pattern: $CLS(($HOST, $PORT), ...)
+          - metavariable-regex:
+              metavariable: $CLS
+              regex: '.*Server$'
+          - pattern-not: $CLS(("127.0.0.1", $PORT), ...)
+    metadata:
+      invariant: Daemon and viewer sockets bind and connect on loopback only.

@@ -1,0 +1,15 @@
+rules:
+  - id: viewer-wfile-write-outside-send-helpers
+    languages: [python]
+    severity: ERROR
+    message: Write response bytes through a send_ helper so security headers are applied; direct wfile writes outside send_ functions are not allowed. Module-level and lambda writes are a known blind spot because this rule only matches def bodies.
+    patterns:
+      - pattern: $S.wfile.write(...)
+      - pattern-inside: |
+          def $F(...):
+            ...
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^(?!send_)
+    metadata:
+      invariant: Viewer response bytes leave through helpers that set security headers.

@@ -152,7 +152,11 @@ Or install the git hook once via `uv run pre-commit install` to run the same che
 automatically on every commit (`.pre-commit-config.yaml`; the `pip-audit`/`deptry` steps are
 CI-only — network/full-env cost makes them a poor fit for every local commit). CI runs the same
 set in its `lint` job (`.github/workflows/python-tests.yml`) alongside the `test` job and a
-`hygiene` job (`scripts/prepush-fast.sh`: gitleaks, actionlint, zizmor).
+`hygiene` job (`scripts/prepush-fast.sh`: gitleaks, actionlint, zizmor, semgrep).
+Custom Semgrep rules live in `.semgrep/rules/`; a hit is fixed, never silenced. Do not add
+`# nosemgrep` or a rule exclusion without the owner's approval (same policy as `# nosec` and
+`# NOSONAR`). To add an invariant, add one rule file, its `.semgrep/tests/<rule>.py` fixtures,
+and one scope row in `scripts/prepush-fast.sh`.
 The `.github/dependabot.yml` file configures weekly Dependabot updates for GitHub Actions and
 locked Python dependencies targeting `develop`; Dependabot reads it only from the default branch,
 so it is inactive until the file is on `master`, and each update runs through the same CI jobs.

@@ -1,0 +1,13 @@
+rules:
+  - id: no-outbound-http-client
+    languages: [python]
+    severity: ERROR
+    message: SALTMDB is local-first; do not add outbound HTTP clients or calls from product code or hooks.
+    pattern-either:
+      - pattern: urllib.request.urlopen(...)
+      - pattern: http.client.HTTPConnection(...)
+      - pattern: http.client.HTTPSConnection(...)
+      - pattern: requests.$FUNC(...)
+      - pattern: httpx.$FUNC(...)
+    metadata:
+      invariant: Product and hooks make no outbound HTTP calls.
