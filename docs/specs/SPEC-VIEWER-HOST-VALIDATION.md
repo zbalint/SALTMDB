@@ -8,7 +8,7 @@ LOCKED 2026-10-21 (consultant review folded in).
 - Baseline: `develop` at `c332b73` or later; `./verify` exits 0 (known flaky: `tests/test_daemon_server_main.py`, `tests/test_adapter_signal_shutdown.py`, a temp-dir cleanup race in `tests/test_relation_service.py`; rerun a failing one alone once).
 - Location and branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`.
 - Test seams: a real `SALTMDBTCPServer(("127.0.0.1", 0), SALTMDBHandler)` served in a thread, driven with `http.client.HTTPConnection` and raw sockets (see `tests/test_viewer_server.py` line 37 for the construction; copy the idiom, do not import from it). Accepted requests use `/static/viewer.css` (no database needed); rejected requests may use `/api/...` paths because they must never reach a route.
-- Scope (may edit): `src/saltmdb/viewer/routes/base.py` (one new method and one constant), the NEW file `tests/test_viewer_host_validation.py`, `docs/architecture.md` (one sentence in the viewer section), `SECURITY.md` only if it already lists viewer protections (one clause).
+- Scope (may edit): `src/saltmdb/viewer/routes/base.py` (three new methods, `_host_allowed`, `parse_request` and `handle_expect_100`, and the module constants D3 needs), the NEW file `tests/test_viewer_host_validation.py`, `docs/architecture.md` (one sentence in the viewer section). `SECURITY.md` is NOT in scope.
 - Does not touch: any existing test, the route dispatchers, `send_json`, `send_html`, the CORS code, the CSP, the daemon, the static files.
 - Hand-off rule: the developer leaves the diff uncommitted, unstaged and unmerged for review.
 
@@ -29,7 +29,7 @@ The viewer binds `127.0.0.1` on a fixed port and serves memory content under `/a
 
 | File | Change |
 |---|---|
-| `src/saltmdb/viewer/routes/base.py` | add the allowed-hostnames constant, a private `_host_allowed()` and `parse_request` per D1 and D2 |
+| `src/saltmdb/viewer/routes/base.py` | add the allowed-hostnames constant (and a constant for the 421 phrase), a private `_host_allowed()`, `parse_request` and `handle_expect_100` per D1 and D2 |
 | `tests/test_viewer_host_validation.py` | new (section 4) |
 | `docs/architecture.md` | one sentence: the viewer rejects requests whose Host is not loopback plus its own port (DNS-rebinding defence) |
 
@@ -68,3 +68,5 @@ Breakage to document (architecture sentence): an SSH or reverse tunnel that chan
 (Mutation sample also includes: parse the port with `int()`; accept a missing Host; first-value-only `headers.get`; lowercase the whole value; skip `handle_expect_100`.)
 
 1. `./verify` exits 0. 2. `git status` lists only the files of section 3 (new test untracked). 3. The curl evidence of section 6. 4. Mutation sample on a scratch copy (tester names the killers): drop the port comparison; accept a missing Host; remove the lowercase; validate in only `do_GET`; echo the Host in the body. Each fails a test of the new file. 5. Architect after CI: Sonar gate stays OK and no new issue.
+
+Amendment 1 (2026-10-21, developer BLOCKED m_2758, verified by the architect): section 0 allowed one method but D1 and D2 require three (`_host_allowed`, `parse_request`, `handle_expect_100`); section 0 and section 3 now name all three, and `SECURITY.md` is removed from the scope (section 8 lists only the section 3 files).
