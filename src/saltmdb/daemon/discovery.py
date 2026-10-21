@@ -26,6 +26,7 @@ _SERVICE_PORT = "service_port"
 _AUTH_FIELD = "auth_token"
 _DAEMON_PID = "daemon_pid"
 _DB_PATH = "db_path"
+_STARTED_AT = "started_at"
 _ownership_warnings: set[str] = set()
 
 
@@ -123,6 +124,24 @@ def _owned_file(file: Any, path: str) -> bool:
     return False
 
 
+def _typed_record(data: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        _SERVICE_PORT: int(data[_SERVICE_PORT]),
+        _AUTH_FIELD: str(data[_AUTH_FIELD]),
+    }
+    if _DAEMON_PID in data:
+        record[_DAEMON_PID] = int(data[_DAEMON_PID])
+    if _DB_PATH in data:
+        record[_DB_PATH] = str(data[_DB_PATH])
+    started_at = data.get(_STARTED_AT)
+    if isinstance(started_at, str):
+        try:
+            record[_STARTED_AT] = datetime.fromisoformat(started_at).isoformat()
+        except (TypeError, ValueError):
+            return record
+    return record
+
+
 def read(key: str) -> dict[str, Any] | None:
     """Best-effort read of the discovery file. Returns None if missing, unreadable, or malformed
     -- callers treat that identically to "no daemon known yet", never as an error."""
@@ -132,7 +151,7 @@ def read(key: str) -> dict[str, Any] | None:
             if not _owned_file(f, path):
                 return None
             data = json.load(f)
-        return data if _valid(data) else None
+        return _typed_record(data) if _valid(data) else None
     except (OSError, ValueError):
         return None
 
