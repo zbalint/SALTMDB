@@ -468,10 +468,11 @@ def resolve_cli() -> str | None:
     return str(legacy) if legacy.is_file() else None
 
 
-def run_quiet(cmd: list[str], timeout_secs: int) -> bool:
+def run_quiet(cmd: list[str], timeout_secs: int, input_text: str | None = None) -> bool:
     try:
         proc = subprocess.run(
             cmd,
+            input=input_text.encode("utf-8") if input_text is not None else None,
             capture_output=True,
             timeout=timeout_secs,
             check=False,

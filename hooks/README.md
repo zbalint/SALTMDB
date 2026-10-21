@@ -24,8 +24,9 @@ Every `saltmdb-*.py` script below has an identical body regardless of which harn
 - **Not every harness supports every lifecycle event, and that's fine.** `PreCompact` is
   registered natively only in the Claude Code example; Codex's example has no `PreCompact` entry,
   and the Antigravity/Copilot examples have no such event. The standalone
-  `saltmdb-pre-compact-sweep.py` is a manual/cron fallback that shells out to `codex exec` or
-  `claude -p`.
+  `saltmdb-pre-compact-sweep.py` is a command entry a harness may invoke as a PreCompact hook:
+  it supplies the bounded transcript tail on stdin to `codex exec` or `claude -p`; manual/cron
+  runs have no hook stdin or `transcript_path` and do nothing.
 - **Prefer structured `PostToolUse` data over transcript-text scanning when a check can be
   expressed that way.** `tool_name`/`tool_input` arrive as parsed JSON on `PostToolUse`
   regardless of harness, so tracking "did X happen" via a small per-session state file set/cleared
@@ -197,7 +198,7 @@ every body is fully shared).
 | [`saltmdb-stop-retrieval-outcome-gate.py`](saltmdb-stop-retrieval-outcome-gate.py) | `Stop` / `agentStop` | Telemetry enforcement: if `search_memory` was called this turn (per the pending flag above), requires a `log_event(event_type="retrieval_outcome", ...)` call before the turn closes; nudges once, then lets it go rather than block forever. See the `saltmdb-usage` skill for the logging convention. |
 | [`saltmdb-stop-related-memories.py`](saltmdb-stop-related-memories.py) | `Stop` (Claude Code; Codex experimental) | Experimental and off by default: lists up to three related memories the agent has not seen after it answers, through `saltmdb-cli related-memories`. See "Answer-side related memories". |
 | [`saltmdb-session-end-wrapup-reminder.py`](saltmdb-session-end-wrapup-reminder.py) | `SessionEnd` | One-shot reminder, at true session close (not every turn), to check `get_events` for anything durable that only exists in the ephemeral event ledger. |
-| [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code native; standalone/manual fallback for Codex and harnesses without a native agent hook; absent from Antigravity/Copilot examples) | Standalone version of the pre-compaction sweep. Claude Code's native `"type": "agent"` PreCompact hook (see `claude-settings-example.json`) is the best mechanism where available; this script is the fallback for manual/cron invocation or harnesses without a native agent-type hook — it shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first) since a bare script has no MCP tool context of its own. |
+| [`saltmdb-pre-compact-sweep.py`](saltmdb-pre-compact-sweep.py) | `PreCompact` (Claude Code native; absent from Codex, Antigravity and Copilot examples) | Command entry a harness may invoke as a PreCompact hook. It reads the transcript named in the hook payload through the validated reader, supplies a bounded tail on stdin, and shells out to `codex exec` or `claude -p` (tried in that order; set `SALTMDB_HOOK_PREFERRED_AGENT=claude` to try `claude -p` first). Manual/cron runs have no hook stdin or `transcript_path` and do nothing. |
 | [`saltmdb-skill-review-sweep.py`](saltmdb-skill-review-sweep.py) | Manual / cron only (no lifecycle event) | Mining and diagnosis sweep for skill/hook improvements. Shells out to `claude -p` or `codex exec` to perform a 5-step telemetry review (mine, diagnose, pair-check, propose, gate). Never auto-applies file edits; outputs proposals as gated memories for human review. |
 | [`saltmdb-checkable-fact-drift-sweep.py`](saltmdb-checkable-fact-drift-sweep.py) | Manual / cron only (no lifecycle event) | Periodic sweep verifying checkable fact memories against live repository source code to flag stale citations. Never auto-corrects or edits content; flags surface via `search_memory`'s `drift_flag` field. |
 
