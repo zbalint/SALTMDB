@@ -3799,7 +3799,8 @@ class TestStoreRelationBoundaries(unittest.TestCase):
     module = "saltmdb.domain.services.relation_service."
 
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: a SQLite sidecar file can appear while the directory is removed
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.temp_dir.cleanup)
         self.db_path = os.path.join(self.temp_dir.name, "test.db")
         self.conn = init_db(self.db_path)
