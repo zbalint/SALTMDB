@@ -26,6 +26,9 @@ else:
     ViewerHandlerProtocol = object
 
 logger = logging.getLogger(__name__)
+_ALLOWED_HOSTNAMES = ("localhost", "127.0.0.1", "[::1]")
+_MISDIRECTED_STATUS = 421
+_MISDIRECTED_MESSAGE = "Misdirected Request"
 _ENTITIES_API_PREFIX = "/api/entities/"
 
 
@@ -35,6 +38,50 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
     def log_message(self, format, *args):
         # Access logging is intentionally disabled; Viewer requests may contain memory content.
         pass
+
+    def _host_allowed(self) -> bool:
+        headers = getattr(self, "headers", None)
+        host_values = headers.get_all("Host") if headers else None
+        if (
+            not isinstance(host_values, list)
+            or len(host_values) != 1
+            or not isinstance(host_values[0], str)
+        ):
+            return False
+        value = host_values[0].strip(" \t")
+        address = getattr(getattr(self, "server", None), "server_address", None)
+        if not isinstance(address, tuple) or len(address) < 2:
+            return False
+        if value.startswith("["):
+            closing_bracket = value.find("]")
+            if closing_bracket < 0:
+                return False
+            host = value[: closing_bracket + 1].lower()
+            remainder = value[closing_bracket + 1 :]
+            if not remainder.startswith(":"):
+                return False
+            port_text = remainder[1:]
+        else:
+            separator = value.rfind(":")
+            host = value[:separator].lower()
+            if separator <= 0:
+                return False
+            port_text = value[separator + 1 :]
+        return host in _ALLOWED_HOSTNAMES and port_text == str(address[1])
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if not self._host_allowed():
+            self.send_error(_MISDIRECTED_STATUS, _MISDIRECTED_MESSAGE)
+            return False
+        return True
+
+    def handle_expect_100(self) -> bool:
+        if not self._host_allowed():
+            self.send_error(_MISDIRECTED_STATUS, _MISDIRECTED_MESSAGE)
+            return False
+        return super().handle_expect_100()
 
     def handle_one_request(self):
         try:
