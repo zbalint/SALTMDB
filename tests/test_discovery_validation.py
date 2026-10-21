@@ -88,7 +88,9 @@ def test_read_returns_loaded_dict_identity(record_file, monkeypatch):
 
 
 def test_read_rejects_non_utf8_file(record_file):
-    path = record_file({PORT: 4000, TOKEN: VALID_TOKEN})
+    valid = {PORT: 4000, TOKEN: VALID_TOKEN}
+    path = record_file(valid)
+    assert discovery.read(DISCOVERY_KEY) == valid
     path.write_bytes(b'\xff\xfe\x80{"service_port": 4000}')
     assert discovery.read(DISCOVERY_KEY) is None
 
