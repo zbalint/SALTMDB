@@ -3871,6 +3871,7 @@ class TestStoreRelationBoundaries(unittest.TestCase):
             "status": "ok",
             "data": {"relation_id": relation_id, "message": message},
             "warnings": warnings,
+            "errors": [],
         }
 
     def _edge(self, predicate, target=None, source=None, valid_to=None):

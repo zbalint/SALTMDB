@@ -2,7 +2,7 @@ import sys
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
-from mcp.server.fastmcp import FastMCP
+from saltmdb.mcp.guard import GuardedFastMCP
 from saltmdb.config import get_db_path, get_agent_id, is_trace_capture_enabled
 from saltmdb.daemon import client
 from saltmdb.daemon.client import SessionConnection
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
+async def server_lifespan(_server: GuardedFastMCP) -> AsyncIterator[dict]:
     """FastMCP lifespan context manager. Track B (scratch/plans/track_b_daemon_detailed.md §5/§8,
     5 rounds of Codex review): owns ONLY the SessionConnection's open/close -- a narrower, more
     accurate scope than the pre-Track-B version, which also handled direct DB/viewer-lifecycle
@@ -69,6 +69,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         logger.info("SALTMDB server shutting down.")
 
 
-mcp = FastMCP("SALTMDB", lifespan=server_lifespan)
+mcp = GuardedFastMCP("SALTMDB", lifespan=server_lifespan)
 
 from saltmdb.mcp import tools  # noqa: F401, E402 -- registers @mcp.tool() decorators as a side effect

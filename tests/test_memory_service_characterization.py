@@ -454,7 +454,12 @@ def test_metadata_fallback_shallow_merge_full_row_and_message(db, raw, patch_val
         result = lifecycle.update_memory_metadata(
             "fixed", patch_value, agent_session_id="touched", agent_id="owner", db_connection=db
         )
-    assert result == {"status": "ok", "data": {"id": "fixed", "message": message}, "warnings": []}
+    assert result == {
+        "status": "ok",
+        "data": {"id": "fixed", "message": message},
+        "warnings": [],
+        "errors": [],
+    }
     columns = [column[1] for column in db.execute("PRAGMA table_info(entities)")]
     expected = dict(zip(columns, before))
     current = (
@@ -492,6 +497,7 @@ def test_metadata_owner_gate_even_for_shared_memories(db, owner, scope, caller, 
             "status": "ok",
             "data": {"id": "fixed", "message": "Memory 'fixed' metadata updated (1 key(s): key)."},
             "warnings": [],
+            "errors": [],
         }
     else:
         assert result == {
@@ -682,10 +688,10 @@ def test_memory_assembly_full_fields_visibility_and_snippet(db, parent_json, met
         "content": "Needle body with descriptive information.",
         "lineage": {"ancestors": [], "descendants": []},
     }
-    assert result == {"status": "ok", "data": expected, "warnings": []}
+    assert result == {"status": "ok", "data": expected, "warnings": [], "errors": []}
     expected.pop("content")
     expected["snippet"] = "Needle body with descriptive information."
-    assert inspected == {"status": "ok", "data": expected, "warnings": []}
+    assert inspected == {"status": "ok", "data": expected, "warnings": [], "errors": []}
 
 
 def test_assembly_unknown_id_returns_none(db):

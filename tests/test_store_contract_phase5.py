@@ -41,7 +41,7 @@ class TestStoreContractPhase5(unittest.TestCase):
 
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "IDENTITY_IN_YAML_FRONT_MATTER")
-        corrected = result["corrected_call"]
+        corrected = result["errors"][0]["corrected_call"]
         self.assertEqual(corrected["title"], "[Auth] Explicit title")
         self.assertEqual(corrected["tags"], ["#auth"])
         self.assertFalse(corrected["content"].startswith("---"))
@@ -66,7 +66,7 @@ class TestStoreContractPhase5(unittest.TestCase):
 
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "IDENTITY_IN_YAML_FRONT_MATTER")
-        corrected = result["corrected_call"]
+        corrected = result["errors"][0]["corrected_call"]
         # content_file_path must not survive into the corrected_call alongside the now-resolved
         # content -- pasting both back verbatim would otherwise immediately fail
         # CONTENT_AND_FILE_PATH_BOTH_SET instead of succeeding.

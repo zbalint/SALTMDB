@@ -507,7 +507,7 @@ def merge_tags(
     guidance to call supersede_memory/consolidate_memories once you've confirmed the
     relationship, or manage_relation to link without merging); `title`/`tags` found inside YAML
     front matter in `content` (`IDENTITY_IN_YAML_FRONT_MATTER`, with a ready-to-resubmit
-    `corrected_call`); neither or both of `content`/`content_file_path` supplied
+    `corrected_call` on its error entry); neither or both of `content`/`content_file_path` supplied
     (`MISSING_CONTENT`/`CONTENT_AND_FILE_PATH_BOTH_SET`); an unreadable/non-UTF-8
     `content_file_path` (`CONTENT_FILE_READ_FAILED`).
 
@@ -579,9 +579,9 @@ def store_memory(
                     "IDENTITY_IN_YAML_FRONT_MATTER",
                     "title and tags belong only in tool parameters; remove them from YAML front matter and retry the corrected call.",
                     "content",
+                    corrected_call=corrected_call,
                 )
-            ],
-            corrected_call=corrected_call,
+            ]
         )
     from saltmdb.utils import error_codes
     from saltmdb.utils.envelope import error, rejected
@@ -876,10 +876,16 @@ def _validate_relation_batch(relations_, submitted):
         if can_fully_correct
         else None
     )
-    return rejected(
-        [env_error(e["code"], e["message"], e.get("field")) for e in errors],
-        corrected_call=corrected_call,
-    )
+    entries = [
+        env_error(
+            e["code"],
+            e["message"],
+            e.get("field"),
+            corrected_call=corrected_call if index == 0 else None,
+        )
+        for index, e in enumerate(errors)
+    ]
+    return rejected(entries)
 
 
 def _validate_relation_single(predicate, source_id, target_id, submitted):
@@ -899,8 +905,14 @@ def _validate_relation_single(predicate, source_id, target_id, submitted):
             fixes["target_id"] = source_id
         corrected_call = build_corrected_call(manage_relation, submitted, fixes)
     return rejected(
-        [env_error(error_entry["code"], error_entry["message"], error_entry.get("field"))],
-        corrected_call=corrected_call,
+        [
+            env_error(
+                error_entry["code"],
+                error_entry["message"],
+                error_entry.get("field"),
+                corrected_call=corrected_call,
+            )
+        ]
     )
 
 
@@ -935,8 +947,8 @@ def manage_relation(
     Rejections you may see (either form): `{"status": "rejected", "errors": [{"code":
     "RESERVED_PREDICATE" | "LEGACY_READONLY_PREDICATE" | "NONCANONICAL_PREDICATE" |
     "UNKNOWN_PREDICATE" | "REJECT_LOW_RELATION_SIMILARITY" | "REJECT_CONTRADICTORY_PREDICATE" |
-    "REJECT_CORE_ELABORATES_ON", "message": "...", "field": "..."}], "corrected_call": {...} |
-    None}` -- `corrected_call`, when present, is a ready-to-resubmit call with the fix already
+    "REJECT_CORE_ELABORATES_ON", "message": "...", "field": "...", "corrected_call": {...} |
+    None}` -- `corrected_call`, when present, is attached to the error it corrects and is a ready-to-resubmit call with the fix already
     applied (e.g. the canonical predicate name, source/target swapped if the drift reversed
     direction). `RESERVED_PREDICATE` names the lifecycle tool that actually creates that edge
     (`supersede_memory`/`consolidate_memories`/`revise_memory` for `supersedes`/
@@ -1866,10 +1878,3 @@ def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
             "agent_id": _effective_agent_id(),
         },
     )
-
-
-# Reject misspelled tool arguments instead of silently taking a browse/default path.
-# shortcut: private FastMCP API, replace if the pinned mcp version changes it.
-for _tool in mcp._tool_manager.list_tools():
-    _tool.fn_metadata.arg_model.model_config["extra"] = "forbid"
-    _tool.fn_metadata.arg_model.model_rebuild(force=True)

@@ -1,23 +1,9 @@
-"""Uniform response envelope (agent API redesign plan §4.2).
+"""Uniform success and rejection envelopes for agent-facing APIs.
 
-Wired into all 19 exposed mcp__saltmdb__* tools' return values as of
-SPEC-TOOL-CONTRACT-CONSISTENCY (completing §4.2's original "every tool" intent, which had
-stalled at 5/19 tools). One envelope constructor, never a hand-rolled dict literal per tool.
-
-Shape (§4.2):
-    {
-      "status": "ok" | "rejected",
-      "data": {...},              # tool-specific payload, "ok" only
-      "warnings": [...],          # never blocking, present (possibly empty) on "ok"
-      "errors": [...],            # present only when status == "rejected"
-      "corrected_call": {...},    # present only for mechanically derivable fixes
-      "effective": {...},         # present only when supplied (agent_id/context_id/scope actually used)
-    }
-
-Zero-side-effect guarantee (§4.2): callers constructing a "rejected" envelope must not have
-written anything first -- validation runs before any BEGIN. This module cannot enforce that by
-itself (it has no view of what a caller did before calling it); it is asserted by tests at each
-call site instead (§8.1).
+Successes always contain ``status``, ``data``, ``warnings`` and ``errors``. Rejections
+contain ``status``, ``errors`` and ``warnings`` but never ``data``. Structured
+``corrected_call`` hints live on the error they correct; alternatives use
+``corrected_calls`` instead.
 """
 
 from typing import Any, Literal
@@ -26,20 +12,31 @@ Status = Literal["ok", "rejected"]
 
 
 def warning(code: str, message: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Builds one entry for the envelope's `warnings` list. Never blocking by construction --
-    a warning is informational only and must never be the sole reason a call is rejected."""
+    """Build one non-blocking warning entry."""
     item: dict[str, Any] = {"code": code, "message": message}
     if detail is not None:
         item["detail"] = detail
     return item
 
 
-def error(code: str, message: str, field: str | None = None) -> dict[str, Any]:
-    """Builds one entry for the envelope's `errors` list. `field` names the offending
-    parameter when the error is attributable to exactly one (omitted for whole-call errors)."""
+def error(
+    code: str,
+    message: str,
+    field: str | None = None,
+    *,
+    corrected_call: dict[str, Any] | None = None,
+    corrected_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build one rejection entry, optionally carrying one correction or alternatives."""
+    if corrected_call is not None and corrected_calls is not None:
+        raise ValueError("corrected_call and corrected_calls are mutually exclusive")
     item: dict[str, Any] = {"code": code, "message": message}
     if field is not None:
         item["field"] = field
+    if corrected_call is not None:
+        item["corrected_call"] = corrected_call
+    if corrected_calls is not None:
+        item["corrected_calls"] = corrected_calls
     return item
 
 
@@ -47,14 +44,15 @@ def ok(
     data: Any = None,
     *,
     warnings: list[dict[str, Any]] | None = None,
-    corrected_call: dict[str, Any] | None = None,
     effective: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Builds a successful envelope. `warnings` defaults to an empty list (always present, per
-    §4.2's shape), never omitted -- callers should never need to guard for a missing key."""
-    envelope: dict[str, Any] = {"status": "ok", "data": data, "warnings": list(warnings or [])}
-    if corrected_call is not None:
-        envelope["corrected_call"] = corrected_call
+    """Build a successful envelope with an explicit empty errors list."""
+    envelope: dict[str, Any] = {
+        "status": "ok",
+        "data": data,
+        "warnings": list(warnings or []),
+        "errors": [],
+    }
     if effective is not None:
         envelope["effective"] = effective
     return envelope
@@ -64,11 +62,9 @@ def rejected(
     errors: list[dict[str, Any]],
     *,
     warnings: list[dict[str, Any]] | None = None,
-    corrected_call: dict[str, Any] | None = None,
     effective: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Builds a rejected envelope. `errors` must be non-empty -- a rejection with no stated
-    reason gives the caller nothing to act on, so this is enforced rather than left to convention."""
+    """Build a rejection envelope without a ``data`` key."""
     if not errors:
         raise ValueError("rejected() requires at least one error entry")
     envelope: dict[str, Any] = {
@@ -76,8 +72,6 @@ def rejected(
         "errors": list(errors),
         "warnings": list(warnings or []),
     }
-    if corrected_call is not None:
-        envelope["corrected_call"] = corrected_call
     if effective is not None:
         envelope["effective"] = effective
     return envelope

@@ -48,6 +48,7 @@ def success(*, tags=None, scope="shared", context=None, memory_type="fact", sess
             "duplicate_candidates": [],
         },
         "warnings": [],
+        "errors": [],
         "effective": {
             "agent_id": "writer",
             "context_id": context,

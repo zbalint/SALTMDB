@@ -4,28 +4,37 @@ from saltmdb.utils import envelope
 
 
 class TestEnvelope(unittest.TestCase):
-    """§4.2 uniform response envelope -- shared module only, not yet wired into any tool."""
-
     def test_ok_default_shape(self):
         env = envelope.ok({"id": "abc"})
         self.assertEqual(env["status"], "ok")
         self.assertEqual(env["data"], {"id": "abc"})
         self.assertEqual(env["warnings"], [])
-        self.assertNotIn("errors", env)
+        self.assertEqual(env["errors"], [])
         self.assertNotIn("corrected_call", env)
         self.assertNotIn("effective", env)
 
-    def test_ok_with_warnings_corrected_call_effective(self):
+    def test_ok_with_warnings_and_effective(self):
         w = envelope.warning("TAG_NEAR_MISS", "did you mean #docs?", detail={"tag": "#doc"})
         env = envelope.ok(
             {"id": "abc"},
             warnings=[w],
-            corrected_call={"title": "T"},
             effective={"agent_id": "claude", "scope": "shared"},
         )
         self.assertEqual(env["warnings"], [w])
-        self.assertEqual(env["corrected_call"], {"title": "T"})
+        self.assertEqual(env["errors"], [])
         self.assertEqual(env["effective"]["agent_id"], "claude")
+
+    def test_error_carries_one_correction_or_alternatives(self):
+        corrected = envelope.error("X", "fix", corrected_call={"title": "T"})
+        alternatives = envelope.error(
+            "X",
+            "choose",
+            corrected_calls=[{"core": {}}, {"demote_core": True}],
+        )
+        self.assertEqual(corrected["corrected_call"], {"title": "T"})
+        self.assertEqual(alternatives["corrected_calls"], [{"core": {}}, {"demote_core": True}])
+        with self.assertRaises(ValueError):
+            envelope.error("X", "ambiguous", corrected_call={}, corrected_calls=[{}])
 
     def test_rejected_requires_at_least_one_error(self):
         with self.assertRaises(ValueError):

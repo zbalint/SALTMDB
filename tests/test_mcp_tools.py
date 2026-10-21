@@ -564,7 +564,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
         self.assertEqual(rel_res["status"], "rejected")
         self.assertEqual(rel_res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
-        corrected_call = rel_res["corrected_call"]
+        corrected_call = rel_res["errors"][0]["corrected_call"]
         self.assertEqual(corrected_call["predicate"], "related_to")
         self.assertEqual(corrected_call["source_id"], id1)
         self.assertEqual(corrected_call["target_id"], id2)
@@ -1240,11 +1240,11 @@ class TestGetMemoryAlias(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
         self.assertEqual(result["errors"][0]["field"], "entity_id")
 
-    async def test_unknown_identifier_name_is_still_rejected(self):
-        from mcp.server.fastmcp.exceptions import ToolError
-
-        with self.assertRaisesRegex(ToolError, "Extra inputs are not permitted"):
-            await tools.mcp.call_tool("get_memory", {"id": self.entity_id})
+    async def test_unknown_identifier_name_is_rejected_with_envelope(self):
+        result = await self._get_memory({"id": self.entity_id})
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_FIELD")
+        self.assertEqual(result["errors"][0]["field"], "id")
 
     async def test_alias_resolves_unambiguous_prefix_like_entity_id(self):
         prefix = self.entity_id[:8]
@@ -1865,17 +1865,11 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
     tearDown = TestConsolidateMemoriesOutputSchema.tearDown
 
     async def test_search_memory_rejects_unknown_query_argument(self):
-        from mcp.server.fastmcp.exceptions import ToolError
-
-        with self.assertRaises(ToolError) as caught:
-            await tools.mcp.call_tool("search_memory", {"query": "anything"})
-        self.assertIn("query", str(caught.exception))
-        self.assertIn("Extra inputs are not permitted", str(caught.exception))
-
-    async def test_every_registered_tool_forbids_unknown_arguments(self):
-        for tool in tools.mcp._tool_manager.list_tools():
-            with self.subTest(tool=tool.name):
-                self.assertEqual(tool.fn_metadata.arg_model.model_config["extra"], "forbid")
+        result = await tools.mcp.call_tool("search_memory", {"query": "anything"})
+        payload = json.loads(result[0].text)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["errors"][0]["code"], "UNKNOWN_FIELD")
+        self.assertEqual(payload["errors"][0]["field"], "query")
 
     async def test_search_memory_accepts_query_keywords_argument(self):
         memory = tools.store_memory(
@@ -1927,19 +1921,17 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
 
         probe = """
 import asyncio
+import json
 import os
 os.environ["SALTMDB_AGENT_ID"] = "test_agent"
 from saltmdb.mcp.server import mcp
-from mcp.server.fastmcp.exceptions import ToolError
 
 async def main():
-    try:
-        await mcp.call_tool("search_memory", {"query": "x"})
-    except ToolError as error:
-        assert "query" in str(error), str(error)
-        assert "Extra inputs are not permitted" in str(error), str(error)
-    else:
-        raise AssertionError("Unknown query argument was accepted")
+    result = await mcp.call_tool("search_memory", {"query": "x"})
+    payload = json.loads(result[0].text)
+    assert payload["status"] == "rejected", payload
+    assert payload["errors"][0]["code"] == "UNKNOWN_FIELD", payload
+    assert payload["errors"][0]["field"] == "query", payload
 
 asyncio.run(main())
 """
@@ -2366,7 +2358,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
-        corrected_call = res["corrected_call"]
+        corrected_call = res["errors"][0]["corrected_call"]
         self.assertEqual(corrected_call["predicate"], "related_to")
         self.assertEqual(corrected_call["source_id"], id1)
         self.assertEqual(corrected_call["target_id"], id2)
@@ -2383,7 +2375,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         res = tools.manage_relation(source_id=id1, target_id=id2, predicate="affects")
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
-        corrected_call = res["corrected_call"]
+        corrected_call = res["errors"][0]["corrected_call"]
         self.assertEqual(corrected_call["predicate"], "caused_by")
         self.assertEqual(corrected_call["source_id"], id2)
         self.assertEqual(corrected_call["target_id"], id1)
@@ -2467,7 +2459,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(row)
 
-        corrected_call = res["corrected_call"]
+        corrected_call = res["errors"][0]["corrected_call"]
         corrected_predicates = {r["predicate"] for r in corrected_call["relations"]}
         self.assertEqual(corrected_predicates, {"part_of", "related_to"})
 
@@ -2502,7 +2494,7 @@ class TestManageRelationPredicateGate(unittest.TestCase):
             relations=[{"source_id": id1, "target_id": id2, "predicate": "verified_by"}]
         )
         self.assertEqual(result["status"], "rejected")
-        corrected = result["corrected_call"]["relations"][0]
+        corrected = result["errors"][0]["corrected_call"]["relations"][0]
         self.assertEqual(corrected["predicate"], "verifies")
         self.assertEqual(corrected["source_id"], id2)
         self.assertEqual(corrected["target_id"], id1)
