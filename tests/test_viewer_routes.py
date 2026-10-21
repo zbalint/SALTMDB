@@ -10,7 +10,7 @@ import numpy as np
 from saltmdb.db.schema import init_db
 from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.domain.services import relation_service
-from saltmdb.domain.services.memory_service import store_memory
+from saltmdb.domain.services.memory_service import store_memory, Provenance
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -1011,7 +1011,7 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             parent_ids=[a, b],
             title=cons_title,
             content=content,
-            agent_id="viewer_tester",
+            provenance=Provenance(agent_id="viewer_tester"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res)

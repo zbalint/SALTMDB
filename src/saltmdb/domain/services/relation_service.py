@@ -27,7 +27,13 @@ from saltmdb.utils import envelope
 from saltmdb.utils.text import resolve_entity_ref, compute_content_hash
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.nlp import evaluate_memory_quality
-from saltmdb.domain.services.memory_service import check_duplicate_memories, resolve_or_create_tag
+from saltmdb.domain.services.memory_service import (
+    check_duplicate_memories,
+    resolve_or_create_tag,
+    Provenance,
+    CoreDeclaration,
+    EntityAnnotations,
+)
 from saltmdb.domain.services.cohesion_service import (
     get_fresh_entity_centroids,
     min_pairwise_cohesion,
@@ -1574,6 +1580,13 @@ def _observe_parent_state(conn, entity_ids: list[str]) -> dict[str, tuple[str, s
     return {r[0]: (r[1], r[2]) for r in rows}
 
 
+@dataclass(frozen=True, slots=True)
+class _BulkContext:
+    precomputed_centroids: dict[str, list[float]] | None
+    precomputed_unresolved: dict[str, str] | None
+    precomputed_observed_state: dict[str, tuple[str, str]] | None
+
+
 @dataclass(frozen=True)
 class _ConsolidationCoreRequest:
     scope: str
@@ -2349,73 +2362,66 @@ def consolidate_memories(
     tags: list[str] = None,
     scope: Literal["private", "shared"] = "shared",
     weight: int = 1,
-    is_core: bool = None,
-    agent_id: str = None,
-    context_id: str = None,
-    agent_session_id: str = None,
     override_justification: str | None = None,
-    metadata: dict | None = None,
-    memory_type: str | None = None,
-    core_reason: str | None = None,
-    core_exit_condition: str | None = None,
-    core_review_after: str | None = None,
-    detail_memory_ids: list | None = None,
     db_connection=None,
     db_path: str = None,
-    _in_transaction: bool = False,
-    _precomputed_centroids: dict[str, list[float]] | None = None,
-    _precomputed_unresolved: dict[str, str] | None = None,
-    _precomputed_observed_state: dict[str, tuple[str, str]] | None = None,
+    *,
+    provenance: Provenance | None = None,
+    core: CoreDeclaration | None = None,
+    annotations: EntityAnnotations | None = None,
+    _bulk: _BulkContext | None = None,
 ) -> dict:
     """Create one canonical memory and archive its parents without semantic edge mutation.
 
-    _in_transaction=True skips the internal write_transaction_retrying wrapper -- used by
-    bulk_commit_consolidation, whose caller already holds an open write transaction around the
-    whole batch (so the single-item write here must not open/commit its own nested transaction).
+    `_bulk` is set only by bulk_commit_consolidation, whose caller already holds an open write
+    transaction around the whole batch; its presence skips the nested write transaction wrapper.
+    The three precomputed maps in `_bulk` are forwarded unchanged to the cohesion preflight.
 
     A pairwise-cohesion gate runs before the write: parent_ids' chunk-embedding centroids must
     clear COHESION_MIN_PAIRWISE_THRESHOLD (MIN, not MEAN, pairwise cosine similarity) or the
     call is rejected with REJECT_LOW_COHESION, unless override_justification (>=
     COHESION_OVERRIDE_MIN_LENGTH chars) is supplied to force the merge (audited atomically, see
-    _do_commit below). The `_precomputed_*` params are never set by external callers or the MCP
-    surface -- they exist only so bulk_commit_consolidation can hoist expensive centroid
-    computation before its write transaction opens, while every item still routes through this
-    same single code path.
+    _do_commit below). The precomputed maps exist only so bulk_commit_consolidation can hoist
+    expensive centroid computation before its write transaction opens, while every item still
+    routes through this same single code path.
 
-    `metadata`/`memory_type` are carried through into the consolidated entity instead of being
-    silently dropped (both default None/unset, matching existing callers; memory_type still
-    resolves to 'fact' via the same COALESCE the plain store path uses).
+    `annotations.metadata`/`annotations.memory_type` are carried through into the consolidated
+    entity instead of being silently dropped. `provenance` groups writer, context, and session
+    attribution. `core` groups the core-memory governance declaration.
 
-    Core-memory governance (see core_governance_service.py): `is_core` is NEVER inherited from
-    parents. If any resolved parent is currently an active core (is_core=1, status != 'archived')
-    and `is_core` is omitted, the commit is rejected -- pass explicit `is_core=True` (with
-    `core_reason`/`core_exit_condition`/`core_review_after`, optionally `detail_memory_ids`) to
-    keep the result core, or `is_core=False` to let it become an ordinary memory (archiving the
-    core parent's status along with everything else). The authoritative core-state resolution,
-    including capacity admission, happens fresh inside `_do_commit`'s own TOCTOU revalidation --
-    a pre-transaction check would not catch a parent whose core/status changed concurrently.
+    Core-memory governance (see core_governance_service.py): `core.is_core` is NEVER inherited
+    from parents. If any resolved parent is currently an active core (is_core=1, status !=
+    'archived') and `core.is_core` is omitted, the commit is rejected -- pass explicit
+    `core.is_core=True` (with `core.core_reason`/`core.core_exit_condition`/`core.core_review_after`,
+    optionally `core.detail_memory_ids`) to keep the result core, or `core.is_core=False` to let
+    it become an ordinary memory. The authoritative core-state resolution, including capacity
+    admission, happens fresh inside `_do_commit`'s own TOCTOU revalidation -- a pre-transaction
+    check would not catch a parent whose core/status changed concurrently.
     """
+    provenance = provenance or Provenance()
+    core = core or CoreDeclaration()
+    annotations = annotations or EntityAnnotations()
     core_request = _ConsolidationCoreRequest(
         scope,
-        is_core,
-        core_reason,
-        core_exit_condition,
-        core_review_after,
-        detail_memory_ids,
+        core.is_core,
+        core.core_reason,
+        core.core_exit_condition,
+        core.core_review_after,
+        core.detail_memory_ids,
     )
     preflight_result = _consolidation_preflight(
         parent_ids,
         title,
         content,
         tags,
-        agent_id,
+        provenance.agent_id,
         db_connection,
         db_path,
         override_justification,
         core_request,
-        _precomputed_centroids,
-        _precomputed_unresolved,
-        _precomputed_observed_state,
+        _bulk.precomputed_centroids if _bulk is not None else None,
+        _bulk.precomputed_unresolved if _bulk is not None else None,
+        _bulk.precomputed_observed_state if _bulk is not None else None,
     )
     if isinstance(preflight_result, dict):
         return preflight_result
@@ -2455,14 +2461,14 @@ def consolidate_memories(
         agent_val=agent_val,
         scope=scope,
         weight=weight,
-        context_id=context_id,
-        agent_session_id=agent_session_id,
+        context_id=provenance.context_id,
+        agent_session_id=provenance.agent_session_id,
         content_hash=content_hash,
         quality_score=quality_score,
         quality_status=quality_status,
         quality_flags_str=quality_flags_str,
-        metadata=metadata,
-        memory_type=memory_type,
+        metadata=annotations.metadata,
+        memory_type=annotations.memory_type,
         now=now,
     )
 
@@ -2480,7 +2486,7 @@ def consolidate_memories(
                 orphaned_edges,
             )
 
-        if _in_transaction:
+        if _bulk is not None:
             _write(conn)
         else:
             write_transaction_retrying(conn, _write)
@@ -2553,20 +2559,25 @@ def _commit_bulk_consolidation_item(
         tags=item.get("tags", []),
         scope=item.get("scope", "shared"),
         weight=item.get("weight", 1),
-        is_core=item.get("is_core"),
-        agent_id=item.get("agent_id", agent_id),
-        context_id=item.get("context_id", context_id),
-        agent_session_id=agent_session_id,
         override_justification=item.get("override_justification"),
-        core_reason=item.get("core_reason"),
-        core_exit_condition=item.get("core_exit_condition"),
-        core_review_after=item.get("core_review_after"),
-        detail_memory_ids=item.get("detail_memory_ids"),
         db_connection=conn,
-        _in_transaction=True,
-        _precomputed_centroids=item_centroids,
-        _precomputed_unresolved=item_unresolved,
-        _precomputed_observed_state=item_observed_state,
+        provenance=Provenance(
+            agent_id=item.get("agent_id", agent_id),
+            context_id=item.get("context_id", context_id),
+            agent_session_id=agent_session_id,
+        ),
+        core=CoreDeclaration(
+            is_core=item.get("is_core"),
+            core_reason=item.get("core_reason"),
+            core_exit_condition=item.get("core_exit_condition"),
+            core_review_after=item.get("core_review_after"),
+            detail_memory_ids=item.get("detail_memory_ids"),
+        ),
+        _bulk=_BulkContext(
+            precomputed_centroids=item_centroids,
+            precomputed_unresolved=item_unresolved,
+            precomputed_observed_state=item_observed_state,
+        ),
     )
     if not isinstance(result, dict) or result.get("status") != "ok":
         raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {result}")

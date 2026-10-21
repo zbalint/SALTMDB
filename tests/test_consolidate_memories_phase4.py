@@ -10,7 +10,12 @@ from saltmdb.domain.services import relation_service as relations
 
 from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory
+from saltmdb.domain.services.memory_service import (
+    store_memory,
+    Provenance,
+    CoreDeclaration,
+    EntityAnnotations,
+)
 from saltmdb.domain.services.relation_service import (
     bulk_consolidate_memories,
     consolidate_memories,
@@ -81,7 +86,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
                 parent_ids=[parent_a, parent_b],
                 title="Canonical summary",
                 content="A coherent canonical summary of both parent memories.",
-                agent_id="agent_db",
+                provenance=Provenance(agent_id="agent_db"),
                 db_connection=self.conn,
             )
 
@@ -150,7 +155,7 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
                 parent_ids=[parent_a, parent_b],
                 title="Two-Sided Canonical",
                 content="A canonical summary for the two-sided relation worklist.",
-                agent_id="agent_db",
+                provenance=Provenance(agent_id="agent_db"),
                 db_connection=self.conn,
             )
 
@@ -442,7 +447,10 @@ class TestConsolidationBoundaries(unittest.TestCase):
                 self.state,
             ),
         ):
-            result = self.call(override_justification=" " + justification + " ", agent_id="writer")
+            result = self.call(
+                override_justification=" " + justification + " ",
+                provenance=Provenance(agent_id="writer"),
+            )
         self.assertEqual(result["status"], "ok")
         entity_id = result["data"]["entity_id"]
         event = self.conn.execute(
@@ -503,7 +511,7 @@ class TestConsolidationBoundaries(unittest.TestCase):
         )
         self.conn.commit()
         self.state[self.parents[0]] = (relations.compute_content_hash(content), "raw")
-        result = self.call(agent_id="other-owner")
+        result = self.call(provenance=Provenance(agent_id="other-owner"))
         self.assertEqual(result["status"], "ok")
         self.duplicates.assert_called_once_with(
             title="Canonical result",
@@ -623,10 +631,11 @@ class TestConsolidationBoundaries(unittest.TestCase):
             tags=["#merge"],
             scope="private",
             weight=7,
-            context_id="context-fixture",
-            agent_session_id="session-fixture",
-            memory_type="decision",
-            metadata={"fixture": "value"},
+            provenance=Provenance(
+                context_id="context-fixture",
+                agent_session_id="session-fixture",
+            ),
+            annotations=EntityAnnotations(metadata={"fixture": "value"}, memory_type="decision"),
         )
 
         self.assertEqual(result["status"], "ok")
@@ -769,9 +778,11 @@ class TestConsolidationBoundaries(unittest.TestCase):
             ) as admission,
         ):
             result = self.call(
-                is_core=True,
-                core_reason="reason",
-                core_exit_condition="exit",
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="reason",
+                    core_exit_condition="exit",
+                )
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(admission.call_args.kwargs["exclude_ids"], self.parents)
@@ -799,10 +810,12 @@ class TestConsolidationBoundaries(unittest.TestCase):
             ) as admission,
         ):
             result = self.call(
-                is_core=True,
-                core_reason="reason",
-                core_exit_condition="exit",
-                memory_type=None,
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="reason",
+                    core_exit_condition="exit",
+                ),
+                annotations=EntityAnnotations(memory_type=None),
             )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(admission.call_args.kwargs["new_entry"]["memory_type"], "fact")

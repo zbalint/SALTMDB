@@ -33,6 +33,8 @@ from ._shared import (
     _search_pool,
     RETRIEVAL_TEXT_UNSET,
     Provenance,
+    CoreDeclaration,
+    EntityAnnotations,
 )
 from .validation import (
     normalize_retrieval_text,
@@ -107,6 +109,8 @@ __all__ = [
     "_search_pool",
     "RETRIEVAL_TEXT_UNSET",
     "Provenance",
+    "CoreDeclaration",
+    "EntityAnnotations",
     "normalize_retrieval_text",
     "get_last_search_diagnostics",
     "validate_memory_input",

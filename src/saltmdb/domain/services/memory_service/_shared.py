@@ -31,6 +31,21 @@ class Provenance:
     agent_session_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CoreDeclaration:
+    is_core: bool | None = None
+    core_reason: str | None = None
+    core_exit_condition: str | None = None
+    core_review_after: str | None = None
+    detail_memory_ids: list | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EntityAnnotations:
+    metadata: dict | None = None
+    memory_type: str | None = None
+
+
 logger = logging.getLogger("saltmdb.domain.services.memory_service")
 _embed_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="saltmdb-embed")
 _search_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saltmdb-search")

@@ -2,7 +2,7 @@ import unittest
 import tempfile
 import os
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory
+from saltmdb.domain.services.memory_service import store_memory, Provenance
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -59,7 +59,7 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
             title="Consolidated Overview",
             content="Merged summary of A and B",
             tags=["#summary"],
-            agent_id="agent1",
+            provenance=Provenance(agent_id="agent1"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", c_res)

@@ -3,7 +3,7 @@ import tempfile
 import os
 import shutil
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory
+from saltmdb.domain.services.memory_service import store_memory, Provenance
 from saltmdb.domain.services.relation_service import commit_consolidation
 from saltmdb.utils import text
 
@@ -41,7 +41,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidation Test",
             content="consolidated these files.",
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Error: Consolidation quality check rejected", res)
@@ -73,7 +73,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Memory Arch Spec",
             content=parent_content,
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification="test override to isolate parent exclusion from cohesion",
         )
@@ -111,7 +111,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Attempt",
             content=existing_markdown,
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("REJECT_EXACT_DUPLICATE", res)
@@ -146,7 +146,7 @@ class TestConsolidationQualityGate(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Overview",
             content=consolidated_md,
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)

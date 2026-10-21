@@ -5,7 +5,7 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory
+from saltmdb.domain.services.memory_service import store_memory, Provenance, CoreDeclaration
 from saltmdb.domain.services.relation_service import commit_consolidation, bulk_commit_consolidation
 
 
@@ -95,7 +95,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Consolidated Core+Plain",
             content="Synthesized content merging the core rule with the plain fact.",
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification="pre-existing test fixture, not exercising the cohesion gate",
         )
@@ -128,7 +128,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Plain",
             content="Synthesized content merging two plain, non-core facts.",
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
@@ -151,8 +151,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation Missing Fields",
             content="Synthesized content that tries to stay core without a reason/exit condition.",
-            agent_id="agent_c",
-            is_core=True,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=True),
             db_connection=self.conn,
             override_justification="test override to isolate explicit core lifecycle validation",
         )
@@ -162,10 +162,12 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Explicit Core Consolidation With Fields",
             content="Synthesized content that stays core with a complete lifecycle declaration.",
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Test fixture core reason for the explicit-is_core consolidation test.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the explicit-is_core consolidation test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
             override_justification="test override to isolate explicit core lifecycle validation",
             db_connection=self.conn,
         )
@@ -185,10 +187,12 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Core Column Result",
             content="A core result with explicit lifecycle columns and tag.",
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Core result reason for lifecycle-column assertion coverage.",
-            core_exit_condition="Core result exit condition for lifecycle-column assertion coverage.",
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Core result reason for lifecycle-column assertion coverage.",
+                core_exit_condition="Core result exit condition for lifecycle-column assertion coverage.",
+            ),
             override_justification="test override to isolate lifecycle-column persistence",
             db_connection=self.conn,
         )
@@ -221,7 +225,7 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[plain_a, plain_b],
             title="Plain Column Result",
             content="A non-core result without a core tag.",
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", plain_result)
@@ -252,8 +256,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[core_parent, plain_parent],
             title="Deliberately Demoted Consolidation",
             content="Synthesized content where the caller explicitly demotes core status.",
-            agent_id="agent_c",
-            is_core=False,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=False),
             db_connection=self.conn,
             override_justification="test override to isolate explicit core demotion validation",
         )
@@ -327,11 +331,13 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
                 f"Core Detail Consolidation describes Core Detail Memory ({detail}) "
                 "as an elaborating detail memory."
             ),
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Core detail relation test reason.",
-            core_exit_condition="Core detail relation test exit condition.",
-            detail_memory_ids=[detail],
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Core detail relation test reason.",
+                core_exit_condition="Core detail relation test exit condition.",
+                detail_memory_ids=[detail],
+            ),
             override_justification="test override to isolate detail relation reconciliation",
             db_connection=self.conn,
         )
@@ -365,8 +371,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
             parent_ids=[parent_a, parent_b],
             title="Plain Detail Consolidation",
             content="A non-core result that must not create elaborating detail relations.",
-            agent_id="agent_c",
-            is_core=False,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=False),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed consolidated memory with ID:", result)
@@ -448,10 +454,9 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[parent_id],
             title="Single Parent Core Consolidation While Overdue",
             content="Synthesized single-parent content that tries to become core while overdue.",
-            agent_id="agent_c",
-            is_core=True,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=True, **self._core_reason_kwargs()),
             db_connection=self.conn,
-            **self._core_reason_kwargs(),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("REJECT_PARENT_COUNT", res)
@@ -475,11 +480,9 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Multi Parent Core Consolidation While Overdue",
             content="Synthesized multi-parent content that tries to become core while overdue.",
-            agent_id="agent_c",
-            is_core=True,
-            override_justification="pre-existing test fixture, not exercising the cohesion gate",
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=True, **self._core_reason_kwargs()),
             db_connection=self.conn,
-            **self._core_reason_kwargs(),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("overdue", res)
@@ -523,8 +526,8 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Demote Overdue Parent Via Consolidation",
             content="Synthesized content where the overdue parent becomes a plain memory.",
-            agent_id="agent_c",
-            is_core=False,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=False),
             db_connection=self.conn,
             override_justification="test override to isolate overdue demotion behavior",
         )
@@ -551,10 +554,9 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Sole Overdue Parent Rejected",
             content="Synthesized content that must not be allowed to replace the sole overdue parent.",
-            agent_id="agent_c",
-            is_core=True,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=True, **self._core_reason_kwargs()),
             db_connection=self.conn,
-            **self._core_reason_kwargs(),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("overdue", res)
@@ -598,10 +600,9 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
             parent_ids=[overdue_id, plain_partner],
             title="Core Result Replacing Reviewed Parent",
             content="Synthesized content replacing the now-reviewed, no-longer-overdue parent.",
-            agent_id="agent_c",
-            is_core=True,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(is_core=True, **self._core_reason_kwargs()),
             db_connection=self.conn,
-            **self._core_reason_kwargs(),
             override_justification="test override to isolate reviewed overdue core behavior",
         )
         self.assertIn("Successfully committed consolidated memory with ID:", res)
@@ -679,7 +680,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Content Change",
                 content="Synthesized content for the two-parent content-race test.",
-                agent_id="agent_c",
+                provenance=Provenance(agent_id="agent_c"),
                 db_connection=self.conn,
                 override_justification="test override to isolate content TOCTOU revalidation",
             )
@@ -711,7 +712,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Archival",
                 content="Synthesized content for the two-parent archival-race test.",
-                agent_id="agent_c",
+                provenance=Provenance(agent_id="agent_c"),
                 db_connection=self.conn,
                 override_justification="test override to isolate archival TOCTOU revalidation",
             )
@@ -752,7 +753,7 @@ class TestConsolidationToctou(unittest.TestCase):
                 parent_ids=[parent_id, partner_id],
                 title="Raced Single Parent Promotion",
                 content="Synthesized content for the two-parent promotion-race test.",
-                agent_id="agent_c",
+                provenance=Provenance(agent_id="agent_c"),
                 db_connection=self.conn,
                 override_justification="test override to isolate promotion TOCTOU revalidation",
             )

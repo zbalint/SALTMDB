@@ -28,7 +28,7 @@ from saltmdb.domain.services import (
     telemetry_service,
     trace_service,
 )
-from saltmdb.domain.services.memory_service import Provenance
+from saltmdb.domain.services.memory_service import Provenance, CoreDeclaration
 from typing import Any, Literal
 
 from saltmdb.utils import error_codes
@@ -485,18 +485,22 @@ def _dispatch_consolidate_memories(**kw):
         parent_ids=parent_ids,
         title=title,
         content=content,
-        is_core=kw.get("is_core"),
         tags=kw.get("tags"),
         scope=scope,
         weight=weight,
-        agent_id=kw.get("agent_id"),
-        context_id=kw.get("context_id"),
-        agent_session_id=kw.get("agent_session_id"),
         override_justification=kw.get("override_justification"),
-        core_reason=kw.get("core_reason"),
-        core_exit_condition=kw.get("core_exit_condition"),
-        core_review_after=kw.get("core_review_after"),
-        detail_memory_ids=kw.get("detail_memory_ids"),
+        provenance=Provenance(
+            agent_id=kw.get("agent_id"),
+            context_id=kw.get("context_id"),
+            agent_session_id=kw.get("agent_session_id"),
+        ),
+        core=CoreDeclaration(
+            is_core=kw.get("is_core"),
+            core_reason=kw.get("core_reason"),
+            core_exit_condition=kw.get("core_exit_condition"),
+            core_review_after=kw.get("core_review_after"),
+            detail_memory_ids=kw.get("detail_memory_ids"),
+        ),
     )
 
 

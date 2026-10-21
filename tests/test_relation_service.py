@@ -33,6 +33,7 @@ from saltmdb.domain.services.memory_service import (
     store_memory,
     detect_orphaned_memories,
     search_tags,
+    Provenance,
 )
 from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
 
@@ -1103,7 +1104,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1],
             title="C Basic Repoint",
             content=_cons_content("basic-repoint"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res)
@@ -1127,7 +1128,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1, p2],
             title="C Dedup",
             content=_cons_content("dedup"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1179,7 +1180,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[p1, p2],
             title="C Self Loop",
             content=_cons_content("self-loop"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1206,7 +1207,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[a, b],
             title="C1 MultiGen",
             content=_cons_content("multigen-c1"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res1)
@@ -1227,7 +1228,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[c1, d],
             title="C2 MultiGen",
             content=_cons_content("multigen-c2"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("INACTIVE_PARENT", res2)
@@ -1265,7 +1266,7 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
             parent_ids=[a, b],
             title="C PredScope",
             content=_cons_content("predscope"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertEqual(result["status"], "ok")
@@ -1361,7 +1362,7 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
             parent_ids=[a, b],
             title="Lineage C1",
             content=_cons_content("lineage-c1"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         c1 = _memory_id(res1)
@@ -1786,7 +1787,7 @@ class TestRelationPointInTime(unittest.TestCase):
             parent_ids=[p1, p2],
             title="PIT Cons C",
             content=_cons_content("pit-deps-cons"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         c_id = _memory_id(res)
@@ -1829,7 +1830,7 @@ class TestRelationPointInTime(unittest.TestCase):
             parent_ids=[a, b],
             title="PIT Lineage C1",
             content=_cons_content("pit-lineage-c1"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         c1 = _memory_id(res)
@@ -2005,7 +2006,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Incohesive",
             content=_cons_content("incohesive"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
@@ -2028,7 +2029,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Unresolvable",
             content=_cons_content("unresolvable"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertTrue(res.startswith("Error: REJECT_LOW_COHESION"), res)
@@ -2044,7 +2045,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Override",
             content=_cons_content("override"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification=(
                 "deliberately merging unrelated axis-0/axis-1 test fixtures for override coverage"
@@ -2073,7 +2074,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Short Override",
             content=_cons_content("short-override"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification="too short",
         )
@@ -2086,7 +2087,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a],
             title="C Solo",
             content=_cons_content("solo"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res, res)
@@ -2116,7 +2117,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a],
             title="C Solo Unresolvable",
             content=_cons_content("solo-unresolvable"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("REJECT_PARENT_COUNT", res, res)
@@ -2149,7 +2150,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Active Unscorable Override",
             content=_cons_content("active-unscorable-override"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification=(
                 "merging despite one parent having no scorable content, override intentional"
@@ -2188,7 +2189,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[a, b],
             title="C Archived Unscorable Override",
             content=_cons_content("archived-unscorable-override"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
             override_justification=(
                 "attempting to merge despite one parent already being archived, should fail"
@@ -2217,7 +2218,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
                 parent_ids=[a, b],
                 title="C Audit Fail",
                 content=_cons_content("audit-fail"),
-                agent_id="agent_c",
+                provenance=Provenance(agent_id="agent_c"),
                 db_connection=self.conn,
                 override_justification=(
                     "deliberately merging unrelated fixtures to exercise the audit-failure "
@@ -2258,7 +2259,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
                 parent_ids=[a, b],
                 title="C Reval Race",
                 content=_cons_content("reval-race"),
-                agent_id="agent_c",
+                provenance=Provenance(agent_id="agent_c"),
                 db_connection=self.conn,
             )
         self.assertTrue(res.startswith("Error"), res)
@@ -2288,7 +2289,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[c, d],
             title="C Reval No Race",
             content=_cons_content("reval-no-race"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("Successfully committed", res2, res2)
@@ -2304,7 +2305,7 @@ class TestCommitConsolidationCohesionGate(unittest.TestCase):
             parent_ids=[consolidated_id, fresh_raw],
             title="C Refresh Consolidated",
             content=_cons_content("refresh-consolidated"),
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             db_connection=self.conn,
         )
         self.assertIn("INACTIVE_PARENT", res, res)
@@ -3479,7 +3480,7 @@ class TestRelationD14Pins(unittest.TestCase):
                 agent_id="batch-agent",
                 db_connection=self.conn,
             )
-        self.assertEqual(captured[0]["agent_id"], "item-agent")
+        self.assertEqual(captured[0]["provenance"].agent_id, "item-agent")
 
     def test_bc07_batch_abort_message_is_exact(self):
         def reject(**_kwargs):
@@ -3536,7 +3537,7 @@ class TestRelationD14Pins(unittest.TestCase):
                 db_connection=self.conn,
             )
         self.assertEqual(result[0]["status"], "success")
-        self.assertEqual(captured[0]["_precomputed_centroids"], {})
+        self.assertEqual(captured[0]["_bulk"].precomputed_centroids, {})
 
     def test_bs03_store_action_label_is_exact(self):
         source, target = self._mk("D14 bs source"), self._mk("D14 bs target")

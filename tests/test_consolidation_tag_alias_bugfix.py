@@ -4,6 +4,7 @@ import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service, librarian_service, relation_service
+from saltmdb.domain.services.memory_service import Provenance
 
 
 class TestConsolidationTagAliasBugfix(unittest.TestCase):
@@ -97,7 +98,7 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
                 "dereferencing the response object."
             ),
             tags=["#fix", "#anewconsolidationtag"],
-            agent_id="user1",
+            provenance=Provenance(agent_id="user1"),
             db_connection=self.conn,
             # Real cosine similarity between these two parents sits at ~0.73, above the 0.60
             # placeholder threshold but with a margin that shouldn't be relied on once the real

@@ -4,7 +4,7 @@ import os
 import shutil
 from unittest.mock import patch
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, archive_memory
+from saltmdb.domain.services.memory_service import store_memory, archive_memory, Provenance
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -97,7 +97,7 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             parent_ids=[p1, p2],
             title="Consolidated Result",
             content="Synthesized content produced from the raw source memory.",
-            agent_id="agent_c",
+            provenance=Provenance(agent_id="agent_c"),
             override_justification="Test fixture deliberately consolidates two isolated parents.",
             db_connection=self.conn,
         )
