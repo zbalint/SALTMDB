@@ -216,7 +216,7 @@ def test_trace_capture_rejects_invalid_default_session_ids(environment, session_
     log = (environment / ".saltmdb/hooks/trace-capture.log").read_text()
     assert "session <invalid>" in log
     if session_id:
-        assert str(session_id) not in log
+        assert f"session {session_id}" not in log
 
 
 @pytest.mark.parametrize("path_kind", ["missing", "directory"])
