@@ -38,7 +38,7 @@ class TestTagMergeTool(unittest.TestCase):
 
     @staticmethod
     def _id(result):
-        return result["data"]["id"]
+        return result["data"]["memory_id"]
 
     def test_merge_tags_repoints_entity_tags_to_canonical(self):
         res1 = tools.store_memory(

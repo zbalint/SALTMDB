@@ -1,4 +1,6 @@
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from typing_extensions import TypedDict
 
@@ -12,9 +14,6 @@ from saltmdb.daemon import client as daemon_client
 from saltmdb.config import is_trace_capture_enabled
 from saltmdb.daemon import protocol
 
-# core_governance_service.parse_is_core is a pure/stateless helper (no DB access), safe to call
-# from the adapter process directly -- same category as saltmdb.utils.corrected_call/envelope.
-from saltmdb.domain.services import core_governance_service
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +38,13 @@ class ConsolidationBatchItem(TypedDict, total=False):
     override_justification: str | None
 
 
-class _UnsetRetrievalText(str):
-    """Serializable MCP-schema sentinel that still preserves Python identity for omission."""
+class CoreInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-
-# A string subclass keeps FastMCP/Pydantic schema generation warning-free while identity (rather
-# than equality) distinguishes an omitted field from an explicit JSON null.  The marker is only an
-# adapter default; it is never sent to the domain service or persisted.
-_RETRIEVAL_TEXT_UNSET = _UnsetRetrievalText("__saltmdb_retrieval_text_omitted__")
+    reason: str
+    exit_condition: str
+    review_after: str | None = None
+    detail_memory_ids: list[str] | None = None
 
 
 _YAML_FRONT_MATTER_RE = re.compile(
@@ -442,122 +440,62 @@ def list_predicates(query: str | None = None, limit: int | None = None) -> dict:
     )
 
 
-@mcp.tool()
-def merge_tags(
-    keep_tag: str | None = None,
-    tags_to_merge: list | str | None = None,
-) -> dict:
-    """Merges one or more fragmented/synonym tags into a single canonical tag, repointing every
-    affected memory's tag associations. Use when you've noticed folksonomy drift -- e.g. some
-    memories tagged '#doc', others '#documentation' -- and want one canonical spelling going
-    forward.
+@mcp.tool(
+    description="""Use this to merge fragmented tags into an existing canonical tag; use store_memory
+    or revise_memory when creating or changing a memory's tags.
 
-    keep_tag: the canonical tag every merged tag repoints to; it must already exist. tags_to_merge:
-    one or more existing tag names/IDs to fold into keep_tag (accepts a list or a
-    comma-separated string).
-
-    Returns `{"status": "ok", "data": {"merged": [...], "skipped": [...], "canonical_tag":
-    keep_tag}}` on success -- `skipped` lists any requested tag that didn't exist or was already
-    canonical, without failing the whole call. `{"status": "rejected", "errors": [{"code":
-    "NOT_FOUND", "message": "...", "field": "keep_tag"}]}` when keep_tag itself doesn't exist --
-    search_tags first if you're not certain of the exact existing spelling.
+    Required: keep_tag and tags_to_merge, a non-empty list of at most 50 tag names. The canonical
+    tag must already exist; every listed source tag is merged or reported as skipped. This updates
+    tag associations in place and returns the existing `merged`, `skipped`, and `canonical_tag`
+    response fields. Comma-separated strings are not accepted.
 
     Example: `merge_tags(keep_tag="#docs", tags_to_merge=["#doc", "#documentation"])`.
     """
-    tags_to_merge_ = _normalize_list_or_str(tags_to_merge)
+)
+def merge_tags(
+    keep_tag: str,
+    tags_to_merge: Annotated[list[str], Field(min_length=1, max_length=50)],
+) -> dict:
     return _backend_or_raise().call(
-        "merge_tags", {"keep_tag": keep_tag, "tags_to_merge": tags_to_merge_}
+        "merge_tags", {"keep_tag": keep_tag, "tags_to_merge": tags_to_merge}
     )
 
 
 @mcp.tool(
-    description="""Creates a new long-term memory (a fact/event/procedure/decision/preference),
-    or performs a metadata-only update to an existing one via entity_id. For CORRECTING or
-    REPLACING an existing memory's content, use revise_memory/supersede_memory instead -- this
-    tool's entity_id path only ever touches metadata/tags/governance fields, never content.
+    description="""Use this to create a new memory; use update_memory_metadata for metadata-only
+    changes and revise_memory or supersede_memory when stored content is wrong or has changed.
 
-    Required: title, and exactly one of content or content_file_path (a local file path SALTMDB
-    reads server-side -- use this instead of inlining a large body to avoid round-tripping it
-    through your own context). memory_type classifies the memory (default 'fact'; omitted on an
-    entity_id update, the existing value is preserved): fact (durable general knowledge), event
-    (something that happened), procedure (how-to/runbook), decision (ADR-style rationale),
-    preference (a durable user/agent preference).
+    Required: title and exactly one of content or content_file_path. The file path must be readable
+    by the SALTMDB server host. Optional tags, memory_type, scope, context_id, metadata,
+    retrieval_text, and a cohesive core declaration may be supplied. A core declaration contains
+    reason, exit_condition, optional review_after, and optional detail_memory_ids. Omitted and null
+    retrieval_text mean no retrieval text. Creation is immutable; duplicates are rejected or warned
+    using the existing exact/near-duplicate response shapes.
 
-    entity_id (optional) targets an existing memory for a metadata-only update -- updating
-    `metadata` (shallow-merged, existing keys not mentioned are preserved) or backfilling
-    core-governance fields. `content`/`content_file_path` is still mandatory on this path too
-    (re-supply the unchanged body; omitting both is rejected with `MISSING_CONTENT` regardless of
-    entity_id) -- use update_memory_metadata instead for a metadata-only edit that doesn't require
-    restating title/content unchanged.
-
-    On the entity_id path, a set of frozen fields (title, content, agent_id, context_id, scope,
-    memory_type, and tags among them) is rejected if the call's value would actually change what's
-    already stored -- this guard exists specifically so an omitted/defaulted parameter (e.g.
-    `scope` silently defaulting to "shared") can never overwrite an existing value that differs,
-    while still allowing lifecycle/core/retrieval fields to change in place. `tags` is frozen here
-    too: omitting it (leaving the existing tags untouched) is safe, but supplying a tag list that
-    differs from what's already stored is rejected the same as changing title/content -- **this
-    path does not support re-tagging**, use revise_memory/supersede_memory for that (or any other
-    frozen field you actually intend to change).
-
-    Returns `{"status": "ok", "data": {"id": ..., "duplicate_candidates": [...] | None, ...},
-    "warnings": [...]}` on success. Rejections you'll see in practice: an exact content-hash
-    duplicate (`errors[0].code == "REJECT_EXACT_DUPLICATE"`, naming the existing entity -- a near
-    duplicate is NOT rejected, it stores and returns `duplicate_candidates` inline instead, with
-    guidance to call supersede_memory/consolidate_memories once you've confirmed the
-    relationship, or manage_relation to link without merging); `title`/`tags` found inside YAML
-    front matter in `content` (`IDENTITY_IN_YAML_FRONT_MATTER`, with a ready-to-resubmit
-    `corrected_call` on its error entry); neither or both of `content`/`content_file_path` supplied
-    (`MISSING_CONTENT`/`CONTENT_AND_FILE_PATH_BOTH_SET`); an unreadable/non-UTF-8
-    `content_file_path` (`CONTENT_FILE_READ_FAILED`).
-
-    Example: `store_memory(title="[Project] Decision to use X", content="...", tags=["arch"],
-    memory_type="decision")`.
-
-    **Core-memory bootstrap governance** (`is_core`): a SCARCE, TEMPORARY mechanism for urgent
-    cross-session hazards an agent must know before it could reasonably search for them -- not a
-    general "important knowledge" tier (stable rules/preferences belong in AGENTS.md/CLAUDE.md/
-    skills instead). `is_core=True` requires `scope="shared"` plus `core_reason`/
-    `core_exit_condition` (20-500 chars each) and admits three hard caps: at most 5 active cores
-    globally, 2,500 chars of content each, and a 15,000-char rendered bootstrap digest. A capacity
-    failure returns `{"status": "rejected", "errors": [{"code": "CORE_CAPACITY_EXCEEDED", ...}],
-    "violated_dimensions": [...], "limits": {...}, ...}` with a balanced inventory of every active
-    core (no full content) and zero side effects -- rebalance (demote/archive/shorten/consolidate)
-    and retry; this never needs a human decision. `core_review_after` defaults to 14 days out, max
-    30; while any core is overdue, creating/promoting/enlarging a core or changing its review date
-    is blocked (use review_core_memory first). Omitting `core_reason`/`core_exit_condition`/
-    `core_review_after`/`detail_memory_ids` on an already-core update preserves existing values;
-    supplying any of them on an effectively non-core write is rejected. `detail_memory_ids` (at
-    most 3 UUIDs of existing shared, non-core memories whose title+UUID must appear in `content`)
-    atomically maintains `elaborates_on` edges into this core -- `None` preserves the current
-    declaration, `[]` clears it. `'#core'` in `tags` is a derived label the server auto-maintains
-    from `is_core`; setting it directly is silently overridden.
+    Example: `store_memory(title="[Project] Decision", content="A durable decision record.")`.
     """
 )
 def store_memory(
     title: str,
     content: str | None = None,
-    tags: list[str] = None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    context_id: str | None = None,
-    entity_id: str | None = None,
-    metadata: dict | None = None,
-    is_core: bool | None = None,
-    scope: Literal["private", "shared"] = "shared",
-    retrieval_text: str | None = _RETRIEVAL_TEXT_UNSET,
-    core_reason: str | None = None,
-    core_exit_condition: str | None = None,
-    core_review_after: str | None = None,
-    detail_memory_ids: list | None = None,
     content_file_path: str | None = None,
+    tags: list[str] | None = None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+    scope: Literal["private", "shared"] = "shared",
+    context_id: str | None = None,
+    metadata: dict | None = None,
+    retrieval_text: str | None = None,
+    core: CoreInput | None = None,
 ) -> dict:
-    content, _content_error = _resolve_content(content, content_file_path)
-    if _content_error is not None:
-        return _content_error
+    content, content_error = _resolve_content(content, content_file_path)
+    if content_error is not None:
+        return content_error
     content = cast(str, content)
+    core_values = core.model_dump() if core is not None else {}
     submitted = locals().copy()
+    submitted["core"] = core_values
     agent_id_ = _effective_agent_id()
-    tags_ = _normalize_list_or_str(tags)
+    tags_ = [] if tags is None else tags
     front_matter_fields, body_without_front_matter = _front_matter_identity_fields(content)
     if front_matter_fields:
         from saltmdb.utils.corrected_call import build_corrected_call
@@ -566,11 +504,6 @@ def store_memory(
         corrected_call = build_corrected_call(
             store_memory,
             submitted,
-            # content_file_path must be cleared here too: `submitted` still carries the caller's
-            # original (non-None) content_file_path alongside the now-resolved `content`, and
-            # build_corrected_call only drops None-valued fields -- without this override the
-            # corrected_call would set both fields and immediately fail
-            # CONTENT_AND_FILE_PATH_BOTH_SET if pasted back verbatim.
             {"content": body_without_front_matter, "content_file_path": None},
         )
         return rejected(
@@ -583,25 +516,6 @@ def store_memory(
                 )
             ]
         )
-    from saltmdb.utils import error_codes
-    from saltmdb.utils.envelope import error, rejected
-
-    try:
-        # Strict tri-state parse (core-memory governance resolved gap #6): an unrecognized value
-        # like "yes" or an integer is rejected outright here, at the adapter boundary, rather
-        # than silently coerced to False the way the old `in (True, 1, "true", "1", "True")`
-        # membership check did.
-        is_core_ = core_governance_service.parse_is_core(is_core)
-    except ValueError as e:
-        return rejected([error(error_codes.VALIDATION_ERROR, str(e), "is_core")])
-
-    memory_type_ = memory_type
-    retrieval_text_provided = retrieval_text is not _RETRIEVAL_TEXT_UNSET
-    retrieval_text_ = retrieval_text if retrieval_text_provided else None
-    detail_memory_ids_ = (
-        _normalize_list_or_str(detail_memory_ids) if detail_memory_ids is not None else None
-    )
-
     return _call_and_record_write(
         "store_memory",
         {
@@ -609,18 +523,17 @@ def store_memory(
             "tags": tags_,
             "agent_id": agent_id_,
             "scope": scope,
-            "is_core": is_core_,
-            "memory_type": memory_type_,
+            "is_core": True if core is not None else None,
+            "memory_type": memory_type,
             "title": title,
-            "entity_id": entity_id,
             "context_id": context_id,
             "metadata": metadata,
-            "retrieval_text": retrieval_text_,
-            "retrieval_text_provided": retrieval_text_provided,
-            "core_reason": core_reason,
-            "core_exit_condition": core_exit_condition,
-            "core_review_after": core_review_after,
-            "detail_memory_ids": detail_memory_ids_,
+            "retrieval_text": retrieval_text,
+            "retrieval_text_provided": retrieval_text is not None,
+            "core_reason": core_values.get("reason"),
+            "core_exit_condition": core_values.get("exit_condition"),
+            "core_review_after": core_values.get("review_after"),
+            "detail_memory_ids": core_values.get("detail_memory_ids"),
         },
     )
 
@@ -1339,7 +1252,7 @@ def get_memory(
 _PENDING_TRACE_WRITES: "collections.deque[tuple[str, str]]" = collections.deque(maxlen=100)
 _PENDING_TRACE_WRITES_LOCK = threading.Lock()
 _WRITTEN_ID_KEY = {
-    "store_memory": "id",
+    "store_memory": "memory_id",
     "revise_memory": "new_id",
     "supersede_memory": "new_id",
     "consolidate_memories": "entity_id",
@@ -1347,10 +1260,35 @@ _WRITTEN_ID_KEY = {
 
 
 def _call_and_record_write(tool_name: str, kwargs: dict):
+    from saltmdb.utils.envelope import error, rejected
+
     result = _backend_or_raise().call(tool_name, kwargs)
-    if is_trace_capture_enabled() and isinstance(result, dict) and result.get("status") == "ok":
-        data = result.get("data")
-        entity_id = data.get(_WRITTEN_ID_KEY[tool_name]) if isinstance(data, dict) else None
+    if isinstance(result, str):
+        result = rejected([error("VALIDATION_ERROR", result)])
+    if isinstance(result, dict):
+        result = dict(result)
+        if result.get("status") == "ok" and isinstance(result.get("data"), dict):
+            data = dict(result["data"])
+            if tool_name in {"store_memory", "update_memory_metadata"} and "id" in data:
+                data["memory_id"] = data.pop("id")
+            result["data"] = data
+        if tool_name == "update_memory_metadata" and isinstance(result.get("errors"), list):
+            result["errors"] = [
+                {**item, "field": "memory_id"}
+                if isinstance(item, dict) and item.get("field") == "entity_id"
+                else item
+                for item in result["errors"]
+            ]
+    if (
+        tool_name in _WRITTEN_ID_KEY
+        and is_trace_capture_enabled()
+        and isinstance(result, dict)
+        and result.get("status") == "ok"
+    ):
+        trace_data = result.get("data")
+        entity_id = (
+            trace_data.get(_WRITTEN_ID_KEY[tool_name]) if isinstance(trace_data, dict) else None
+        )
         if entity_id:
             with _PENDING_TRACE_WRITES_LOCK:
                 _PENDING_TRACE_WRITES.append((tool_name, entity_id))
@@ -1848,32 +1786,22 @@ def review_core_memory(
     )
 
 
-@mcp.tool()
-def update_memory_metadata(entity_id: str, metadata: dict) -> dict:
-    """Shallow-merges `metadata` into an existing memory -- the lightest-weight way to update
-    metadata only, with no quality gate, duplicate check, or content-hash machinery involved (an
-    alternative to store_memory(entity_id=..., metadata=...), which also supports a metadata-only
-    update but carries store_memory's own full validation path).
+@mcp.tool(
+    description="""Use this for metadata-only changes; use store_memory for creation and
+    revise_memory or supersede_memory for content changes.
 
-    entity_id and metadata (a dict) are required. Submitted keys overwrite/add; keys not
-    mentioned are preserved untouched. There is no key-deletion sentinel -- submit a key with
-    value null to mark it cleared (the key stays present with a null value, it is not stripped).
-    Works uniformly on core and non-core memories; core lifecycle fields (outcome,
-    core_review_after, review_rationale) are governed exclusively by review_core_memory, not this
-    tool.
+    Required: memory_id and metadata. The metadata patch is shallow: non-null top-level values
+    overwrite or add keys, while top-level null deletes a key; nested null values remain unchanged.
+    Missing keys and an empty patch are no-ops. Core lifecycle names are inert metadata here.
 
-    Returns `{"status": "ok", "data": {"id": ..., "message": "..."}, "warnings": [...]}` --
-    including when the patch was empty (still success, not a warning: nothing was rejected).
-    `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR" | "AMBIGUOUS_ID_PREFIX" |
-    "NOT_FOUND", "message": "...", "field": "entity_id" | "metadata"}]}` for a malformed
-    parameter or an unresolvable/ambiguous entity_id.
-
-    Example: `update_memory_metadata(entity_id="abc123", metadata={"project_id": "wf-42"})`.
+    Example: `update_memory_metadata(memory_id="abc123", metadata={"project_id": "wf-42"})`.
     """
-    return _backend_or_raise().call(
+)
+def update_memory_metadata(memory_id: str, metadata: dict) -> dict:
+    return _call_and_record_write(
         "update_memory_metadata",
         {
-            "entity_id": entity_id,
+            "entity_id": memory_id,
             "metadata": metadata,
             "agent_id": _effective_agent_id(),
         },

@@ -35,7 +35,7 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             tags=["#test"],
         )
         self.assertEqual(res["status"], "ok")
-        entity_id = res["data"]["id"]
+        entity_id = res["data"]["memory_id"]
 
         drift_flag_data = {
             "reason": "File line offset changed",
@@ -44,12 +44,8 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             "flagged_by": "agent_hook_driftsweep",
         }
 
-        # Update metadata via administrative store_memory path
-        update_res = tools.store_memory(
-            entity_id=entity_id,
-            title="Drift Flagged Memory Test",
-            content="This memory cites file src/foo.py:42 which drifted.",
-            tags=["#test"],
+        update_res = tools.update_memory_metadata(
+            memory_id=entity_id,
             metadata={"drift_flag": drift_flag_data},
         )
         self.assertEqual(update_res["status"], "ok")
@@ -61,7 +57,7 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
             tags=["#test"],
         )
         self.assertEqual(clean_res["status"], "ok")
-        clean_id = clean_res["data"]["id"]
+        clean_id = clean_res["data"]["memory_id"]
 
         # Search mode="broad" (default)
         search_res = tools.search_memory(query_keywords="Memory Test", mode="broad")

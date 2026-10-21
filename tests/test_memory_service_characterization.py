@@ -434,7 +434,7 @@ def test_replacement_validation_accepts_boundary_and_optional_values(db, scope, 
 @pytest.mark.parametrize(
     "patch_value,message",
     [
-        ({"z": None, "a": {"new": True}}, "Memory 'fixed' metadata updated (2 key(s): a, z)."),
+        ({"z": None, "a": {"new": True}}, "Memory 'fixed' metadata updated (1 key(s): a)."),
         ({}, "Memory 'fixed' metadata unchanged (empty patch)."),
     ],
 )
@@ -467,13 +467,46 @@ def test_metadata_fallback_shallow_merge_full_row_and_message(db, raw, patch_val
         if raw == '{"keep": 1, "nested": {"old": true}}'
         else {}
     )
-    current.update(patch_value)
-    expected.update(
-        metadata=json.dumps(current),
-        updated_at="2020-01-02T00:00:00+00:00",
-        last_touched_session_id="touched",
-    )
+    current.update({key: value for key, value in patch_value.items() if value is not None})
+    for key, value in patch_value.items():
+        if value is None:
+            current.pop(key, None)
+    if patch_value:
+        expected.update(
+            metadata=json.dumps(current),
+            updated_at="2020-01-02T00:00:00+00:00",
+            last_touched_session_id="touched",
+        )
     assert snapshot(db) == [tuple(expected[column] for column in columns)]
+
+
+def test_metadata_falsy_values_are_updates(db):
+    insert(
+        db,
+        metadata="{}",
+        is_core=0,
+        content_hash="hash-falsy",
+        parent_ids="[]",
+        agent_session_id="created",
+    )
+    result = lifecycle.update_memory_metadata(
+        "fixed",
+        {"zero": 0, "false": False, "empty": "", "list": [], "dict": {}},
+        agent_session_id="touched",
+        agent_id="owner",
+        db_connection=db,
+    )
+    assert result == {
+        "status": "ok",
+        "data": {
+            "id": "fixed",
+            "message": "Memory 'fixed' metadata updated (5 key(s): dict, empty, false, list, zero).",
+        },
+        "warnings": [],
+        "errors": [],
+    }
+    stored = db.execute("SELECT metadata FROM entities WHERE id = 'fixed'").fetchone()[0]
+    assert json.loads(stored) == {"zero": 0, "false": False, "empty": "", "list": [], "dict": {}}
 
 
 @pytest.mark.parametrize(

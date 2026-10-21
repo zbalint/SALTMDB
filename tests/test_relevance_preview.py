@@ -57,7 +57,7 @@ class TestRelevancePreviewMCP(unittest.TestCase):
     def _store(self, title: str, content: str, tag: str) -> str:
         response = tools.store_memory(title=title, content=content, tags=[tag])
         self.assertEqual(response["status"], "ok")
-        return response["data"]["id"]
+        return response["data"]["memory_id"]
 
     def _seed_chunk_embeddings(self, entity_id: str) -> None:
         row = self.conn.execute(

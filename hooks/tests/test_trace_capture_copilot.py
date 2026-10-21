@@ -110,7 +110,9 @@ class TestParseInteractions(unittest.TestCase):
     def test_memory_writes_are_collected_from_successful_calls_only(self):
         lines = [
             user("store things"),
-            *tool("store_memory", "c1", json.dumps({"status": "ok", "data": {"id": "e-new"}})),
+            *tool(
+                "store_memory", "c1", json.dumps({"status": "ok", "data": {"memory_id": "e-new"}})
+            ),
             *tool("revise_memory", "c2", json.dumps({"status": "ok", "data": {"new_id": "e-rev"}})),
             *tool(
                 "supersede_memory", "c3", json.dumps({"status": "ok", "data": {"new_id": "e-sup"}})
@@ -209,7 +211,7 @@ class TestRun(unittest.TestCase):
         self.lines = [
             user("hello"),
             assistant("", requests=[{"toolCallId": "c1"}]),
-            *tool("store_memory", "c1", json.dumps({"status": "ok", "data": {"id": "E1"}})),
+            *tool("store_memory", "c1", json.dumps({"status": "ok", "data": {"memory_id": "E1"}})),
             assistant("stored"),
         ]
         self.transcript.write_text("\n".join(self.lines), encoding="utf-8")

@@ -101,9 +101,9 @@ class TestStoreContractPhase5(unittest.TestCase):
             content="Some sufficiently long content body for the quality gate to accept without issue here.",
         )
 
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Error: "))
-        self.assertIn("adjacent", result.lower())
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertIn("adjacent", result["errors"][0]["message"].lower())
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0], 0)
 
     def test_store_memory_collapses_single_separator_tag_and_still_warns_near_miss(self):
@@ -126,7 +126,7 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertEqual(stored["status"], "ok")
 
         result = tools.revise_memory(
-            entity_id=stored["data"]["id"],
+            entity_id=stored["data"]["memory_id"],
             title="[Test] Revised",
             content="Different content body long enough to pass quality checks easily.",
             tags=["#foo::bar"],
@@ -152,7 +152,7 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertEqual(second["status"], "ok")
 
         result = tools.consolidate_memories(
-            parent_ids=[first["data"]["id"], second["data"]["id"]],
+            parent_ids=[first["data"]["memory_id"], second["data"]["memory_id"]],
             title="[Test] Consolidated",
             content="Consolidated content body long enough to pass quality checks easily.",
             tags=["#foo::bar"],

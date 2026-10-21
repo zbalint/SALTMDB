@@ -83,7 +83,7 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ok")
         stored = self.conn.execute(
-            "SELECT full_content FROM entities WHERE id = ?", (result["data"]["id"],)
+            "SELECT full_content FROM entities WHERE id = ?", (result["data"]["memory_id"],)
         ).fetchone()[0]
         self.assertEqual(stored, "A complete and sufficiently descriptive body from a file.")
 
@@ -134,7 +134,7 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         )
         path = self._write_file("A complete and sufficiently descriptive newer body from a file.")
         result = tools.supersede_memory(
-            entity_id=original["data"]["id"],
+            entity_id=original["data"]["memory_id"],
             title="Newer",
             tags=["#file"],
             reason="A later decision replaced the old one.",
@@ -157,11 +157,11 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         self.assertGreater(len(large_body), CONTENT_FILE_DUMP_THRESHOLD_CHARS)
         stored = tools.store_memory(title="Large memory", tags=["#large"], content=large_body)
         self.assertEqual(stored["status"], "ok")
-        fetched = tools.get_memory(entity_id=stored["data"]["id"])
+        fetched = tools.get_memory(entity_id=stored["data"]["memory_id"])
         self.assertNotIn("content", fetched["data"])
         self.assertEqual(fetched["data"]["content_preview"], large_body[:500])
         stored_content = self.conn.execute(
-            "SELECT full_content FROM entities WHERE id = ?", (stored["data"]["id"],)
+            "SELECT full_content FROM entities WHERE id = ?", (stored["data"]["memory_id"],)
         ).fetchone()[0]
         with open(fetched["data"]["content_file_path"], encoding="utf-8") as f:
             self.assertEqual(f.read(), stored_content)

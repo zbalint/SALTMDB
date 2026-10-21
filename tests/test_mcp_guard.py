@@ -128,7 +128,7 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("replacement_tool", result["errors"][0]["message"])
 
     async def test_caller_validation_errors_are_normal_rejections(self):
-        result = await mcp_contract.call("store_memory", {"title": 7, "tags": None})
+        result = await mcp_contract.call("store_memory", {"title": 7, "tags": "wrong"})
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(
             [(item["code"], item["field"]) for item in result["errors"]],

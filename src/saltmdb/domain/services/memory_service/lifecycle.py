@@ -1227,20 +1227,43 @@ def _write_metadata_update(
             current = {}
     except (json.JSONDecodeError, TypeError):
         current = {}
-    merged = {**current, **metadata}
+    updated_keys = sorted(key for key, value in metadata.items() if value is not None)
+    deleted_keys = sorted(
+        key for key, value in metadata.items() if value is None and key in current
+    )
+    merged = {**current, **{key: metadata[key] for key in updated_keys}}
+    for key in deleted_keys:
+        merged.pop(key, None)
+    if not updated_keys and not deleted_keys:
+        result_holder["result"] = envelope_ok(
+            {
+                "id": resolved_id,
+                "message": f"Memory '{resolved_id}' metadata unchanged (empty patch).",
+            }
+        )
+        return
     now = datetime.now(UTC).isoformat()
     conn.execute(
         "UPDATE entities SET metadata = ?, updated_at = ?, last_touched_session_id = ? "
         "WHERE id = ?",
         (json.dumps(merged), now, agent_session_id, resolved_id),
     )
-    changed_keys = sorted(metadata.keys())
-    message = (
-        f"Memory '{resolved_id}' metadata updated "
-        f"({len(changed_keys)} key(s): {', '.join(changed_keys)})."
-        if changed_keys
-        else f"Memory '{resolved_id}' metadata unchanged (empty patch)."
-    )
+    if updated_keys and deleted_keys:
+        message = (
+            f"Memory '{resolved_id}' metadata updated "
+            f"({len(updated_keys)} key(s): {', '.join(updated_keys)}); "
+            f"deleted ({len(deleted_keys)} key(s): {', '.join(deleted_keys)})."
+        )
+    elif updated_keys:
+        message = (
+            f"Memory '{resolved_id}' metadata updated "
+            f"({len(updated_keys)} key(s): {', '.join(updated_keys)})."
+        )
+    elif deleted_keys:
+        message = (
+            f"Memory '{resolved_id}' metadata deleted "
+            f"({len(deleted_keys)} key(s): {', '.join(deleted_keys)})."
+        )
     result_holder["result"] = envelope_ok({"id": resolved_id, "message": message})
 
 
@@ -1285,13 +1308,11 @@ def update_memory_metadata(
     agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Shallow-merges `metadata` into an existing memory's metadata dict without touching
-    title/content/tags/content_hash/parent_ids -- coexists with (does not deprecate)
-    store_memory(entity_id=..., metadata=...), which requires those fields restated
-    byte-identical for the same intent. Works uniformly on core and non-core memories;
-    core-lifecycle governance fields (outcome/core_review_after/review_rationale) remain owned
-    exclusively by review_core_memory, not this tool. No key-deletion sentinel: submitting a
-    key with value null overwrites it to null (caller convention for "cleared") -- it is never
-    stripped from the stored dict.
+    title/content/tags/content_hash/parent_ids. Top-level null values delete existing keys;
+    deleting an absent key is a no-op, and nested nulls remain unchanged. Empty patches succeed
+    without changing the row. Works uniformly on core and non-core memories; core-lifecycle
+    governance fields (outcome/core_review_after/review_rationale) remain owned exclusively by
+    review_core_memory, not this tool.
     """
     from saltmdb.utils import error_codes
 
