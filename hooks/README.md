@@ -46,6 +46,14 @@ Every `saltmdb-*.py` script below has an identical body regardless of which harn
   emission, transcript scanning, per-session state files) lives in `_saltmdb_hook_common.py` —
   copy it alongside the `saltmdb-*.py` scripts, it's not a hook itself.
 
+Transcript readers accept only absolute paths resolved under the harness-owned roots
+`~/.claude/projects`, `~/.codex/sessions`, `~/.copilot/session-state`, and
+`~/.omp/agent/sessions`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` override their matching roots only
+when set to absolute paths. Reads are limited to 256 MiB, regular files, and UTF-8 replacement
+decoding. A denied or unreadable non-empty path emits one path-free
+`saltmdb hook: transcript path denied or unreadable` trace on stderr per process; empty or missing
+transcript paths remain silent.
+
 ## Adapter identity and session lifecycle
 
 Configure `SALTMDB_AGENT_ID` in every MCP server entry before enabling these hooks. The value is

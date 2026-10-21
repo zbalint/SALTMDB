@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +21,8 @@ def _load():
 
 
 def _transcript(tmp_path: Path, *lines: str) -> Path:
-    path = tmp_path / "transcript.jsonl"
+    path = tmp_path / ".claude" / "projects" / "transcript.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -33,6 +35,7 @@ def _run(module, home: Path, transcript: Path, session: str = "s") -> tuple[obje
     with (
         patch("sys.stdin", io.StringIO(json.dumps(payload))),
         patch("sys.stdout", output),
+        patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "", "CODEX_HOME": ""}),
         patch.object(module.Path, "home", return_value=home),
     ):
         exited = False

@@ -15,11 +15,17 @@ scanning for a recognizable substring pattern is more robust than trusting one a
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+_TRANSCRIPT_MAX_BYTES = 256 * 1024 * 1024
+_TRANSCRIPT_DENIAL_TRACE = "saltmdb hook: transcript path denied or unreadable"
+_transcript_denial_emitted = False
 
 # Merged, case-insensitive read-only tool-name vocabulary (union of Claude Code/Antigravity/
 # Copilot's own read-only tools) -- a tool matching this is never gated regardless of
@@ -92,6 +98,85 @@ def get_tool_name(data: dict) -> str:
     return ""
 
 
+def _raw_path_ok(raw: object) -> str | None:
+    if not isinstance(raw, str) or not raw or not os.path.isabs(raw):
+        return None
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw):
+        return None
+    return raw
+
+
+def _transcript_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    claude_config = os.environ.get("CLAUDE_CONFIG_DIR")
+    codex_home = os.environ.get("CODEX_HOME")
+    try:
+        home = Path.home()
+    except RuntimeError:
+        home = None
+    if claude_config and os.path.isabs(claude_config):
+        roots.append(Path(claude_config) / "projects")
+    elif home is not None:
+        roots.append(home / ".claude" / "projects")
+    if codex_home and os.path.isabs(codex_home):
+        roots.append(Path(codex_home) / "sessions")
+    elif home is not None:
+        roots.append(home / ".codex" / "sessions")
+    if home is not None:
+        roots.extend((home / ".copilot" / "session-state", home / ".omp" / "agent" / "sessions"))
+    return tuple(roots)
+
+
+def read_transcript(raw: object) -> str | None:
+    global _transcript_denial_emitted
+    if raw is None or raw == "":
+        return None
+    result: str | None = None
+    fd: int | None = None
+    try:
+        path = _raw_path_ok(raw)
+        if path is None:
+            raise ValueError("invalid transcript path")
+        real = os.path.realpath(path)
+        try:
+            inside = any(
+                os.path.commonpath([os.path.normcase(root_real), os.path.normcase(real)])
+                == os.path.normcase(root_real)
+                and os.path.normcase(real) != os.path.normcase(root_real)
+                for root_real in (os.path.realpath(root) for root in _transcript_roots())
+            )
+        except ValueError:
+            raise ValueError("transcript root comparison failed") from None
+        if not inside:
+            raise ValueError("transcript path outside allowed roots")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
+        # shortcut: same-uid parent-directory swaps can race this containment check; re-check /proc/self/fd when shared-home deployments require it.
+        fd = os.open(real, flags)
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _TRANSCRIPT_MAX_BYTES:
+            raise ValueError("transcript is not a regular file within the size limit")
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            data = handle.read(_TRANSCRIPT_MAX_BYTES + 1)
+        if len(data) > _TRANSCRIPT_MAX_BYTES:
+            raise ValueError("transcript grew beyond the size limit")
+        result = data.decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        result = None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if result is None and not _transcript_denial_emitted:
+            print(_TRANSCRIPT_DENIAL_TRACE, file=sys.stderr)
+            _transcript_denial_emitted = True
+    return result
+
+
 def read_transcript_full(transcript_path: str) -> str:
     """Reads a transcript file in full, or "" if unreadable. For checks that need to know
     whether something happened ANYWHERE in the session (e.g. "was search_memory ever called"),
@@ -99,13 +184,7 @@ def read_transcript_full(transcript_path: str) -> str:
     session purely because the matching line scrolled out of the window, which is a real bug a
     fixed-window version of this hook had (caught live: the search-gate hook denied a Bash call
     outright mid-session despite search_memory having already been called many times earlier)."""
-    path = Path(transcript_path)
-    if not transcript_path or not path.is_file():
-        return ""
-    try:
-        return path.read_text(errors="replace")
-    except OSError:
-        return ""
+    return read_transcript(transcript_path) or ""
 
 
 def read_transcript_tail(transcript_path: str, max_lines: int = 400) -> str:
@@ -113,41 +192,25 @@ def read_transcript_tail(transcript_path: str, max_lines: int = 400) -> str:
     text, not parsed JSONL -- see module docstring. Only appropriate for a check that is
     genuinely about "this turn"/"recently", not "ever this session" -- see read_transcript_full
     for the distinction and why it matters."""
-    path = Path(transcript_path)
-    if not transcript_path or not path.is_file():
-        return ""
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(lines[-max_lines:])
+    text = read_transcript(transcript_path)
+    return "\n".join(text.splitlines()[-max_lines:]) if text is not None else ""
 
 
 def read_transcript_from_line(transcript_path: str, start_line: int) -> str:
     """Reads a transcript file from a given 1-indexed line number to EOF, or "" if unreadable."""
-    path = Path(transcript_path)
-    if not transcript_path or not path.is_file():
-        return ""
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(lines[max(start_line - 1, 0) :])
+    text = read_transcript(transcript_path)
+    return "\n".join(text.splitlines()[max(start_line - 1, 0) :]) if text is not None else ""
 
 
 def find_last_line_matching(transcript_path: str, pattern: str) -> int | None:
     """1-indexed line number of the LAST line matching pattern (plain substring, not regex --
     every caller here searches for a literal sentinel/tool-name string), or None if no match /
     unreadable file."""
-    path = Path(transcript_path)
-    if not transcript_path or not path.is_file():
-        return None
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
+    text = read_transcript(transcript_path)
+    if text is None:
         return None
     last = None
-    for i, line in enumerate(lines, start=1):
+    for i, line in enumerate(text.splitlines(), start=1):
         if pattern in line:
             last = i
     return last

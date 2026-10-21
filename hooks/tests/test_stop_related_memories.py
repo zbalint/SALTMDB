@@ -92,6 +92,8 @@ class HookCase(HookHelpers, unittest.TestCase):
             "SALTMDB_RELATED_MEMORIES_HOOK": "1",
             "STUB_RECORD": str(self.record),
             "STUB_OUTPUT": str(self.output),
+            "CLAUDE_CONFIG_DIR": "",
+            "CODEX_HOME": "",
         }
 
     # helpers -------------------------------------------------------------------------------
@@ -329,7 +331,8 @@ class TestSeenFilter(HookCase):
     """T4."""
 
     def transcript(self, text):
-        path = self.root / "transcript.jsonl"
+        path = self.home / ".claude" / "projects" / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return str(path)
 
@@ -521,7 +524,8 @@ class TestCritiqueGateInteraction(HookCase):
         lines.append(
             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}
         )
-        path = self.root / f"t9-{with_related_feedback}.jsonl"
+        path = self.home / ".claude" / "projects" / f"t9-{with_related_feedback}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
         return str(path)
 
