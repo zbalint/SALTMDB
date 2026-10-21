@@ -221,7 +221,7 @@ def _start_timeout_result(canonical_db_path: str) -> ServiceResult:
     return ServiceResult(
         1,
         f"timed out waiting for daemon after {config.DAEMON_START_WAIT_S:g} s; "
-        f"see daemon.log\n{tail}",
+        f"see {discovery.daemon_log_path(canonical_db_path)}\n{tail}",
     )
 
 
@@ -263,7 +263,11 @@ def _spawn_started_daemon(
         client._spawn_daemon_process(canonical_db_path, persistent=True)
     except OSError as exc:
         return (
-            ServiceResult(1, f"failed to spawn persistent daemon: {exc}; see daemon.log"),
+            ServiceResult(
+                1,
+                f"failed to spawn persistent daemon: {exc}; "
+                f"see {discovery.daemon_log_path(canonical_db_path)}",
+            ),
             False,
             None,
             0,
@@ -324,7 +328,7 @@ def start_daemon(db_path: str | None = None) -> ServiceResult:
     return _wait_for_started_daemon(canonical_db_path)
 
 
-def _wait_for_stopped_daemon(pid: int) -> ServiceResult:
+def _wait_for_stopped_daemon(pid: int, canonical_db_path: str) -> ServiceResult:
     deadline = time.monotonic() + config.DAEMON_STOP_WAIT_S
     while True:
         if "saltmdb.daemon.server" not in _read_proc_cmdline(pid):
@@ -334,7 +338,7 @@ def _wait_for_stopped_daemon(pid: int) -> ServiceResult:
             return ServiceResult(
                 1,
                 f"daemon pid {pid} did not exit within {config.DAEMON_STOP_WAIT_S:g} s; "
-                "it may still be draining, see daemon.log",
+                f"it may still be draining, see {discovery.daemon_log_path(canonical_db_path)}",
             )
         time.sleep(min(config.DAEMON_DISCOVERY_RETRY_DELAY_S, remaining))
 
@@ -367,7 +371,7 @@ def stop_daemon(  # noqa: PLR0911 -- each lifecycle refusal is reported directly
     refusal = _signal_local_daemon(pid)
     if refusal is not None:
         return ServiceResult(1, refusal)
-    return _wait_for_stopped_daemon(pid)
+    return _wait_for_stopped_daemon(pid, canonical_db_path)
 
 
 def daemon_status(db_path: str | None = None) -> ServiceResult:

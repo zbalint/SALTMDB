@@ -41,6 +41,11 @@ class _Runner:
 class TestDaemonService(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.home_patch = patch.dict(
+            os.environ, {"HOME": self.temp_dir.name, "USERPROFILE": self.temp_dir.name}
+        )
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
         self.db_path = os.path.join(self.temp_dir.name, "saltmdb.db")
         self.canonical_db_path = discovery.resolve_canonical_db_path(self.db_path)
         self.info = {
@@ -428,7 +433,9 @@ class TestDaemonService(unittest.TestCase):
         self.assertEqual(
             result,
             service.ServiceResult(
-                1, "failed to spawn persistent daemon: spawn denied; see daemon.log"
+                1,
+                f"failed to spawn persistent daemon: spawn denied; "
+                f"see {discovery.daemon_log_path(self.canonical_db_path)}",
             ),
         )
 

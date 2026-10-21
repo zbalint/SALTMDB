@@ -773,6 +773,11 @@ class TestDaemonStateRealConcurrency(unittest.TestCase):
 class TestDaemonSignalShutdown(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
+        self.home_patch = patch.dict(
+            os.environ, {"HOME": self.tmp_dir, "USERPROFILE": self.tmp_dir}
+        )
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
         self.db_path = os.path.join(self.tmp_dir, "sigterm_test.db")
 
     def tearDown(self):

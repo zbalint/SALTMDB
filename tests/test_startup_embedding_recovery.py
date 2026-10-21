@@ -28,6 +28,12 @@ _SEED_ROWS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
 def _seed_database(path: Path) -> sqlite3.Connection:
     conn = init_db(str(path))
     for entity_id, title, content, content_hash, retrieval_text, retrieval_hash in _SEED_ROWS:

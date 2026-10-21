@@ -250,13 +250,10 @@ def _classify_startup_failure(db_path: str, key: str) -> str:
     )
 
 
-def _daemon_log_path(db_path: str) -> str:
-    return os.path.join(os.path.dirname(db_path) or os.path.expanduser("~/.saltmdb"), "daemon.log")
-
-
 def _read_daemon_log_tail(db_path: str, lines: int = 20) -> str:
     try:
-        log_path = _daemon_log_path(db_path)
+        canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+        log_path = discovery.daemon_log_path(canonical_db_path)
         if not os.path.exists(log_path):
             return "(no daemon.log found)"
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -329,10 +326,8 @@ def _spawn_daemon_process(db_path: str, *, persistent: bool = False) -> None:
     instantly and exits cleanly, so calling this speculatively/redundantly is cheap. Called
     directly on POSIX; called from inside the short-lived intermediary launcher on win32 (see
     _spawn_daemon_via_intermediary)."""
-    log_dir = os.path.dirname(db_path) or os.path.expanduser("~/.saltmdb")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = _daemon_log_path(db_path)
-    log_file = open(log_path, "a", encoding="utf-8")
+    canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+    log_file = discovery.open_daemon_log(canonical_db_path)
 
     env = dict(os.environ)
     env.setdefault("MALLOC_ARENA_MAX", DAEMON_MALLOC_ARENA_MAX)
@@ -1014,18 +1009,26 @@ def _intermediary_main(argv: list[str] | None = None) -> None:
     if len(argv) < 3 or argv[1] != "--spawn-detached":
         raise SystemExit("Usage: python -m saltmdb.daemon.client --spawn-detached <db_path>")
     db_path = argv[2]
-    logging.basicConfig(
-        filename=_daemon_log_path(db_path),
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logger.info(
-        "Intermediary launcher started: pid=%d ppid=%d -- spawning daemon then exiting immediately",
-        os.getpid(),
-        os.getppid(),
-    )
-    _spawn_daemon_process(db_path)
-    logger.info("Intermediary launcher exiting: pid=%d", os.getpid())
+    canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+    log_file = None
+    if not logging.getLogger().handlers:
+        log_file = discovery.open_daemon_log(canonical_db_path)
+        logging.basicConfig(
+            stream=log_file,
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    try:
+        logger.info(
+            "Intermediary launcher started: pid=%d ppid=%d -- spawning daemon then exiting immediately",
+            os.getpid(),
+            os.getppid(),
+        )
+        _spawn_daemon_process(db_path)
+        logger.info("Intermediary launcher exiting: pid=%d", os.getpid())
+    finally:
+        if log_file is not None:
+            log_file.close()
 
 
 if __name__ == "__main__":

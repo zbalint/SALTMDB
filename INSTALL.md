@@ -75,7 +75,7 @@ that logs to the terminal, run:
 python -m saltmdb.daemon.server --foreground
 ```
 
-For a detached daemon with output redirected to `daemon.log`, use:
+For a detached daemon with output redirected to `~/.saltmdb/logs/<key>/daemon.log`, use:
 
 ```bash
 saltmdb-cli daemon start

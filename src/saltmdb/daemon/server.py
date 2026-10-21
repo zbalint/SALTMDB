@@ -841,13 +841,9 @@ def _configure_stdio_logging() -> None:
 
 
 def _daemon_log_redirect(db_path: str) -> None:
-    """Redirects stdout/stderr to daemon.log (same directory as the DB), matching the
-    viewer.log/librarian.log redirection precedent, so a spawned background daemon's output is
-    visible for debugging rather than lost."""
-    log_dir = os.path.dirname(db_path) or os.path.expanduser("~/.saltmdb")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, "daemon.log")
-    log_file = open(log_path, "a", encoding="utf-8")
+    """Redirect stdout/stderr to the canonical daemon log under ~/.saltmdb/logs."""
+    canonical_db_path = discovery.resolve_canonical_db_path(db_path)
+    log_file = discovery.open_daemon_log(canonical_db_path)
     sys.stdout = log_file
     sys.stderr = log_file
 

@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 from datetime import datetime, UTC
-from typing import Any, cast
+from typing import IO, Any, cast
 
 from saltmdb.config import (
     DAEMON_PORT_PAIR_BASE,
@@ -39,6 +39,25 @@ def resolve_canonical_db_path(raw_path: str | None = None) -> str:
 
 def daemon_key(canonical_db_path: str) -> str:
     return hashlib.sha256(canonical_db_path.encode("utf-8")).hexdigest()[:16]
+
+
+def daemon_log_path(canonical_db_path: str) -> str:
+    """Return the owner-scoped log path for a canonical database path."""
+    base = os.path.join(os.path.expanduser("~/.saltmdb"), "logs")
+    return os.path.join(base, daemon_key(canonical_db_path), "daemon.log")
+
+
+def open_daemon_log(canonical_db_path: str) -> IO[str]:
+    """Create and open the owner-only append log for a canonical database path."""
+    path = daemon_log_path(canonical_db_path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    return open(
+        path,
+        "a",
+        encoding="utf-8",
+        opener=lambda opened_path, flags: os.open(opened_path, flags, 0o600),
+    )
 
 
 def _slot(key: str) -> int:

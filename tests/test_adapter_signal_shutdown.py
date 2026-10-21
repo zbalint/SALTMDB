@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import unittest
 import subprocess
+from unittest.mock import patch
 from typing import Optional, Tuple
 
 from saltmdb.daemon import discovery
@@ -17,6 +18,11 @@ from saltmdb.daemon import discovery
 class TestAdapterSignalShutdown(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.home_patch = patch.dict(
+            os.environ, {"HOME": self.temp_dir, "USERPROFILE": self.temp_dir}
+        )
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
         self.db_path = os.path.join(self.temp_dir, "test.db")
         self.canonical = discovery.resolve_canonical_db_path(self.db_path)
         self.key = discovery.daemon_key(self.canonical)
