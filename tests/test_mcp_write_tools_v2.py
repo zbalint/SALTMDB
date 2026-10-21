@@ -1,9 +1,11 @@
 from __future__ import annotations
+
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import mcp_contract
@@ -540,6 +542,99 @@ class TestMCPWriteToolsV2(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["errors"][0]["field"], "tags_to_merge")
         self.assertEqual(result["errors"][0]["message"], "Input should be a valid list")
         self.assertEqual(self._counts(), before)
+
+
+class TestWriteResultCharacterization(unittest.TestCase):
+    def setUp(self):
+        tools._drain_pending_trace_writes()
+        self.addCleanup(tools._drain_pending_trace_writes)
+
+    def test_non_dict_results_are_unchanged_and_never_recorded(self):
+        for response in (None, [], [{"status": "ok", "data": {"id": "not-a-write"}}]):
+            with (
+                self.subTest(response=response),
+                patch("saltmdb.mcp.tools._backend_or_raise") as backend,
+                patch("saltmdb.mcp.tools.is_trace_capture_enabled", return_value=True),
+            ):
+                backend.return_value.call.return_value = response
+                self.assertIs(tools._call_and_record_write("store_memory", {}), response)
+                self.assertEqual(tools._drain_pending_trace_writes(), [])
+
+    def test_missing_or_false_written_ids_never_record_a_trace(self):
+        for data in (None, [], "invalid", {}, {"id": None}, {"id": ""}):
+            with (
+                self.subTest(data=data),
+                patch("saltmdb.mcp.tools._backend_or_raise") as backend,
+                patch("saltmdb.mcp.tools.is_trace_capture_enabled", return_value=True),
+            ):
+                backend.return_value.call.return_value = {"status": "ok", "data": data}
+                result = tools._call_and_record_write("store_memory", {})
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(tools._drain_pending_trace_writes(), [])
+                if isinstance(data, dict) and "id" in data:
+                    self.assertEqual(result["data"], {"memory_id": data["id"]})
+                else:
+                    self.assertEqual(result["data"], data)
+
+    def test_error_remap_is_independent_of_status_and_preserves_other_entries(self):
+        for status in ("ok", "rejected"):
+            original = {
+                "status": status,
+                "data": {"id": "metadata-record"},
+                "errors": [
+                    {"field": "entity_id", "code": "NOT_FOUND"},
+                    {"field": "metadata", "code": "VALIDATION_ERROR"},
+                    "legacy error",
+                    None,
+                ],
+            }
+            with (
+                self.subTest(status=status),
+                patch("saltmdb.mcp.tools._backend_or_raise") as backend,
+                patch("saltmdb.mcp.tools.is_trace_capture_enabled") as capture,
+            ):
+                backend.return_value.call.return_value = original
+                result = tools._call_and_record_write("update_memory_metadata", {})
+                self.assertEqual(
+                    result["errors"],
+                    [
+                        {"field": "memory_id", "code": "NOT_FOUND"},
+                        {"field": "metadata", "code": "VALIDATION_ERROR"},
+                        "legacy error",
+                        None,
+                    ],
+                )
+                original_errors = cast(list[object], original["errors"])
+                self.assertEqual(cast(dict[str, object], original_errors[0])["field"], "entity_id")
+                self.assertEqual(original["data"], {"id": "metadata-record"})
+                self.assertEqual(
+                    result["data"],
+                    {"memory_id": "metadata-record"} if status == "ok" else original["data"],
+                )
+                capture.assert_not_called()
+
+    def test_other_tool_keeps_internal_fields_and_does_not_read_capture_flag(self):
+        response = {
+            "status": "ok",
+            "data": {"id": "unrelated-record"},
+            "errors": [{"field": "entity_id", "code": "NOT_FOUND"}],
+        }
+        with (
+            patch("saltmdb.mcp.tools._backend_or_raise") as backend,
+            patch("saltmdb.mcp.tools.is_trace_capture_enabled") as capture,
+        ):
+            backend.return_value.call.return_value = response
+            result = tools._call_and_record_write("merge_tags", {})
+        self.assertEqual(
+            result,
+            {
+                "status": "ok",
+                "data": {"id": "unrelated-record"},
+                "errors": [{"field": "entity_id", "code": "NOT_FOUND"}],
+            },
+        )
+        self.assertEqual(tools._drain_pending_trace_writes(), [])
+        capture.assert_not_called()
 
 
 if __name__ == "__main__":

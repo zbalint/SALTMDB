@@ -1257,28 +1257,42 @@ _WRITTEN_ID_KEY = {
     "supersede_memory": "new_id",
     "consolidate_memories": "entity_id",
 }
+_ID_RENAME_TO_MEMORY_ID_TOOLS = {"store_memory", "update_memory_metadata"}
+_ERROR_FIELD_REMAP_TOOL = "update_memory_metadata"
 
 
-def _call_and_record_write(tool_name: str, kwargs: dict):
+def _wrap_string_result(result):
     from saltmdb.utils.envelope import error, rejected
 
-    result = _backend_or_raise().call(tool_name, kwargs)
     if isinstance(result, str):
-        result = rejected([error("VALIDATION_ERROR", result)])
-    if isinstance(result, dict):
-        result = dict(result)
-        if result.get("status") == "ok" and isinstance(result.get("data"), dict):
-            data = dict(result["data"])
-            if tool_name in {"store_memory", "update_memory_metadata"} and "id" in data:
-                data["memory_id"] = data.pop("id")
-            result["data"] = data
-        if tool_name == "update_memory_metadata" and isinstance(result.get("errors"), list):
-            result["errors"] = [
-                {**item, "field": "memory_id"}
-                if isinstance(item, dict) and item.get("field") == "entity_id"
-                else item
-                for item in result["errors"]
-            ]
+        return rejected([error("VALIDATION_ERROR", result)])
+    return result
+
+
+def _remap_public_errors(errors):
+    return [
+        {**item, "field": "memory_id"}
+        if isinstance(item, dict) and item.get("field") == "entity_id"
+        else item
+        for item in errors
+    ]
+
+
+def _to_public_write_result(tool_name: str, result):
+    if not isinstance(result, dict):
+        return result
+    public_result = dict(result)
+    if public_result.get("status") == "ok" and isinstance(public_result.get("data"), dict):
+        data = dict(public_result["data"])
+        if tool_name in _ID_RENAME_TO_MEMORY_ID_TOOLS and "id" in data:
+            data["memory_id"] = data.pop("id")
+        public_result["data"] = data
+    if tool_name == _ERROR_FIELD_REMAP_TOOL and isinstance(public_result.get("errors"), list):
+        public_result["errors"] = _remap_public_errors(public_result["errors"])
+    return public_result
+
+
+def _queue_trace_write(tool_name: str, result):
     if (
         tool_name in _WRITTEN_ID_KEY
         and is_trace_capture_enabled()
@@ -1293,6 +1307,13 @@ def _call_and_record_write(tool_name: str, kwargs: dict):
             with _PENDING_TRACE_WRITES_LOCK:
                 _PENDING_TRACE_WRITES.append((tool_name, entity_id))
     return result
+
+
+def _call_and_record_write(tool_name: str, kwargs: dict):
+    result = _backend_or_raise().call(tool_name, kwargs)
+    result = _wrap_string_result(result)
+    result = _to_public_write_result(tool_name, result)
+    return _queue_trace_write(tool_name, result)
 
 
 def _drain_pending_trace_writes() -> list[tuple[str, str]]:
