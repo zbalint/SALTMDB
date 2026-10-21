@@ -203,6 +203,7 @@ class TestRun(unittest.TestCase):
         (self.home / ".saltmdb" / f"daemon_{key}.json").write_text(
             json.dumps({"service_port": self.daemon.port, "auth_token": "tok"}), encoding="utf-8"
         )
+        os.chmod(self.home / ".saltmdb" / f"daemon_{key}.json", 0o600)
 
     def tearDown(self):
         self.daemon.close()

@@ -9,8 +9,9 @@ import hashlib
 import json
 import logging
 import os
+import sys
 from datetime import datetime, UTC
-from typing import Any
+from typing import Any, cast
 
 from saltmdb.config import (
     DAEMON_PORT_PAIR_BASE,
@@ -21,6 +22,11 @@ from saltmdb.config import (
 logger = logging.getLogger(__name__)
 
 DISCOVERY_SCHEMA_VERSION = 1
+_SERVICE_PORT = "service_port"
+_AUTH_FIELD = "auth_token"
+_DAEMON_PID = "daemon_pid"
+_DB_PATH = "db_path"
+_ownership_warnings: set[str] = set()
 
 
 def resolve_canonical_db_path(raw_path: str | None = None) -> str:
@@ -52,7 +58,7 @@ def probe_port(key: str) -> int:
 
 def _discovery_dir() -> str:
     d = os.path.expanduser("~/.saltmdb")
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, mode=0o700, exist_ok=True)
     return d
 
 
@@ -64,17 +70,51 @@ def spawn_stamp_path(key: str) -> str:
     return os.path.join(_discovery_dir(), f"spawn_{key}.stamp")
 
 
+def _valid(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    port = data.get(_SERVICE_PORT)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return False
+    token = data.get(_AUTH_FIELD)
+    if (
+        not isinstance(token, str)
+        or not 1 <= len(token) <= 256
+        or any(not "\x21" <= char <= "\x7e" for char in token)
+    ):
+        return False
+    pid: object = cast(object, data.get(_DAEMON_PID))
+    if _DAEMON_PID in data and (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0):
+        return False
+    return _DB_PATH not in data or isinstance(data[_DB_PATH], str)
+
+
+def _owned_file(file: Any, path: str) -> bool:
+    if sys.platform == "win32":
+        return True
+    st = os.fstat(file.fileno())
+    if st.st_uid == os.getuid() and not st.st_mode & 0o022:
+        return True
+    if path not in _ownership_warnings:
+        logger.warning(
+            "Discovery file %s is not owned by the current user or writable by group/others",
+            path,
+        )
+        _ownership_warnings.add(path)
+    return False
+
+
 def read(key: str) -> dict[str, Any] | None:
     """Best-effort read of the discovery file. Returns None if missing, unreadable, or malformed
     -- callers treat that identically to "no daemon known yet", never as an error."""
     path = discovery_path(key)
     try:
         with open(path, "r", encoding="utf-8") as f:
+            if not _owned_file(f, path):
+                return None
             data = json.load(f)
-        if not isinstance(data, dict) or "service_port" not in data or "auth_token" not in data:
-            return None
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return data if _valid(data) else None
+    except (OSError, ValueError):
         return None
 
 

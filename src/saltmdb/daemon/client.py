@@ -436,6 +436,10 @@ def _authenticated_ping_ok(info: dict[str, Any]) -> bool:
         return False
 
 
+def _logged_ids(info: dict[str, Any]) -> tuple[int, int]:
+    return int(info.get("daemon_pid") or 0), int(info["service_port"])
+
+
 def reachable_daemon_info(db_path: str) -> dict[str, Any] | None:
     """Return authenticated discovery information for this canonical database, if reachable."""
     canonical_db_path = discovery.resolve_canonical_db_path(db_path)
@@ -528,11 +532,12 @@ def ensure_daemon_running(db_path: str, *, cap_s: float | None = None) -> dict[s
 
         info = reachable_daemon_info(db_path)
         if info is not None:
+            pid, port = _logged_ids(info)
             logger.info(
-                "ensure_daemon_running: daemon reachable after %.2f s (pid=%s port=%s)",
+                "ensure_daemon_running: daemon reachable after %.2f s (pid=%d port=%d)",
                 now - started_at,
-                info.get("daemon_pid"),
-                info.get("service_port"),
+                pid,
+                port,
             )
             return info
 
@@ -866,13 +871,14 @@ class SessionConnection:
                 )
                 global _current_session
                 _current_session = self
+                pid, port = _logged_ids(info)
                 logger.info(
-                    "Session opened: agent_session_id=%s adapter_pid=%d daemon_pid=%s "
-                    "service_port=%s",
+                    "Session opened: agent_session_id=%s adapter_pid=%d daemon_pid=%d "
+                    "service_port=%d",
                     self._agent_session_id,
                     os.getpid(),
-                    info.get("daemon_pid"),
-                    info.get("service_port"),
+                    pid,
+                    port,
                 )
                 return
             if last_error is None:

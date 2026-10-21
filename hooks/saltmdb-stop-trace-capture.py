@@ -172,13 +172,31 @@ def _adapter(home, environ, ppid):
 
 
 def _daemon(home, db_path):
-    # Same key formula as daemon/discovery.py (daemon_key + resolve_canonical_db_path); a hook
-    # cannot import saltmdb, so it is repeated here.
+    # Same key formula and discovery validation rules as daemon/discovery.py; a hook cannot import
+    # saltmdb, so the checks are repeated here.
     key = hashlib.sha256(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:16]
-    info = _read_json(home / _SALTMDB_DIR / f"daemon_{key}.json")
-    if info and info.get("service_port") and info.get("auth_token"):
-        return int(info["service_port"]), info["auth_token"]
-    return None
+    path = home / _SALTMDB_DIR / f"daemon_{key}.json"
+    try:
+        with path.open("rb") as handle:
+            st = os.fstat(handle.fileno())
+            if sys.platform != "win32" and (st.st_uid != os.getuid() or st.st_mode & 0o022):
+                return None
+            info = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    port = info.get("service_port")
+    token = info.get("auth_token")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return None
+    if (
+        not isinstance(token, str)
+        or not 1 <= len(token) <= 256
+        or any(not "\x21" <= char <= "\x7e" for char in token)
+    ):
+        return None
+    return port, token
 
 
 def _capture(port, token, identity, session_id, interactions):
