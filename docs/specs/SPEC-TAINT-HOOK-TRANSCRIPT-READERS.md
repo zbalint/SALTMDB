@@ -29,7 +29,7 @@ LOCKED 2026-10-21 (consultant review folded in).
 
 | File | Change |
 |---|---|
-| `hooks/_saltmdb_hook_common.py` | add `_TRANSCRIPT_MAX_BYTES`, `_transcript_roots`, `_inside_allowed_root`, `read_transcript`; reroute the four readers (D4) |
+| `hooks/_saltmdb_hook_common.py` | add `_TRANSCRIPT_MAX_BYTES`, `_transcript_roots`, `_raw_path_ok`, `read_transcript` (D5: no other helper); reroute the four readers (D4) |
 | `hooks/tests/test_transcript_reader.py` | new (section 4) |
 | `hooks/tests/test_stop_related_memories.py`, `hooks/tests/test_stop_critique_gate.py` | setup-only isolation of `HOME`/`USERPROFILE` (and the config-dir vars) so their `tmp_path` transcripts are under `tmp_path/.claude/projects` (move the fixture transcript path under that root if the test builds its own path; assertion text unchanged) |
 | `hooks/README.md` | one paragraph (roots, env overrides, size cap, the stderr trace) |
@@ -65,3 +65,5 @@ The direct `read_text` sites and `_line_count` (slice 2), `run_quiet` and the sw
 ## 8. Acceptance
 
 1. `./verify` exits 0. 2. `git status` lists only the files of section 3 (new test untracked). 3. The manual evidence of section 6, plus live-hook evidence before the commit (these hooks run for every agent on this host, and a wrongly derived root would silently disable them): run the real hook scripts `hooks/saltmdb-pre-tool-search-gate.py` and `hooks/saltmdb-stop-critique-gate.py` with a synthetic payload whose `transcript_path` is a REAL current session file (one under `~/.claude/projects`, and once a Codex rollout under `~/.codex/sessions`), read-only, and report the normal gate decision with NO denial line on stderr; also one run with a path outside every root showing the denial line once. 4. Mutation sample on a scratch copy (tester names the killers): `startswith` instead of `commonpath`; drop the `S_ISREG` check; drop the size cap; drop the realpath of the candidate; drop the realpath of the root; open without fstat; leak the path in the stderr line; allow a relative path; honour an unlisted env var. Each fails a test of the new file. 5. Architect: Sonar gate OK after CI, no new issue.
+
+Amendment 1 (2026-10-21, developer BLOCKED m_2785/m_2788, verified by the architect): section 3 named `_inside_allowed_root`, contradicting D5 (only `_raw_path_ok` and `_transcript_roots` may be split out; realpath, commonpath, open and read stay inline); section 3 now matches D5. Acceptance item 3: a Codex rollout counts as REAL when it is the newest actual rollout file under `~/.codex/sessions` (today none exists for 2026-10-21; the newest earlier rollout is fine), and the Claude session file is any current file under `~/.claude/projects`.
