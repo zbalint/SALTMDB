@@ -421,7 +421,7 @@ def _spawn_daemon_process(db_path: str, *, persistent: bool = False) -> None:
 def _authenticated_ping_ok(info: dict[str, Any]) -> bool:
     try:
         with socket.create_connection(
-            ("127.0.0.1", info["service_port"]), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
+            ("127.0.0.1", int(info["service_port"])), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
         ) as sock:
             sock.settimeout(DAEMON_RPC_CONNECT_TIMEOUT_S)
             protocol.send_frame(sock, protocol.build_request("ping", {}, token=info["auth_token"]))
@@ -585,7 +585,7 @@ def _refresh_call_session(
 def _send_call_request(info: dict[str, Any], method: str, params: dict[str, Any]) -> dict[str, Any]:
     try:
         with socket.create_connection(
-            ("127.0.0.1", info["service_port"]), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
+            ("127.0.0.1", int(info["service_port"])), timeout=DAEMON_RPC_CONNECT_TIMEOUT_S
         ) as sock:
             sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
             request = protocol.build_request(method, params, token=info["auth_token"])
@@ -786,7 +786,7 @@ def _open_session_attempt(
     sock: socket.socket | None = None
     try:
         sock = socket.create_connection(
-            ("127.0.0.1", info["service_port"]),
+            ("127.0.0.1", int(info["service_port"])),
             timeout=DAEMON_RPC_CONNECT_TIMEOUT_S,
         )
         sock.settimeout(DAEMON_RPC_CALL_TIMEOUT_S)
