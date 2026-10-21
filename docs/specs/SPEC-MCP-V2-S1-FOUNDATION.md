@@ -63,3 +63,7 @@ Tool signatures and behaviours (S2 to S4); the two bare-list tools; the correcte
 ## 8. Acceptance
 
 1. `./verify` exits 0. 2. `git status` lists only files named in sections 0 and 3 and D7. 3. The sweep of D7 shows only the authorised assertion changes. 4. Mutation sample of section 4. 5. Complexity report. 6. Architect after CI and the Sonar scan: the gate stays OK and no new issue appears.
+
+## Amendment 1 (2026-10-21)
+
+Resolves a contradiction found by the developer: D7 listed the tests that encode the old raw `ToolError` rejection but missed `tests/test_mcp_tools.py` `test_server_first_import_rejects_unknown_query_argument` (about lines 1918 to 1950), a subprocess test that imports `saltmdb.mcp.server` first and asserts the raw `ToolError` "Extra inputs are not permitted". It is added to the D7 list of authorised assertion changes: the probe must instead assert that `call_tool("search_memory", {"query": "x"})` returns a rejected envelope whose error has code `UNKNOWN_FIELD` and `field` equal to `query` (keeping the server-first import order and the subprocess shape). A grep of `tests` for `ToolError`, `Extra inputs` and `extra_forbidden` found no other occurrence outside the three tests of D7 and this one.
