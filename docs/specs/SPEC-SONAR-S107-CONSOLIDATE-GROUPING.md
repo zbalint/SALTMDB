@@ -62,3 +62,8 @@ D5 and D6. Mutation sample (tester, scratch copy, import-pinned): ignore `proven
 ## 8. Acceptance
 
 1. `./verify` exits 0. 2. `git status` lists only files named in sections 0, 3 and D5. 3. The D5 edit list, exactly the two authorised changed assertion lines (bc04, bc11) and no other, the dict/`**` keys report, the AST scan showing no removed keyword and no positional call past index 5. 4. Mutation sample of section 4. 5. Complexity before/after. 6. Architect after CI and the Sonar scan: the service `consolidate_memories` S107 closed.
+
+## 9. Amendment 1 (2026-10-21)
+
+- A1.1 D7 is relaxed for `consolidate_memories` only: its cognitive complexity may rise from the baseline 5 to at most 12 (the repo's ruff `max-complexity`, below Sonar's 15), because normalising the three optional value objects (`provenance or Provenance()` and the like) and reading `_bulk` add conditions the old flat signature did not have. The developer's measured 11 conforms. `_commit_bulk_consolidation_item` and `_dispatch_consolidate_memories` must still not rise (measured 8 and 4, unchanged).
+- A1.2 D5 lists `tests/test_mcp_tools.py` (1077, `context_id`) by mistake: that call is `tools.commit_consolidation` at the MCP layer (flat wire fields), not the service function, and is NOT edited.
