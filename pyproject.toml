@@ -11,7 +11,7 @@ authors = [
     { name = "Bálint Zoltán Márton" }
 ]
 license = "AGPL-3.0-only"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.30.0,<2.0.0",
     "anyio>=4.0.0,<5.0.0",
@@ -53,7 +53,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "C90", "PLR"]
@@ -65,7 +65,7 @@ ignore = ["E501", "PLR0913", "PLR0917", "PLR2004"]
 max-complexity = 12
 
 [tool.mypy]
-# Set above requires-python's 3.10 floor: the installed numpy>=2.5 stub uses PEP 695 `type`
+# Set above requires-python's 3.11 floor: the installed numpy>=2.5 stub uses PEP 695 `type`
 # statements unconditionally, which mypy can only parse when python_version >= 3.12. This only
 # affects how mypy reads dependency stubs, not a runtime requirement for this project.
 python_version = "3.12"
@@ -109,13 +109,11 @@ omit = ["hooks/tests/*"]
 relative_files = true
 
 [tool.uv]
-# shortcut: Pillow 13 is forced on Python >= 3.11 although fastembed (up to 0.9.0) declares
-# pillow<13, because Pillow < 13 carries eight advisories fixed in 13.0.0 (CVE-2026-112395,
-# -112397, -112400, -112404, -112895, -112896, -112897 and -112899; image decode and save
-# paths such as TIFF, GIF, PPM, EPS and PDF append). Pillow 13 needs Python 3.11, so Python 3.10
-# keeps fastembed's pillow<13. SALTMDB embeds text only and never calls Pillow. Remove this
-# override as soon as fastembed allows Pillow 13.
+# shortcut: Pillow 13 is forced although fastembed (up to 0.9.0) declares pillow<13,
+# because Pillow < 13 carries eight advisories fixed in 13.0.0 (CVE-2026-112395,
+# -112397, -112400, -112403, -112404, -112895, -112896 and -112897; image decode and save
+# paths such as TIFF, GIF, PPM, EPS and PDF append). SALTMDB embeds text only and never
+# calls Pillow. Remove this override as soon as fastembed allows Pillow 13.
 override-dependencies = [
-    "pillow>=13.0.0; python_full_version >= '3.11'",
-    "pillow>=10.3.0,<13; python_full_version < '3.11'",
+    "pillow>=13.0.0",
 ]

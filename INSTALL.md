@@ -6,7 +6,7 @@ Follow these steps to set up and configure the SALTMDB Model Context Protocol (M
 
 ## 1. Prerequisites
 
-* **Python:** Version 3.10 or higher.
+* **Python:** Version 3.11 or higher.
 * **pip:** Python package manager.
 * **SQLite:** Standard library dependency (pre-bundled with Python).
 
