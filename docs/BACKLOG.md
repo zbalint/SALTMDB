@@ -71,6 +71,9 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-057 | feature | MCP tool surface v2, slice S4: read tools (compact `search_memory`, `get_memory` detail, `get_memories`, id-anchored `retrieve_context`, envelope and cursor uniformity, `capture_trace_*` hook-only) | queued | Parent spec `docs/specs/SPEC-MCP-TOOL-SURFACE-V2.md`. Depends on BL-054. |
 | BL-058 | chore | MCP tool surface v2, slice S5: sweep of hooks, settings examples, skills, docs, shared agent instruction sources, `MIGRATION.md`, coupling test and the release cutover checklist | queued | Parent spec `docs/specs/SPEC-MCP-TOOL-SURFACE-V2.md`. The live hook sources outside the repository differ from `hooks/`; the cutover is an owner action. Depends on BL-055 to BL-057. |
 | BL-059 | feature | MCP tool-call telemetry (a counter per tool and per field, no payload) so the next redesign has usage data | open | Follow-up named in `docs/specs/SPEC-MCP-TOOL-SURFACE-V2.md` (M4); not part of the v2 release. No call counter exists today. |
+| BL-060 | feature | MCP tool surface v2, slice S2b: list-based `archive_memory` and `manage_relation` on new batch services (typed per-item errors, resolved ids, owner check, one community-detection trigger) | queued | Split out of BL-055 by amendment 3 of `docs/specs/SPEC-MCP-TOOL-SURFACE-V2.md`; own spec `docs/specs/SPEC-MCP-V2-S2B-BATCH-TOOLS.md`. Depends on BL-055. |
+| BL-061 | chore | Make the `store_memory` service return rejection envelopes with a field and a code instead of bare strings | open | Today the adapter wraps the string into a `VALIDATION_ERROR` without a field (BL-055). Many service-level tests pin the strings. |
+| BL-062 | chore | Remove the superseded `bulk_archive_memory`, `bulk_store_relations`, the old dispatch modes and the single-form relation and archive paths | open | Only after BL-060 and no caller remains. |
 
 ## Closed
 
