@@ -56,12 +56,18 @@ def _flag_file(home: Path, session_id: str) -> Path:
 # --- Bug #1: stop-critique-gate turn-boundary detection ---------------------------------------
 
 
-def test_critique_gate_finds_real_prompt_not_tool_result_echo():
+def test_critique_gate_finds_real_prompt_not_tool_result_echo(tmp_path: Path, monkeypatch):
     critique_gate = _load_module("saltmdb-stop-critique-gate")
+    transcript = tmp_path / ".claude" / "projects" / FIXTURE.name
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(FIXTURE.read_text())
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
-    last_line = critique_gate.find_last_user_line(str(FIXTURE))
+    last_line = critique_gate.find_last_user_line(str(transcript))
 
-    lines = FIXTURE.read_text().splitlines()
+    lines = transcript.read_text().splitlines()
     # Line 8 (1-indexed) is the synthetic human prompt in this fixture; later lines tagged
     # "type":"user" are tool_result echoes carrying tool_use_id, which must be excluded.
     assert last_line == 8

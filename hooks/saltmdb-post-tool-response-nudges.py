@@ -39,6 +39,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     get_session_id,
     get_tool_name,
     read_stdin_json,
+    read_transcript,
     retrieval_outcome_flag_path,
     search_memory_called_flag_path,
     write_count,
@@ -119,9 +120,10 @@ def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> Non
             "explicitly note why none apply -- don't just note the warning and continue."
         )
 
-    if not transcript_path or not Path(transcript_path).is_file():
+    text = read_transcript(transcript_path)
+    if text is None:
         return
-    lines = Path(transcript_path).read_text(errors="replace").splitlines()
+    lines = text.splitlines()
     last_store_line = None
     for i, line in enumerate(lines, start=1):
         if STORE_MEMORY_PATTERN in line:

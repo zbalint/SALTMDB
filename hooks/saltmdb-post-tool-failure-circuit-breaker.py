@@ -32,6 +32,7 @@ from _saltmdb_hook_common import (  # noqa: E402
     get_session_id,
     get_tool_name,
     read_stdin_json,
+    read_transcript,
     retrieval_outcome_flag_path,
 )
 
@@ -57,9 +58,6 @@ def main() -> None:
         return
 
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
-    if not transcript_path or not Path(transcript_path).is_file():
-        return
-
     error_match = ERROR_CODE_PATTERN.search(input_text)
     if not event_match or event_match.group(1) != "issue":
         return
@@ -67,7 +65,10 @@ def main() -> None:
         return
     error_code = error_match.group(1)
 
-    lines = Path(transcript_path).read_text(errors="replace").splitlines()[-200:]
+    text = read_transcript(transcript_path)
+    if text is None:
+        return
+    lines = text.splitlines()[-200:]
     # prior_count includes this call's own just-appended entry, so >=2 means this is the 2nd+
     # repeat.
     prior_count = sum(1 for line in lines if error_code in line and ISSUE_PATTERN.search(line))

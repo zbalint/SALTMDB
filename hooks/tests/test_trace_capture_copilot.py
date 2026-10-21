@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HOOKS_DIR = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -188,9 +189,23 @@ class _FakeDaemon:
 class TestRun(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.home, ignore_errors=True))
+        self._env_patch = patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "USERPROFILE": str(self.home),
+                "CLAUDE_CONFIG_DIR": "",
+                "CODEX_HOME": "",
+            },
+            clear=False,
+        )
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
         (self.home / ".saltmdb").mkdir()
         self.db_path = str(self.home / "x.db")
-        self.transcript = self.home / "events.jsonl"
+        self.transcript = self.home / ".copilot" / "session-state" / "cs-1" / "events.jsonl"
+        self.transcript.parent.mkdir(parents=True, exist_ok=True)
         self.lines = [
             user("hello"),
             assistant("", requests=[{"toolCallId": "c1"}]),
@@ -260,7 +275,7 @@ class TestRun(unittest.TestCase):
     def test_session_end_payload_without_transcript_path_uses_copilot_session_state(self):
         self._adapter(777)
         state = self.home / ".copilot" / "session-state" / "cs-1"
-        state.mkdir(parents=True)
+        state.mkdir(parents=True, exist_ok=True)
         (state / "events.jsonl").write_text(self.transcript.read_text(), encoding="utf-8")
         self._run(payload={"sessionId": "cs-1", "reason": "user_exit"})
         self.assertEqual(len(self.daemon.calls), 3)

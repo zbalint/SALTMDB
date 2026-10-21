@@ -54,6 +54,8 @@ from _saltmdb_hook_common import (  # noqa: E402
     prune_stale_state,
     read_count,
     read_stdin_json,
+    read_transcript,
+    read_transcript_full,
     read_transcript_from_line,
     state_dir,
     stop_block_payload,
@@ -131,11 +133,11 @@ def get_or_roll_session_cap(cap_state: Path) -> int:
 
 
 def find_last_user_line(transcript_path: str) -> int | None:
-    path = Path(transcript_path)
-    if not transcript_path or not path.is_file():
+    text = read_transcript(transcript_path)
+    if text is None:
         return None
     last = None
-    for i, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+    for i, line in enumerate(text.splitlines(), start=1):
         if (
             USER_TURN_PATTERN.search(line)
             and not TOOL_RESULT_ECHO_PATTERN.search(line)
@@ -246,7 +248,7 @@ def main() -> None:
     data = read_stdin_json()
     transcript_path = get_field(data, "transcript_path", "transcriptPath")
     session_id = get_session_id(data) or "unknown"
-    if not transcript_path or not Path(transcript_path).is_file():
+    if read_transcript(transcript_path) is None:
         sys.exit(0)
 
     count_state, stage2_state, session_fires_state, session_cap_state = _state_paths(session_id)
@@ -274,7 +276,7 @@ def main() -> None:
 
 
 def _line_count(transcript_path: str) -> int:
-    return len(Path(transcript_path).read_text(errors="replace").splitlines())
+    return len(read_transcript_full(transcript_path).splitlines())
 
 
 if __name__ == "__main__":

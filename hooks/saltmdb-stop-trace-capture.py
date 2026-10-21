@@ -20,6 +20,7 @@ Never blocks Copilot: always exits 0 and logs failures to ``~/.saltmdb/hooks/tra
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -28,7 +29,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _saltmdb_hook_common import read_stdin_json  # noqa: E402
+from _saltmdb_hook_common import read_stdin_json, read_transcript  # noqa: E402
 
 # mcpToolName -> key of the written entity id in that tool's result data (mirrors the adapter's
 # _WRITTEN_ID_KEY in src/saltmdb/mcp/tools.py; keep in sync).
@@ -230,27 +231,59 @@ def _capture(port, token, identity, session_id, interactions):
             )
 
 
-def run(payload, home, environ, ppid):
+INVALID_SESSION_LABEL = "<invalid>"
+TRANSCRIPT_DENIED = "transcript path denied or unreadable"
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+
+
+def _valid_session_id(session_id):
+    return (
+        isinstance(session_id, str)
+        and bool(SESSION_ID_PATTERN.fullmatch(session_id))
+        and session_id not in (".", "..")
+    )
+
+
+def _session_log_label(payload):
     session_id = payload.get("sessionId") or ""
+    return session_id if _valid_session_id(session_id) else INVALID_SESSION_LABEL
+
+
+def _resolve_transcript(payload, home):
+    session_id = payload.get("sessionId") or ""
+    explicit = payload.get("transcriptPath")
+    if explicit:
+        return explicit
+    if not _valid_session_id(session_id):
+        raise RuntimeError(TRANSCRIPT_DENIED)
+    return str(home / ".copilot" / "session-state" / session_id / "events.jsonl")
+
+
+def _read_transcript_or_raise(transcript):
+    text = read_transcript(transcript)
+    if text is None:
+        raise RuntimeError(TRANSCRIPT_DENIED)
+    return text
+
+
+def run(payload, home, environ, ppid):
+    log_session = _session_log_label(payload)
     try:
         adapter = _adapter(home, environ, ppid)
         if adapter is None:
             return 0  # capture not enabled for this Copilot process
-        transcript = payload.get("transcriptPath") or str(
-            home / ".copilot" / "session-state" / session_id / "events.jsonl"
-        )
+        transcript = _resolve_transcript(payload, home)
         daemon = _daemon(home, adapter["db_path"])
         if daemon is None:
             raise RuntimeError("no daemon discovery file")
-        with open(transcript, encoding="utf-8") as handle:
-            interactions = parse_interactions(handle.read().splitlines())
+        interactions = parse_interactions(_read_transcript_or_raise(transcript).splitlines())
         identity = {
             "agent_id": adapter.get("agent_id", "copilot"),
             "agent_session_id": adapter["agent_session_id"],
         }
-        _capture(*daemon, identity, session_id, interactions)
+        _capture(*daemon, identity, log_session, interactions)
     except Exception as exc:  # noqa: BLE001 -- a capture failure must never break Copilot
-        _log(home, f"session {session_id}: {type(exc).__name__}: {exc}")
+        _log(home, f"session {log_session}: {type(exc).__name__}: {exc}")
     return 0
 
 

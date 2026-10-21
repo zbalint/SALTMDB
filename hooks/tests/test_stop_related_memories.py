@@ -80,6 +80,13 @@ class HookCase(HookHelpers, unittest.TestCase):
         self.root = Path(directory.name)
         self.home = self.root / "home"
         self.home.mkdir()
+        self._reader_env = patch.dict(
+            os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}, clear=False
+        )
+        self._reader_env.start()
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("CODEX_HOME", None)
+        self.addCleanup(self._reader_env.stop)
         self.stub = self.root / "saltmdb-cli"
         self.stub.write_text(STUB.format(python=sys.executable), encoding="utf-8")
         self.stub.chmod(0o755)
@@ -564,7 +571,8 @@ class TestCritiqueGateInteraction(HookCase):
 
     def test_plain_later_user_prompt_remains_a_new_turn(self):
         gate = _load("saltmdb_stop_critique_gate_plain_user", self.GATE)
-        path = self.root / "t9-plain-later-user.jsonl"
+        path = self.home / ".claude" / "projects" / "t9-plain-later-user.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             {"type": "user", "message": {"role": "user", "content": "please do the thing"}},
             {
@@ -601,7 +609,8 @@ class TestCritiqueGateInteraction(HookCase):
             }
             for sentinel in sentinels
         )
-        path = self.root / "t9-all-sentinels.jsonl"
+        path = self.home / ".claude" / "projects" / "t9-all-sentinels.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
         self.assertEqual(gate.find_last_user_line(str(path)), 1)
 
