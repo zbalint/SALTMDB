@@ -2,6 +2,7 @@ import logging
 import random
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -146,6 +147,34 @@ def rollback_to_and_release(conn: sqlite3.Connection, savepoint: str) -> None:
     """Undo a savepoint's writes and release its savepoint marker."""
     conn.execute(f"ROLLBACK TO {savepoint}")
     conn.execute(f"RELEASE {savepoint}")
+
+
+def _abort_savepoint(conn: sqlite3.Connection, savepoint_name: str) -> None:
+    if not conn.in_transaction:
+        return
+    try:
+        rollback_to_and_release(conn, savepoint_name)
+    except Exception as rollback_error:
+        logger.error("Savepoint rollback failed for %s: %s", savepoint_name, rollback_error)
+        conn.execute("ROLLBACK;")
+
+
+@contextmanager
+def savepoint(conn: sqlite3.Connection, prefix: str):
+    """Run a nested write region that can roll back without ending its outer transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("savepoint requires an active transaction")
+    name = f"{prefix}_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield conn
+    except BaseException:
+        _abort_savepoint(conn, name)
+        raise
+    else:
+        if not conn.in_transaction:
+            raise RuntimeError("savepoint outer transaction ended unexpectedly")
+        conn.execute(f"RELEASE {name}")
 
 
 def write_transaction_retrying(conn: sqlite3.Connection, fn):

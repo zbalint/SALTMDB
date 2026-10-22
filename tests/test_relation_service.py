@@ -14,7 +14,7 @@ from unittest.mock import patch
 import sqlite_vec
 
 from saltmdb.db.schema import init_db
-from saltmdb.db.connection import write_transaction_retrying
+from saltmdb.db.connection import write_transaction, write_transaction_retrying
 from saltmdb.domain.services.relation_service import (
     resolve_or_create_predicate,
     list_predicates,
@@ -3165,6 +3165,11 @@ class TestRelationD14Pins(unittest.TestCase):
     def _bulk_patches(self, *, consolidate, tx=None, centroids=True):
         parents = [self._mk("D14 bulk parent 1"), self._mk("D14 bulk parent 2")]
         centroid_map = {parent: [1.0] for parent in parents} if centroids else {}
+
+        def _run_in_transaction(conn, fn):
+            with write_transaction(conn) as tx_conn:
+                return fn(tx_conn)
+
         return (
             parents,
             patch(
@@ -3177,7 +3182,7 @@ class TestRelationD14Pins(unittest.TestCase):
             ),
             patch(
                 "saltmdb.domain.services.relation_service.write_transaction_retrying",
-                side_effect=tx or (lambda conn, fn: fn(conn)),
+                side_effect=tx or _run_in_transaction,
             ),
         )
 
@@ -3443,8 +3448,10 @@ class TestRelationD14Pins(unittest.TestCase):
             return {"status": "ok", "data": {"entity_id": "bulk-id", "message": "ok"}}
 
         def retry_twice(conn, fn):
-            fn(conn)
-            fn(conn)
+            with write_transaction(conn) as tx_conn:
+                fn(tx_conn)
+            with write_transaction(conn) as tx_conn:
+                fn(tx_conn)
 
         parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
             consolidate=fake_consolidate, tx=retry_twice

@@ -156,8 +156,9 @@ automatically and retain their historical rows.
 Bulk ownership is intentionally split between trusted internals and public surfaces. Relation
 batches use the configured adapter owner as their default; trusted in-process callers may override
 an item, but public MCP wrappers strip per-item owners. Bulk consolidation keeps its configured
-batch-owner behavior, with per-item overrides retained only for internal compatibility. The
-`saltmdb-cli orphans` scan is scoped by `SALTMDB_AGENT_ID`; `saltmdb-cli corpus-health` is a
+batch-owner behavior, with per-item overrides retained only for internal compatibility.
+Consolidation and its batch form run their row writes in a savepoint and clear vectors after it, so a failure under the daemon leaves no partial state.
+The `saltmdb-cli orphans` scan is scoped by `SALTMDB_AGENT_ID`; `saltmdb-cli corpus-health` is a
 cross-owner administrative report; it also reports correction counts per week and the share of active
 memories updated in the last 30 days.
 

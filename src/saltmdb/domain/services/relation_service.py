@@ -21,6 +21,7 @@ from saltmdb.db.connection import (
     close_connection,
     is_coordinator_connection,
     rollback_to_and_release,
+    savepoint,
 )
 from saltmdb.utils import error_codes
 from saltmdb.utils.envelope import (
@@ -2021,7 +2022,6 @@ def _consolidation_archive_parents(
     from saltmdb.domain.services.embedding_service import (
         cancel_embedding_jobs_for_entity,
         cancel_retrieval_embedding_jobs_for_entity,
-        clear_embedding_vectors_for_entity,
         enqueue_embedding_jobs_for_entity,
     )
 
@@ -2057,6 +2057,16 @@ def _consolidation_archive_parents(
     )
     for parent_id in resolved_parents:
         cancel_embedding_jobs_for_entity(conn, parent_id)
+        cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=False)
+
+
+def _clear_archived_parent_vectors(conn, parent_ids: list[str]) -> None:
+    from saltmdb.domain.services.embedding_service import (
+        cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
+    )
+
+    for parent_id in parent_ids:
         clear_embedding_vectors_for_entity(conn, parent_id)
         cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=True)
 
@@ -2652,6 +2662,7 @@ def consolidate_memories(
     try:
 
         def _write(c):
+            orphaned_edges.clear()
             _consolidation_commit(
                 c,
                 resolved_parents,
@@ -2666,7 +2677,13 @@ def consolidate_memories(
         if _bulk is not None:
             _write(conn)
         else:
-            write_transaction_retrying(conn, _write)
+
+            def _commit_single(c):
+                with savepoint(c, "consolidation"):
+                    _write(c)
+                _clear_archived_parent_vectors(c, resolved_parents)
+
+            write_transaction_retrying(conn, _commit_single)
 
         return envelope_ok(
             {
@@ -2783,20 +2800,24 @@ def _write_bulk_consolidations(
     agent_session_id: str | None,
 ) -> None:
     results.clear()
-    for item, parent_ids in zip(consolidations, item_resolved_parents):
-        results.append(
-            _commit_bulk_consolidation_item(
-                conn,
-                item,
-                parent_ids,
-                centroids,
-                unresolved,
-                observed_state,
-                agent_id,
-                context_id,
-                agent_session_id,
+    archived_parent_ids: list[str] = []
+    with savepoint(conn, "bulk_consolidation"):
+        for item, parent_ids in zip(consolidations, item_resolved_parents):
+            results.append(
+                _commit_bulk_consolidation_item(
+                    conn,
+                    item,
+                    parent_ids,
+                    centroids,
+                    unresolved,
+                    observed_state,
+                    agent_id,
+                    context_id,
+                    agent_session_id,
+                )
             )
-        )
+            archived_parent_ids.extend(parent_ids)
+    _clear_archived_parent_vectors(conn, archived_parent_ids)
 
 
 def _prepare_bulk_consolidation_parents(

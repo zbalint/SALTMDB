@@ -72,32 +72,32 @@ class TestLibrarianService(unittest.TestCase):
         self.assertEqual(p2[1], "archived")
 
     def test_bulk_commit_consolidation_is_all_or_nothing(self):
-        # Regression test for the bulk-atomicity fix: bulk_commit_consolidation wraps its
-        # whole loop in ONE write_transaction_retrying block, so a failure on a later item
-        # must roll back an earlier item's would-be-successful insert too -- previously each
-        # item committed individually despite the function's docstring claiming atomicity.
-        res1 = store_memory(
-            title="Bulk Atomicity Parent A",
-            content="Detailed description of a parent fact used for the bulk atomicity regression test",
-            agent_id="agent1",
-            db_path=self.db_path,
-        )
-        id1 = res1["data"]["id"]
+        parents = []
+        for title in (
+            "Bulk Atomicity Parent A",
+            "Bulk Atomicity Parent B",
+            "Bulk Atomicity Parent C",
+            "Bulk Atomicity Parent D",
+        ):
+            result = store_memory(
+                title=title,
+                content=f"Detailed description of {title} for the bulk atomicity regression test",
+                agent_id="agent1",
+                db_path=self.db_path,
+            )
+            parents.append(result["data"]["id"])
 
         results = bulk_commit_consolidation(
             consolidations=[
                 {
-                    "parent_ids": [id1],
+                    "parent_ids": parents[:2],
                     "title": "Would-Be Valid Consolidation",
                     "content": "This item is valid on its own and would succeed in isolation",
                 },
                 {
-                    # Deliberately malformed: commit_consolidation already validates and
-                    # rejects an empty parent_ids list with "Error: parent_ids must be a
-                    # non-empty list of UUID strings."
-                    "parent_ids": [],
-                    "title": "Malformed Second Item",
-                    "content": "This item is deliberately invalid to trigger a batch rollback",
+                    "parent_ids": parents[2:],
+                    "title": "Rejected In Transaction",
+                    "content": "test " * 40,
                 },
             ],
             db_connection=self.conn,
@@ -114,12 +114,11 @@ class TestLibrarianService(unittest.TestCase):
         ).fetchone()
         self.assertIsNone(row)
 
-        # Parent A must still be 'raw' (not archived), since the archiving UPDATE that
-        # commit_consolidation performs for item 1 must also have been rolled back.
-        p1_status = self.conn.execute(
-            "SELECT status FROM entities WHERE id = ?", (id1,)
-        ).fetchone()[0]
-        self.assertEqual(p1_status, "raw")
+        # Both first-item parents must remain raw after the rejected second item.
+        statuses = self.conn.execute(
+            "SELECT status FROM entities WHERE id IN (?, ?) ORDER BY id", tuple(parents[:2])
+        ).fetchall()
+        self.assertEqual(statuses, [("raw",), ("raw",)])
 
     def test_merge_tags_heuristics_merges_normalized_duplicate_tags(self):
         self.conn.execute(

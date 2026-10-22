@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from saltmdb.daemon.dispatch import _dispatch_consolidate_memories
+from saltmdb.db.connection import write_transaction
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import relation_service
 from saltmdb.domain.services.memory_service import (
@@ -352,6 +353,11 @@ class TestConsolidationGrouping(unittest.TestCase):
 
     def test_without_bulk_context_transaction_wrapper_is_used(self):
         parent_ids = [self._parent("Transaction A"), self._parent("Transaction B")]
+
+        def _run_in_transaction(conn, callback):
+            with write_transaction(conn) as tx_conn:
+                return callback(tx_conn)
+
         with (
             patch.object(
                 relation_service, "get_fresh_entity_centroids", side_effect=self._cohesion
@@ -359,7 +365,7 @@ class TestConsolidationGrouping(unittest.TestCase):
             patch.object(
                 relation_service,
                 "write_transaction_retrying",
-                side_effect=lambda conn, callback: callback(conn),
+                side_effect=lambda conn, callback: _run_in_transaction(conn, callback),
             ) as transaction,
         ):
             result = consolidate_memories(
