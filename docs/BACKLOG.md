@@ -84,7 +84,7 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 
 | Id | Type | Title | Closed by |
 |---|---|---|---|
-| BL-056 | feature | MCP tool surface v2, slice S3a: batch-only `consolidate_memories` (items, `core`/`demote_core`, `CORE_DECISION_REQUIRED`) on the new `apply_consolidations` service | PENDING_SHA (spec `docs/specs/SPEC-MCP-V2-S3A-CONSOLIDATE.md`, amendment 1). Until S5 the shipped skill text and the live install still teach the old shape. |
+| BL-056 | feature | MCP tool surface v2, slice S3a: batch-only `consolidate_memories` (items, `core`/`demote_core`, `CORE_DECISION_REQUIRED`) on the new `apply_consolidations` service | e5d73eb (spec `docs/specs/SPEC-MCP-V2-S3A-CONSOLIDATE.md`, amendment 1). Until S5 the shipped skill text and the live install still teach the old shape. |
 | BL-060 | feature | MCP tool surface v2, slice S2b: list-based `archive_memory` and `manage_relation` on new batch services (typed per-item errors, resolved ids, owner check, one community-detection trigger) | e0f0b74 (spec `docs/specs/SPEC-MCP-V2-S2B-BATCH-TOOLS.md`, amendments 1 to 4) |
 | BL-055 | feature | MCP tool surface v2, slice S2: create-only `store_memory`, null-deleting `update_memory_metadata`, list-only `merge_tags`, the two repository hooks (the list-based `archive_memory` and `manage_relation` moved to BL-060) | afc7474 (spec `docs/specs/SPEC-MCP-V2-S2-WRITE-TOOLS.md`, amendments 1 to 4) |
 | BL-054 | feature | MCP tool surface v2, slice S1: `call_tool` guard (unknown fields and removed names), R4 envelope, contract-test harness | 918e7fa (spec `docs/specs/SPEC-MCP-V2-S1-FOUNDATION.md`, amendments 1 and 2) |
