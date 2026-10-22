@@ -72,6 +72,7 @@ decided), `blocked`, `needs-owner` (waiting on a decision or authorization).
 | BL-060 | feature | MCP tool surface v2, slice S2b: list-based `archive_memory` and `manage_relation` on new batch services (typed per-item errors, resolved ids, owner check, one community-detection trigger) | queued | Split out of BL-055 by amendment 3 of `docs/specs/SPEC-MCP-TOOL-SURFACE-V2.md`; own spec `docs/specs/SPEC-MCP-V2-S2B-BATCH-TOOLS.md`. Depends on BL-055. |
 | BL-061 | chore | Make the `store_memory` service return rejection envelopes with a field and a code instead of bare strings | open | Today the adapter wraps the string into a `VALIDATION_ERROR` without a field (BL-055). Many service-level tests pin the strings. |
 | BL-062 | chore | Remove the superseded `bulk_archive_memory`, `bulk_store_relations`, the old dispatch modes and the single-form relation and archive paths | open | Only after BL-060 and no caller remains. |
+| BL-063 | bug | The old `bulk_archive_memory`, `bulk_store_relations` and `bulk_commit_consolidation` are not atomic under the daemon | open | Found 2026-10-22 during S2b: the daemon runs the whole service call inside the coordinator's outer transaction, so their raise-inside-and-catch-outside rollback is a no-op and earlier valid items commit. The new batch services use a SAVEPOINT (S2b amendment 2). Fix `bulk_commit_consolidation` in S3 (consolidate becomes batch-only) and remove the other two under BL-062. Verified by a probe on a real coordinator (code). |
 
 ## Closed
 
