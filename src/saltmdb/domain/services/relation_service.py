@@ -929,9 +929,11 @@ def _apply_relation_item(
     is_duplicate = any(
         warning.get("code") == error_codes.ALREADY_DONE for warning in result.get("warnings", [])
     )
-    kind: Literal["created", "duplicate", "invalidated"] = (
-        "duplicate" if is_duplicate else "invalidated" if is_invalidate else "created"
-    )
+    kind: Literal["created", "duplicate", "invalidated"] = "created"
+    if is_duplicate:
+        kind = "duplicate"
+    elif is_invalidate:
+        kind = "invalidated"
     return RelationOutcome(
         kind,
         {
