@@ -4,7 +4,7 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, UTC
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 from dataclasses import dataclass
 from saltmdb.config import (
     get_db_path,
@@ -15,7 +15,13 @@ from saltmdb.config import (
     RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS,
     MAX_MEMORY_CONTENT_CHARS,
 )
-from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
+from saltmdb.db.connection import (
+    get_connection,
+    write_transaction_retrying,
+    close_connection,
+    is_coordinator_connection,
+    rollback_to_and_release,
+)
 from saltmdb.utils import error_codes
 from saltmdb.utils.envelope import (
     error as envelope_error,
@@ -847,6 +853,175 @@ def invalidate_relation(
     finally:
         if should_close:
             close_connection(conn)
+
+
+def _assert_relation_transaction(conn, message: str) -> None:
+    if not conn.in_transaction:
+        raise RuntimeError(message)
+
+
+class RelationOutcome(NamedTuple):
+    kind: Literal["created", "duplicate", "invalidated"]
+    item: dict[str, Any]
+
+
+def _relation_rejection(result: dict[str, Any]) -> list[dict[str, Any]]:
+    errors = result.get("errors") or [
+        envelope_error(error_codes.INTERNAL_ERROR, "relation operation failed")
+    ]
+    internal_message = next(
+        (
+            entry.get("message", "relation operation failed")
+            for entry in errors
+            if entry.get("code") == error_codes.INTERNAL_ERROR
+        ),
+        None,
+    )
+    if internal_message is not None:
+        raise RuntimeError(internal_message)
+    return errors
+
+
+def _prefix_relation_errors(errors: list[dict[str, Any]], index: int) -> list[dict[str, Any]]:
+    prefixed = []
+    for entry in errors:
+        inner_field = entry.get("field")
+        field = f"relations[{index}].{inner_field}" if inner_field else f"relations[{index}]"
+        prefixed.append({**entry, "field": field})
+    return prefixed
+
+
+def _apply_relation_item(
+    tx_conn,
+    item: dict[str, Any],
+    agent_id: str | None,
+    coordinator,
+) -> RelationOutcome | list[dict[str, Any]]:
+    is_invalidate = bool(item.get("invalidate", False))
+    source_id = item.get("source_id")
+    target_id = item.get("target_id")
+    predicate = item.get("predicate")
+    if is_invalidate:
+        result = invalidate_relation(
+            source_id=source_id,
+            target_id=target_id,
+            predicate=predicate,
+            invalid_at=item.get("invalid_at"),
+            db_connection=tx_conn,
+            coordinator=coordinator,
+            _in_transaction=True,
+        )
+    else:
+        result = store_relation(
+            source_id=source_id,
+            target_id=target_id,
+            predicate=predicate,
+            valid_at=item.get("valid_at"),
+            override_justification=item.get("override_justification"),
+            agent_id=agent_id,
+            db_connection=tx_conn,
+            coordinator=coordinator,
+            _in_transaction=True,
+        )
+    if result.get("status") == "rejected":
+        return _relation_rejection(result)
+    data = result.get("data") or {}
+    is_duplicate = any(
+        warning.get("code") == error_codes.ALREADY_DONE for warning in result.get("warnings", [])
+    )
+    kind: Literal["created", "duplicate", "invalidated"] = (
+        "duplicate" if is_duplicate else "invalidated" if is_invalidate else "created"
+    )
+    return RelationOutcome(
+        kind,
+        {
+            "status": "duplicate" if is_duplicate else "success",
+            "source_id": source_id,
+            "target_id": target_id,
+            "predicate": predicate,
+            "action": "invalidate" if is_invalidate else "store",
+            "result": data,
+        },
+    )
+
+
+def _apply_relations_transaction(
+    tx_conn,
+    relations: list,
+    agent_id: str | None,
+    coordinator,
+) -> dict:
+    _assert_relation_transaction(tx_conn, "relation batch requires an active transaction")
+    savepoint = f"relation_batch_{uuid.uuid4().hex}"
+    tx_conn.execute(f"SAVEPOINT {savepoint}")
+    batch_items: list[dict] = []
+    batch_errors: list[dict] = []
+    counts = {"created_count": 0, "duplicate_count": 0, "invalidated_count": 0}
+    for index, item in enumerate(relations):
+        if not isinstance(item, dict):
+            batch_errors.append(
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "relation item must be an object",
+                    f"relations[{index}]",
+                )
+            )
+            continue
+        outcome = _apply_relation_item(tx_conn, item, agent_id, coordinator)
+        if isinstance(outcome, list):
+            batch_errors.extend(_prefix_relation_errors(outcome, index))
+            continue
+        counts[f"{outcome.kind}_count"] += 1
+        batch_items.append(outcome.item)
+    if batch_errors:
+        _assert_relation_transaction(tx_conn, "relation batch transaction ended before rollback")
+        rollback_to_and_release(tx_conn, savepoint)
+        return rejected(batch_errors)
+    _assert_relation_transaction(tx_conn, "relation batch transaction ended before release")
+    tx_conn.execute(f"RELEASE {savepoint}")
+    return envelope_ok({"items": batch_items, **counts})
+
+
+def apply_relations(
+    relations: list,
+    agent_id: str | None = None,
+    db_connection=None,
+    db_path: str | None = None,
+    coordinator=None,
+) -> dict:
+    """Apply relation operations atomically, collecting expected rejections."""
+    if not isinstance(relations, list) or not relations:
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "relations must be a non-empty array",
+                    "relations",
+                )
+            ]
+        )
+    conn, resolved_path, should_close = _open_relation_connection(db_connection, db_path)
+    try:
+        result = write_transaction_retrying(
+            conn,
+            lambda tx_conn: _apply_relations_transaction(tx_conn, relations, agent_id, coordinator),
+        )
+        if result.get("status") == "ok" and (
+            result["data"]["created_count"] or result["data"]["invalidated_count"]
+        ):
+            from saltmdb.domain.services.community_detection_service import (
+                trigger_community_detection,
+            )
+
+            trigger_community_detection(db_path=resolved_path, coordinator=coordinator)
+        return result
+    except Exception as exc:
+        logger.error("Error applying relation batch: %s", exc)
+        if is_coordinator_connection(conn):
+            raise
+        return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(exc))])
+    finally:
+        _close_owned_relation_connection(conn, should_close)
 
 
 def _dependency_cte_sql(

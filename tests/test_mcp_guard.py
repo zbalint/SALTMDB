@@ -23,8 +23,6 @@ _SKIP_REASONS = {
         "list_predicates": "Published schema has no required field.",
         "merge_tags": "Published schema has no required field.",
         "search_memory": "Published schema has no required field.",
-        "archive_memory": "Published schema has no required field.",
-        "manage_relation": "Published schema has no required field.",
         "consolidate_memories": "Published schema has no required field.",
         "get_memory": "Published schema has no required field.",
         "search_traces": "Published schema has no required field.",
@@ -38,7 +36,6 @@ _SKIP_REASONS = {
         "list_predicates": "Every published parameter accepts null.",
         "merge_tags": "Every published parameter accepts null.",
         "search_memory": "Every published parameter accepts null.",
-        "archive_memory": "Every published parameter accepts null.",
         "search_traces": "Every published parameter accepts null.",
         "retrieve_context": "Every published parameter accepts null.",
         "review_core_memory": "Every published parameter accepts null.",
@@ -273,8 +270,8 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
 
     async def test_output_schema_rejections_pass_lowlevel_validation(self):
         for name, arguments in (
-            ("archive_memory", {"__unknown_guard_field__": 1}),
-            ("manage_relation", {"__unknown_guard_field__": 1}),
+            ("store_memory", {"__unknown_guard_field__": 1}),
+            ("revise_memory", {"__unknown_guard_field__": 1}),
             ("consolidate_memories", {"__unknown_guard_field__": 1}),
         ):
             with self.subTest(tool=name):
@@ -311,7 +308,7 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["errors"][0]["code"], "INTERNAL_ERROR")
 
     async def test_guard_result_matches_fastmcp_conversion_for_plain_and_wrapped_tools(self):
-        for name in ("list_predicates", "archive_memory"):
+        for name in ("list_predicates", "consolidate_memories"):
             tool = mcp_contract.mcp._tool_manager.get_tool(name)
             properties = await mcp_contract.published_properties(name)
             envelope = {
@@ -329,7 +326,7 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
             expected = tool.fn_metadata.convert_result(envelope)
             actual = await mcp_contract.mcp.call_tool(name, {"bad": 1})
             self.assertEqual(actual, expected)
-            self.assertEqual(isinstance(actual, tuple), name == "archive_memory")
+            self.assertEqual(isinstance(actual, tuple), name == "consolidate_memories")
 
     async def test_none_arguments_are_treated_as_empty(self):
         result = await mcp_contract.call("store_memory", None)

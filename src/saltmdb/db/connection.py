@@ -142,6 +142,12 @@ def write_transaction(conn: sqlite3.Connection):
         raise
 
 
+def rollback_to_and_release(conn: sqlite3.Connection, savepoint: str) -> None:
+    """Undo a savepoint's writes and release its savepoint marker."""
+    conn.execute(f"ROLLBACK TO {savepoint}")
+    conn.execute(f"RELEASE {savepoint}")
+
+
 def write_transaction_retrying(conn: sqlite3.Connection, fn):
     """Executes a callable inside write_transaction with retry/backoff on lock contention.
 

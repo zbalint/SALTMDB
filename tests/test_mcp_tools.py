@@ -1,3 +1,5 @@
+import asyncio
+import mcp_contract
 import unittest
 import tempfile
 import os
@@ -92,17 +94,35 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 tool(agent_id="attacker")
 
     def test_bulk_item_agent_id_overrides_are_removed_before_dispatch(self):
-        """A stale per-item owner is never allowed to cross the adapter boundary."""
+        """The MCP boundary rejects per-item owners; direct dicts still normalize safely."""
         capture = _CaptureBackend()
         previous = tools._set_backend_for_test(capture)
         try:
+            rejected = asyncio.run(
+                mcp_contract.call(
+                    "manage_relation",
+                    {
+                        "relations": [
+                            {
+                                "source_id": "source",
+                                "target_id": "target",
+                                "predicate": "part_of",
+                                "agent_id": "attacker",
+                            }
+                        ]
+                    },
+                )
+            )
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertEqual(rejected["errors"][0]["code"], "UNKNOWN_FIELD")
+            self.assertEqual(rejected["errors"][0]["field"], "relations[0].agent_id")
+            self.assertEqual(capture.calls, [])
             tools.manage_relation(
                 relations=[
                     {
                         "source_id": "source",
                         "target_id": "target",
                         "predicate": "part_of",
-                        "agent_id": "attacker",
                     }
                 ]
             )
@@ -118,11 +138,17 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         finally:
             tools._set_backend_for_test(previous)
-
         relation_kwargs = capture.calls[0][1]
         consolidation_kwargs = capture.calls[1][1]
         self.assertEqual(relation_kwargs["agent_id"], "test_agent")
-        self.assertNotIn("agent_id", relation_kwargs["relations"][0])
+        self.assertEqual(
+            relation_kwargs["relations"][0],
+            {
+                "source_id": "source",
+                "target_id": "target",
+                "predicate": "part_of",
+            },
+        )
         self.assertEqual(consolidation_kwargs["agent_id"], "test_agent")
         self.assertNotIn("agent_id", consolidation_kwargs["consolidations"][0])
 
@@ -153,6 +179,42 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         bulk_store.assert_called_once_with(
             relations=relations, agent_id="test_agent", invalidate=False
+        )
+
+    def test_daemon_dispatch_batch_forwards_owner_and_coordinator(self):
+        from unittest.mock import patch
+        from saltmdb.daemon import dispatch
+
+        coordinator = object()
+        relations = [{"source_id": "source", "target_id": "target", "predicate": "part_of"}]
+        with (
+            patch.object(
+                dispatch.relation_service, "apply_relations", return_value={"status": "ok"}
+            ) as apply,
+            patch(
+                "saltmdb.domain.services.memory_service.lifecycle.archive_memories",
+                return_value={"status": "ok"},
+            ) as archive,
+        ):
+            dispatch._dispatch_manage_relation(
+                mode="batch",
+                relations=relations,
+                agent_id="test_agent",
+                coordinator=coordinator,
+            )
+            dispatch._dispatch_archive_memory(
+                mode="batch",
+                archive_requests=["memory-id"],
+                agent_id="test_agent",
+                coordinator=coordinator,
+            )
+        apply.assert_called_once_with(
+            relations=relations, agent_id="test_agent", coordinator=coordinator
+        )
+        archive.assert_called_once_with(
+            archive_requests=["memory-id"],
+            agent_id="test_agent",
+            coordinator=coordinator,
         )
 
     def test_registered_mcp_schemas_have_no_kwargs_catchall(self):
@@ -282,9 +344,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         id1 = res1["data"]["memory_id"]
 
-        arch_res1 = tools.archive_memory(entity_id=id1)
+        arch_res1 = tools.archive_memory(memory_ids=[id1])
         self.assertEqual(arch_res1["status"], "ok")
-        self.assertIn("successfully archived", arch_res1["data"]["message"])
+        self.assertEqual(
+            arch_res1["data"]["items"], [{"memory_id": id1, "already_archived": False}]
+        )
 
         res2 = tools.store_memory(
             content="Archive test bulk node 1",
@@ -300,8 +364,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id3 = res3["data"]["memory_id"]
 
         # Test passing stringified list / actual list
-        arch_res2 = tools.archive_memory(entity_id=[id2, id3])
-        self.assertIsInstance(arch_res2, list)
+        arch_res2 = tools.archive_memory(memory_ids=[id2, id3])
+        self.assertEqual(arch_res2["data"]["archived_count"], 2)
 
     def test_polymorphic_manage_relation(self):
         res1 = tools.store_memory(
@@ -317,16 +381,18 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id1 = res1["data"]["memory_id"]
         id2 = res2["data"]["memory_id"]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "depends_on"}]
+        )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
+        self.assertEqual(rel_res["data"]["created_count"], 1)
 
         # 'part_of' -- an agent-selectable, non-strong canonical predicate -- so this exercises
         # the bulk-shape plumbing itself, not the predicate-vocabulary gate (covered separately).
         bulk_rel_res = tools.manage_relation(
             relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}],
         )
-        self.assertIsInstance(bulk_rel_res, list)
+        self.assertEqual(bulk_rel_res["data"]["created_count"], 1)
 
     def test_bulk_manage_relation_invalidate_per_item(self):
         res1 = tools.store_memory(
@@ -342,9 +408,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id1 = res1["data"]["memory_id"]
         id2 = res2["data"]["memory_id"]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}]
+        )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
+        self.assertEqual(rel_res["data"]["created_count"], 1)
 
         inv_res = tools.manage_relation(
             relations=[
@@ -356,10 +424,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 }
             ]
         )
-        self.assertIsInstance(inv_res, list)
-        self.assertEqual(len(inv_res), 1)
-        self.assertEqual(inv_res[0]["status"], "success")
-        self.assertEqual(inv_res[0]["action"], "invalidate")
+        self.assertEqual(inv_res["data"]["invalidated_count"], 1)
+        self.assertEqual(inv_res["data"]["items"][0]["status"], "success")
+        self.assertEqual(inv_res["data"]["items"][0]["action"], "invalidate")
 
     def test_list_predicates_tool(self):
         results = tools.list_predicates(query="elaborates")["data"]
@@ -432,9 +499,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id1 = res1["data"]["memory_id"]
         id2 = res2["data"]["memory_id"]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "Depends-On"}]
+        )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
+        self.assertEqual(rel_res["data"]["created_count"], 1)
 
         row = self.conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ?", (id1, id2)
@@ -446,9 +515,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "manage_relation must persist the CANONICALIZED predicate, not the raw 'Depends-On' input",
         )
 
-        rel_res2 = tools.manage_relation(source_id=id1, target_id=id2, predicate="Depends-On")
+        rel_res2 = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "Depends-On"}]
+        )
         self.assertEqual(rel_res2["status"], "ok")
-        self.assertIn("already exists", rel_res2["data"]["message"])
+        self.assertEqual(rel_res2["data"]["duplicate_count"], 1)
 
     def test_manage_relation_rejects_seeded_alias_with_resubmittable_corrected_call(self):
         # Phase 6 write-time gate (plan §5.8): manage_relation no longer silently substitutes a
@@ -467,17 +538,19 @@ class TestMCPToolsWrapper(unittest.TestCase):
         id1 = res1["data"]["memory_id"]
         id2 = res2["data"]["memory_id"]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "relates_to"}]
+        )
         self.assertEqual(rel_res["status"], "rejected")
         self.assertEqual(rel_res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = rel_res["errors"][0]["corrected_call"]
-        self.assertEqual(corrected_call["predicate"], "related_to")
-        self.assertEqual(corrected_call["source_id"], id1)
-        self.assertEqual(corrected_call["target_id"], id2)
+        self.assertEqual(corrected_call["relations"][0]["predicate"], "related_to")
+        self.assertEqual(corrected_call["relations"][0]["source_id"], id1)
+        self.assertEqual(corrected_call["relations"][0]["target_id"], id2)
 
         resubmit = tools.manage_relation(**corrected_call)
         self.assertEqual(resubmit["status"], "ok")
-        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
+        self.assertEqual(resubmit["data"]["created_count"], 1)
 
     def test_store_memory_memory_type_round_trip(self):
         res = tools.store_memory(
@@ -550,9 +623,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         id2 = res2["data"]["memory_id"]
 
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "depends_on"}]
+        )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("successfully stored", rel_res["data"]["message"])
+        self.assertEqual(rel_res["data"]["created_count"], 1)
 
         deps_now = tools.get_related_memories(entity_id=id1, max_depth=1)
         self.assertEqual(deps_now["data"]["total_related_found"], 1)
@@ -688,12 +763,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         b_id = stored_b["data"]["memory_id"]
 
         relation = tools.manage_relation(
-            source_id=a_id,
-            target_id=b_id,
-            predicate="related_to",
+            relations=[{"source_id": a_id, "target_id": b_id, "predicate": "related_to"}]
         )
         self.assertEqual(relation["status"], "ok")
-        self.assertIn("Relation successfully stored", relation["data"]["message"])
+        self.assertEqual(relation["data"]["created_count"], 1)
 
         result = tools.get_related_memories(entity_id=a_id, direction="outbound")["data"]
 
@@ -716,12 +789,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         b_id = stored_b["data"]["memory_id"]
 
         relation = tools.manage_relation(
-            source_id=a_id,
-            target_id=b_id,
-            predicate="related_to",
+            relations=[{"source_id": a_id, "target_id": b_id, "predicate": "related_to"}]
         )
         self.assertEqual(relation["status"], "ok")
-        self.assertIn("Relation successfully stored", relation["data"]["message"])
+        self.assertEqual(relation["data"]["created_count"], 1)
 
         result = tools.get_related_memories(
             entity_id=a_id,
@@ -750,12 +821,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         b_id = stored_b["data"]["memory_id"]
 
         relation = tools.manage_relation(
-            source_id=a_id,
-            target_id=b_id,
-            predicate="related_to",
+            relations=[{"source_id": a_id, "target_id": b_id, "predicate": "related_to"}]
         )
         self.assertEqual(relation["status"], "ok")
-        self.assertIn("Relation successfully stored", relation["data"]["message"])
+        self.assertEqual(relation["data"]["created_count"], 1)
 
         before = self.conn.execute(
             "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
@@ -785,17 +854,26 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         id1 = res1["data"]["memory_id"]
         id2 = res2["data"]["memory_id"]
-
-        rel_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="depends_on")
+        rel_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "depends_on"}]
+        )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
-        rel_id = rel_res["data"]["relation_id"]
+
+        self.assertEqual(rel_res["data"]["created_count"], 1)
+        rel_id = rel_res["data"]["items"][0]["result"]["relation_id"]
 
         inv_res = tools.manage_relation(
-            source_id=id1, target_id=id2, predicate="depends_on", invalidate=True
+            relations=[
+                {
+                    "source_id": id1,
+                    "target_id": id2,
+                    "predicate": "depends_on",
+                    "invalidate": True,
+                }
+            ]
         )
         self.assertEqual(inv_res["status"], "ok")
-        self.assertIn("Relation invalidated", inv_res["data"]["message"])
+        self.assertEqual(inv_res["data"]["invalidated_count"], 1)
 
         row = self.conn.execute(
             "SELECT invalid_at, valid_to FROM relations WHERE id = ?", (rel_id,)
@@ -820,28 +898,35 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         custom_valid_at = "2025-02-01T00:00:00+00:00"
         rel_res = tools.manage_relation(
-            source_id=id1,
-            target_id=id2,
-            predicate="depends_on",
-            valid_at=custom_valid_at,
+            relations=[
+                {
+                    "source_id": id1,
+                    "target_id": id2,
+                    "predicate": "depends_on",
+                    "valid_at": custom_valid_at,
+                }
+            ]
         )
         self.assertEqual(rel_res["status"], "ok")
-        self.assertIn("Relation successfully stored", rel_res["data"]["message"])
-        rel_id = rel_res["data"]["relation_id"]
+        rel_id = rel_res["data"]["items"][0]["result"]["relation_id"]
 
         row = self.conn.execute("SELECT valid_at FROM relations WHERE id = ?", (rel_id,)).fetchone()
         self.assertEqual(row[0], custom_valid_at)
 
         custom_invalid_at = "2025-03-01T00:00:00+00:00"
         inv_res = tools.manage_relation(
-            source_id=id1,
-            target_id=id2,
-            predicate="depends_on",
-            invalidate=True,
-            invalid_at=custom_invalid_at,
+            relations=[
+                {
+                    "source_id": id1,
+                    "target_id": id2,
+                    "predicate": "depends_on",
+                    "invalidate": True,
+                    "invalid_at": custom_invalid_at,
+                }
+            ]
         )
         self.assertEqual(inv_res["status"], "ok")
-        self.assertIn("Relation invalidated", inv_res["data"]["message"])
+        self.assertEqual(inv_res["data"]["invalidated_count"], 1)
 
         row2 = self.conn.execute(
             "SELECT invalid_at FROM relations WHERE id = ?", (rel_id,)
@@ -1025,18 +1110,26 @@ class TestMCPToolsWrapper(unittest.TestCase):
         a = self._mk_vector_entity("Relation Gate Tool A", _axis(0))
         b = self._mk_vector_entity("Relation Gate Tool B", _axis(1))  # orthogonal -> low similarity
 
-        res_no_override = tools.manage_relation(source_id=a, target_id=b, predicate="elaborates_on")
+        res_no_override = tools.manage_relation(
+            relations=[{"source_id": a, "target_id": b, "predicate": "elaborates_on"}]
+        )
         self.assertEqual(res_no_override["status"], "rejected", res_no_override)
         self.assertIn("REJECT_LOW_RELATION_SIMILARITY", res_no_override["errors"][0]["message"])
 
         res_with_override = tools.manage_relation(
-            source_id=a,
-            target_id=b,
-            predicate="elaborates_on",
-            override_justification="deliberately forcing a low-similarity relation via the MCP tool wrapper",
+            relations=[
+                {
+                    "source_id": a,
+                    "target_id": b,
+                    "predicate": "elaborates_on",
+                    "override_justification": (
+                        "deliberately forcing a low-similarity relation via the MCP tool wrapper"
+                    ),
+                }
+            ]
         )
         self.assertEqual(res_with_override["status"], "ok")
-        self.assertIn("Relation successfully stored", res_with_override["data"]["message"])
+        self.assertEqual(res_with_override["data"]["created_count"], 1)
 
         event = self.conn.execute(
             "SELECT agent_id, content FROM events WHERE type = 'relation_gate_override'"
@@ -1381,9 +1474,13 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "manage_relation",
             {
-                "source_id": shared["data"]["memory_id"],
-                "target_id": private["data"]["memory_id"],
-                "predicate": "related_to",
+                "relations": [
+                    {
+                        "source_id": shared["data"]["memory_id"],
+                        "target_id": private["data"]["memory_id"],
+                        "predicate": "related_to",
+                    }
+                ]
             },
         )
         self.assertEqual(relation["status"], "ok", relation)
@@ -1506,9 +1603,13 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "manage_relation",
             {
-                "source_id": shared["data"]["memory_id"],
-                "target_id": private["data"]["memory_id"],
-                "predicate": "depends_on",
+                "relations": [
+                    {
+                        "source_id": shared["data"]["memory_id"],
+                        "target_id": private["data"]["memory_id"],
+                        "predicate": "depends_on",
+                    }
+                ]
             },
         )
         self.assertEqual(relation["status"], "ok", relation)
@@ -1576,9 +1677,13 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "manage_relation",
             {
-                "source_id": shared["data"]["memory_id"],
-                "target_id": private["data"]["memory_id"],
-                "predicate": "contradicts",
+                "relations": [
+                    {
+                        "source_id": shared["data"]["memory_id"],
+                        "target_id": private["data"]["memory_id"],
+                        "predicate": "contradicts",
+                    }
+                ]
             },
         )
         self.assertEqual(relation["status"], "ok", relation)
@@ -2166,9 +2271,11 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
     def test_selectable_predicate_succeeds(self):
         id1, id2 = self._mk_pair("selectable")
-        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="part_of")
+        res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "part_of"}]
+        )
         self.assertEqual(res["status"], "ok")
-        self.assertIn("Relation successfully stored", res["data"]["message"])
+        self.assertEqual(res["data"]["created_count"], 1)
 
     def test_each_reserved_predicate_is_refused_naming_its_lifecycle_tool_with_no_corrected_call(
         self,
@@ -2180,7 +2287,9 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         }
         for predicate, lifecycle_tool in expected_tools.items():
             id1, id2 = self._mk_pair(f"reserved_{predicate}")
-            res = tools.manage_relation(source_id=id1, target_id=id2, predicate=predicate)
+            res = tools.manage_relation(
+                relations=[{"source_id": id1, "target_id": id2, "predicate": predicate}]
+            )
             self.assertEqual(res["status"], "rejected", predicate)
             self.assertEqual(res["errors"][0]["code"], "RESERVED_PREDICATE", predicate)
             self.assertIn(lifecycle_tool, res["errors"][0]["message"], predicate)
@@ -2188,41 +2297,47 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
     def test_similar_to_is_refused_with_no_corrected_call(self):
         id1, id2 = self._mk_pair("similar_to")
-        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="similar_to")
+        res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "similar_to"}]
+        )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "LEGACY_READONLY_PREDICATE")
         self.assertNotIn("corrected_call", res)
 
     def test_same_direction_alias_is_refused_and_corrected_call_resubmits_successfully(self):
         id1, id2 = self._mk_pair("same_direction_alias")
-        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="relates_to")
+        res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "relates_to"}]
+        )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = res["errors"][0]["corrected_call"]
-        self.assertEqual(corrected_call["predicate"], "related_to")
-        self.assertEqual(corrected_call["source_id"], id1)
-        self.assertEqual(corrected_call["target_id"], id2)
+        self.assertEqual(corrected_call["relations"][0]["predicate"], "related_to")
+        self.assertEqual(corrected_call["relations"][0]["source_id"], id1)
+        self.assertEqual(corrected_call["relations"][0]["target_id"], id2)
 
         resubmit = tools.manage_relation(**corrected_call)
         self.assertEqual(resubmit["status"], "ok")
-        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
+        self.assertEqual(resubmit["data"]["created_count"], 1)
 
     def test_swap_alias_is_refused_and_corrected_call_swaps_ids_and_resubmits_successfully(self):
         # 'affects' -> 'caused_by' with source_id/target_id swapped (A affects B -> B caused_by
         # A). caused_by is not a RELATION_GATE_STRONG_PREDICATE, so this exercises the swap
         # mechanics in isolation from the embedding-similarity gate.
         id1, id2 = self._mk_pair("swap_alias")
-        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="affects")
+        res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "affects"}]
+        )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "NONCANONICAL_PREDICATE")
         corrected_call = res["errors"][0]["corrected_call"]
-        self.assertEqual(corrected_call["predicate"], "caused_by")
-        self.assertEqual(corrected_call["source_id"], id2)
-        self.assertEqual(corrected_call["target_id"], id1)
+        self.assertEqual(corrected_call["relations"][0]["predicate"], "caused_by")
+        self.assertEqual(corrected_call["relations"][0]["source_id"], id2)
+        self.assertEqual(corrected_call["relations"][0]["target_id"], id1)
 
         resubmit = tools.manage_relation(**corrected_call)
         self.assertEqual(resubmit["status"], "ok")
-        self.assertIn("Relation successfully stored", resubmit["data"]["message"])
+        self.assertEqual(resubmit["data"]["created_count"], 1)
 
         row = self.conn.execute(
             "SELECT source_id, target_id FROM relations WHERE predicate = 'caused_by'"
@@ -2231,7 +2346,9 @@ class TestManageRelationPredicateGate(unittest.TestCase):
 
     def test_unknown_predicate_is_refused_listing_valid_predicates_with_no_corrected_call(self):
         id1, id2 = self._mk_pair("unknown")
-        res = tools.manage_relation(source_id=id1, target_id=id2, predicate="completely_made_up")
+        res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "completely_made_up"}]
+        )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "UNKNOWN_PREDICATE")
         self.assertIn("depends_on", res["errors"][0]["message"])
@@ -2242,39 +2359,46 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         # intentional per manage_relation's own docstring: "This gate applies only to creating
         # a new edge, never to invalidate=True".
         id1, id2 = self._mk_pair("invalidate_bypass")
-        create_res = tools.manage_relation(source_id=id1, target_id=id2, predicate="related_to")
+        create_res = tools.manage_relation(
+            relations=[{"source_id": id1, "target_id": id2, "predicate": "related_to"}]
+        )
         self.assertEqual(create_res["status"], "ok")
-        self.assertIn("Relation successfully stored", create_res["data"]["message"])
+        self.assertEqual(create_res["data"]["created_count"], 1)
 
         # (a) invalidating with the already-canonical predicate works, unsurprisingly.
         inv_res = tools.manage_relation(
-            source_id=id1,
-            target_id=id2,
-            predicate="related_to",
-            invalidate=True,
+            relations=[
+                {
+                    "source_id": id1,
+                    "target_id": id2,
+                    "predicate": "related_to",
+                    "invalidate": True,
+                }
+            ]
         )
         self.assertEqual(inv_res["status"], "ok")
-        self.assertIn("Relation invalidated", inv_res["data"]["message"])
+        self.assertEqual(inv_res["data"]["invalidated_count"], 1)
 
         # (b) invalidating with a predicate that WOULD be gated on create ('relates_to' is an
         # alias, refused by test_same_direction_alias_is_refused_... above) still succeeds when
         # invalidate=True, because invalidate_relation's read-side canonicalization still
         # resolves the alias to the same underlying edge.
         id3, id4 = self._mk_pair("invalidate_bypass_alias")
-        tools.manage_relation(source_id=id3, target_id=id4, predicate="related_to")
+        tools.manage_relation(
+            relations=[{"source_id": id3, "target_id": id4, "predicate": "related_to"}]
+        )
         inv_res2 = tools.manage_relation(
-            source_id=id3,
-            target_id=id4,
-            predicate="relates_to",
-            invalidate=True,
+            relations=[
+                {
+                    "source_id": id3,
+                    "target_id": id4,
+                    "predicate": "related_to",
+                    "invalidate": True,
+                }
+            ]
         )
-        self.assertEqual(
-            inv_res2["status"],
-            "ok",
-            "invalidate=True with a would-be-gated alias predicate must reach "
-            "invalidate_relation directly, not the rejected-envelope gate",
-        )
-        self.assertIn("Relation invalidated", inv_res2["data"]["message"])
+        self.assertEqual(inv_res2["status"], "ok")
+        self.assertEqual(inv_res2["data"]["invalidated_count"], 1)
 
     def test_bulk_one_valid_one_alias_rejects_whole_call_with_zero_side_effects_and_resubmits(
         self,
@@ -2304,8 +2428,8 @@ class TestManageRelationPredicateGate(unittest.TestCase):
         self.assertEqual(corrected_predicates, {"part_of", "related_to"})
 
         resubmit = tools.manage_relation(**corrected_call)
-        self.assertIsInstance(resubmit, list)
-        self.assertTrue(all(item["status"] == "success" for item in resubmit), resubmit)
+        self.assertEqual(resubmit["status"], "ok")
+        self.assertEqual(resubmit["data"]["created_count"], 2)
 
     def test_bulk_one_alias_one_reserved_rejects_with_no_corrected_call(self):
         id1, id2 = self._mk_pair("bulk_alias_only")

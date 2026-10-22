@@ -11,7 +11,9 @@ from saltmdb.db.connection import (
     get_connection,
     write_transaction_retrying,
     close_connection,
+    rollback_to_and_release,
 )
+
 from saltmdb.db.schema import init_db
 
 
@@ -114,6 +116,21 @@ class TestWriteTransactionCommitRollback(unittest.TestCase):
             "SELECT id FROM events WHERE id = ?", ("evt-rollback-1",)
         ).fetchone()
         self.assertIsNone(row)
+
+    def test_rollback_to_and_release_reverts_write_and_removes_savepoint(self):
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT helper_test")
+        self.conn.execute(
+            "INSERT INTO events (id, agent_id, type, content) VALUES (?, ?, ?, ?)",
+            ("evt-savepoint", "agent_qa", "test", "savepoint"),
+        )
+        rollback_to_and_release(self.conn, "helper_test")
+        self.assertIsNone(
+            self.conn.execute("SELECT id FROM events WHERE id = ?", ("evt-savepoint",)).fetchone()
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            self.conn.execute("RELEASE helper_test")
+        self.conn.rollback()
 
 
 class TestBeginImmediateContention(unittest.TestCase):

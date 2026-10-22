@@ -18,14 +18,16 @@ from saltmdb.daemon import protocol
 logger = logging.getLogger(__name__)
 
 
-class RelationBatchItem(TypedDict, total=False):
+class RelationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     target_id: str
     predicate: str
-    valid_at: str | None
-    invalidate: bool
-    invalid_at: str | None
-    override_justification: str | None
+    valid_at: str | None = None
+    invalid_at: str | None = None
+    invalidate: bool = False
+    override_justification: str | None = None
 
 
 class ConsolidationBatchItem(TypedDict, total=False):
@@ -632,54 +634,21 @@ def search_memory(
 
 
 @mcp.tool()
-def archive_memory(entity_id: str | list[str] | None = None) -> dict | list:
-    """Archives (retires) one or more memories -- the reversible-in-spirit-but-not-in-practice
-    lifecycle action for a memory that's no longer worth surfacing in ordinary search, without
-    deleting its history: an archived memory stays fully visible via get_memory/get_lineage, and
-    is excluded from search_memory's normal ranking (but not from `mode="history"`).
+def archive_memory(
+    memory_ids: Annotated[list[str], Field(min_length=1, max_length=50)],
+) -> dict:
+    """Use this to archive a bounded list of memory IDs; use get_memory to inspect one memory.
 
-    Works uniformly on core and non-core memories, with no rationale required -- `is_core` is
-    deliberately never cleared by archiving (only review_core_memory's `demote` outcome clears
-    it), so `is_core=1` on an archived row is an intentional "was once core" signal, not
-    staleness. For a deliberate, audited core-memory review with a mandatory rationale, use
-    review_core_memory(outcome="archive") instead (it requires the target to be an active core).
-
-    entity_id accepts a single ID (or unambiguous ID prefix) OR a list of IDs. **The return
-    shape depends on which you pass**: a single ID (or omitted) returns
-    `{"status": "ok", "data": {"id": ..., "message": "..."}, "warnings": [...]}`, with an
-    `ALREADY_DONE`-coded warning (not a rejection) if it was already archived. A LIST of IDs --
-    even a single-item list -- instead returns a bare list of `{"status": "success"/"error",
-    "entity_id": ..., "result": ...}` dicts, one per requested ID, run all-or-nothing in one
-    transaction (any single item's failure rolls back the whole batch, so a partial-success list
-    is never returned -- a batch failure instead returns a single-item list,
-    `[{"status": "error", "error": "..."}]`).
-
-    A single-ID call's failure: `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR" |
-    "NOT_FOUND" | "CONFLICT", "message": "...", "field": "entity_id" | "agent_id"}]}` --
-    `NOT_FOUND` for an unresolvable ID, `CONFLICT` for an owner mismatch.
-
-    Example, single: `archive_memory(entity_id="abc123")`. Example, bulk: `archive_memory
-    (entity_id=["abc123", "def456"])` -- note the list wrapper changes the return shape as
-    described above, not just the count of things archived.
+    Every ID must be a full UUID or unique prefix. Validation is atomic: any rejection rolls back
+    the whole batch and reports its ``memory_ids[i]`` field. Example:
+    ``archive_memory(memory_ids=["abc123", "def456"])``.
     """
     agent_id_ = _effective_agent_id()
-    raw_target = entity_id
-    target = _normalize_list_or_str(raw_target)
-
-    # The bulk/single/none decision depends on the ORIGINAL request shape (did the caller pass a
-    # list, even a 1-item one?) -- pre-normalization information that daemon/dispatch.py can't
-    # reconstruct from the already-normalized `target` list alone, so the mode is resolved here
-    # and sent as an explicit tag (self-caught during implementation, see dispatch.py's matching
-    # comment).
-    if len(target) > 1 or (isinstance(raw_target, list) and len(target) > 0):
-        return _backend_or_raise().call(
-            "archive_memory", {"mode": "bulk", "archive_requests": target, "agent_id": agent_id_}
-        )
-    elif len(target) == 1:
-        return _backend_or_raise().call(
-            "archive_memory", {"mode": "single", "entity_id": target[0], "agent_id": agent_id_}
-        )
-    return _backend_or_raise().call("archive_memory", {"mode": "none", "agent_id": agent_id_})
+    target = _normalize_list_or_str(memory_ids)
+    return _backend_or_raise().call(
+        "archive_memory",
+        {"mode": "batch", "archive_requests": target, "agent_id": agent_id_},
+    )
 
 
 def _predicate_disposition_error(
@@ -801,110 +770,35 @@ def _validate_relation_batch(relations_, submitted):
     return rejected(entries)
 
 
-def _validate_relation_single(predicate, source_id, target_id, submitted):
-    check = _predicate_disposition_error(predicate, "predicate")
-    if check is None:
-        return None
-    from saltmdb.utils.corrected_call import build_corrected_call
-    from saltmdb.utils.envelope import error as env_error
-    from saltmdb.utils.envelope import rejected
-
-    error_entry, canonical, swap = check
-    corrected_call = None
-    if canonical is not None:
-        fixes: dict[str, Any] = {"predicate": canonical}
-        if swap:
-            fixes["source_id"] = target_id
-            fixes["target_id"] = source_id
-        corrected_call = build_corrected_call(manage_relation, submitted, fixes)
-    return rejected(
-        [
-            env_error(
-                error_entry["code"],
-                error_entry["message"],
-                error_entry.get("field"),
-                corrected_call=corrected_call,
-            )
-        ]
-    )
-
-
 @mcp.tool()
 def manage_relation(
-    relations: list[RelationBatchItem] | None = None,
-    source_id: str | None = None,
-    target_id: str | None = None,
-    predicate: str | None = None,
-    invalidate: bool = False,
-    valid_at: str | None = None,
-    invalid_at: str | None = None,
-    override_justification: str | None = None,
-) -> dict | list:
-    """Creates a directional semantic edge between two memories (source_id -> predicate ->
-    target_id), or invalidates one (invalidate=True). For a batch of edges in one call, use
-    relations instead of source_id/target_id/predicate.
+    relations: Annotated[list[RelationInput], Field(min_length=1, max_length=100)],
+) -> dict:
+    """Use this to create or invalidate a batch of relations; use graph reads to inspect edges.
 
-    predicate must be one of 11 agent-selectable values -- see list_predicates for the current
-    list and each one's meaning; a drifted/non-canonical spelling is rejected with a
-    corrected_call using the right one, so calling list_predicates first is optional, not
-    required. Re-submitting an edge that already exists is an idempotent no-op, not an error.
-
-    **Return shape depends on which form you use**: single-edge (source_id/target_id/predicate)
-    returns `{"status": "ok", "data": {"relation_id": ..., "message": "..."}, "warnings":
-    [...]}` -- an `ALREADY_DONE`-coded warning, not a rejection, for the idempotent-duplicate
-    case. A `relations` BATCH instead returns a bare list of `{"status": "success"/"duplicate",
-    "source", "target", "predicate", "action", "result"}` dicts, one per item, all-or-nothing
-    (any item's failure aborts the whole batch; a batch failure returns a single-item list,
-    `[{"status": "error", "error": "..."}]`, not a partial-success list).
-
-    Rejections you may see (either form): `{"status": "rejected", "errors": [{"code":
-    "RESERVED_PREDICATE" | "LEGACY_READONLY_PREDICATE" | "NONCANONICAL_PREDICATE" |
-    "UNKNOWN_PREDICATE" | "REJECT_LOW_RELATION_SIMILARITY" | "REJECT_CONTRADICTORY_PREDICATE" |
-    "REJECT_CORE_ELABORATES_ON", "message": "...", "field": "...", "corrected_call": {...} |
-    None}` -- `corrected_call`, when present, is attached to the error it corrects and is a ready-to-resubmit call with the fix already
-    applied (e.g. the canonical predicate name, source/target swapped if the drift reversed
-    direction). `RESERVED_PREDICATE` names the lifecycle tool that actually creates that edge
-    (`supersede_memory`/`consolidate_memories`/`revise_memory` for `supersedes`/
-    `consolidated_from`/`revises`).
-
-    Example: `manage_relation(source_id="abc", target_id="def", predicate="depends_on")`.
-
-    Two rejections are governance gates, not schema errors, and both accept
-    override_justification (a non-throwaway explanation) to force the edge through anyway, on
-    each affected item for a batch call: `REJECT_LOW_RELATION_SIMILARITY` (a "strong" predicate
-    -- elaborates_on/resolves/supersedes -- whose source/target embeddings are too dissimilar)
-    and `REJECT_CONTRADICTORY_PREDICATE` (a contradictory predicate pair already exists on this
-    directional edge). `REJECT_CORE_ELABORATES_ON` has no override: a new `elaborates_on` edge
-    targeting an active core memory can only be created via that core's own `detail_memory_ids`
-    declaration (store_memory/consolidate_memories), never directly.
+    Each item supplies source_id, target_id, predicate, and optional timestamps, invalidate flag,
+    or governance override. Validation is atomic and errors identify ``relations[i].field``.
+    Example: ``manage_relation(relations=[{"source_id": "a", "target_id": "b",
+    "predicate": "depends_on"}])``.
     """
     submitted = locals().copy()
     agent_id_ = _effective_agent_id()
-    relations_ = relations
-    if relations_ and isinstance(relations_, str):
-        relations_ = _normalize_list_or_str(relations_)
-
-    if relations_:
-        relations_ = _strip_item_agent_id(relations_)
-        rejection = _validate_relation_batch(relations_, submitted)
-        if rejection is not None:
-            return rejection
-    elif not invalidate and predicate:
-        rejection = _validate_relation_single(predicate, source_id, target_id, submitted)
-        if rejection is not None:
-            return rejection
-
+    if isinstance(relations, str):
+        relations_ = _normalize_list_or_str(relations)
+    else:
+        relations_ = relations
+    dumped_relations = [
+        item.model_dump() if isinstance(item, RelationInput) else dict(item) for item in relations_
+    ]
+    submitted["relations"] = dumped_relations
+    rejection = _validate_relation_batch(dumped_relations, submitted)
+    if rejection is not None:
+        return rejection
     return _backend_or_raise().call(
         "manage_relation",
         {
-            "relations": relations_,
-            "source_id": source_id,
-            "target_id": target_id,
-            "predicate": predicate,
-            "invalidate": invalidate,
-            "invalid_at": invalid_at,
-            "valid_at": valid_at,
-            "override_justification": override_justification,
+            "mode": "batch",
+            "relations": dumped_relations,
             "agent_id": agent_id_,
         },
     )

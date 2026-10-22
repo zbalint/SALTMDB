@@ -359,21 +359,27 @@ def _dispatch_inspect_memory(**kw):
 
 
 def _dispatch_archive_memory(**kw):
-    # archive_memory's bulk/single/none decision depends on the ORIGINAL request shape (did the
-    # caller pass a list, even a 1-item one?), which is pre-normalization information -- mcp/
-    # tools.py resolves that into an explicit "mode" tag before calling the backend, a narrow,
-    # documented exception to the "dispatch.py owns branching" split (self-caught during
-    # implementation, not from a Codex review round -- logged as an implementation-grounding
-    # addendum per standing practice).
+    # The adapter preserves the original list-vs-single shape through ``mode``.
     mode = kw.get("mode")
+    if mode == "batch":
+        try:
+            archive_requests = _required_list(kw, "archive_requests")
+        except _DispatchValidationError as exc:
+            return exc.payload
+        from saltmdb.domain.services.memory_service.lifecycle import archive_memories
+
+        return archive_memories(
+            archive_requests=archive_requests,
+            agent_id=kw.get("agent_id"),
+            coordinator=kw.get("coordinator"),
+        )
     if mode == "bulk":
         try:
             archive_requests = _required_list(kw, "archive_requests")
         except _DispatchValidationError as exc:
             return exc.payload
         return memory_service.bulk_archive_memory(archive_requests=archive_requests)
-
-    elif mode == "single":
+    if mode == "single":
         return memory_service.archive_memory(
             entity_id=kw.get("entity_id"), agent_id=kw.get("agent_id")
         )
@@ -381,6 +387,16 @@ def _dispatch_archive_memory(**kw):
 
 
 def _dispatch_manage_relation(**kw):
+    if kw.get("mode") == "batch":
+        try:
+            relations = _required_list(kw, "relations")
+        except _DispatchValidationError as exc:
+            return exc.payload
+        return relation_service.apply_relations(
+            relations=relations,
+            agent_id=kw.get("agent_id"),
+            coordinator=kw.get("coordinator"),
+        )
     if kw.get("relations"):
         try:
             relations = _required_list(kw, "relations")
@@ -774,7 +790,7 @@ def _dispatch_tool_inner(tool: str, kwargs: dict[str, Any], coordinator):
                 except Exception:
                     logger.warning("Deferred store_memory duplicate probe failed", exc_info=True)
             return result
-        if tool in {"log_event", "manage_relation"}:
+        if tool in {"log_event", "manage_relation", "archive_memory"}:
             kwargs = {**kwargs, "coordinator": coordinator}
         return coordinator.submit(f"tool:{tool}", lambda _conn: fn(**kwargs), priority="foreground")
     if tool in {"search_traces", "get_trace"}:

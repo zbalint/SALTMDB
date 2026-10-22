@@ -10,7 +10,7 @@ from functools import partial
 import sqlite3
 import uuid
 from datetime import datetime, UTC
-from typing import Any, cast, Literal
+from typing import Any, NamedTuple, cast, Literal
 
 from saltmdb.config import get_db_path, MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.connection import (
@@ -18,6 +18,8 @@ from saltmdb.db.connection import (
     is_coordinator_connection,
     write_transaction_retrying,
     close_connection,
+    managed_connection,
+    rollback_to_and_release,
 )
 from saltmdb.utils.text import resolve_entity_id, resolve_id_prefix
 from saltmdb.utils.text import resolve_entity_ref
@@ -46,6 +48,11 @@ class _LifecycleRejected(Exception):
     def __init__(self, payload: dict[str, Any]):
         super().__init__(payload)
         self.payload = payload
+
+
+class ArchiveTarget(NamedTuple):
+    memory_id: str
+    already_archived: bool
 
 
 def _lineage_nodes(result, direction: str) -> list[dict]:
@@ -1592,6 +1599,154 @@ def archive_memory(  # noqa: PLR0911
     finally:
         if should_close:
             close_connection(conn)
+
+
+def _resolve_archive_id(conn, request) -> str | dict[str, Any]:
+    from saltmdb.utils import error_codes
+
+    if not isinstance(request, str) or not request.strip():
+        return envelope_error(error_codes.VALIDATION_ERROR, "memory id must be a non-empty string")
+    exact = conn.execute("SELECT id FROM entities WHERE id = ?", (request,)).fetchone()
+    if exact is not None:
+        return exact[0]
+    resolved_id, candidates, truncated = resolve_id_prefix(conn, request)
+    if candidates:
+        candidate_ids = ", ".join(item["id"] for item in candidates)
+        suffix = "+" if truncated else ""
+        return envelope_error(
+            "AMBIGUOUS_ID_PREFIX",
+            f"Memory id '{request}' matches {len(candidates)}{suffix} candidates: {candidate_ids}",
+        )
+    if not resolved_id:
+        return envelope_error(
+            error_codes.NOT_FOUND,
+            f"Could not resolve memory id '{request}'",
+        )
+    return resolved_id
+
+
+def _resolve_archive_target(conn, request, agent_id: str | None) -> ArchiveTarget | dict[str, Any]:
+    from saltmdb.utils import error_codes
+
+    resolved_id = _resolve_archive_id(conn, request)
+    if isinstance(resolved_id, dict):
+        return resolved_id
+    row = conn.execute(
+        "SELECT agent_id, status FROM entities WHERE id = ?", (resolved_id,)
+    ).fetchone()
+    if row is None:
+        return envelope_error(error_codes.NOT_FOUND, f"Memory '{resolved_id}' not found")
+    existing_agent_id, status = row
+    if status == "archived":
+        return ArchiveTarget(resolved_id, True)
+    if agent_id and existing_agent_id and existing_agent_id != agent_id:
+        return envelope_error(error_codes.CONFLICT, f"Memory '{resolved_id}' owner mismatch")
+    return ArchiveTarget(resolved_id, False)
+
+
+def _validate_archive_requests(
+    conn,
+    archive_requests: list,
+    agent_id: str | None,
+) -> tuple[list[ArchiveTarget], list[dict[str, Any]]]:
+    errors: list[dict[str, Any]] = []
+    resolved_items: list[ArchiveTarget] = []
+    seen: set[str] = set()
+    for index, request in enumerate(archive_requests):
+        field = f"memory_ids[{index}]"
+        target = _resolve_archive_target(conn, request, agent_id)
+        if isinstance(target, dict):
+            errors.append({**target, "field": field})
+            continue
+        if target.memory_id in seen:
+            errors.append(
+                {
+                    **envelope_error(
+                        "DUPLICATE_ID",
+                        f"Memory id '{target.memory_id}' was supplied more than once",
+                    ),
+                    "field": field,
+                }
+            )
+            continue
+        seen.add(target.memory_id)
+        resolved_items.append(target)
+    return resolved_items, errors
+
+
+def _archive_batch_response(resolved_items: list[ArchiveTarget]) -> dict[str, Any]:
+    archived_count = sum(not item.already_archived for item in resolved_items)
+    return envelope_ok(
+        {
+            "items": [item._asdict() for item in resolved_items],
+            "archived_count": archived_count,
+            "already_archived_count": len(resolved_items) - archived_count,
+        }
+    )
+
+
+def _archive_batch_transaction(
+    tx_conn,
+    archive_requests: list,
+    agent_id: str | None,
+) -> dict[str, Any]:
+    if not tx_conn.in_transaction:
+        raise RuntimeError("archive batch requires an active transaction")
+    savepoint = f"archive_batch_{uuid.uuid4().hex}"
+    tx_conn.execute(f"SAVEPOINT {savepoint}")
+    resolved_items, errors = _validate_archive_requests(tx_conn, archive_requests, agent_id)
+    if errors:
+        if not tx_conn.in_transaction:
+            raise RuntimeError("archive batch transaction ended during validation")
+        rollback_to_and_release(tx_conn, savepoint)
+        return rejected(errors)
+    for target in resolved_items:
+        if not target.already_archived:
+            _archive_entity_unchecked(tx_conn, target.memory_id)
+    if not tx_conn.in_transaction:
+        raise RuntimeError("archive batch transaction ended before release")
+    tx_conn.execute(f"RELEASE {savepoint}")
+    return _archive_batch_response(resolved_items)
+
+
+def archive_memories(
+    archive_requests: list,
+    agent_id: str | None = None,
+    db_connection=None,
+    db_path: str | None = None,
+    coordinator=None,
+) -> dict[str, Any]:
+    """Archive a validated list of memory IDs atomically."""
+    from saltmdb.utils import error_codes
+
+    if not isinstance(archive_requests, list) or not archive_requests:
+        return rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR,
+                    "memory_ids must be a non-empty array",
+                    "memory_ids",
+                )
+            ]
+        )
+    with managed_connection(db_connection=db_connection, db_path=db_path) as conn:
+        try:
+            result = write_transaction_retrying(
+                conn,
+                lambda tx_conn: _archive_batch_transaction(tx_conn, archive_requests, agent_id),
+            )
+        except Exception as exc:
+            logger.error("Error archiving memory batch: %s", exc)
+            if is_coordinator_connection(conn):
+                raise
+            result = rejected([envelope_error(error_codes.INTERNAL_ERROR, str(exc))])
+    if result.get("status") == "ok":
+        from saltmdb.domain.services.community_detection_service import (
+            trigger_community_detection,
+        )
+
+        trigger_community_detection(db_path=db_path, coordinator=coordinator)
+    return result
 
 
 def detect_orphaned_memories(agent_id: str = None, db_connection=None, db_path: str = None) -> dict:
