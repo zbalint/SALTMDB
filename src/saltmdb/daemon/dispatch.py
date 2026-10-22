@@ -469,6 +469,13 @@ def _dispatch_supersede_memory(**kw):
 
 
 def _dispatch_consolidate_memories(**kw):
+    if kw.get("items") is not None:
+        return relation_service.apply_consolidations(
+            items=kw["items"],
+            agent_id=kw.get("agent_id"),
+            context_id=kw.get("context_id"),
+            agent_session_id=kw.get("agent_session_id"),
+        )
     if kw.get("consolidations"):
         # The singular Phase-4 worker entry point is new; its bulk companion is still named
         # ``bulk_commit_consolidation`` until the relation-service migration lands.  Keep this

@@ -242,7 +242,7 @@ Three independent hard limits, enforced inside every write transaction that can 
 
 **Detail memories.** A core must stay directly actionable even if a weaker agent never follows a link — rationale, chronology, evidence, and examples belong in linked normal memories instead. `detail_memory_ids` (at most 3 full UUIDs of existing shared, non-core memories whose canonical title and UUID must appear in the core's own `content`) atomically maintains `detail --elaborates_on--> core` relations; `manage_relation` cannot create such an edge directly against an active core (`REJECT_CORE_ELABORATES_ON`) — only the core's own declaration governs it.
 
-**Consolidation never inherits core status.** If any resolved `consolidate_memories` parent is currently an active core and `is_core` is omitted, the call is rejected — pass `is_core=True` (with lifecycle fields) explicitly to keep the result core, or `is_core=False` to let it become ordinary.
+**Consolidation never inherits core status.** In the batch `consolidate_memories(items=[...])` tool, if any resolved parent is currently an active core and that item omits `core` and `demote_core`, the call is rejected — pass `core={reason, exit_condition, ...}` explicitly to keep the result core, or `demote_core=true` to let it become ordinary.
 
 **Review.** `review_core_memory(entity_id, outcome, review_rationale, core_review_after)` is a direct, synchronous operation (never a queue/event): `retain` extends the review date, `demote` returns the memory to ordinary searchable status, `archive` retires it. The configured `SALTMDB_AGENT_ID` identifies the *reviewing* agent, not an ownership check.
 

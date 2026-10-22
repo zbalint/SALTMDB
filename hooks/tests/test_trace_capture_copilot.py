@@ -120,7 +120,17 @@ class TestParseInteractions(unittest.TestCase):
             *tool(
                 "consolidate_memories",
                 "c4",
-                json.dumps({"status": "ok", "data": {"entity_id": "e-con"}}),
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "data": {
+                            "items": [
+                                {"memory_id": "e-con-1"},
+                                {"memory_id": "e-con-2"},
+                            ]
+                        },
+                    }
+                ),
             ),
             *tool("store_memory", "c5", json.dumps({"status": "rejected", "errors": []})),
             *tool("store_memory", "c6", "boom", success=False),
@@ -134,7 +144,8 @@ class TestParseInteractions(unittest.TestCase):
                 ("store_memory", "e-new"),
                 ("revise_memory", "e-rev"),
                 ("supersede_memory", "e-sup"),
-                ("consolidate_memories", "e-con"),
+                ("consolidate_memories", "e-con-1"),
+                ("consolidate_memories", "e-con-2"),
             ],
         )
 

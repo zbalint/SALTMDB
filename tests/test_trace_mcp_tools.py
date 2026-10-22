@@ -336,14 +336,18 @@ class TestTraceWriteLinking(unittest.TestCase):
         self._record("store_memory", {"id": "e-store"})
         self._record("revise_memory", {"old_id": "x", "new_id": "e-revise"})
         self._record("supersede_memory", {"old_id": "x", "new_id": "e-supersede"})
-        self._record("consolidate_memories", {"entity_id": "e-consolidate"})
+        self._record(
+            "consolidate_memories",
+            {"items": [{"memory_id": "e-consolidate-1"}, {"memory_id": "e-consolidate-2"}]},
+        )
         self.assertEqual(
             tools._drain_pending_trace_writes(),
             [
                 ("store_memory", "e-store"),
                 ("revise_memory", "e-revise"),
                 ("supersede_memory", "e-supersede"),
-                ("consolidate_memories", "e-consolidate"),
+                ("consolidate_memories", "e-consolidate-1"),
+                ("consolidate_memories", "e-consolidate-2"),
             ],
         )
 

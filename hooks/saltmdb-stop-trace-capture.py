@@ -37,7 +37,6 @@ WRITTEN_ID_KEY = {
     "store_memory": "memory_id",
     "revise_memory": "new_id",
     "supersede_memory": "new_id",
-    "consolidate_memories": "entity_id",
 }
 RPC_TIMEOUT_SECS = 5
 _SALTMDB_DIR = ".saltmdb"
@@ -47,23 +46,31 @@ def _new_interaction(interaction_id):
     return {"interaction_id": interaction_id, "messages": [], "final": None, "writes": []}
 
 
-def _written_id(tool_name, content):
+def _written_ids(tool_name, content):
     try:
         obj = json.loads(content)
     except (TypeError, ValueError):
-        return None
+        return []
     if not isinstance(obj, dict) or obj.get("status") not in (None, "ok"):
-        return None
+        return []
     data = obj["data"] if isinstance(obj.get("data"), dict) else obj
-    return data.get(WRITTEN_ID_KEY[tool_name]) or None
+    if tool_name == "consolidate_memories":
+        return [
+            item["memory_id"]
+            for item in data.get("items", [])
+            if isinstance(item, dict) and item.get("memory_id")
+        ]
+    key = WRITTEN_ID_KEY.get(tool_name)
+    value = data.get(key) if key else None
+    return [value] if value else []
 
 
 def _write_of(tool_name, complete_data):
-    """(tool, entity id) for a finished memory-write call, else None."""
-    if tool_name not in WRITTEN_ID_KEY:
-        return None
-    entity_id = _written_id(tool_name, (complete_data.get("result") or {}).get("content"))
-    return (tool_name, entity_id) if entity_id else None
+    """Return ordered ``(tool, entity_id)`` pairs for a finished memory-write call."""
+    if tool_name not in WRITTEN_ID_KEY and tool_name != "consolidate_memories":
+        return []
+    entity_ids = _written_ids(tool_name, (complete_data.get("result") or {}).get("content"))
+    return [(tool_name, entity_id) for entity_id in entity_ids]
 
 
 def _get_interaction(iid, order, by_id):
@@ -86,9 +93,9 @@ def _record_tool(data, kind, iid, order, by_id, started):
     if kind == "tool.execution_start":
         started[data.get("toolCallId")] = data.get("mcpToolName")
     elif kind == "tool.execution_complete" and iid and data.get("success"):
-        write = _write_of(started.get(data.get("toolCallId")), data)
-        if write:
-            _get_interaction(iid, order, by_id)["writes"].append(write)
+        writes = _write_of(started.get(data.get("toolCallId")), data)
+        if writes:
+            _get_interaction(iid, order, by_id)["writes"].extend(writes)
 
 
 def _record_event(event, order, by_id, started):

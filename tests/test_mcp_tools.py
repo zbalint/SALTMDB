@@ -127,12 +127,11 @@ class TestMCPToolsWrapper(unittest.TestCase):
                 ]
             )
             tools.consolidate_memories(
-                consolidations=[
+                items=[
                     {
-                        "parent_ids": ["parent-a", "parent-b"],
+                        "parent_memory_ids": ["parent-a", "parent-b"],
                         "title": "Merged",
                         "content": "Merged content",
-                        "agent_id": "attacker",
                     }
                 ]
             )
@@ -150,7 +149,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             },
         )
         self.assertEqual(consolidation_kwargs["agent_id"], "test_agent")
-        self.assertNotIn("agent_id", consolidation_kwargs["consolidations"][0])
+        self.assertNotIn("agent_id", consolidation_kwargs["items"][0])
 
     def test_rpc_backend_stamps_lifecycle_writes_and_not_reads(self):
         from unittest.mock import patch
@@ -653,12 +652,16 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "- Detail alpha\n- Detail beta"
         )
         cons_res = tools.consolidate_memories(
-            parent_ids=[a_id, b_id],
-            title="PIT MCP Consolidated Lineage Entity",
-            content=cons_content,
+            items=[
+                {
+                    "parent_memory_ids": [a_id, b_id],
+                    "title": "PIT MCP Consolidated Lineage Entity",
+                    "content": cons_content,
+                }
+            ]
         )
         self.assertEqual(cons_res["status"], "ok")
-        c_id = cons_res["data"]["entity_id"]
+        c_id = cons_res["data"]["items"][0]["memory_id"]
 
         lineage_now = tools.get_lineage(entity_id=c_id)
         self.assertEqual(lineage_now["data"]["total"], 2)
@@ -977,27 +980,35 @@ class TestMCPToolsWrapper(unittest.TestCase):
         b = self._mk_vector_entity("Override Tool B", _axis(1))  # orthogonal -> incohesive
 
         res_no_override = tools.consolidate_memories(
-            parent_ids=[a, b],
-            title="C Override Tool No Justification",
-            content=(
-                "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
-                "- Merged detail alpha\n- Merged detail beta"
-            ),
+            items=[
+                {
+                    "parent_memory_ids": [a, b],
+                    "title": "C Override Tool No Justification",
+                    "content": (
+                        "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
+                        "- Merged detail alpha\n- Merged detail beta"
+                    ),
+                }
+            ]
         )
         self.assertEqual(res_no_override["status"], "rejected")
         self.assertEqual(res_no_override["errors"][0]["code"], "REJECT_LOW_COHESION")
 
         res_with_override = tools.consolidate_memories(
-            parent_ids=[a, b],
-            title="C Override Tool With Justification",
-            content=(
-                "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
-                "- Merged detail alpha\n- Merged detail beta"
-            ),
-            override_justification="deliberately merging unrelated fixtures via the MCP tool wrapper",
+            items=[
+                {
+                    "parent_memory_ids": [a, b],
+                    "title": "C Override Tool With Justification",
+                    "content": (
+                        "# Consolidated Record\n\nSynthesized summary combining source facts.\n"
+                        "- Merged detail alpha\n- Merged detail beta"
+                    ),
+                    "override_justification": "deliberately merging unrelated fixtures via the MCP tool wrapper",
+                }
+            ]
         )
         self.assertEqual(res_with_override["status"], "ok")
-        consolidated_id = res_with_override["data"]["entity_id"]
+        consolidated_id = res_with_override["data"]["items"][0]["memory_id"]
         content = self.conn.execute(
             "SELECT full_content FROM entities WHERE id = ?", (consolidated_id,)
         ).fetchone()[0]
@@ -1013,10 +1024,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "# Consolidated Bulk Record\n\nSynthesized summary combining bulk source facts.\n"
             "- Merged bulk detail alpha\n- Merged bulk detail beta"
         )
-        bulk_results = tools.commit_consolidation(
-            consolidations=[
+        bulk_results = tools.consolidate_memories(
+            items=[
                 {
-                    "parent_ids": [c, d],
+                    "parent_memory_ids": [c, d],
                     "title": "Bulk Override Item CD",
                     "content": bulk_content + "\n- Owner-default item",
                     "override_justification": (
@@ -1024,21 +1035,22 @@ class TestMCPToolsWrapper(unittest.TestCase):
                     ),
                 },
                 {
-                    "parent_ids": [e, f],
+                    "parent_memory_ids": [e, f],
                     "title": "Bulk Override Item EF",
                     "content": bulk_content + "\n- Owner-override item",
                 },
-            ],
+            ]
         )
-        self.assertEqual(len(bulk_results), 2)
-        self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
-        self.assertEqual(bulk_results[1]["status"], "success", bulk_results)
+        self.assertEqual(bulk_results["status"], "ok", bulk_results)
+        self.assertEqual(len(bulk_results["data"]["items"]), 2)
 
         cd_content = self.conn.execute(
-            "SELECT full_content FROM entities WHERE id = ?", (bulk_results[0]["entity_id"],)
+            "SELECT full_content FROM entities WHERE id = ?",
+            (bulk_results["data"]["items"][0]["memory_id"],),
         ).fetchone()[0]
         ef_content = self.conn.execute(
-            "SELECT full_content FROM entities WHERE id = ?", (bulk_results[1]["entity_id"],)
+            "SELECT full_content FROM entities WHERE id = ?",
+            (bulk_results["data"]["items"][1]["memory_id"],),
         ).fetchone()[0]
         self.assertIn("[Consolidation Override]", cd_content)
         self.assertNotIn("[Consolidation Override]", ef_content)
@@ -1065,35 +1077,32 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "# Consolidated Bulk Record\n\nSynthesized summary combining bulk source facts.\n"
             "- Merged bulk detail alpha\n- Merged bulk detail beta"
         )
-        bulk_results = tools.commit_consolidation(
-            consolidations=[
+        bulk_results = tools.consolidate_memories(
+            items=[
                 {
-                    "parent_ids": [a, b],
+                    "parent_memory_ids": [a, b],
                     "title": "Bulk Owner Default Item AB",
                     "content": bulk_content + "\n- Owner-default item",
-                    # no context_id here -> must inherit the top-level batch default
                 },
                 {
-                    "parent_ids": [c, d],
+                    "parent_memory_ids": [c, d],
                     "title": "Bulk Owner Override Item CD",
                     "content": bulk_content + "\n- Owner-override item",
-                    # A stale per-item owner must be ignored by the adapter boundary.
-                    "agent_id": "agent_override",
                     "context_id": "ctx_override",
                 },
             ],
             context_id="ctx_batch_default",
         )
-        self.assertEqual(bulk_results[0]["status"], "success", bulk_results)
-        self.assertEqual(bulk_results[1]["status"], "success", bulk_results)
+        self.assertEqual(bulk_results["status"], "ok", bulk_results)
+        self.assertEqual(len(bulk_results["data"]["items"]), 2)
 
         row_ab = self.conn.execute(
             "SELECT agent_id, context_id FROM entities WHERE id = ?",
-            (bulk_results[0]["entity_id"],),
+            (bulk_results["data"]["items"][0]["memory_id"],),
         ).fetchone()
         row_cd = self.conn.execute(
             "SELECT agent_id, context_id FROM entities WHERE id = ?",
-            (bulk_results[1]["entity_id"],),
+            (bulk_results["data"]["items"][1]["memory_id"],),
         ).fetchone()
         self.assertEqual(row_ab, ("test_agent", "ctx_batch_default"))
         self.assertEqual(row_cd, ("test_agent", "ctx_override"))
@@ -1854,24 +1863,23 @@ class TestConsolidateMemoriesOutputSchema(unittest.IsolatedAsyncioTestCase):
             tags=["#probe"],
         )
 
-        # This must go through tools.mcp.call_tool (the real FastMCP protocol entry point, not a
-        # direct tools.consolidate_memories(...) call) -- only call_tool runs the output-schema
-        # Pydantic validation that the return-type annotation feeds.
-        result = await tools.mcp.call_tool(
+        result = await mcp_contract.call(
             "consolidate_memories",
             {
-                "parent_ids": [a["data"]["memory_id"], b["data"]["memory_id"]],
-                "title": "Output Schema Probe Consolidated",
-                "content": "Consolidated probe content combining A and B.",
+                "items": [
+                    {
+                        "parent_memory_ids": [a["data"]["memory_id"], b["data"]["memory_id"]],
+                        "title": "Output Schema Probe Consolidated",
+                        "content": "Consolidated probe content combining A and B.",
+                    }
+                ]
             },
         )
-        structured = result[1]["result"]
-        self.assertEqual(structured["status"], "ok")
-        self.assertIn("entity_id", structured["data"])
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("memory_id", result["data"]["items"][0])
 
 
 class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
-    # Reuse the neighboring real-call fixture without inheriting its tests.
     setUp = TestConsolidateMemoriesOutputSchema.setUp
     tearDown = TestConsolidateMemoriesOutputSchema.tearDown
 

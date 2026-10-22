@@ -78,6 +78,12 @@ class CoreGovernanceRejected(Exception):
         super().__init__(message)
 
 
+class CoreDecisionRequired(CoreGovernanceRejected):
+    def __init__(self, message: str, keep_fragment: dict):
+        self.keep_fragment = keep_fragment
+        super().__init__(message)
+
+
 # ---------------------------------------------------------------------------
 # is_core strict parsing
 # ---------------------------------------------------------------------------
@@ -984,6 +990,36 @@ def resolve_store_core_state(
 # ---------------------------------------------------------------------------
 # Consolidation core-state resolution
 # ---------------------------------------------------------------------------
+def _resolve_omitted_consolidation_core(conn, resolved_parents: list[str], scope: str) -> dict:
+    if not resolved_parents:
+        return _non_core_state(previous_detail_ids=[])
+    placeholders = ",".join("?" for _ in resolved_parents)
+    rows = conn.execute(
+        f"SELECT id, is_core, status, core_reason, core_exit_condition "
+        f"FROM entities WHERE id IN ({placeholders})",
+        resolved_parents,
+    ).fetchall()
+    active_core_rows = {row[0]: row for row in rows if bool(row[1]) and row[2] != "archived"}
+    if not active_core_rows:
+        return _non_core_state(previous_detail_ids=[])
+    first_core = next(
+        row for parent_id in resolved_parents if (row := active_core_rows.get(parent_id))
+    )
+    keep_fragment: dict[str, object] = {
+        "core": {
+            "reason": first_core[3],
+            "exit_condition": first_core[4],
+        }
+    }
+    if scope != "shared":
+        keep_fragment["scope"] = "shared"
+    raise CoreDecisionRequired(
+        "One or more parents is an active core memory and is_core was omitted -- "
+        "consolidation must never silently inherit or drop core status. Pass explicit "
+        "is_core=True (with core_reason/core_exit_condition/core_review_after) to keep "
+        "the result core, or is_core=False to let it become an ordinary memory.",
+        keep_fragment,
+    )
 
 
 def resolve_consolidation_core_state(
@@ -1003,25 +1039,8 @@ def resolve_consolidation_core_state(
     this raises. Must be called fresh inside commit_consolidation's in-transaction TOCTOU
     revalidation, not only pre-transaction, since parent core/status can change between preflight
     and commit (resolved gap #2)."""
-    if resolved_parents:
-        placeholders = ",".join("?" for _ in resolved_parents)
-        rows = conn.execute(
-            f"SELECT id, is_core, status FROM entities WHERE id IN ({placeholders})",
-            resolved_parents,
-        ).fetchall()
-    else:
-        rows = []
-    any_active_core_parent = any(bool(r[1]) and r[2] != "archived" for r in rows)
-
     if is_core_requested is None:
-        if any_active_core_parent:
-            raise ValueError(
-                "One or more parents is an active core memory and is_core was omitted -- "
-                "consolidation must never silently inherit or drop core status. Pass explicit "
-                "is_core=True (with core_reason/core_exit_condition/core_review_after) to keep "
-                "the result core, or is_core=False to let it become an ordinary memory."
-            )
-        return _non_core_state(previous_detail_ids=[])
+        return _resolve_omitted_consolidation_core(conn, resolved_parents, scope)
 
     if is_core_requested is False:
         return _non_core_state(previous_detail_ids=[])

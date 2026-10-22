@@ -152,10 +152,14 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertEqual(second["status"], "ok")
 
         result = tools.consolidate_memories(
-            parent_ids=[first["data"]["memory_id"], second["data"]["memory_id"]],
-            title="[Test] Consolidated",
-            content="Consolidated content body long enough to pass quality checks easily.",
-            tags=["#foo::bar"],
+            items=[
+                {
+                    "parent_memory_ids": [first["data"]["memory_id"], second["data"]["memory_id"]],
+                    "title": "[Test] Consolidated",
+                    "content": "Consolidated content body long enough to pass quality checks easily.",
+                    "tags": ["#foo::bar"],
+                }
+            ]
         )
 
         self.assertIsInstance(result, dict)

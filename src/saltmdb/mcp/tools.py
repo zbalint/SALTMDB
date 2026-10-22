@@ -2,7 +2,6 @@ from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from typing_extensions import TypedDict
 
 import collections
 import json
@@ -30,16 +29,6 @@ class RelationInput(BaseModel):
     override_justification: str | None = None
 
 
-class ConsolidationBatchItem(TypedDict, total=False):
-    parent_ids: list[str]
-    title: str
-    content: str
-    is_core: bool | None
-    tags: list[str] | None
-    scope: Literal["private", "shared"] | None
-    override_justification: str | None
-
-
 class CoreInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -47,6 +36,21 @@ class CoreInput(BaseModel):
     exit_condition: str
     review_after: str | None = None
     detail_memory_ids: list[str] | None = None
+
+
+class ConsolidationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parent_memory_ids: list[str]
+    title: str
+    content: str | None = None
+    content_file_path: str | None = None
+    tags: list[str] | None = None
+    scope: Literal["private", "shared"] = "shared"
+    override_justification: str | None = None
+    context_id: str | None = None
+    core: CoreInput | None = None
+    demote_core: bool = False
 
 
 _YAML_FRONT_MATTER_RE = re.compile(
@@ -92,8 +96,12 @@ def _normalize_list_or_str(val) -> list:
     return [val]
 
 
+def _content_field(field_prefix: str, field_name: str) -> str:
+    return f"{field_prefix}.{field_name}" if field_prefix else field_name
+
+
 def _resolve_content(
-    content: str | None, content_file_path: str | None
+    content: str | None, content_file_path: str | None, field_prefix: str = ""
 ) -> tuple[str | None, dict | None]:
     """Resolve exactly one of ``content`` (inline) or ``content_file_path`` (read from local disk)
     into a plain content string, at the adapter boundary -- before any domain-service call, so
@@ -112,13 +120,19 @@ def _resolve_content(
                 error(
                     "CONTENT_AND_FILE_PATH_BOTH_SET",
                     "Provide exactly one of content or content_file_path, not both.",
-                    "content",
+                    _content_field(field_prefix, "content"),
                 )
             ]
         )
     if content is None and content_file_path is None:
         return None, rejected(
-            [error("MISSING_CONTENT", "Provide content or content_file_path.", "content")]
+            [
+                error(
+                    "MISSING_CONTENT",
+                    "Provide content or content_file_path.",
+                    _content_field(field_prefix, "content"),
+                )
+            ]
         )
     if content_file_path is None:
         return content, None
@@ -131,23 +145,10 @@ def _resolve_content(
                 error(
                     "CONTENT_FILE_READ_FAILED",
                     f"Could not read content_file_path '{content_file_path}': {exc}",
-                    "content_file_path",
+                    _content_field(field_prefix, "content_file_path"),
                 )
             ]
         )
-
-
-def _strip_item_agent_id(items: list) -> list:
-    """Remove a stray/attacker-supplied ``agent_id`` key from each bulk item before it crosses
-    the adapter boundary (manage_relation's ``relations`` and consolidate_memories's
-    ``consolidations``, review finding 2026-08-26: was duplicated inline at both call sites).
-    Non-dict items are passed through unchanged -- the caller's own validation rejects those."""
-    return [
-        {key: value for key, value in item.items() if key != "agent_id"}
-        if isinstance(item, dict)
-        else item
-        for item in items
-    ]
 
 
 def _effective_agent_id() -> str:
@@ -804,93 +805,139 @@ def manage_relation(
     )
 
 
+def _public_consolidation_item(item: ConsolidationItem | dict) -> dict:
+    if isinstance(item, ConsolidationItem):
+        return item.model_dump(exclude_none=True)
+    return ConsolidationItem.model_validate(item).model_dump(exclude_none=True)
+
+
+def _map_consolidation_item(
+    item: ConsolidationItem | dict, index: int
+) -> tuple[dict | None, list[dict]]:
+    from saltmdb.utils.envelope import error
+
+    item = item if isinstance(item, ConsolidationItem) else ConsolidationItem.model_validate(item)
+    content, content_error = _resolve_content(
+        item.content,
+        item.content_file_path,
+        f"items[{index}]",
+    )
+    errors = list(content_error.get("errors", [])) if content_error else []
+    if item.core is not None and item.demote_core:
+        errors.append(
+            error(
+                "CORE_AND_DEMOTE_CONFLICT",
+                "core and demote_core are mutually exclusive.",
+                f"items[{index}].demote_core",
+            )
+        )
+    if errors:
+        return None, errors
+    mapped: dict[str, object] = {
+        "parent_ids": item.parent_memory_ids,
+        "title": item.title,
+        "content": content,
+        "tags": item.tags,
+        "scope": item.scope,
+        "override_justification": item.override_justification,
+        "context_id": item.context_id,
+    }
+    if item.core is not None:
+        mapped.update(
+            {
+                "is_core": True,
+                "core_reason": item.core.reason,
+                "core_exit_condition": item.core.exit_condition,
+                "core_review_after": item.core.review_after,
+                "detail_memory_ids": item.core.detail_memory_ids,
+            }
+        )
+    elif item.demote_core:
+        mapped["is_core"] = False
+    return {key: value for key, value in mapped.items() if value is not None}, []
+
+
+def _complete_consolidation_core_decision(
+    result: dict, items: list, context_id: str | None
+) -> dict:
+    if result.get("status") != "rejected":
+        return result
+    core_error = next(
+        (
+            entry
+            for entry in result.get("errors", [])
+            if entry.get("code") == "CORE_DECISION_REQUIRED"
+        ),
+        None,
+    )
+    if core_error is None:
+        return result
+    match = re.match(r"items\[(\d+)\](?:\.parent_memory_ids)?$", core_error.get("field", ""))
+    fragments = core_error.get("corrected_calls")
+    if match is None or not isinstance(fragments, list):
+        return result
+    index = int(match.group(1))
+    submitted = [_public_consolidation_item(item) for item in items]
+    corrected_calls = []
+    from saltmdb.utils.corrected_call import build_corrected_call
+
+    for fragment in fragments:
+        merged = [dict(item) for item in submitted]
+        merged[index].update(fragment)
+        corrected_calls.append(
+            build_corrected_call(
+                consolidate_memories,
+                {"items": submitted, "context_id": context_id},
+                {"items": merged},
+            )
+        )
+    errors = [dict(entry) for entry in result["errors"]]
+    error_index = result["errors"].index(core_error)
+    errors[error_index].update(
+        {
+            "message": (
+                "One or more parents of this item is an active core memory. Resend the item "
+                "with core (keep the result core: reason and exit_condition) or demote_core true "
+                "(let the result become an ordinary memory)."
+            ),
+            "corrected_calls": corrected_calls,
+        }
+    )
+    return {**result, "errors": errors}
+
+
 @mcp.tool()
 def consolidate_memories(
-    consolidations: list[ConsolidationBatchItem] | None = None,
-    parent_ids: list | None = None,
-    title: str | None = None,
-    content: str | None = None,
-    tags: list | None = None,
+    items: Annotated[list[ConsolidationItem], Field(min_length=1, max_length=20)],
     context_id: str | None = None,
-    scope: Literal["private", "shared"] = "shared",
-    weight: int | float = 1,
-    is_core: bool | None = None,
-    override_justification: str | None = None,
-    core_reason: str | None = None,
-    core_exit_condition: str | None = None,
-    core_review_after: str | None = None,
-    detail_memory_ids: list | None = None,
-) -> dict | list:
-    """Merges two or more existing memories into one new canonical memory -- the parents are
-    archived unchanged and linked via `consolidated_from`; the new memory's own identity is
-    immutable afterward. For a batch of consolidations in one call, use `consolidations` instead
-    of `parent_ids`/`title`/`content`.
-
-    parent_ids (2+ existing memory IDs), title, content are required for a single consolidation.
-    Semantic relations pointing at a parent are never auto-repointed onto the new memory; the
-    response's `orphaned_relations`/`orphaned_edge_worklist` lists them as safe, optional
-    follow-up `manage_relation` declarations you may choose to re-create.
-
-    **Return shape depends on which form you use** (same pattern as `manage_relation`/
-    `archive_memory`): a single consolidation returns `{"status": "ok", "data": {"entity_id":
-    ..., "message": "...", "orphaned_relations": [...], "worklist_guidance": "..."}, "warnings":
-    [...]}`. A `consolidations` BATCH instead returns a bare list of per-item result dicts,
-    all-or-nothing (one item's failure aborts the whole batch).
-
-    Rejections: `{"status": "rejected", "errors": [{"code": "REJECT_LOW_COHESION" | ..., ...}]}`
-    -- `REJECT_LOW_COHESION` (the parent set's chunk-embedding centroids are too dissimilar to be
-    one coherent memory) accepts `override_justification` (a non-throwaway explanation, baked
-    into the committed content and audited) to force it through; for a batch, put
-    `override_justification` on each item that needs it, never at the top level.
-
-    Example: `consolidate_memories(parent_ids=["id1", "id2"], title="[Topic] Merged decision",
-    content="...")`.
-
-    `context_id` is the batch-wide default for the bulk shape; an item's own `context_id` wins.
-    Core-memory governance: `is_core` is never inherited from parents -- if any resolved parent is
-    an active core and `is_core` is omitted, the commit is rejected with an actionable error; pass
-    `is_core=True` (with `core_reason`/`core_exit_condition`) to keep the result core, or
-    `is_core=False` to let it become ordinary. Same capacity caps and `detail_memory_ids` rules as
-    store_memory. For the bulk shape, put every `core_*`/`detail_memory_ids` field on each item.
+) -> dict:
+    """Use this to synthesize one or more memories atomically; use revise_memory when one stored
+    memory is wrong. Provide each item with parent_memory_ids, title, and exactly one content
+    source, optionally core or demote_core. Any rejection leaves all parents and results
+    unchanged; errors identify items[i].field. Active core parents require either core or
+    demote_core. Example: consolidate_memories(items=[{"parent_memory_ids": ["id1", "id2"],
+    "title": "Merged topic", "content": "Durable synthesis."}]).
     """
-    agent_id_ = _effective_agent_id()
-    consolidations_ = consolidations
-    if consolidations_ and isinstance(consolidations_, str):
-        consolidations_ = _normalize_list_or_str(consolidations_)
-    if consolidations_:
-        consolidations_ = _strip_item_agent_id(consolidations_)
+    from saltmdb.utils.envelope import rejected
 
-    parent_ids_ = _normalize_list_or_str(parent_ids)
-    tags_ = _normalize_list_or_str(tags)
-    detail_memory_ids_ = (
-        _normalize_list_or_str(detail_memory_ids) if detail_memory_ids is not None else None
-    )
-
-    return _call_and_record_write(
+    mapped_items = []
+    adapter_errors = []
+    for index, item in enumerate(items):
+        mapped, errors = _map_consolidation_item(item, index)
+        adapter_errors.extend(errors)
+        if mapped is not None:
+            mapped_items.append(mapped)
+    if adapter_errors:
+        return rejected(adapter_errors)
+    result = _call_and_record_write(
         "consolidate_memories",
         {
-            "consolidations": consolidations_,
-            "parent_ids": parent_ids_,
-            "title": title,
-            "content": content,
-            "is_core": is_core,
-            "tags": tags_,
-            "scope": scope,
-            "weight": weight,
-            "agent_id": agent_id_,
+            "items": mapped_items,
             "context_id": context_id,
-            "core_reason": core_reason,
-            "core_exit_condition": core_exit_condition,
-            "core_review_after": core_review_after,
-            "detail_memory_ids": detail_memory_ids_,
-            "override_justification": override_justification,
+            "agent_id": _effective_agent_id(),
         },
     )
-
-
-# Python-level compatibility for callers migrating from the pre-Phase-4 adapter.  This alias is
-# deliberately not decorated, so ``commit_consolidation`` cannot be invoked as a public MCP tool.
-commit_consolidation = consolidate_memories
+    return _complete_consolidation_core_decision(result, items, context_id)
 
 
 def _replacement_payload(
@@ -1149,8 +1196,23 @@ _WRITTEN_ID_KEY = {
     "store_memory": "memory_id",
     "revise_memory": "new_id",
     "supersede_memory": "new_id",
-    "consolidate_memories": "entity_id",
 }
+
+
+def _written_ids(tool_name: str, result: dict) -> list[str]:
+    data = result.get("data")
+    if tool_name == "consolidate_memories":
+        return [
+            item["memory_id"]
+            for item in (data.get("items", []) if isinstance(data, dict) else [])
+            if isinstance(item, dict) and item.get("memory_id")
+        ]
+    if not isinstance(data, dict):
+        return []
+    entity_id = data.get(_WRITTEN_ID_KEY.get(tool_name))
+    return [entity_id] if entity_id else []
+
+
 _ID_RENAME_TO_MEMORY_ID_TOOLS = {"store_memory", "update_memory_metadata"}
 _ERROR_FIELD_REMAP_TOOL = "update_memory_metadata"
 
@@ -1187,19 +1249,13 @@ def _to_public_write_result(tool_name: str, result):
 
 
 def _queue_trace_write(tool_name: str, result):
-    if (
-        tool_name in _WRITTEN_ID_KEY
-        and is_trace_capture_enabled()
-        and isinstance(result, dict)
-        and result.get("status") == "ok"
-    ):
-        trace_data = result.get("data")
-        entity_id = (
-            trace_data.get(_WRITTEN_ID_KEY[tool_name]) if isinstance(trace_data, dict) else None
-        )
-        if entity_id:
+    if tool_name not in _WRITTEN_ID_KEY and tool_name != "consolidate_memories":
+        return result
+    if is_trace_capture_enabled() and isinstance(result, dict) and result.get("status") == "ok":
+        entity_ids = _written_ids(tool_name, result)
+        if entity_ids:
             with _PENDING_TRACE_WRITES_LOCK:
-                _PENDING_TRACE_WRITES.append((tool_name, entity_id))
+                _PENDING_TRACE_WRITES.extend((tool_name, entity_id) for entity_id in entity_ids)
     return result
 
 

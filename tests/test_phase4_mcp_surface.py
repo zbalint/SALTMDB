@@ -201,20 +201,28 @@ class TestPhase4McpSurface(unittest.TestCase):
         self.assertEqual(result["errors"][0]["code"], "INVALID_TAGS")
 
     @patch(
-        "saltmdb.daemon.dispatch.relation_service.consolidate_memories",
+        "saltmdb.daemon.dispatch.relation_service.apply_consolidations",
         return_value={"status": "ok"},
     )
-    def test_consolidate_dispatch_calls_renamed_service(self, consolidate):
+    def test_consolidate_dispatch_calls_batch_service(self, apply):
         dispatch._dispatch_consolidate_memories(
-            parent_ids=["a", "b"], title="Merged", content="content", tags=["#api"]
+            items=[{"parent_ids": ["a", "b"], "title": "Merged", "content": "content"}]
         )
-        consolidate.assert_called_once()
-        self.assertEqual(consolidate.call_args.kwargs["parent_ids"], ["a", "b"])
+        apply.assert_called_once()
+        self.assertEqual(apply.call_args.kwargs["items"][0]["parent_ids"], ["a", "b"])
 
     @patch.object(tools, "_backend_or_raise")
-    def test_consolidation_uses_renamed_public_method(self, backend):
-        backend.return_value.call.return_value = "ok"
-        tools.consolidate_memories(parent_ids=["a", "b"], title="Merged", content="content")
+    def test_consolidation_uses_batch_public_method(self, backend):
+        backend.return_value.call.return_value = {"status": "ok"}
+        tools.consolidate_memories(
+            items=[
+                {
+                    "parent_memory_ids": ["a", "b"],
+                    "title": "Merged",
+                    "content": "content",
+                }
+            ]
+        )
         backend.return_value.call.assert_called_once()
         self.assertEqual(backend.return_value.call.call_args.args[0], "consolidate_memories")
 

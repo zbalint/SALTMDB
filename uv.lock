@@ -2128,7 +2128,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-igraph" },
     { name = "sqlite-vec" },
-    { name = "typing-extensions" },
     { name = "uuid6" },
 ]
 
@@ -2162,7 +2161,6 @@ requires-dist = [
     { name = "python-igraph", specifier = ">=0.11.0,<0.12.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.0,<0.15.0" },
     { name = "sqlite-vec", specifier = ">=0.1.9,<0.2.0" },
-    { name = "typing-extensions", specifier = ">=4.0.0,<5.0.0" },
     { name = "uuid6", specifier = ">=2024.7.10,<2026.0.0" },
 ]
 provides-extras = ["dev"]

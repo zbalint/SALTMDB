@@ -255,12 +255,6 @@ class AdapterEnvelopeTests(unittest.TestCase):
     def test_non_injected_tool_has_a_stray_agent_id_removed(self):
         self.assertNotIn("agent_id", self._forwarded("search_tags", {"agent_id": "attacker"}))
 
-    def test_bulk_item_stray_agent_id_is_stripped(self):
-        items = [{"agent_id": "attacker", "source_id": "a", "target_id": "b"}]
-        self.assertEqual(
-            mcp_tools._strip_item_agent_id(items), [{"source_id": "a", "target_id": "b"}]
-        )
-
 
 class TelemetryAndSessionTests(unittest.TestCase):
     def setUp(self):

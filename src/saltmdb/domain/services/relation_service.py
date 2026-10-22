@@ -17,6 +17,7 @@ from saltmdb.config import (
 )
 from saltmdb.db.connection import (
     get_connection,
+    managed_connection,
     write_transaction_retrying,
     close_connection,
     is_coordinator_connection,
@@ -2698,6 +2699,17 @@ def consolidate_memories(
                 ),
             }
         )
+    except core_governance_service.CoreDecisionRequired as exc:
+        keep = exc.keep_fragment
+        return rejected(
+            [
+                envelope_error(
+                    "CORE_DECISION_REQUIRED",
+                    str(exc),
+                    corrected_calls=[keep, {"demote_core": True}],
+                )
+            ]
+        )
     except Exception as e:
         logger.error("Error committing consolidation: %s", e)
         return _consolidation_rejected("CONSOLIDATION_FAILED", str(e))
@@ -2727,6 +2739,12 @@ def commit_consolidation(*args, **kwargs) -> str:
             return f"Error: {message}"
         return f"Error: {code} - {message}"
     return str(result)
+
+
+class _BulkItemRejected(RuntimeError):
+    def __init__(self, result: dict):
+        self.errors = list(result.get("errors") or [])
+        super().__init__(f"Bulk consolidation aborted (all-or-nothing): {result}")
 
 
 def _commit_bulk_consolidation_item(
@@ -2774,7 +2792,7 @@ def _commit_bulk_consolidation_item(
         ),
     )
     if not isinstance(result, dict) or result.get("status") != "ok":
-        raise RuntimeError(f"Bulk consolidation aborted (all-or-nothing): {result}")
+        raise _BulkItemRejected(result)
     data = result["data"]
     return {
         "status": "success",
@@ -2822,22 +2840,158 @@ def _write_bulk_consolidations(
 
 def _prepare_bulk_consolidation_parents(
     conn, consolidations: list
-) -> tuple[list[list[str]], list[str], dict[str, str] | None]:
+) -> tuple[list[list[str]], list[str], dict[str, object] | None]:
     item_resolved_parents: list[list[str]] = []
     union_ids: list[str] = []
     seen_union: set[str] = set()
-    for item in consolidations:
+    for index, item in enumerate(consolidations):
         parent_ids, parent_error = _resolve_and_validate_parent_ids(
             conn, item.get("parent_ids", [])
         )
         if parent_error is not None:
-            return [], [], parent_error
+            return [], [], {**parent_error, "_item_index": index}
         item_resolved_parents.append(parent_ids)
         for parent_id in parent_ids:
             if parent_id not in seen_union:
                 seen_union.add(parent_id)
                 union_ids.append(parent_id)
     return item_resolved_parents, union_ids, None
+
+
+def _prefix_consolidation_errors(errors: list[dict], index: int) -> list[dict]:
+    prefixed = []
+    for entry in errors:
+        field = entry.get("field")
+        if not field:
+            suffix = "parent_memory_ids" if entry.get("code") == "CORE_DECISION_REQUIRED" else ""
+            field = f"items[{index}].{suffix}".rstrip(".")
+        if field.startswith("items["):
+            prefixed.append({**entry, "field": field})
+        else:
+            prefixed.append({**entry, "field": f"items[{index}].{field}"})
+    return prefixed
+
+
+def _consolidation_batch_result(conn, results: list, resolved_parents: list[list[str]]) -> dict:
+    items = []
+    for index, result in enumerate(results):
+        entity_id = result["entity_id"]
+        title = conn.execute("SELECT title FROM entities WHERE id = ?", (entity_id,)).fetchone()[0]
+        items.append(
+            {
+                "memory_id": entity_id,
+                "title": title,
+                "parent_memory_ids": resolved_parents[index],
+                "orphaned_relations": result.get("orphaned_relations", []),
+            }
+        )
+    return envelope_ok(
+        {
+            "items": items,
+            "consolidated_count": len(items),
+            "worklist_guidance": (
+                "Re-declaring these relations through manage_relation is optional; "
+                "skipping them leaves a correct historical graph."
+            ),
+        }
+    )
+
+
+def _normalize_consolidation_items(items: list) -> tuple[list[dict], dict | None]:
+    if not isinstance(items, list) or not items:
+        return [], rejected(
+            [
+                envelope_error(
+                    error_codes.VALIDATION_ERROR, "items must be a non-empty array", "items"
+                )
+            ]
+        )
+    normalized = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            return [], rejected(
+                [
+                    envelope_error(
+                        error_codes.VALIDATION_ERROR,
+                        "consolidation item must be an object",
+                        f"items[{index}]",
+                    )
+                ]
+            )
+        normalized.append(
+            {key: value for key, value in item.items() if value is not None and key != "agent_id"}
+        )
+    return normalized, None
+
+
+def _validate_cross_item_parents(resolved: list[list[str]]) -> dict | None:
+    owner_by_parent: dict[str, int] = {}
+    for index, parent_ids in enumerate(resolved):
+        for parent_id in parent_ids:
+            earlier = owner_by_parent.get(parent_id)
+            if earlier is not None:
+                return rejected(
+                    [
+                        envelope_error(
+                            "DUPLICATE_PARENT_ID",
+                            f"parent '{parent_id}' is already used by item {earlier}.",
+                            f"items[{index}].parent_memory_ids",
+                        )
+                    ]
+                )
+            owner_by_parent[parent_id] = index
+    return None
+
+
+def apply_consolidations(
+    items: list,
+    agent_id: str | None = None,
+    context_id: str | None = None,
+    agent_session_id: str | None = None,
+    db_connection=None,
+    db_path: str | None = None,
+) -> dict:
+    """Apply consolidation items atomically, preserving per-item rejection fields."""
+    normalized, validation_error = _normalize_consolidation_items(items)
+    if validation_error is not None:
+        return validation_error
+
+    with managed_connection(db_connection=db_connection, db_path=db_path) as conn:
+        results: list[dict] = []
+        try:
+            resolved, union_ids, parent_error = _prepare_bulk_consolidation_parents(
+                conn, normalized
+            )
+            if parent_error is not None:
+                index = cast(int, parent_error.pop("_item_index", 0))
+                return rejected([{**parent_error, "field": f"items[{index}].parent_memory_ids"}])
+            parent_conflict = _validate_cross_item_parents(resolved)
+            if parent_conflict is not None:
+                return parent_conflict
+            centroids, unresolved, observed_state = get_fresh_entity_centroids(union_ids, conn)
+            write_transaction_retrying(
+                conn,
+                lambda tx_conn: _write_bulk_consolidations(
+                    tx_conn,
+                    normalized,
+                    resolved,
+                    centroids,
+                    unresolved,
+                    observed_state,
+                    results,
+                    agent_id,
+                    context_id,
+                    agent_session_id,
+                ),
+            )
+            return _consolidation_batch_result(conn, results, resolved)
+        except _BulkItemRejected as exc:
+            return rejected(_prefix_consolidation_errors(exc.errors, len(results)))
+        except Exception as exc:
+            logger.error("Error applying consolidation batch: %s", exc)
+            if is_coordinator_connection(conn):
+                raise
+            return rejected([envelope_error(error_codes.INTERNAL_ERROR, str(exc))])
 
 
 def bulk_commit_consolidation(
@@ -2847,7 +3001,7 @@ def bulk_commit_consolidation(
     agent_session_id: str = None,
     db_connection=None,
     db_path: str = None,
-) -> list:
+) -> list[dict]:
     """Executes multiple consolidation commits atomically in a single transaction -- all-or-nothing.
 
     If any item raises (or would otherwise be reported as an error), the whole batch rolls

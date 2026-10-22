@@ -23,7 +23,6 @@ _SKIP_REASONS = {
         "list_predicates": "Published schema has no required field.",
         "merge_tags": "Published schema has no required field.",
         "search_memory": "Published schema has no required field.",
-        "consolidate_memories": "Published schema has no required field.",
         "get_memory": "Published schema has no required field.",
         "search_traces": "Published schema has no required field.",
         "retrieve_context": "Published schema has no required field.",
@@ -269,15 +268,30 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_output_schema_rejections_pass_lowlevel_validation(self):
-        for name, arguments in (
-            ("store_memory", {"__unknown_guard_field__": 1}),
-            ("revise_memory", {"__unknown_guard_field__": 1}),
-            ("consolidate_memories", {"__unknown_guard_field__": 1}),
-        ):
-            with self.subTest(tool=name):
-                result = await mcp_contract.call_protocol(name, arguments)
-                self.assertFalse(result.isError)
-                self.assertEqual(json.loads(result.content[0].text)["status"], "rejected")
+        schema = types.Tool(
+            name="wrapped",
+            description="wrapped",
+            inputSchema={"type": "object", "properties": {}},
+            outputSchema={"type": "object", "properties": {"result": {}}, "required": ["result"]},
+        )
+        actual = GuardedFastMCP._result(
+            envelope.rejected([envelope.error("UNKNOWN_FIELD", "bad", "bad")]), schema
+        )
+        self.assertEqual(
+            actual[1],
+            {
+                "result": {
+                    "status": "rejected",
+                    "errors": [{"code": "UNKNOWN_FIELD", "message": "bad", "field": "bad"}],
+                    "warnings": [],
+                }
+            },
+        )
+
+    async def test_public_output_schema_rejection_uses_plain_tool(self):
+        result = await mcp_contract.call_protocol("list_predicates", {"__unknown_guard_field__": 1})
+        self.assertFalse(result.isError)
+        self.assertEqual(json.loads(result.content[0].text)["status"], "rejected")
 
     async def test_internal_backend_failure_is_protocol_error_without_traceback(self):
         previous = tools._set_backend_for_test(_RaisingBackend())
@@ -307,26 +321,25 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(str(caught.exception))
         self.assertEqual(payload["errors"][0]["code"], "INTERNAL_ERROR")
 
-    async def test_guard_result_matches_fastmcp_conversion_for_plain_and_wrapped_tools(self):
-        for name in ("list_predicates", "consolidate_memories"):
-            tool = mcp_contract.mcp._tool_manager.get_tool(name)
-            properties = await mcp_contract.published_properties(name)
-            envelope = {
-                "status": "rejected",
-                "errors": [
-                    {
-                        "code": "UNKNOWN_FIELD",
-                        "message": (f"Unknown field 'bad'; valid fields: {', '.join(properties)}."),
-                        "field": "bad",
-                        "corrected_call": {},
-                    }
-                ],
-                "warnings": [],
-            }
-            expected = tool.fn_metadata.convert_result(envelope)
-            actual = await mcp_contract.mcp.call_tool(name, {"bad": 1})
-            self.assertEqual(actual, expected)
-            self.assertEqual(isinstance(actual, tuple), name == "consolidate_memories")
+    async def test_guard_result_matches_fastmcp_conversion_for_plain_tool(self):
+        name = "list_predicates"
+        tool = mcp_contract.mcp._tool_manager.get_tool(name)
+        properties = await mcp_contract.published_properties(name)
+        result_envelope = {
+            "status": "rejected",
+            "errors": [
+                {
+                    "code": "UNKNOWN_FIELD",
+                    "message": (f"Unknown field 'bad'; valid fields: {', '.join(properties)}."),
+                    "field": "bad",
+                    "corrected_call": {},
+                }
+            ],
+            "warnings": [],
+        }
+        expected = tool.fn_metadata.convert_result(result_envelope)
+        actual = await mcp_contract.mcp.call_tool(name, {"bad": 1})
+        self.assertEqual(actual, expected)
 
     async def test_none_arguments_are_treated_as_empty(self):
         result = await mcp_contract.call("store_memory", None)
