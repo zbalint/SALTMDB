@@ -75,3 +75,9 @@ Service ranking and retrieval logic; `get_memory`, `get_memories`, `inspect_memo
 ## 9. Acceptance
 
 All commands of section 6 exit 0; new tests red on the old code where the behavior is new; mutation table; parameter counts and complexity numbers; `git status --short` shows only the files of section 3.
+
+## Amendment 1 (2026-10-23)
+
+Found by the developer before the baseline run and verified by the architect against the tree.
+
+1. D7 named `test_search_memory_rejects_unknown_query_argument` only; `tests/test_mcp_tools.py::test_server_first_import_rejects_unknown_query_argument` (a subprocess probe, near line 1933) asserts the same old contract (`search_memory(query="x")` is `UNKNOWN_FIELD` on `query`). It is inverted the same way: the probe sends `{"query_keywords": "x"}` and asserts `UNKNOWN_FIELD` on `query_keywords`. The tests that forward `query_keywords=` through a capture backend (near lines 1900 to 1930, the diagnostics-forward test) use `query=` instead. Both are inside D7's "name is governed by the test, find it by name" rule; the developer greps `tests/` for `query_keywords` and `"query"` at MCP level and reports each hit it changes with its test name.
