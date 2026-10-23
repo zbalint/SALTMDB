@@ -99,6 +99,8 @@ from .lifecycle import (
     detect_orphaned_memories,
     revise_memory,
     supersede_memory,
+    replace_memory,
+    ReplacementRequest,
     update_memory_metadata,
 )
 from .duplicates import check_duplicate_memories, scan_memories, bulk_archive_memory
@@ -163,6 +165,8 @@ __all__ = [
     "detect_orphaned_memories",
     "revise_memory",
     "supersede_memory",
+    "replace_memory",
+    "ReplacementRequest",
     "update_memory_metadata",
     "check_duplicate_memories",
     "scan_memories",

@@ -113,9 +113,15 @@ class TestParseInteractions(unittest.TestCase):
             *tool(
                 "store_memory", "c1", json.dumps({"status": "ok", "data": {"memory_id": "e-new"}})
             ),
-            *tool("revise_memory", "c2", json.dumps({"status": "ok", "data": {"new_id": "e-rev"}})),
             *tool(
-                "supersede_memory", "c3", json.dumps({"status": "ok", "data": {"new_id": "e-sup"}})
+                "revise_memory",
+                "c2",
+                json.dumps({"status": "ok", "data": {"successor_memory_id": "e-rev"}}),
+            ),
+            *tool(
+                "supersede_memory",
+                "c3",
+                json.dumps({"status": "ok", "data": {"successor_memory_id": "e-sup"}}),
             ),
             *tool(
                 "consolidate_memories",

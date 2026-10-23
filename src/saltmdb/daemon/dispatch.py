@@ -427,11 +427,7 @@ def _dispatch_manage_relation(**kw):
 
 
 def _dispatch_replacement(**kw):
-    """Dispatch an immutable lifecycle replacement to the DB-worker service.
-
-    The lifecycle services own validation, successor lookup, archival, and edge creation.  The
-    daemon only enforces the typed adapter contract before entering the coordinator transaction.
-    """
+    """Dispatch an immutable lifecycle replacement to the DB-worker service."""
     try:
         required = ("entity_id", "title", "content", "reason")
         for key in required:
@@ -441,22 +437,43 @@ def _dispatch_replacement(**kw):
             tags = _required_str_list(kw, "tags")
     except _DispatchValidationError as exc:
         return exc.payload
-    service_name = kw.pop("_service_name")
-    service = getattr(memory_service, service_name)
-    return service(
-        entity_id=kw["entity_id"],
-        title=kw["title"],
-        content=kw["content"],
-        tags=tags,
-        reason=kw["reason"],
-        provenance=Provenance(
-            agent_id=kw.get("agent_id"),
+    from saltmdb.domain.services.memory_service import CoreDeclaration, ReplacementRequest
+
+    core_fields = (
+        "is_core",
+        "core_reason",
+        "core_exit_condition",
+        "core_review_after",
+        "detail_memory_ids",
+    )
+    core = None
+    if kw.get("demote_core"):
+        core = CoreDeclaration(is_core=False)
+    elif any(kw.get(field) is not None for field in core_fields):
+        core = CoreDeclaration(
+            is_core=kw.get("is_core"),
+            core_reason=kw.get("core_reason"),
+            core_exit_condition=kw.get("core_exit_condition"),
+            core_review_after=kw.get("core_review_after"),
+            detail_memory_ids=kw.get("detail_memory_ids"),
+        )
+    return memory_service.replace_memory(
+        "revises" if kw.get("_service_name") == "revise_memory" else "supersedes",
+        ReplacementRequest(
+            entity_id=kw["entity_id"],
+            title=kw["title"],
+            content=kw["content"],
+            tags=tags,
+            reason=kw["reason"],
             context_id=kw.get("context_id"),
+            scope=kw.get("scope"),
+            memory_type=kw.get("memory_type"),
+            retrieval_text=kw.get("retrieval_text"),
+            core=core,
+            repoint_relations=bool(kw.get("repoint_relations", False)),
+            agent_id=kw.get("agent_id"),
             agent_session_id=kw.get("agent_session_id"),
         ),
-        scope=kw.get("scope"),
-        memory_type=kw.get("memory_type"),
-        repoint_relations=bool(kw.get("repoint_relations", False)),
     )
 
 

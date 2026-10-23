@@ -1848,62 +1848,30 @@ def _consolidation_core_state(
     redacted_content,
     entity_values,
 ):
-    # Core-memory governance (resolved gap #2): authoritative, in-transaction resolution
-    # -- fresh parent is_core/status read, never the outer-scope pre-transaction snapshot
-    # -- so a parent that turned core (or lost core status) between preflight and commit
-    # is always caught here, not silently missed. Raises ValueError on a lifecycle/
-    # validation failure or CoreGovernanceRejected on a capacity failure; either aborts
-    # this transaction before any destructive write below.
-    try:
-        core_state = core_governance_service.resolve_consolidation_core_state(
-            conn,
-            resolved_parents=resolved_parents,
-            is_core_requested=core_request.is_core_requested,
-            content=redacted_content,
-            scope=core_request.scope,
-            core_reason=core_request.core_reason,
-            core_exit_condition=core_request.core_exit_condition,
-            core_review_after=core_request.core_review_after,
-            detail_memory_ids=core_request.detail_memory_ids,
-        )
-        if core_state["is_core"]:
-            # Resolved review finding #2 / resolved follow-up review finding #2:
-            # core-producing consolidation must check the overdue-write boundary against
-            # EVERY active core, including a resolved parent this same transaction is
-            # about to archive -- silently replacing an overdue parent with a freshly
-            # created core would reset its lifecycle without recording review provenance
-            # through review_core_memory. The only sanctioned recovery paths remain an
-            # explicit non-core consolidation, or a prior review_core_memory
-            # (retain/demote/archive) of the overdue core.
-            core_governance_service.enforce_overdue_boundary(
-                conn,
-                entity_id=None,
-                effective_is_core=True,
-                is_new_core=core_state["is_new_core"],
-                review_after_changed=False,
-            )
-    except ValueError as e:
-        raise core_governance_service.CoreGovernanceRejected(str(e)) from e
-
-    if core_state["is_core"]:
-        rejection = core_governance_service.check_capacity_admission(
-            conn,
-            exclude_ids=resolved_parents,
-            new_entry={
-                "id": entity_values.consolidated_id,
-                "title": entity_values.clean_title,
-                "memory_type": entity_values.memory_type or "fact",
-                "core_reason": core_state["core_reason"],
-                "core_exit_condition": core_state["core_exit_condition"],
-                "core_review_after": core_state["core_review_after"],
-                "full_content": redacted_content,
-                "agent_id": entity_values.agent_val,
-            },
-        )
-        if rejection is not None:
-            raise core_governance_service.CoreGovernanceRejected(rejection)
-
-    return core_state
+    declaration = CoreDeclaration(
+        is_core=core_request.is_core_requested,
+        core_reason=core_request.core_reason,
+        core_exit_condition=core_request.core_exit_condition,
+        core_review_after=core_request.core_review_after,
+        detail_memory_ids=core_request.detail_memory_ids,
+    )
+    return core_governance_service.resolve_derived_core_state(
+        conn,
+        source_ids=resolved_parents,
+        declaration=declaration,
+        content=redacted_content,
+        scope=core_request.scope,
+        new_entry={
+            "id": entity_values.consolidated_id,
+            "title": entity_values.clean_title,
+            "memory_type": entity_values.memory_type or "fact",
+            "core_reason": core_request.core_reason,
+            "core_exit_condition": core_request.core_exit_condition,
+            "core_review_after": core_request.core_review_after,
+            "full_content": redacted_content,
+            "agent_id": entity_values.agent_val,
+        },
+    )
 
 
 def _consolidation_audit_override(

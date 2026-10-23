@@ -20,6 +20,7 @@ from saltmdb.db.connection import (
     close_connection,
     managed_connection,
     rollback_to_and_release,
+    savepoint,
 )
 from saltmdb.utils.text import resolve_entity_id, resolve_id_prefix
 from saltmdb.utils.text import resolve_entity_ref
@@ -34,12 +35,28 @@ from saltmdb.utils.nlp import evaluate_memory_quality
 from saltmdb.utils.redaction import redact_secrets
 from saltmdb.utils.text import compute_content_hash
 
-from ._shared import Provenance, logger
+from ._shared import CoreDeclaration, Provenance, logger
 
 
 _MEMORY_TYPES = ("fact", "event", "procedure", "decision", "preference")
 _ENTITY_ID_MANDATORY = "entity_id is mandatory."
 _LAST_ACCESSED_UPDATE_SQL = "UPDATE entities SET last_accessed_at = ? WHERE id = ?"
+
+_REPLACEMENT_RESET_COLUMNS = frozenset(
+    {
+        "is_core",
+        "core_reason",
+        "core_exit_condition",
+        "core_review_after",
+        "core_detail_memory_ids",
+        "core_last_reviewed_at",
+        "core_last_reviewed_by",
+        "core_review_rationale",
+        "retrieval_text",
+        "retrieval_text_hash",
+        "parent_ids",
+    }
+)
 
 
 class _LifecycleRejected(Exception):
@@ -538,11 +555,58 @@ def _replacement_locked_source(c, resolved_id: str, before: dict) -> dict:
     return locked_before
 
 
+def _replacement_insert_core_tags(c, context: dict, new_id: str) -> None:
+    if not context["core_state"]["is_core"]:
+        return
+    from . import tags as tag_ops
+    from saltmdb.domain.services.core_governance_service import reconcile_detail_relations
+
+    core_tag_id = tag_ops.resolve_or_create_tag(c, "#core", agent_id=context["inherited_agent_id"])
+    if core_tag_id:
+        c.execute(
+            "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
+            (new_id, core_tag_id),
+        )
+    reconcile_detail_relations(
+        c,
+        core_id=new_id,
+        agent_id=context["inherited_agent_id"],
+        new_detail_ids=context["core_state"].get("core_detail_memory_ids", []),
+        previous_detail_ids=[],
+    )
+
+
+def _replacement_enqueue_jobs(c, context: dict, replacement: dict, resolved_id: str) -> None:
+    from saltmdb.domain.services.embedding_service import (
+        cancel_embedding_jobs_for_entity,
+        cancel_retrieval_embedding_jobs_for_entity,
+        enqueue_embedding_jobs_for_entity,
+        enqueue_retrieval_embedding_job_for_entity,
+    )
+
+    cancel_embedding_jobs_for_entity(c, resolved_id)
+    cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=False)
+    enqueue_embedding_jobs_for_entity(
+        c, context["new_id"], context["new_title"], context["new_content"], context["content_hash"]
+    )
+    enqueue_retrieval_embedding_job_for_entity(
+        c,
+        context["new_id"],
+        replacement.get("retrieval_text"),
+        replacement.get("retrieval_text_hash"),
+        force=True,
+    )
+
+
 def _replacement_insert_entity(
     c, context: dict, locked_before: dict, resolved_id: str, operation: str
 ):
-    new_id = str(uuid.uuid4())
-    replacement = dict(locked_before)
+    new_id = context["new_id"]
+    replacement = {
+        column: value
+        for column, value in locked_before.items()
+        if column not in _REPLACEMENT_RESET_COLUMNS
+    }
     replacement.update(
         {
             "id": new_id,
@@ -566,6 +630,19 @@ def _replacement_insert_entity(
             "quality_score": context["quality"].get("quality_score"),
             "quality_status": context["quality"].get("status"),
             "quality_flags": json.dumps(context["quality"].get("quality_flags", [])),
+            "is_core": context["core_state"]["is_core"],
+            "core_reason": context["core_state"].get("core_reason"),
+            "core_exit_condition": context["core_state"].get("core_exit_condition"),
+            "core_review_after": context["core_state"].get("core_review_after"),
+            "core_detail_memory_ids": json.dumps(
+                context["core_state"].get("core_detail_memory_ids", [])
+            ),
+            "core_last_reviewed_at": None,
+            "core_last_reviewed_by": None,
+            "core_review_rationale": None,
+            "retrieval_text": context["retrieval_text"],
+            "retrieval_text_hash": context["retrieval_text_hash"],
+            "parent_ids": None,
         }
     )
     insert_columns = [column for column in context["columns"] if column in replacement]
@@ -575,32 +652,13 @@ def _replacement_insert_entity(
         [replacement[column] for column in insert_columns],
     )
     _insert_replacement_tags(c, new_id, context["effective_tags"], context["inherited_agent_id"])
+    _replacement_insert_core_tags(c, context, new_id)
     archived_at = context["now"]
     c.execute(
         "UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id = ? AND status = 'raw'",
         (archived_at, archived_at, resolved_id),
     )
-    from saltmdb.domain.services.embedding_service import (
-        cancel_embedding_jobs_for_entity,
-        cancel_retrieval_embedding_jobs_for_entity,
-        clear_embedding_vectors_for_entity,
-        enqueue_embedding_jobs_for_entity,
-        enqueue_retrieval_embedding_job_for_entity,
-    )
-
-    cancel_embedding_jobs_for_entity(c, resolved_id)
-    clear_embedding_vectors_for_entity(c, resolved_id)
-    cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
-    enqueue_embedding_jobs_for_entity(
-        c, new_id, context["new_title"], context["new_content"], context["content_hash"]
-    )
-    enqueue_retrieval_embedding_job_for_entity(
-        c,
-        new_id,
-        replacement.get("retrieval_text"),
-        replacement.get("retrieval_text_hash"),
-        force=True,
-    )
+    _replacement_enqueue_jobs(c, context, replacement, resolved_id)
     relation_id = str(uuid.uuid4())
     c.execute(
         "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -624,7 +682,17 @@ def _replacement_repoint_edges(c, resolved_id: str, new_id: str, now: str):
     # `orphaned_edges` snapshot -- mirrors the frozen-column re-check above, so a
     # relation created/invalidated concurrently between validation and this lock is
     # not silently missed or double-handled.
+    source_is_core = bool(
+        c.execute("SELECT is_core FROM entities WHERE id = ?", (resolved_id,)).fetchone()[0]
+    )
     for edge in _semantic_edge_worklist(c, resolved_id):
+        if (
+            source_is_core
+            and edge["predicate"] == "elaborates_on"
+            and edge["target_id"] == resolved_id
+        ):
+            still_orphaned_ids.add(edge["relation_id"])
+            continue
         new_source = new_id if edge["source_id"] == resolved_id else edge["source_id"]
         new_target = new_id if edge["target_id"] == resolved_id else edge["target_id"]
         if new_source == new_target:
@@ -669,15 +737,44 @@ def _replacement_repoint_edges(c, resolved_id: str, new_id: str, now: str):
 
 def _replacement_write(c, operation: str, resolved_id: str, context: dict, repoint_relations: bool):
     locked_before = _replacement_locked_source(c, resolved_id, context["before"])
-    new_id, relation_id = _replacement_insert_entity(
-        c, context, locked_before, resolved_id, operation
+    new_id = str(uuid.uuid4())
+    context["new_id"] = new_id
+    from saltmdb.domain.services import core_governance_service
+
+    context["core_state"] = core_governance_service.resolve_derived_core_state(
+        c,
+        source_ids=[resolved_id],
+        declaration=context["core_declaration"],
+        content=context["new_content"],
+        scope=context["inherited_scope"],
+        new_entry={
+            "id": new_id,
+            "title": context["new_title"],
+            "memory_type": context["inherited_type"],
+            "core_reason": context["core_declaration"].core_reason,
+            "core_exit_condition": context["core_declaration"].core_exit_condition,
+            "core_review_after": context["core_declaration"].core_review_after,
+            "full_content": context["new_content"],
+            "agent_id": context["inherited_agent_id"],
+        },
     )
-    if repoint_relations:
-        repointed, still_orphaned_ids = _replacement_repoint_edges(
-            c, resolved_id, new_id, context["now"]
+    with savepoint(c, "replacement"):
+        new_id, relation_id = _replacement_insert_entity(
+            c, context, locked_before, resolved_id, operation
         )
-    else:
-        repointed, still_orphaned_ids = [], set()
+        if repoint_relations:
+            repointed, still_orphaned_ids = _replacement_repoint_edges(
+                c, resolved_id, new_id, context["now"]
+            )
+        else:
+            repointed, still_orphaned_ids = [], set()
+    from saltmdb.domain.services.embedding_service import (
+        cancel_retrieval_embedding_jobs_for_entity,
+        clear_embedding_vectors_for_entity,
+    )
+
+    clear_embedding_vectors_for_entity(c, resolved_id)
+    cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
     return new_id, relation_id, repointed, still_orphaned_ids
 
 
@@ -699,6 +796,17 @@ def _replacement_response(
     # INACTIVE_TARGET) never leaves an orphaned dump file with nothing referencing it.
     changed = context["changed"]
     changed.update(large_content_descriptor(context["new_content"]))
+    declaration = context.get("core_declaration")
+    if declaration is not None and declaration.is_core is True:
+        state = context["core_state"]
+        changed["core"] = {
+            "reason": state["core_reason"],
+            "exit_condition": state["core_exit_condition"],
+            "review_after": state["core_review_after"],
+            "detail_memory_ids": state.get("core_detail_memory_ids", []),
+        }
+    elif declaration is not None and declaration.is_core is False:
+        changed["demote_core"] = True
     response_orphaned_edges = (
         [edge for edge in context["orphaned_edges"] if edge["relation_id"] in still_orphaned_ids]
         if repoint_relations
@@ -723,7 +831,7 @@ def _replacement_response(
 
 
 @dataclass(frozen=True, slots=True)
-class _ReplacementRequest:
+class ReplacementRequest:
     # Contains mutable state; must not be hashed or cached.
     entity_id: str | None = None
     title: str | None = None
@@ -736,14 +844,16 @@ class _ReplacementRequest:
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None
     agent_session_id: str | None = None
     metadata: dict | None = None
+    retrieval_text: str | None = None
+    core: CoreDeclaration | None = None
     repoint_relations: bool = False
     db_connection: sqlite3.Connection | None = None
     db_path: str | None = None
     in_transaction: bool = False
 
 
-def _replacement_operation(
-    operation: Literal["revises", "supersedes"], request: _ReplacementRequest
+def replace_memory(
+    operation: Literal["revises", "supersedes"], request: ReplacementRequest
 ) -> dict:
     """Atomically create an immutable replacement and archive its predecessor.
 
@@ -762,13 +872,8 @@ def _replacement_operation(
     similarity/contradiction governance in `relation_service.store_relation`: this is identity
     continuity for an already-approved edge, not a new semantic claim being asserted.
 
-    This default-False/opt-in shape is deliberately compatible with the standing safe-degradation
-    law (saltmdb project's own SALTMDB memory `7af33335`: a lazy caller must get a correct-if-
-    sparse graph, never a richer-but-fabricated one) -- it is the "optional cooperative path" that
-    law's own corollary describes, not a reopening of the original no-auto-repoint decision. See
-    memory `60fca8c8` for the full rationale, including the related known gap `213f80c5` (the
-    previously-documented manual `orphaned_semantic_edges` workaround leaves the old edge
-    un-invalidated) that this flag closes for any caller who opts into it.
+    The opt-in repoint path preserves approved semantic edges and reports any edge that cannot
+    be carried forward. Rejected writes never create replacement rows, relations, jobs, or vectors.
     """
     validation_error = _validate_replacement_inputs(
         request.entity_id,
@@ -815,39 +920,81 @@ def _replacement_operation(
         if preparation_error is not None:
             return preparation_error
         context = cast(dict, context)
-        callback = partial(
-            _replacement_write,
-            operation=operation,
-            resolved_id=resolved_id,
-            context=context,
-            repoint_relations=request.repoint_relations,
-        )
+        from .validation import _retrieval_text_hash, normalize_retrieval_text
+
         try:
-            if request.in_transaction:
-                new_id, relation_id, repointed_relations, still_orphaned_ids = callback(conn)
-            else:
-                new_id, relation_id, repointed_relations, still_orphaned_ids = (
-                    write_transaction_retrying(conn, callback)
-                )
-        except _LifecycleRejected as exc:
-            return exc.payload
-        return _replacement_response(
-            operation,
-            resolved_id,
-            reason,
-            context,
-            new_id,
-            relation_id,
-            repointed_relations,
-            still_orphaned_ids,
-            request.repoint_relations,
-        )
+            normalized_retrieval_text = (
+                normalize_retrieval_text(request.retrieval_text)
+                if request.retrieval_text is not None
+                else None
+            )
+        except ValueError as exc:
+            return _replacement_error("INVALID_RETRIEVAL_TEXT", str(exc), "retrieval_text")
+        context["retrieval_text"] = normalized_retrieval_text
+        context["retrieval_text_hash"] = _retrieval_text_hash(normalized_retrieval_text)
+        context["core_declaration"] = request.core or CoreDeclaration()
+        context["reason"] = reason
+        return _replacement_execute(conn, operation, resolved_id, context, request)
     except Exception as exc:
         logger.error("Error %sing memory: %s", operation, exc)
+        if is_coordinator_connection(conn):
+            raise
         return rejected([envelope_error("LIFECYCLE_WRITE_FAILED", str(exc))])
     finally:
         if request.db_connection is None:
             close_connection(conn)
+
+
+def _replacement_execute(
+    conn,
+    operation: Literal["revises", "supersedes"],
+    resolved_id: str,
+    context: dict,
+    request: ReplacementRequest,
+):
+    from saltmdb.domain.services import core_governance_service
+
+    callback = partial(
+        _replacement_write,
+        operation=operation,
+        resolved_id=resolved_id,
+        context=context,
+        repoint_relations=request.repoint_relations,
+    )
+    try:
+        values = (
+            callback(conn) if request.in_transaction else write_transaction_retrying(conn, callback)
+        )
+    except core_governance_service.CoreDecisionRequired as exc:
+        return rejected(
+            [
+                envelope_error(
+                    "CORE_DECISION_REQUIRED",
+                    str(exc),
+                    "entity_id",
+                    corrected_calls=[exc.keep_fragment, {"demote_core": True}],
+                )
+            ]
+        )
+    except core_governance_service.CoreGovernanceRejected as exc:
+        if isinstance(exc.payload, dict):
+            return exc.payload
+        field = "scope" if "private" in str(exc).lower() else "core"
+        return _replacement_error("VALIDATION_ERROR", str(exc), field)
+    except _LifecycleRejected as exc:
+        return exc.payload
+    new_id, relation_id, repointed_relations, still_orphaned_ids = values
+    return _replacement_response(
+        operation,
+        resolved_id,
+        context["reason"],
+        context,
+        new_id,
+        relation_id,
+        repointed_relations,
+        still_orphaned_ids,
+        request.repoint_relations,
+    )
 
 
 def revise_memory(
@@ -869,11 +1016,11 @@ def revise_memory(
     """Create a corrected representation with ``new --revises--> old`` lineage.
 
     ``provenance`` groups the optional writer, context, and session attribution values.
-    See ``_replacement_operation`` for ``repoint_relations``.
+    See ``replace_memory`` for ``repoint_relations``.
     """
-    return _replacement_operation(
+    return replace_memory(
         "revises",
-        _ReplacementRequest(
+        ReplacementRequest(
             entity_id=entity_id,
             title=title,
             tags=tags,
@@ -911,11 +1058,11 @@ def supersede_memory(
     """Create newer knowledge with ``new --supersedes--> old`` lineage.
 
     ``provenance`` groups the optional writer, context, and session attribution values.
-    See ``_replacement_operation`` for ``repoint_relations``.
+    See ``replace_memory`` for ``repoint_relations``.
     """
-    return _replacement_operation(
+    return replace_memory(
         "supersedes",
-        _ReplacementRequest(
+        ReplacementRequest(
             entity_id=entity_id,
             title=title,
             tags=tags,

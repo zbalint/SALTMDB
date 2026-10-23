@@ -942,184 +942,251 @@ def consolidate_memories(
 
 def _replacement_payload(
     *,
-    entity_id: str,
+    memory_id: str,
     title: str,
+    reason: str,
     content: str | None,
+    content_file_path: str | None,
     tags: list[str] | None,
-    reason: str | None,
-    agent_id: str | None,
-    context_id: str | None,
     scope: Literal["private", "shared"] | None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
-    repoint_relations: bool = False,
+    retrieval_text: str | None,
+    repoint_relations: bool,
+    context_id: str | None,
+    core: CoreInput | None,
+    demote_core: bool,
 ) -> dict:
-    """Build the common replacement request without hidden aliases or front matter parsing."""
-    return {
-        "entity_id": entity_id,
+    if core is not None and demote_core:
+        from saltmdb.utils.envelope import error, rejected
+
+        return rejected(
+            [
+                error(
+                    "CORE_AND_DEMOTE_CONFLICT",
+                    "core and demote_core are mutually exclusive.",
+                    "demote_core",
+                )
+            ]
+        )
+    payload: dict[str, object] = {
+        "entity_id": memory_id,
         "title": title,
         "content": content,
-        "tags": None if tags is None else _normalize_list_or_str(tags),
         "reason": reason,
-        "agent_id": agent_id,
+        "tags": None if tags is None else _normalize_list_or_str(tags),
         "context_id": context_id,
         "scope": scope,
         "memory_type": memory_type,
+        "retrieval_text": retrieval_text,
         "repoint_relations": repoint_relations,
+        "agent_id": _effective_agent_id(),
     }
+    if content_file_path is not None:
+        payload["content_file_path"] = content_file_path
+    if core is not None:
+        payload.update(
+            {
+                "is_core": True,
+                "core_reason": core.reason,
+                "core_exit_condition": core.exit_condition,
+                "core_review_after": core.review_after,
+                "detail_memory_ids": core.detail_memory_ids,
+            }
+        )
+    elif demote_core:
+        payload["is_core"] = False
+    return {key: value for key, value in payload.items() if value is not None}
 
 
-@mcp.tool()
-def revise_memory(
-    entity_id: str,
-    title: str,
-    content: str | None = None,
-    tags: list[str] = None,
-    reason: str = None,
-    context_id: str | None = None,
-    scope: Literal["private", "shared"] | None = None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
-    repoint_relations: bool = False,
-    content_file_path: str | None = None,
+def _core_decision_error(result: dict) -> tuple[int, dict] | None:
+    if result.get("status") != "rejected":
+        return None
+    for index, entry in enumerate(result.get("errors", [])):
+        if entry.get("code") == "CORE_DECISION_REQUIRED":
+            return index, entry
+    return None
+
+
+def _complete_core_decision(
+    result: dict,
+    *,
+    tool_func,
+    submitted: dict,
+    fixes_for,
+    message: str,
 ) -> dict:
-    """Corrects a memory whose *representation* was flawed (wrong wording, an error you made
-    recording it, a wrong unit) -- content changes, but the underlying fact/decision does not. Use
-    supersede_memory instead when the real-world fact/decision itself has changed;
-    update_memory_metadata for a metadata-only edit needing no content restatement.
+    found = _core_decision_error(result)
+    if found is None:
+        return result
+    index, entry = found
+    fragments = entry.get("corrected_calls")
+    if not isinstance(fragments, list):
+        return result
+    from saltmdb.utils.corrected_call import build_corrected_call
 
-    entity_id (the active memory to revise), title, and exactly one of content/content_file_path
-    are required. tags, context_id, scope, and memory_type are all optional and INHERITED from
-    the predecessor when omitted -- pass an explicit value only to change it, never to keep the
-    old one. entity_id is never mutated in place: the predecessor is archived byte-for-byte and
-    the new entity links back to it via `revises`.
+    corrected_calls = [
+        build_corrected_call(tool_func, submitted, fixes_for(fragment)) for fragment in fragments
+    ]
+    errors = [dict(item) for item in result["errors"]]
+    errors[index].update({"message": message, "corrected_calls": corrected_calls})
+    return {**result, "errors": errors}
 
-    Returns `{"status": "ok", "data": {"old_id": ..., "new_id": ..., "inherited": {...},
-    "changed": {...}, ...}, "warnings": [...]}` -- `inherited` lists every field you omitted
-    (including `tags`, if omitted) with the value actually carried forward; `changed` lists every
-    field you explicitly supplied. A validation problem -- a missing required field, or targeting
-    an already-inactive `entity_id` -- returns a clean `{"status": "rejected", "errors": [{...}],
-    ...}` value; it never raises an exception across the tool boundary. An inactive target names
-    its known successor in the rejection -- inspect it (get_memory) before retrying, rather than
-    reissuing the same call. If there is no successor to inspect (the target is terminally
-    inactive, e.g. consolidated/archived with nothing further replacing it), neither revise_memory
-    nor supersede_memory can be used at all -- store a new memory with the correction instead,
-    then `manage_relation(predicate="corrects", source_id=<new memory>, target_id=<the inactive
-    entity_id>)` to link it without reviving the old one.
 
-    Example: `revise_memory(entity_id="abc123", title="[Worker] Request timeout", content="The
-    worker request timeout is 30 seconds.", reason="Corrected the unit from milliseconds.",
-    repoint_relations=True)` -- `tags`/`context_id`/`scope`/`memory_type` all omitted here are
-    inherited from `abc123` unchanged; `repoint_relations=True` carries every edge `abc123` already
-    had onto the new entity automatically.
-
-    Pass `repoint_relations=True` whenever the target has existing edges and this revision is
-    identity-preserving continuity (the common case, since revise_memory is for fixing a flawed
-    *representation*, not changing the underlying fact) -- otherwise the response's
-    `orphaned_semantic_edges` list is left for you to walk and repoint by hand via manage_relation,
-    one call per edge. Leave it False (the default) only when the revision might invalidate what
-    an existing edge asserted about the old content, and stale edges should surface for review
-    instead of silently carrying forward.
-
-    `repoint_relations=True` has two edge cases worth knowing before relying on it blindly: a
-    self-loop edge on the predecessor (an edge whose source and target are the same entity) is
-    left completely untouched -- still active on the archived predecessor, still listed in
-    `orphaned_semantic_edges` -- since the new entity is never allowed a self-referential edge
-    either; and if repointing would produce a source/target/predicate triple that's already an
-    active edge elsewhere, the old edge is still invalidated but no duplicate is created for the
-    new entity (silently dropped, not named in the response).
-    """
-    content, content_error = _resolve_content(content, content_file_path)
+def _replacement_call(
+    tool_name: str,
+    tool_func,
+    *,
+    memory_id: str,
+    title: str,
+    reason: str,
+    content: str | None,
+    content_file_path: str | None,
+    tags: list[str] | None,
+    scope: Literal["private", "shared"] | None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
+    retrieval_text: str | None,
+    repoint_relations: bool,
+    context_id: str | None,
+    core: CoreInput | None,
+    demote_core: bool,
+) -> dict:
+    resolved, content_error = _resolve_content(content, content_file_path)
     if content_error is not None:
         return content_error
-    agent_id_ = _effective_agent_id()
-    return _call_and_record_write(
-        "revise_memory",
-        _replacement_payload(
-            entity_id=entity_id,
-            title=title,
-            content=content,
-            tags=tags,
-            reason=reason,
-            agent_id=agent_id_,
-            context_id=context_id,
-            scope=scope,
-            memory_type=memory_type,
-            repoint_relations=repoint_relations,
+    payload = _replacement_payload(
+        memory_id=memory_id,
+        title=title,
+        reason=reason,
+        content=resolved,
+        content_file_path=None,
+        tags=tags,
+        scope=scope,
+        memory_type=memory_type,
+        retrieval_text=retrieval_text,
+        repoint_relations=repoint_relations,
+        context_id=context_id,
+        core=core,
+        demote_core=demote_core,
+    )
+    if payload.get("status") == "rejected":
+        return payload
+    result = _call_and_record_write(tool_name, payload)
+    submitted = {
+        key: value
+        for key, value in {
+            "memory_id": memory_id,
+            "title": title,
+            "reason": reason,
+            "content": content,
+            "content_file_path": content_file_path,
+            "tags": tags,
+            "scope": scope,
+            "memory_type": memory_type,
+            "retrieval_text": retrieval_text,
+            "repoint_relations": repoint_relations,
+            "context_id": context_id,
+            "core": core.model_dump(exclude_none=True) if core is not None else None,
+            "demote_core": demote_core,
+        }.items()
+        if value is not None
+    }
+    return _complete_core_decision(
+        result,
+        tool_func=tool_func,
+        submitted=submitted,
+        fixes_for=lambda fragment: fragment,
+        message=(
+            "Choose core to keep the result core with reason and exit_condition and redeclare "
+            "detail_memory_ids in the new content, or demote_core to make the result ordinary."
         ),
     )
 
 
 @mcp.tool()
-def supersede_memory(
-    entity_id: str,
+def revise_memory(
+    memory_id: str,
     title: str,
+    reason: str,
     content: str | None = None,
-    tags: list[str] = None,
-    reason: str = None,
-    context_id: str | None = None,
+    content_file_path: str | None = None,
+    tags: list[str] | None = None,
     scope: Literal["private", "shared"] | None = None,
     memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+    retrieval_text: str | None = None,
     repoint_relations: bool = False,
-    content_file_path: str | None = None,
+    context_id: str | None = None,
+    core: CoreInput | None = None,
+    demote_core: bool = False,
 ) -> dict:
-    """Replaces knowledge that was once valid with newer knowledge -- the real-world fact/
-    decision itself has changed, not just how it was worded. Use revise_memory instead when
-    you're only correcting a representational error (wrong wording/unit) in an otherwise-still-
-    true memory; update_memory_metadata for a metadata-only edit.
+    """Use this when a stored memory was wrong or badly worded when it was written; use supersede_memory when it was true then and the facts changed since.
 
-    entity_id (the active memory to supersede), title, and exactly one of content/
-    content_file_path are required. tags, context_id, scope, and memory_type are all optional and
-    INHERITED from the predecessor when omitted. The predecessor remains byte-identical and is
-    linked via `supersedes`; an inactive target is never silently redirected.
-
-    Returns `{"status": "ok", "data": {"old_id": ..., "new_id": ..., "inherited": {...},
-    "changed": {...}, "semantic_relations_repointed": bool, "repointed_relations": [...], ...},
-    "warnings": [...]}` on success, `{"status": "rejected", "errors": [{...}]}` -- naming known
-    active successors and lineage -- when the target is already inactive. Never raises an
-    exception across the tool boundary for a validation problem. If there is no successor to
-    inspect (the target is terminally inactive, e.g. consolidated/archived with nothing further
-    replacing it), neither supersede_memory nor revise_memory can be used at all -- store a new
-    memory with the correction instead, then `manage_relation(predicate="corrects",
-    source_id=<new memory>, target_id=<the inactive entity_id>)` to link it without reviving the
-    old one.
-
-    Example: `supersede_memory(entity_id="abc123", title="[Roadmap] Q3 priorities", content="...
-    (updated priorities)", reason="Priorities changed after the Q2 retro.")`.
-
-    `repoint_relations` (default False) opts in to server-side repointing: every active
-    non-lifecycle edge touching the predecessor is invalidated and an equivalent edge recreated
-    onto the new entity atomically -- no separate `orphaned_semantic_edges` walk plus manual
-    manage_relation calls needed. Setting this flag is your judgment that the supersession is
-    additive/index-like continuity (e.g. a growing tracker document), not a correction that
-    should leave some edge intentionally stale against the old content; `repointed_relations`
-    lists each old/new relation id pair actually rewritten. Pairs naturally with a large document
-    already edited on disk via `content_file_path`, such as a wayfinder map's growing body.
-
-    `repoint_relations=True` has two edge cases worth knowing before relying on it blindly: a
-    self-loop edge on the predecessor (an edge whose source and target are the same entity) is
-    left completely untouched -- still active on the archived predecessor, still listed in
-    `orphaned_semantic_edges` -- since the new entity is never allowed a self-referential edge
-    either; and if repointing would produce a source/target/predicate triple that's already an
-    active edge elsewhere, the old edge is still invalidated but no duplicate is created for the
-    new entity (silently dropped, absent from `repointed_relations`).
+    For an active core predecessor, pass exactly one of ``core`` or ``demote_core``: ``core``
+    keeps or creates a core successor with a reason and exit condition and redeclared
+    ``detail_memory_ids``; ``demote_core`` makes it ordinary. They are mutually exclusive.
+    Omitted tags, scope, memory_type, and context_id inherit; retrieval_text is never inherited.
+    ``repoint_relations`` opts into carrying semantic edges to the successor. If supplied,
+    ``content_file_path`` must be readable by the SALTMDB server host.
     """
-    content, content_error = _resolve_content(content, content_file_path)
-    if content_error is not None:
-        return content_error
-    agent_id_ = _effective_agent_id()
-    return _call_and_record_write(
+    return _replacement_call(
+        "revise_memory",
+        revise_memory,
+        memory_id=memory_id,
+        title=title,
+        reason=reason,
+        content=content,
+        content_file_path=content_file_path,
+        tags=tags,
+        scope=scope,
+        memory_type=memory_type,
+        retrieval_text=retrieval_text,
+        repoint_relations=repoint_relations,
+        context_id=context_id,
+        core=core,
+        demote_core=demote_core,
+    )
+
+
+@mcp.tool()
+def supersede_memory(
+    memory_id: str,
+    title: str,
+    reason: str,
+    content: str | None = None,
+    content_file_path: str | None = None,
+    tags: list[str] | None = None,
+    scope: Literal["private", "shared"] | None = None,
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None = None,
+    retrieval_text: str | None = None,
+    repoint_relations: bool = False,
+    context_id: str | None = None,
+    core: CoreInput | None = None,
+    demote_core: bool = False,
+) -> dict:
+    """Use this when a stored memory was true then and the facts changed since; use revise_memory when it was wrong or badly worded when it was written.
+
+    For an active core predecessor, pass exactly one of ``core`` or ``demote_core``: ``core``
+    keeps or creates a core successor with a reason and exit condition and redeclared
+    ``detail_memory_ids``; ``demote_core`` makes it ordinary. They are mutually exclusive.
+    Omitted tags, scope, memory_type, and context_id inherit; retrieval_text is never inherited.
+    ``repoint_relations`` opts into carrying semantic edges to the successor. If supplied,
+    ``content_file_path`` must be readable by the SALTMDB server host.
+    """
+    return _replacement_call(
         "supersede_memory",
-        _replacement_payload(
-            entity_id=entity_id,
-            title=title,
-            content=content,
-            tags=tags,
-            reason=reason,
-            agent_id=agent_id_,
-            context_id=context_id,
-            scope=scope,
-            memory_type=memory_type,
-            repoint_relations=repoint_relations,
-        ),
+        supersede_memory,
+        memory_id=memory_id,
+        title=title,
+        reason=reason,
+        content=content,
+        content_file_path=content_file_path,
+        tags=tags,
+        scope=scope,
+        memory_type=memory_type,
+        retrieval_text=retrieval_text,
+        repoint_relations=repoint_relations,
+        context_id=context_id,
+        core=core,
+        demote_core=demote_core,
     )
 
 
@@ -1194,8 +1261,8 @@ _PENDING_TRACE_WRITES: "collections.deque[tuple[str, str]]" = collections.deque(
 _PENDING_TRACE_WRITES_LOCK = threading.Lock()
 _WRITTEN_ID_KEY = {
     "store_memory": "memory_id",
-    "revise_memory": "new_id",
-    "supersede_memory": "new_id",
+    "revise_memory": "successor_memory_id",
+    "supersede_memory": "successor_memory_id",
 }
 
 
@@ -1214,7 +1281,11 @@ def _written_ids(tool_name: str, result: dict) -> list[str]:
 
 
 _ID_RENAME_TO_MEMORY_ID_TOOLS = {"store_memory", "update_memory_metadata"}
-_ERROR_FIELD_REMAP_TOOL = "update_memory_metadata"
+_REPLACEMENT_ID_MAP = {
+    "old_id": "predecessor_memory_id",
+    "new_id": "successor_memory_id",
+}
+_ERROR_FIELD_REMAP_TOOLS = {"update_memory_metadata", "revise_memory", "supersede_memory"}
 
 
 def _wrap_string_result(result):
@@ -1234,17 +1305,27 @@ def _remap_public_errors(errors):
     ]
 
 
+def _remap_public_data(tool_name: str, data: dict) -> dict:
+    data = dict(data)
+    if tool_name in _ID_RENAME_TO_MEMORY_ID_TOOLS and "id" in data:
+        data["memory_id"] = data.pop("id")
+    if tool_name in {"revise_memory", "supersede_memory"}:
+        for old_key, public_key in _REPLACEMENT_ID_MAP.items():
+            if old_key in data:
+                data[public_key] = data.pop(old_key)
+    return data
+
+
 def _to_public_write_result(tool_name: str, result):
     if not isinstance(result, dict):
         return result
     public_result = dict(result)
-    if public_result.get("status") == "ok" and isinstance(public_result.get("data"), dict):
-        data = dict(public_result["data"])
-        if tool_name in _ID_RENAME_TO_MEMORY_ID_TOOLS and "id" in data:
-            data["memory_id"] = data.pop("id")
-        public_result["data"] = data
-    if tool_name == _ERROR_FIELD_REMAP_TOOL and isinstance(public_result.get("errors"), list):
-        public_result["errors"] = _remap_public_errors(public_result["errors"])
+    data = public_result.get("data")
+    if public_result.get("status") == "ok" and isinstance(data, dict):
+        public_result["data"] = _remap_public_data(tool_name, data)
+    errors = public_result.get("errors")
+    if tool_name in _ERROR_FIELD_REMAP_TOOLS and isinstance(errors, list):
+        public_result["errors"] = _remap_public_errors(errors)
     return public_result
 
 

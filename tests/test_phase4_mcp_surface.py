@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import Provenance
 from saltmdb.domain.services.memory_service.lifecycle import revise_memory, supersede_memory
 from saltmdb.daemon import dispatch, protocol
 from saltmdb.mcp import tools
@@ -52,34 +51,40 @@ class TestPhase4McpSurface(unittest.TestCase):
         self.assertNotIn("export_corpus_snapshot", tools.mcp._tool_manager._tools)
         for function in (tools.revise_memory, tools.supersede_memory):
             params = list(inspect.signature(function).parameters)
-            self.assertEqual(params[:5], ["entity_id", "title", "content", "tags", "reason"])
-            # entity_id/title stay unconditionally required (Parameter.empty). content, tags,
-            # and reason no longer are, at the bare Python-signature level: content_file_path is
-            # now a legitimate alternative to content (_resolve_content enforces that exactly
-            # one of the two is supplied, at runtime), which forces every trailing positional
-            # parameter -- tags and reason included -- to also carry a default. Domain-layer
-            # validation (_validate_replacement_inputs) still rejects a missing/empty tags or
-            # reason exactly as before; only the enforcement point moved.
-            for required in ("entity_id", "title"):
+            self.assertEqual(
+                params,
+                [
+                    "memory_id",
+                    "title",
+                    "reason",
+                    "content",
+                    "content_file_path",
+                    "tags",
+                    "scope",
+                    "memory_type",
+                    "retrieval_text",
+                    "repoint_relations",
+                    "context_id",
+                    "core",
+                    "demote_core",
+                ],
+            )
+            for required in ("memory_id", "title", "reason"):
                 self.assertIs(
                     inspect.signature(function).parameters[required].default,
                     inspect.Parameter.empty,
                 )
-            for optional_at_signature_level in ("content", "tags", "reason"):
-                self.assertIsNone(
-                    inspect.signature(function).parameters[optional_at_signature_level].default
-                )
 
     def test_replacements_forward_identity_and_intent(self):
         tools.revise_memory(
-            entity_id="old",
+            memory_id="old",
             title="Revised",
             content="# Revised\n\nComplete representation.",
             tags=["#api"],
             reason="Fix an incomplete representation",
         )
         tools.supersede_memory(
-            entity_id="old",
+            memory_id="old",
             title="Current",
             content="# Current\n\nNew knowledge.",
             tags=["#api"],
@@ -136,8 +141,8 @@ class TestPhase4McpSurface(unittest.TestCase):
         for registry in (dispatch.DISPATCH_TABLE, dispatch.MUTATING_TOOLS, protocol.WRITE_TOOLS):
             self.assertNotIn("commit_consolidation", registry)
 
-    @patch("saltmdb.daemon.dispatch.memory_service.revise_memory", return_value={"status": "ok"})
-    def test_revise_dispatch_calls_lifecycle_service(self, revise):
+    @patch("saltmdb.daemon.dispatch.memory_service.replace_memory", return_value={"status": "ok"})
+    def test_revise_dispatch_calls_lifecycle_service(self, replace):
         dispatch._dispatch_revise_memory(
             entity_id="old",
             title="Revised",
@@ -145,20 +150,14 @@ class TestPhase4McpSurface(unittest.TestCase):
             tags=["#api"],
             reason="representation repair",
         )
-        revise.assert_called_once_with(
-            entity_id="old",
-            title="Revised",
-            content="content",
-            tags=["#api"],
-            reason="representation repair",
-            provenance=Provenance(agent_id=None, context_id=None, agent_session_id=None),
-            scope=None,
-            memory_type=None,
-            repoint_relations=False,
-        )
+        replace.assert_called_once()
+        operation, request = replace.call_args.args
+        self.assertEqual(operation, "revises")
+        self.assertEqual(request.entity_id, "old")
+        self.assertEqual(request.reason, "representation repair")
 
-    @patch("saltmdb.daemon.dispatch.memory_service.supersede_memory", return_value={"status": "ok"})
-    def test_supersede_dispatch_calls_lifecycle_service(self, supersede):
+    @patch("saltmdb.daemon.dispatch.memory_service.replace_memory", return_value={"status": "ok"})
+    def test_supersede_dispatch_calls_lifecycle_service(self, replace):
         dispatch._dispatch_supersede_memory(
             entity_id="old",
             title="Current",
@@ -166,11 +165,13 @@ class TestPhase4McpSurface(unittest.TestCase):
             tags=["#api"],
             reason="newer knowledge",
         )
-        supersede.assert_called_once()
-        self.assertEqual(supersede.call_args.kwargs["reason"], "newer knowledge")
+        replace.assert_called_once()
+        operation, request = replace.call_args.args
+        self.assertEqual(operation, "supersedes")
+        self.assertEqual(request.reason, "newer knowledge")
 
     @patch(
-        "saltmdb.daemon.dispatch.memory_service.revise_memory",
+        "saltmdb.daemon.dispatch.memory_service.replace_memory",
         return_value={
             "status": "rejected",
             "errors": [
@@ -183,11 +184,7 @@ class TestPhase4McpSurface(unittest.TestCase):
             "warnings": [],
         },
     )
-    def test_replacement_requires_nonempty_tags(self, revise):
-        # An explicitly empty tags list is structurally valid at the dispatch layer (a list of
-        # strings, vacuously) -- non-emptiness is now a domain-layer business rule (§6.1), not a
-        # dispatch-layer shape check, so dispatch passes it straight through and returns whatever
-        # the service layer decides.
+    def test_replacement_requires_nonempty_tags(self, replace):
         result = dispatch._dispatch_revise_memory(
             entity_id="old",
             title="Revised",
@@ -195,8 +192,8 @@ class TestPhase4McpSurface(unittest.TestCase):
             tags=[],
             reason="representation repair",
         )
-        revise.assert_called_once()
-        self.assertEqual(revise.call_args.kwargs["tags"], [])
+        replace.assert_called_once()
+        self.assertEqual(replace.call_args.args[1].tags, [])
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "INVALID_TAGS")
 

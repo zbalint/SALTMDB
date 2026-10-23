@@ -1070,6 +1070,48 @@ def resolve_consolidation_core_state(
     }
 
 
+def resolve_derived_core_state(
+    conn,
+    *,
+    source_ids: list[str],
+    declaration,
+    content: str,
+    scope: str,
+    new_entry: dict,
+) -> dict:
+    """Resolve the explicit core outcome for a derived replacement entity."""
+    try:
+        core_state = resolve_consolidation_core_state(
+            conn,
+            resolved_parents=source_ids,
+            is_core_requested=declaration.is_core,
+            content=content,
+            scope=scope,
+            core_reason=declaration.core_reason,
+            core_exit_condition=declaration.core_exit_condition,
+            core_review_after=declaration.core_review_after,
+            detail_memory_ids=declaration.detail_memory_ids,
+        )
+        if core_state["is_core"]:
+            enforce_overdue_boundary(
+                conn,
+                entity_id=None,
+                effective_is_core=True,
+                is_new_core=core_state["is_new_core"],
+                review_after_changed=False,
+            )
+            rejection = check_capacity_admission(
+                conn,
+                exclude_ids=source_ids,
+                new_entry=new_entry,
+            )
+            if rejection is not None:
+                raise CoreGovernanceRejected(rejection)
+        return core_state
+    except ValueError as exc:
+        raise CoreGovernanceRejected(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # review_core_memory
 # ---------------------------------------------------------------------------

@@ -1412,7 +1412,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "revise_memory",
             {
-                "entity_id": private["data"]["memory_id"],
+                "memory_id": private["data"]["memory_id"],
                 "title": "Shared lineage successor",
                 "content": "Shared successor body for the revised lineage case.",
                 "reason": "Publish corrected shared fact",
@@ -1420,7 +1420,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(revised["status"], "ok", revised)
-        shared_id = revised["data"]["new_id"]
+        shared_id = revised["data"]["successor_memory_id"]
         result = await self._call_as("owner_b", "get_memory", {"entity_id": shared_id})
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(private["data"]["memory_id"], str(result))
@@ -1441,7 +1441,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "revise_memory",
             {
-                "entity_id": private["data"]["memory_id"],
+                "memory_id": private["data"]["memory_id"],
                 "title": "Shared lineage graph root",
                 "content": "A shared successor for the public lineage graph test.",
                 "reason": "Publish shared revision",
@@ -1452,7 +1452,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "get_lineage",
-            {"entity_id": revised["data"]["new_id"], "direction": "ancestors"},
+            {"entity_id": revised["data"]["successor_memory_id"], "direction": "ancestors"},
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(private["data"]["memory_id"], str(result))
@@ -1645,7 +1645,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             "owner_a",
             "revise_memory",
             {
-                "entity_id": private["data"]["memory_id"],
+                "memory_id": private["data"]["memory_id"],
                 "title": "Shared local successor",
                 "content": "A shared successor for the local context lineage privacy test.",
                 "reason": "Publish shared revision",
@@ -1656,7 +1656,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [revised["data"]["new_id"]]},
+            {"entity_ids": [revised["data"]["successor_memory_id"]]},
         )
         self.assertNotIn(private["data"]["memory_id"], str(result))
         self.assertNotIn("Private local predecessor", str(result))

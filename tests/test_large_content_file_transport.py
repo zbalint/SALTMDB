@@ -134,7 +134,7 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         )
         path = self._write_file("A complete and sufficiently descriptive newer body from a file.")
         result = tools.supersede_memory(
-            entity_id=original["data"]["memory_id"],
+            memory_id=original["data"]["memory_id"],
             title="Newer",
             tags=["#file"],
             reason="A later decision replaced the old one.",
@@ -142,7 +142,8 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ok")
         stored = self.conn.execute(
-            "SELECT full_content FROM entities WHERE id = ?", (result["data"]["new_id"],)
+            "SELECT full_content FROM entities WHERE id = ?",
+            (result["data"]["successor_memory_id"],),
         ).fetchone()[0]
         self.assertEqual(stored, "A complete and sufficiently descriptive newer body from a file.")
 

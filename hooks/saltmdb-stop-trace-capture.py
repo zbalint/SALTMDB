@@ -35,8 +35,8 @@ from _saltmdb_hook_common import read_stdin_json, read_transcript  # noqa: E402
 # _WRITTEN_ID_KEY in src/saltmdb/mcp/tools.py; keep in sync).
 WRITTEN_ID_KEY = {
     "store_memory": "memory_id",
-    "revise_memory": "new_id",
-    "supersede_memory": "new_id",
+    "revise_memory": "successor_memory_id",
+    "supersede_memory": "successor_memory_id",
 }
 RPC_TIMEOUT_SECS = 5
 _SALTMDB_DIR = ".saltmdb"

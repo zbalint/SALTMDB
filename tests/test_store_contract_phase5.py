@@ -126,7 +126,7 @@ class TestStoreContractPhase5(unittest.TestCase):
         self.assertEqual(stored["status"], "ok")
 
         result = tools.revise_memory(
-            entity_id=stored["data"]["memory_id"],
+            memory_id=stored["data"]["memory_id"],
             title="[Test] Revised",
             content="Different content body long enough to pass quality checks easily.",
             tags=["#foo::bar"],
