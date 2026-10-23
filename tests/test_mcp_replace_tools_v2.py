@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mcp_contract
 
@@ -21,25 +22,158 @@ def test_replacement_public_result_maps_both_lineage_ids():
     assert result["data"] == {"predecessor_memory_id": "old", "successor_memory_id": "new"}
 
 
+def test_replacement_payload_maps_all_public_fields_for_both_tools():
+    captured = []
+
+    def capture(tool_name, payload):
+        captured.append((tool_name, payload))
+        return {"status": "ok", "data": {}, "warnings": []}
+
+    with (
+        tempfile.TemporaryDirectory() as temp_dir,
+        patch.object(tools, "_call_and_record_write", side_effect=capture),
+        patch.object(tools, "_effective_agent_id", return_value="mapping-agent"),
+    ):
+        for tool_name, tool_func in (
+            ("revise_memory", tools.revise_memory),
+            ("supersede_memory", tools.supersede_memory),
+        ):
+            direct = {
+                "memory_id": f"{tool_name}-direct-id",
+                "title": f"{tool_name}-direct-title",
+                "reason": f"{tool_name}-direct-reason",
+                "content": f"{tool_name}-direct-content",
+                "content_file_path": None,
+                "tags": ["#mapping-direct"],
+                "scope": "private",
+                "memory_type": "decision",
+                "retrieval_text": f"{tool_name}-direct-retrieval",
+                "repoint_relations": True,
+                "context_id": f"{tool_name}-direct-context",
+                "core": None,
+                "demote_core": False,
+            }
+            assert tool_func(**direct)["status"] == "ok"
+            assert captured[-1] == (
+                tool_name,
+                {
+                    "entity_id": f"{tool_name}-direct-id",
+                    "title": f"{tool_name}-direct-title",
+                    "content": f"{tool_name}-direct-content",
+                    "reason": f"{tool_name}-direct-reason",
+                    "tags": ["#mapping-direct"],
+                    "context_id": f"{tool_name}-direct-context",
+                    "scope": "private",
+                    "memory_type": "decision",
+                    "retrieval_text": f"{tool_name}-direct-retrieval",
+                    "repoint_relations": True,
+                    "agent_id": "mapping-agent",
+                },
+            )
+
+            content_path = Path(temp_dir) / f"{tool_name}-core.md"
+            content_path.write_text(f"{tool_name}-core-file-content")
+            core = tools.CoreInput(
+                reason=f"{tool_name}-core-reason",
+                exit_condition=f"{tool_name}-core-exit",
+                review_after="2030-01-02",
+                detail_memory_ids=[f"{tool_name}-core-detail"],
+            )
+            core_values = {
+                "memory_id": f"{tool_name}-core-id",
+                "title": f"{tool_name}-core-title",
+                "reason": f"{tool_name}-core-replacement-reason",
+                "content": None,
+                "content_file_path": str(content_path),
+                "tags": ["#mapping-core"],
+                "scope": "shared",
+                "memory_type": "event",
+                "retrieval_text": f"{tool_name}-core-retrieval",
+                "repoint_relations": False,
+                "context_id": f"{tool_name}-core-context",
+                "core": core,
+                "demote_core": False,
+            }
+            assert tool_func(**core_values)["status"] == "ok"
+            assert captured[-1] == (
+                tool_name,
+                {
+                    "entity_id": f"{tool_name}-core-id",
+                    "title": f"{tool_name}-core-title",
+                    "content": f"{tool_name}-core-file-content",
+                    "reason": f"{tool_name}-core-replacement-reason",
+                    "tags": ["#mapping-core"],
+                    "context_id": f"{tool_name}-core-context",
+                    "scope": "shared",
+                    "memory_type": "event",
+                    "retrieval_text": f"{tool_name}-core-retrieval",
+                    "repoint_relations": False,
+                    "agent_id": "mapping-agent",
+                    "is_core": True,
+                    "core_reason": f"{tool_name}-core-reason",
+                    "core_exit_condition": f"{tool_name}-core-exit",
+                    "core_review_after": "2030-01-02",
+                    "detail_memory_ids": [f"{tool_name}-core-detail"],
+                },
+            )
+
+            demoted = {
+                "memory_id": f"{tool_name}-demote-id",
+                "title": f"{tool_name}-demote-title",
+                "reason": f"{tool_name}-demote-reason",
+                "content": f"{tool_name}-demote-content",
+                "content_file_path": None,
+                "tags": ["#mapping-demote"],
+                "scope": "private",
+                "memory_type": "fact",
+                "retrieval_text": f"{tool_name}-demote-retrieval",
+                "repoint_relations": True,
+                "context_id": f"{tool_name}-demote-context",
+                "core": None,
+                "demote_core": True,
+            }
+            assert tool_func(**demoted)["status"] == "ok"
+            assert captured[-1] == (
+                tool_name,
+                {
+                    "entity_id": f"{tool_name}-demote-id",
+                    "title": f"{tool_name}-demote-title",
+                    "content": f"{tool_name}-demote-content",
+                    "reason": f"{tool_name}-demote-reason",
+                    "tags": ["#mapping-demote"],
+                    "context_id": f"{tool_name}-demote-context",
+                    "scope": "private",
+                    "memory_type": "fact",
+                    "retrieval_text": f"{tool_name}-demote-retrieval",
+                    "repoint_relations": True,
+                    "agent_id": "mapping-agent",
+                    "is_core": False,
+                },
+            )
+
+
 def test_replacement_rejects_core_and_demote_conflict():
     core = tools.CoreInput(
         reason="A sufficiently long core reason",
         exit_condition="A sufficiently long core exit condition",
     )
     result = tools._replacement_payload(
-        memory_id="old",
-        title="Replacement",
-        reason="Reason",
-        content="Body",
-        content_file_path=None,
-        tags=None,
-        scope=None,
-        memory_type=None,
-        retrieval_text=None,
-        repoint_relations=False,
-        context_id=None,
-        core=core,
-        demote_core=True,
+        tools._ReplacementArgs(
+            memory_id="old",
+            title="Replacement",
+            reason="Reason",
+            content="Body",
+            content_file_path=None,
+            tags=None,
+            scope=None,
+            memory_type=None,
+            retrieval_text=None,
+            repoint_relations=False,
+            context_id=None,
+            core=core,
+            demote_core=True,
+        ),
+        "Body",
     )
     assert result["status"] == "rejected"
     assert result["errors"][0]["code"] == "CORE_AND_DEMOTE_CONFLICT"
@@ -49,19 +183,21 @@ def test_replacement_rejects_both_content_sources():
     result = tools._replacement_call(
         "revise_memory",
         tools.revise_memory,
-        memory_id="old",
-        title="Replacement",
-        reason="Reason",
-        content="Body",
-        content_file_path="/tmp/content.md",
-        tags=None,
-        scope=None,
-        memory_type=None,
-        retrieval_text=None,
-        repoint_relations=False,
-        context_id=None,
-        core=None,
-        demote_core=False,
+        tools._ReplacementArgs(
+            memory_id="old",
+            title="Replacement",
+            reason="Reason",
+            content="Body",
+            content_file_path="/tmp/content.md",
+            tags=None,
+            scope=None,
+            memory_type=None,
+            retrieval_text=None,
+            repoint_relations=False,
+            context_id=None,
+            core=None,
+            demote_core=False,
+        ),
     )
     assert result["status"] == "rejected"
     assert result["errors"][0]["code"] == "CONTENT_AND_FILE_PATH_BOTH_SET"

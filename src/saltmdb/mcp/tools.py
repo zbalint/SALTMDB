@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +37,23 @@ class CoreInput(BaseModel):
     exit_condition: str
     review_after: str | None = None
     detail_memory_ids: list[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementArgs:
+    memory_id: str
+    title: str
+    reason: str
+    content: str | None
+    content_file_path: str | None
+    tags: list[str] | None
+    scope: Literal["private", "shared"] | None
+    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None
+    retrieval_text: str | None
+    repoint_relations: bool
+    context_id: str | None
+    core: CoreInput | None
+    demote_core: bool
 
 
 class ConsolidationItem(BaseModel):
@@ -940,23 +958,8 @@ def consolidate_memories(
     return _complete_consolidation_core_decision(result, items, context_id)
 
 
-def _replacement_payload(
-    *,
-    memory_id: str,
-    title: str,
-    reason: str,
-    content: str | None,
-    content_file_path: str | None,
-    tags: list[str] | None,
-    scope: Literal["private", "shared"] | None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
-    retrieval_text: str | None,
-    repoint_relations: bool,
-    context_id: str | None,
-    core: CoreInput | None,
-    demote_core: bool,
-) -> dict:
-    if core is not None and demote_core:
+def _replacement_payload(args: _ReplacementArgs, resolved_content: str | None) -> dict:
+    if args.core is not None and args.demote_core:
         from saltmdb.utils.envelope import error, rejected
 
         return rejected(
@@ -969,31 +972,29 @@ def _replacement_payload(
             ]
         )
     payload: dict[str, object] = {
-        "entity_id": memory_id,
-        "title": title,
-        "content": content,
-        "reason": reason,
-        "tags": None if tags is None else _normalize_list_or_str(tags),
-        "context_id": context_id,
-        "scope": scope,
-        "memory_type": memory_type,
-        "retrieval_text": retrieval_text,
-        "repoint_relations": repoint_relations,
+        "entity_id": args.memory_id,
+        "title": args.title,
+        "content": resolved_content,
+        "reason": args.reason,
+        "tags": None if args.tags is None else _normalize_list_or_str(args.tags),
+        "context_id": args.context_id,
+        "scope": args.scope,
+        "memory_type": args.memory_type,
+        "retrieval_text": args.retrieval_text,
+        "repoint_relations": args.repoint_relations,
         "agent_id": _effective_agent_id(),
     }
-    if content_file_path is not None:
-        payload["content_file_path"] = content_file_path
-    if core is not None:
+    if args.core is not None:
         payload.update(
             {
                 "is_core": True,
-                "core_reason": core.reason,
-                "core_exit_condition": core.exit_condition,
-                "core_review_after": core.review_after,
-                "detail_memory_ids": core.detail_memory_ids,
+                "core_reason": args.core.reason,
+                "core_exit_condition": args.core.exit_condition,
+                "core_review_after": args.core.review_after,
+                "detail_memory_ids": args.core.detail_memory_ids,
             }
         )
-    elif demote_core:
+    elif args.demote_core:
         payload["is_core"] = False
     return {key: value for key, value in payload.items() if value is not None}
 
@@ -1032,61 +1033,30 @@ def _complete_core_decision(
     return {**result, "errors": errors}
 
 
-def _replacement_call(
-    tool_name: str,
-    tool_func,
-    *,
-    memory_id: str,
-    title: str,
-    reason: str,
-    content: str | None,
-    content_file_path: str | None,
-    tags: list[str] | None,
-    scope: Literal["private", "shared"] | None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] | None,
-    retrieval_text: str | None,
-    repoint_relations: bool,
-    context_id: str | None,
-    core: CoreInput | None,
-    demote_core: bool,
-) -> dict:
-    resolved, content_error = _resolve_content(content, content_file_path)
+def _replacement_call(tool_name: str, tool_func, args: _ReplacementArgs) -> dict:
+    resolved, content_error = _resolve_content(args.content, args.content_file_path)
     if content_error is not None:
         return content_error
-    payload = _replacement_payload(
-        memory_id=memory_id,
-        title=title,
-        reason=reason,
-        content=resolved,
-        content_file_path=None,
-        tags=tags,
-        scope=scope,
-        memory_type=memory_type,
-        retrieval_text=retrieval_text,
-        repoint_relations=repoint_relations,
-        context_id=context_id,
-        core=core,
-        demote_core=demote_core,
-    )
+    payload = _replacement_payload(args, resolved)
     if payload.get("status") == "rejected":
         return payload
     result = _call_and_record_write(tool_name, payload)
     submitted = {
         key: value
         for key, value in {
-            "memory_id": memory_id,
-            "title": title,
-            "reason": reason,
-            "content": content,
-            "content_file_path": content_file_path,
-            "tags": tags,
-            "scope": scope,
-            "memory_type": memory_type,
-            "retrieval_text": retrieval_text,
-            "repoint_relations": repoint_relations,
-            "context_id": context_id,
-            "core": core.model_dump(exclude_none=True) if core is not None else None,
-            "demote_core": demote_core,
+            "memory_id": args.memory_id,
+            "title": args.title,
+            "reason": args.reason,
+            "content": args.content,
+            "content_file_path": args.content_file_path,
+            "tags": args.tags,
+            "scope": args.scope,
+            "memory_type": args.memory_type,
+            "retrieval_text": args.retrieval_text,
+            "repoint_relations": args.repoint_relations,
+            "context_id": args.context_id,
+            "core": args.core.model_dump(exclude_none=True) if args.core is not None else None,
+            "demote_core": args.demote_core,
         }.items()
         if value is not None
     }
@@ -1130,19 +1100,21 @@ def revise_memory(
     return _replacement_call(
         "revise_memory",
         revise_memory,
-        memory_id=memory_id,
-        title=title,
-        reason=reason,
-        content=content,
-        content_file_path=content_file_path,
-        tags=tags,
-        scope=scope,
-        memory_type=memory_type,
-        retrieval_text=retrieval_text,
-        repoint_relations=repoint_relations,
-        context_id=context_id,
-        core=core,
-        demote_core=demote_core,
+        _ReplacementArgs(
+            memory_id=memory_id,
+            title=title,
+            reason=reason,
+            content=content,
+            content_file_path=content_file_path,
+            tags=tags,
+            scope=scope,
+            memory_type=memory_type,
+            retrieval_text=retrieval_text,
+            repoint_relations=repoint_relations,
+            context_id=context_id,
+            core=core,
+            demote_core=demote_core,
+        ),
     )
 
 
@@ -1174,19 +1146,21 @@ def supersede_memory(
     return _replacement_call(
         "supersede_memory",
         supersede_memory,
-        memory_id=memory_id,
-        title=title,
-        reason=reason,
-        content=content,
-        content_file_path=content_file_path,
-        tags=tags,
-        scope=scope,
-        memory_type=memory_type,
-        retrieval_text=retrieval_text,
-        repoint_relations=repoint_relations,
-        context_id=context_id,
-        core=core,
-        demote_core=demote_core,
+        _ReplacementArgs(
+            memory_id=memory_id,
+            title=title,
+            reason=reason,
+            content=content,
+            content_file_path=content_file_path,
+            tags=tags,
+            scope=scope,
+            memory_type=memory_type,
+            retrieval_text=retrieval_text,
+            repoint_relations=repoint_relations,
+            context_id=context_id,
+            core=core,
+            demote_core=demote_core,
+        ),
     )
 
 
