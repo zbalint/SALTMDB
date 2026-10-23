@@ -82,3 +82,12 @@ New `tests/test_mcp_lists_events_traces_v2.py` through `tests/mcp_contract.py` o
 | the `search_memory` envelope lines `page` replaces | `tools.py:670-675` | read (consultant) |
 | the hook examples are `mcp_tool` hooks; the link hook needs the adapter's in-process queue; `hooks/tests/test_capture_hook_config.py:19-42,88` pins it | `tools.py:1354,1439-1447`, `hooks/README.md:82-107` | read (consultant) |
 | tests that break / stay untouched | D9 (consultant grep of `tests/`, `hooks/tests`, viewer) | read, grep |
+
+
+## Amendment 1 (2026-10-23)
+
+Found by the S5 inventory (consultant) after the spec was locked: the skill-review sweep teaches `get_events` with `limit 300`, which D1 and D7 now reject (`le=100`), and it has no paging instruction. A slice that changes a tool's bounds changes the text that teaches the tool (parent M2), so the fix belongs here.
+
+- A1.1 Scope is widened by exactly: `hooks/saltmdb-skill-review-sweep.py` (the `REVIEW_PROMPT` step 1 text), `skills/saltmdb-skill-review/SKILL.md` (the "Mine Telemetry" bullet), and `hooks/tests/test_skill_review_sweep.py`.
+- A1.2 New text for both places: `get_events` for `event_type="issue"` and separately for `event_type="retrieval_outcome"`, `order="oldest_first"`, `limit=100` per page; follow `next_cursor` while `has_more` is true until every event since the last sweep is read (cap at 3 pages per type and say so if the cap is reached); the call returns `data.items`.
+- A1.3 Test: the sweep's prompt contains `limit=100`, `next_cursor` and `has_more`, and contains neither `limit 300` nor `limit ~300`; the same three tokens in the skill file text (read in the test). Contract: the hook's other behaviour is unchanged (existing tests stay).
