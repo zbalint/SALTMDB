@@ -87,6 +87,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             tools.get_memory,
             tools.get_lineage,
             tools.get_related_memories,
+            tools.set_core_memory,
             tools.review_core_memory,
         )
         for tool in owner_tools:
@@ -1172,14 +1173,9 @@ class TestMCPToolsWrapper(unittest.TestCase):
         registered_count = len(tools.mcp._tool_manager._tools)
         self.assertEqual(
             registered_count,
-            24,
-            f"MCP server tool count must be exactly 24 after retrieve_context was added "
-            f"(Milestone A slice A5) and Phase 1 added capture_trace_start, "
-            f"capture_trace_memory_link, capture_trace_complete, search_traces, and get_trace "
-            f"on top of the metadata update and inspect_memory tools "
-            f"(ephemeral_memory and "
-            f"export_corpus_snapshot removed, following Phase 6's dismiss_event removal), "
-            f"got {registered_count}",
+            25,
+            f"MCP server tool count must be exactly 25 after set_core_memory and "
+            f"review_core_memory v2 were added; got {registered_count}",
         )
 
     def test_public_descriptions_do_not_describe_tool_call_owner_binding(self):
@@ -2003,7 +1999,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
     def test_retain_via_mcp_tool(self):
         entity_id = self._store_core("MCP Retain Core")
         result = tools.review_core_memory(
-            entity_id=entity_id,
+            memory_id=entity_id,
             outcome="retain",
             review_rationale="C" * 20,
         )
@@ -2013,7 +2009,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
     def test_demote_via_mcp_tool(self):
         entity_id = self._store_core("MCP Demote Core")
         result = tools.review_core_memory(
-            entity_id=entity_id,
+            memory_id=entity_id,
             outcome="demote",
             review_rationale="C" * 20,
         )
@@ -2027,7 +2023,7 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
     def test_archive_via_mcp_tool(self):
         entity_id = self._store_core("MCP Archive Core")
         result = tools.review_core_memory(
-            entity_id=entity_id,
+            memory_id=entity_id,
             outcome="archive",
             review_rationale="C" * 20,
         )
@@ -2039,8 +2035,16 @@ class TestReviewCoreMemoryTool(unittest.TestCase):
         # spec (§12.1) -- a missing review_rationale is now a rejected envelope, matching every
         # other validation failure this function reports, not a raised exception.
         entity_id = self._store_core("MCP Missing Fields Core")
-        result = tools.review_core_memory(entity_id=entity_id, outcome="retain")
+        response = asyncio.run(
+            mcp_contract.call_protocol(
+                "review_core_memory",
+                {"memory_id": entity_id, "outcome": "retain"},
+            )
+        )
+        result = json.loads(response.content[0].model_dump(mode="json")["text"])
         self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertEqual(result["errors"][0]["field"], "review_rationale")
 
     def test_get_core_bootstrap_digest_dispatch_entry(self):
         """Not a public MCP tool -- exercised directly through the daemon dispatch table, the

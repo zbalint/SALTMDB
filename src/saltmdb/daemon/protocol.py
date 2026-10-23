@@ -29,6 +29,7 @@ WRITE_TOOLS = frozenset(
         "revise_memory",
         "supersede_memory",
         "consolidate_memories",
+        "set_core_memory",
         "review_core_memory",
         "update_memory_metadata",
         "capture_trace_start",

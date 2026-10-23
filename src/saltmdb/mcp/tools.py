@@ -39,6 +39,14 @@ class CoreInput(BaseModel):
     detail_memory_ids: list[str] | None = None
 
 
+class SetCoreInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    exit_condition: str
+    detail_memory_ids: list[str] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _ReplacementArgs:
     memory_id: str
@@ -197,6 +205,7 @@ _AGENT_ID_INJECTED_TOOLS = frozenset(
         "inspect_memory",
         "get_lineage",
         "get_related_memories",
+        "set_core_memory",
         "review_core_memory",
         "retrieve_context",
         "update_memory_metadata",
@@ -1254,12 +1263,23 @@ def _written_ids(tool_name: str, result: dict) -> list[str]:
     return [entity_id] if entity_id else []
 
 
-_ID_RENAME_TO_MEMORY_ID_TOOLS = {"store_memory", "update_memory_metadata"}
+_ID_RENAME_TO_MEMORY_ID_TOOLS = {
+    "store_memory",
+    "update_memory_metadata",
+    "set_core_memory",
+    "review_core_memory",
+}
 _REPLACEMENT_ID_MAP = {
     "old_id": "predecessor_memory_id",
     "new_id": "successor_memory_id",
 }
-_ERROR_FIELD_REMAP_TOOLS = {"update_memory_metadata", "revise_memory", "supersede_memory"}
+_ERROR_FIELD_REMAP_TOOLS = {
+    "update_memory_metadata",
+    "revise_memory",
+    "supersede_memory",
+    "set_core_memory",
+    "review_core_memory",
+}
 
 
 def _wrap_string_result(result):
@@ -1772,38 +1792,68 @@ def get_events(
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    description="""Use this to make an existing memory core, or to change the declaration of a core memory; use store_memory to create a new core memory and review_core_memory to extend, demote or archive one.
+
+Only the memory's own agent may call it; the memory must be active, shared and at most 2,500
+characters; reason and exit_condition are 20 to 500 characters. A promotion gets the default
+review date (14 days out) and the date of an existing core never changes here.
+detail_memory_ids omitted keeps the current declaration, [] clears it, and at most 3 shared
+non-core memories may be declared; each detail memory's title and UUID must appear in the
+content. The call is atomic; an identical repeat is a no-op warning (ALREADY_DONE); capacity
+(CORE_CAPACITY_EXCEEDED) and overdue-review rejections are the existing ones.
+A private memory must first be made shared (revise_memory(scope="shared", ...)); a preserved
+detail declaration that is no longer valid (a detail archived, or no longer named in the content)
+makes even an identical repeat a VALIDATION_ERROR, and detail_memory_ids=[] is the fix.
+A memory over 2,500 characters is rejected, also for a repeat (revise it first). A memory of
+another agent cannot be made core here (store a new core memory with store_memory(core=...) that
+cites it)."""
+)
+def set_core_memory(memory_id: str, core: SetCoreInput) -> dict:
+    core_values = core.model_dump(exclude_none=True)
+    payload = {
+        "entity_id": memory_id,
+        "core_reason": core_values["reason"],
+        "core_exit_condition": core_values["exit_condition"],
+        "agent_id": _effective_agent_id(),
+    }
+    if "detail_memory_ids" in core_values:
+        payload["detail_memory_ids"] = core_values["detail_memory_ids"]
+    return _call_and_record_write("set_core_memory", payload)
+
+
+@mcp.tool(
+    description="""Use this to review an active core memory (retain, demote or archive it); use set_core_memory to change its declaration.
+
+The operation is direct and synchronous, never a request/queue/event. Use store_memory instead for
+a meaningful CONTENT revision; this tool only ever changes lifecycle/review state.
+
+memory_id and outcome ("retain"/"demote"/"archive") are required. review_rationale (20-1,000
+characters) is stored for provenance, never injected into the bootstrap digest. retain requires
+an absolute core_review_after in the future, at most 30 days out (omit for the 14-day default);
+demote/archive must not supply core_review_after. The configured calling agent need not match the
+memory's own owner, and reviewing never transfers ownership.
+
+Returns {"status": "ok", "data": {"memory_id": ..., "message": ...}, "warnings": [...]} --
+demote/archive on an already-non-core/already-archived memory is an ALREADY_DONE-coded warning,
+not a rejection. {"status": "rejected", "errors": [{"code": "VALIDATION_ERROR" | "NOT_FOUND" |
+"CONFLICT", "message": "..."}]} -- VALIDATION_ERROR for a malformed outcome/timestamp,
+NOT_FOUND for an unresolvable memory_id, CONFLICT for a retain against a memory that is not
+currently an active core (already demoted or archived).
+
+Example: review_core_memory(memory_id="abc123", outcome="retain",
+review_rationale="Still an active hazard; extending the review window.")"""
+)
 def review_core_memory(
-    entity_id: str | None = None,
-    outcome: Literal["retain", "demote", "archive"] | None = None,
-    review_rationale: str | None = None,
+    memory_id: str,
+    outcome: Literal["retain", "demote", "archive"],
+    review_rationale: str,
     core_review_after: str | None = None,
 ) -> dict:
-    """Reviews an active core memory: retain (extend its review deadline), demote (turn it back
-    into an ordinary searchable memory), or archive (retire it) -- a direct, synchronous
-    operation. Use store_memory instead for a meaningful CONTENT revision; this tool only ever
-    changes lifecycle/review state.
-
-    entity_id and outcome ("retain"/"demote"/"archive") are required. review_rationale (20-1,000
-    chars) is stored for provenance, never injected into the bootstrap digest. `retain` requires
-    an absolute core_review_after in the future, at most 30 days out (omit for the 14-day
-    default); demote/archive must not supply core_review_after. The configured calling agent need
-    not match the entity's own owner, and reviewing never transfers ownership.
-
-    Returns `{"status": "ok", "data": {"id": ..., "message": "..."}, "warnings": [...]}` --
-    demote/archive on an already-non-core/already-archived memory is an `ALREADY_DONE`-coded
-    warning, not a rejection. `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR" |
-    "NOT_FOUND" | "CONFLICT", "message": "..."}]}` -- `VALIDATION_ERROR` for a malformed
-    outcome/timestamp, `NOT_FOUND` for an unresolvable entity_id, `CONFLICT` for a `retain`
-    against a memory that isn't currently an active core (already demoted or archived).
-
-    Example: `review_core_memory(entity_id="abc123", outcome="retain",
-    review_rationale="Still an active hazard; extending review window.")`.
-    """
-    return _backend_or_raise().call(
+    return _call_and_record_write(
         "review_core_memory",
         {
-            "entity_id": entity_id,
+            "entity_id": memory_id,
             "outcome": outcome,
             "review_rationale": review_rationale,
             "agent_id": _effective_agent_id(),

@@ -27,7 +27,6 @@ _SKIP_REASONS = {
         "search_traces": "Published schema has no required field.",
         "retrieve_context": "Published schema has no required field.",
         "get_events": "Published schema has no required field.",
-        "review_core_memory": "Published schema has no required field.",
     },
     "typed": {},
     "nullable": {
@@ -37,7 +36,6 @@ _SKIP_REASONS = {
         "search_memory": "Every published parameter accepts null.",
         "search_traces": "Every published parameter accepts null.",
         "retrieve_context": "Every published parameter accepts null.",
-        "review_core_memory": "Every published parameter accepts null.",
     },
 }
 

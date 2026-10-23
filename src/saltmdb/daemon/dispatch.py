@@ -549,6 +549,43 @@ def _dispatch_consolidate_memories(**kw):
 _dispatch_commit_consolidation = _dispatch_consolidate_memories
 
 
+def _dispatch_set_core_memory(**kw):
+    try:
+        entity_id = _required_str(kw, "entity_id")
+        agent_id = _required_str(kw, "agent_id")
+        core_reason = _required_str(kw, "core_reason")
+        core_exit_condition = _required_str(kw, "core_exit_condition")
+        detail_memory_ids = kw.get("detail_memory_ids")
+        if detail_memory_ids is not None:
+            detail_memory_ids = _required_str_list(kw, "detail_memory_ids")
+        if kw.get("core_review_after") is not None:
+            raise _DispatchValidationError(
+                rejected(
+                    [
+                        error(
+                            error_codes.VALIDATION_ERROR,
+                            "the review date is set by review_core_memory",
+                            "core_review_after",
+                        )
+                    ]
+                )
+            )
+    except _DispatchValidationError as exc:
+        return exc.payload
+    from saltmdb.config import get_db_path
+    from saltmdb.db.connection import get_connection
+
+    conn = get_connection(get_db_path())
+    return core_governance_service.set_core_memory(
+        conn,
+        entity_id=entity_id,
+        agent_id=agent_id,
+        core_reason=core_reason,
+        core_exit_condition=core_exit_condition,
+        detail_memory_ids=detail_memory_ids,
+    )
+
+
 def _dispatch_review_core_memory(**kw):
     # Same pattern as every other DISPATCH_TABLE entry: no explicit connection is threaded
     # through kwargs -- the domain call's own get_connection() resolves to the ambient
@@ -754,6 +791,7 @@ DISPATCH_TABLE = {
     "get_related_memories": _dispatch_get_related_memories,
     "get_events": _dispatch_get_events,
     "retrieve_context": _dispatch_retrieve_context,
+    "set_core_memory": _dispatch_set_core_memory,
     "review_core_memory": _dispatch_review_core_memory,
     "update_memory_metadata": _dispatch_update_memory_metadata,
     "get_core_bootstrap_digest": _dispatch_get_core_bootstrap_digest,
@@ -780,6 +818,7 @@ MUTATING_TOOLS = frozenset(
         "supersede_memory",
         "consolidate_memories",
         "review_core_memory",
+        "set_core_memory",
         "update_memory_metadata",
         "capture_trace_start",
         "capture_trace_memory_link",

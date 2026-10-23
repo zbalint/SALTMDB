@@ -33,8 +33,8 @@ class TestPhase3McpSurface(unittest.TestCase):
         # added afterward (16 -> 17, API-ergonomics Gap 1), then inspect_memory (17 -> 18,
         # API-ergonomics Gap 2). Milestone A slice A5 added retrieve_context (18 -> 19). See
         # test_mcp_tools.py's test_mcp_tool_count_regression_guard for the authoritative count
-        # guard. Phase 1 conversation-trace-provenance added 5 new tools (19 -> 24).
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 24)
+        # (19 -> 24). S3c core tools add set_core_memory (24 -> 25).
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 25)
         self.assertIn("get_memory", dispatch.DISPATCH_TABLE)
         self.assertIn("get_lineage", dispatch.DISPATCH_TABLE)
         self.assertIn("get_related_memories", dispatch.DISPATCH_TABLE)

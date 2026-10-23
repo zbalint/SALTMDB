@@ -40,8 +40,8 @@ class TestPhase4McpSurface(unittest.TestCase):
         # update_memory_metadata was added afterward (16 -> 17, API-ergonomics Gap 1), then
         # inspect_memory (17 -> 18, API-ergonomics Gap 2). Milestone A slice A5 added
         # retrieve_context (18 -> 19). Phase 1 conversation-trace-provenance added 5 new tools
-        # (19 -> 24).
-        self.assertEqual(len(tools.mcp._tool_manager._tools), 24)
+        # (19 -> 24). S3c core tools add set_core_memory (24 -> 25).
+        self.assertEqual(len(tools.mcp._tool_manager._tools), 25)
         self.assertIn("revise_memory", tools.mcp._tool_manager._tools)
         self.assertIn("supersede_memory", tools.mcp._tool_manager._tools)
         self.assertIn("consolidate_memories", tools.mcp._tool_manager._tools)

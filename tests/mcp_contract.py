@@ -36,6 +36,7 @@ TOOL_NAMES = (
     "get_related_memories",
     "retrieve_context",
     "get_events",
+    "set_core_memory",
     "review_core_memory",
     "update_memory_metadata",
 )

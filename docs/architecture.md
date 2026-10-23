@@ -227,7 +227,7 @@ Memories are **never** weight-decremented or archived due to inactivity or disus
 
 ## Core-Memory Bootstrap Governance
 
-`is_core=True` is a **scarce, temporary bootstrap-delivery mechanism**, not a general "important knowledge" tier. It exists for urgent cross-session hazards an agent must know before it could reasonably search for them (active bugs, temporary overrides, environment failures, migrations in progress) — stable coding rules, standing behavioral guidelines, and user preferences belong in `AGENTS.md`/`CLAUDE.md`/skills instead. All logic lives in `src/saltmdb/domain/services/core_governance_service.py`, the sole authority every write path (`store_memory`, `consolidate_memories`, `review_core_memory`) and the bootstrap-digest renderer route through.
+`is_core=True` is a **scarce, temporary bootstrap-delivery mechanism**, not a general "important knowledge" tier. It exists for urgent cross-session hazards an agent must know before it could reasonably search for them (active bugs, temporary overrides, environment failures, migrations in progress) — stable coding rules, standing behavioral guidelines, and user preferences belong in `AGENTS.md`/`CLAUDE.md`/skills instead. All logic lives in `src/saltmdb/domain/services/core_governance_service.py`, the sole authority every write path (`store_memory`, `consolidate_memories`, `set_core_memory`, `review_core_memory`) and the bootstrap-digest renderer route through.
 
 Three independent hard limits, enforced inside every write transaction that can create/promote/enlarge a core memory:
 
@@ -245,6 +245,6 @@ Three independent hard limits, enforced inside every write transaction that can 
 
 **Consolidation never inherits core status.** In the batch `consolidate_memories(items=[...])` tool, if any resolved parent is currently an active core and that item omits `core` and `demote_core`, the call is rejected — pass `core={reason, exit_condition, ...}` explicitly to keep the result core, or `demote_core=true` to let it become ordinary.
 
-**Review.** `review_core_memory(entity_id, outcome, review_rationale, core_review_after)` is a direct, synchronous operation (never a queue/event): `retain` extends the review date, `demote` returns the memory to ordinary searchable status, `archive` retires it. The configured `SALTMDB_AGENT_ID` identifies the *reviewing* agent, not an ownership check.
+**Review.** `review_core_memory(memory_id, outcome, review_rationale, core_review_after)` is a direct, synchronous operation (never a queue/event): `retain` extends the review date, `demote` returns the memory to ordinary searchable status, `archive` retires it. The configured `SALTMDB_AGENT_ID` identifies the *reviewing* agent, not an ownership check.
 
 **Bootstrap fails closed.** The `saltmdb-cli bootstrap-digest` hook (global, core-only — no project-keyword search, no arbitrary core-count limit) renders every active core in canonical order (overdue first, then earliest upcoming review, then creation time). If any active core is malformed or the set exceeds a limit, bootstrap emits one bounded `<core-bootstrap-error>` report (violations + compact inventory + a rebalancing instruction) instead of a partial, truncated, or oversized digest.

@@ -1421,7 +1421,13 @@ def _write_metadata_update(
     result_holder["result"] = envelope_ok({"id": resolved_id, "message": message})
 
 
-def _metadata_target(conn, entity_id: str, agent_id: str | None):
+def _owned_memory_target(
+    conn,
+    entity_id: str,
+    agent_id: str | None,
+    *,
+    foreign_code: str = "NOT_FOUND",
+):
     from saltmdb.utils import error_codes
 
     resolved_id, candidates, truncated = resolve_entity_ref(conn, entity_id, agent_id=agent_id)
@@ -1435,12 +1441,7 @@ def _metadata_target(conn, entity_id: str, agent_id: str | None):
         if truncated:
             item["candidates_truncated"] = True
         return None, rejected([item])
-    if not resolved_id or (
-        agent_id is not None
-        and not conn.execute(
-            "SELECT 1 FROM entities WHERE id = ? AND agent_id = ?", (resolved_id, agent_id)
-        ).fetchone()
-    ):
+    if not resolved_id:
         return None, rejected(
             [
                 envelope_error(
@@ -1450,7 +1451,33 @@ def _metadata_target(conn, entity_id: str, agent_id: str | None):
                 )
             ]
         )
-    return resolved_id, None
+    if agent_id is None:
+        return resolved_id, None
+    owner_row = conn.execute(
+        "SELECT agent_id, scope FROM entities WHERE id = ?", (resolved_id,)
+    ).fetchone()
+    if owner_row is None:
+        return None, rejected(
+            [
+                envelope_error(
+                    error_codes.NOT_FOUND,
+                    f"No memory matches entity_id '{entity_id}'.",
+                    "entity_id",
+                )
+            ]
+        )
+    if owner_row[0] == agent_id:
+        return resolved_id, None
+    foreign_shared = owner_row[1] == "shared"
+    immutable_foreign = foreign_shared and foreign_code == "IMMUTABLE_MEMORY"
+    code = foreign_code if foreign_shared else error_codes.NOT_FOUND
+    message = (
+        "Only the owning agent can make this memory core; store a new core memory "
+        "with store_memory(core=...) that cites it."
+        if immutable_foreign
+        else f"No memory matches entity_id '{entity_id}'."
+    )
+    return None, rejected([envelope_error(code, message, "entity_id")])
 
 
 def update_memory_metadata(
@@ -1490,7 +1517,7 @@ def update_memory_metadata(
         conn = get_connection(db_path or get_db_path())
         should_close = True
     try:
-        resolved_id, target_error = _metadata_target(conn, entity_id, agent_id)
+        resolved_id, target_error = _owned_memory_target(conn, entity_id, agent_id)
         if target_error is not None:
             return target_error
         result_holder: dict[str, Any] = {}

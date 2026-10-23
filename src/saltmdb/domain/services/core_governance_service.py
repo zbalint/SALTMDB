@@ -26,6 +26,7 @@ importable from anywhere.
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -49,6 +50,14 @@ from saltmdb.utils import envelope
 from saltmdb.utils.redaction import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _CoreInputs:
+    core_reason: str
+    core_exit_condition: str
+    detail_memory_ids: list[str] | None
+
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -1110,6 +1119,274 @@ def resolve_derived_core_state(
         return core_state
     except ValueError as exc:
         raise CoreGovernanceRejected(str(exc)) from exc
+
+
+def _set_core_target_row(conn, entity_id: str, agent_id: str) -> tuple[str, dict] | dict:
+    from saltmdb.domain.services.memory_service.lifecycle import _owned_memory_target
+
+    resolved_id, target_error = _owned_memory_target(
+        conn,
+        entity_id,
+        agent_id,
+        foreign_code="IMMUTABLE_MEMORY",
+    )
+    if target_error is not None:
+        return target_error
+    if resolved_id is None:
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.NOT_FOUND,
+                    f"No memory matches entity_id '{entity_id}'.",
+                    "entity_id",
+                )
+            ]
+        )
+    row = conn.execute(
+        "SELECT status, scope, full_content, title, memory_type, is_core, core_reason, "
+        "core_exit_condition, core_detail_memory_ids FROM entities WHERE id = ?",
+        (resolved_id,),
+    ).fetchone()
+    if row is None:
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.NOT_FOUND,
+                    f"Could not resolve entity '{entity_id}'.",
+                    "entity_id",
+                )
+            ]
+        )
+    row_data = {
+        "status": row[0],
+        "scope": row[1],
+        "full_content": row[2],
+        "title": row[3],
+        "memory_type": row[4] or "fact",
+        "is_core": bool(row[5]),
+        "core_reason": row[6],
+        "core_exit_condition": row[7],
+        "core_detail_memory_ids": json.loads(row[8]) if row[8] else [],
+    }
+    return resolved_id, row_data
+
+
+def _set_core_state(conn, resolved_id: str, row: dict, inputs: _CoreInputs) -> dict:
+    effective_details = inputs.detail_memory_ids
+    if not row["is_core"] and effective_details is None:
+        effective_details = []
+    if effective_details is not None and resolved_id in effective_details:
+        raise ValueError("A core cannot be its own detail.")
+    return resolve_store_core_state(
+        conn,
+        entity_id=resolved_id,
+        is_core_requested=True,
+        content=row["full_content"],
+        scope=row["scope"],
+        core_reason=inputs.core_reason,
+        core_exit_condition=inputs.core_exit_condition,
+        core_review_after=None,
+        detail_memory_ids=effective_details,
+    )
+
+
+def _set_core_admission(conn, resolved_id: str, row: dict, state: dict, agent_id: str):
+    entry = {
+        "id": resolved_id,
+        "title": row["title"],
+        "memory_type": row["memory_type"],
+        "core_reason": state["core_reason"],
+        "core_exit_condition": state["core_exit_condition"],
+        "core_review_after": state["core_review_after"],
+        "full_content": row["full_content"],
+        "agent_id": agent_id,
+    }
+    try:
+        enforce_overdue_boundary(
+            conn,
+            entity_id=resolved_id,
+            effective_is_core=True,
+            is_new_core=state["is_new_core"],
+            review_after_changed=False,
+            prospective_entry=entry,
+        )
+    except ValueError as exc:
+        return envelope.rejected([envelope.error(error_codes.VALIDATION_ERROR, str(exc), "core")])
+    return check_capacity_admission(conn, exclude_ids=[resolved_id], new_entry=entry)
+
+
+def _set_core_write(
+    conn,
+    resolved_id: str,
+    state: dict,
+    agent_id: str,
+    previous_detail_ids: list[str],
+) -> dict:
+    now = datetime.now(UTC).isoformat()
+    detail_text = (
+        json.dumps(state["core_detail_memory_ids"]) if state["core_detail_memory_ids"] else None
+    )
+    conn.execute(
+        "UPDATE entities SET is_core = 1, core_reason = ?, core_exit_condition = ?, "
+        "core_review_after = ?, core_detail_memory_ids = ?, updated_at = ? WHERE id = ?",
+        (
+            state["core_reason"],
+            state["core_exit_condition"],
+            state["core_review_after"],
+            detail_text,
+            now,
+            resolved_id,
+        ),
+    )
+    reconcile_detail_relations(
+        conn,
+        core_id=resolved_id,
+        agent_id=agent_id,
+        new_detail_ids=state["core_detail_memory_ids"],
+        previous_detail_ids=previous_detail_ids,
+    )
+    from saltmdb.domain.services.memory_service.write import _sync_raw_core_tag
+
+    _sync_raw_core_tag(conn, resolved_id, agent_id)
+    if state["is_new_core"]:
+        message = (
+            f"Memory '{resolved_id}' promoted to core; next review at {state['core_review_after']}."
+        )
+    else:
+        message = (
+            f"Core declaration of '{resolved_id}' updated; next review at "
+            f"{state['core_review_after']}."
+        )
+    return envelope.ok(
+        {
+            "id": resolved_id,
+            "message": message,
+            "core_review_after": state["core_review_after"],
+        }
+    )
+
+
+def _set_core_apply(
+    conn,
+    resolved_id: str,
+    row: dict,
+    agent_id: str,
+    inputs: _CoreInputs,
+) -> dict:
+    if row["status"] != "raw":
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.CONFLICT,
+                    f"Memory '{resolved_id}' cannot be made core because its status is "
+                    f"'{row['status']}'.",
+                    "entity_id",
+                )
+            ]
+        )
+    try:
+        state = _set_core_state(conn, resolved_id, row, inputs)
+    except ValueError as exc:
+        return envelope.rejected([envelope.error(error_codes.VALIDATION_ERROR, str(exc), "core")])
+    if (
+        row["is_core"]
+        and state["core_reason"] == row["core_reason"]
+        and state["core_exit_condition"] == row["core_exit_condition"]
+        and state["core_detail_memory_ids"] == row["core_detail_memory_ids"]
+    ):
+        return envelope.ok(
+            {
+                "id": resolved_id,
+                "message": f"Core declaration of '{resolved_id}' is already current (no-op).",
+                "core_review_after": state["core_review_after"],
+            },
+            warnings=[
+                envelope.warning(error_codes.ALREADY_DONE, "Core declaration was already current.")
+            ],
+        )
+    admission_error = _set_core_admission(conn, resolved_id, row, state, agent_id)
+    if admission_error is not None:
+        return admission_error
+    return _set_core_write(
+        conn,
+        resolved_id,
+        state,
+        agent_id,
+        state["previous_detail_memory_ids"],
+    )
+
+
+def _set_core_transaction(
+    conn,
+    entity_id: str,
+    agent_id: str,
+    inputs: _CoreInputs,
+) -> dict:
+    target = _set_core_target_row(conn, entity_id, agent_id)
+    if isinstance(target, dict):
+        return target
+    resolved_id, row = target
+    return _set_core_apply(conn, resolved_id, row, agent_id, inputs)
+
+
+def set_core_memory(
+    conn,
+    *,
+    entity_id: str,
+    agent_id: str,
+    core_reason: str,
+    core_exit_condition: str,
+    detail_memory_ids: list | None = None,
+) -> dict:
+    if not isinstance(core_reason, str) or not core_reason.strip():
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.VALIDATION_ERROR,
+                    "core_reason must be a non-empty string.",
+                    "core_reason",
+                )
+            ]
+        )
+    if not isinstance(core_exit_condition, str) or not core_exit_condition.strip():
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.VALIDATION_ERROR,
+                    "core_exit_condition must be a non-empty string.",
+                    "core_exit_condition",
+                )
+            ]
+        )
+    if detail_memory_ids is not None and not isinstance(detail_memory_ids, list):
+        return envelope.rejected(
+            [
+                envelope.error(
+                    error_codes.VALIDATION_ERROR,
+                    "detail_memory_ids must be a list or null.",
+                    "detail_memory_ids",
+                )
+            ]
+        )
+    if not agent_id:
+        return envelope.rejected(
+            [envelope.error(error_codes.VALIDATION_ERROR, "agent_id is mandatory.", "agent_id")]
+        )
+    from saltmdb.db.connection import write_transaction_retrying
+
+    return write_transaction_retrying(
+        conn,
+        lambda transaction_conn: _set_core_transaction(
+            transaction_conn,
+            entity_id,
+            agent_id,
+            _CoreInputs(
+                core_reason=core_reason,
+                core_exit_condition=core_exit_condition,
+                detail_memory_ids=detail_memory_ids,
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
