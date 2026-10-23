@@ -981,7 +981,7 @@ def _semantic_search_db_path(db_path, disable_semantic):
             "Semantic search is disabled (SALTMDB_ENABLE_SEMANTIC=false); search_memory "
             "requires the hybrid FTS+dense-vector pipeline for query-based search. Unset "
             "SALTMDB_ENABLE_SEMANTIC (or set it to true), or call search_memory without "
-            "query_keywords to browse via tags/filters only."
+            "a query to browse via tags/filters only."
         )
 
 
