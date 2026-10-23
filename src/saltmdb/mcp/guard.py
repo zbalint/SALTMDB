@@ -23,6 +23,12 @@ RENAMED_FIELDS: dict[str, dict[str, str]] = {
     "supersede_memory": {"entity_id": "memory_id"},
     "review_core_memory": {"entity_id": "memory_id"},
     "get_memory": {"entity_id": "memory_id"},
+    "get_lineage": {"entity_id": "memory_id"},
+    "get_related_memories": {
+        "entity_id": "memory_id",
+        "include_inspect": "include_summary",
+    },
+    "retrieve_context": {"entity_ids": "memory_ids"},
 }
 
 REMOVED_TOOLS: dict[str, str] = {
@@ -104,7 +110,11 @@ class GuardedFastMCP(FastMCP):
             if key in properties:
                 continue
             message = f"Unknown field '{key}'; valid fields: {valid_fields}."
-            if key in renamed:
+            if name == "retrieve_context" and key in {"query", "strategy"}:
+                message += (
+                    " This tool takes memory_ids anchors only; find them with search_memory first."
+                )
+            elif key in renamed:
                 message += f" It was renamed to '{renamed[key]}'."
             errors.append(error("UNKNOWN_FIELD", message, key, corrected_call=corrected))
         return self._result(rejected(errors), schema)

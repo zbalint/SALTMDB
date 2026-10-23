@@ -18,6 +18,7 @@ persistent DB, so it was never in scope for this boundary to begin with).
 
 import logging
 
+from saltmdb.config import MEMORY_REF_MAX_CHARS
 from saltmdb.domain.services import (
     core_governance_service,
     event_service,
@@ -32,6 +33,7 @@ from saltmdb.domain.services.memory_service import Provenance, CoreDeclaration
 from typing import Any, Literal
 
 from saltmdb.utils import error_codes
+
 from saltmdb.utils.envelope import error, rejected
 
 logger = logging.getLogger(__name__)
@@ -382,12 +384,12 @@ def _validate_memory_ids(memory_ids: list[str]) -> dict[str, Any] | None:
         )
     normalized_ids = [memory_id.strip() for memory_id in memory_ids]
     for index, memory_id in enumerate(normalized_ids):
-        if not memory_id or len(memory_id) > 128:
+        if not memory_id or len(memory_id) > MEMORY_REF_MAX_CHARS:
             return rejected(
                 [
                     error(
                         error_codes.VALIDATION_ERROR,
-                        "memory_ids entries must be 1 to 128 characters after stripping",
+                        f"memory_ids entries must be 1 to {MEMORY_REF_MAX_CHARS} characters after stripping",
                         f"memory_ids[{index}]",
                     )
                 ]

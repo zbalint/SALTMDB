@@ -81,10 +81,10 @@ class TestRetrieveContextWiring(unittest.TestCase):
             agent_id=None,
         )
 
-    def test_public_schema_exposes_query_controls_without_agent_id(self):
+    def test_public_schema_exposes_memory_anchors_without_agent_id(self):
         self.assertEqual(
             list(inspect.signature(tools.retrieve_context).parameters),
-            ["entity_ids", "query", "budget_tokens", "strategy"],
+            ["memory_ids", "budget_tokens"],
         )
         self.assertNotIn("agent_id", inspect.signature(tools.retrieve_context).parameters)
         registered = tools.mcp._tool_manager._tools["retrieve_context"]
@@ -99,12 +99,16 @@ class TestRetrieveContextWiring(unittest.TestCase):
         )
         self.assertEqual(result["status"], "ok")
         entity_id = result["data"]["id"]
-        envelope = tools.retrieve_context(entity_ids=[entity_id])
+        envelope = tools.retrieve_context(memory_ids=[entity_id])
         self.assertEqual(
             set(envelope),
-            {"entity_ids", "memories", "edges", "lineage", "conflict_sets", "metadata"},
+            {"status", "data", "warnings", "errors"},
         )
-        self.assertEqual(envelope["entity_ids"], [entity_id])
+        self.assertEqual(
+            set(envelope["data"]),
+            {"memory_ids", "memories", "edges", "lineage", "conflict_sets", "metadata"},
+        )
+        self.assertEqual(envelope["data"]["memory_ids"], [entity_id])
 
 
 if __name__ == "__main__":

@@ -600,10 +600,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(res1["status"], "ok")
         id1 = res1["data"]["memory_id"]
 
-        deps = tools.get_related_memories(entity_id=id1)
+        deps = tools.get_related_memories(memory_id=id1)
         self.assertIsInstance(deps, dict)
 
-        lineage = tools.get_lineage(entity_id=id1)
+        lineage = tools.get_lineage(memory_id=id1)
         self.assertIsInstance(lineage, dict)
 
         memory = tools.get_memory(memory_id=id1)
@@ -629,8 +629,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(rel_res["status"], "ok")
         self.assertEqual(rel_res["data"]["created_count"], 1)
 
-        deps_now = tools.get_related_memories(entity_id=id1, max_depth=1)
-        self.assertEqual(deps_now["data"]["total_related_found"], 1)
+        deps_now = tools.get_related_memories(memory_id=id1, max_depth=1)
+        self.assertEqual(deps_now["data"]["total_edges"], 1)
 
         # Lineage threading: consolidate two memories and confirm point_in_time excludes the
         # brand-new consolidated_from ancestry while an unrestricted (now) call includes it.
@@ -664,10 +664,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(cons_res["status"], "ok")
         c_id = cons_res["data"]["items"][0]["memory_id"]
 
-        lineage_now = tools.get_lineage(entity_id=c_id)
-        self.assertEqual(lineage_now["data"]["total"], 2)
+        lineage_now = tools.get_lineage(memory_id=c_id)
+        self.assertEqual(lineage_now["data"]["total_edges"], 2)
 
-    def test_inspect_memory_returns_snippet_not_content_with_lineage(self):
+    def test_get_memory_summary_returns_snippet_not_content_with_lineage(self):
         content = (
             "# Inspect Snippet Heading\n\n"
             "First body line here.\n"
@@ -692,7 +692,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertNotIn("Fourth unique body line excluded", result["data"]["snippet"])
         self.assertIn("lineage", result["data"])
 
-    def test_inspect_memory_field_parity_with_get_memory_minus_content(self):
+    def test_get_memory_summary_field_parity_with_get_memory_minus_content(self):
         stored = tools.store_memory(
             content=(
                 "# Field Parity Heading\n\n"
@@ -715,12 +715,12 @@ class TestMCPToolsWrapper(unittest.TestCase):
             set(inspect_result["data"].keys()) - {"snippet"},
         )
 
-    def test_inspect_memory_unknown_entity_id_rejected(self):
+    def test_get_memory_summary_unknown_entity_id_rejected(self):
         result = tools.get_memory(memory_id="totally-fake-id-000", detail="summary")
 
         self.assertEqual(result["status"], "rejected")
 
-    def test_inspect_memory_ambiguous_prefix_returns_candidates_never_content(self):
+    def test_get_memory_summary_ambiguous_prefix_returns_candidates_never_content(self):
         # No tags on these two: entity_tags rows carry a foreign key to entities.id, which
         # would block the raw `UPDATE entities SET id = ...` below used to force the collision
         # (mirrors test_entity_id_prefix_resolution.py's own tag-free collision fixture).
@@ -752,7 +752,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertNotIn("Secret content A", str(result))
         self.assertNotIn("Secret content B", str(result))
 
-    def test_get_related_memories_include_inspect_false_is_unchanged_by_default(self):
+    def test_get_related_memories_include_summary_false_is_unchanged_by_default(self):
         stored_a = tools.store_memory(
             content="Default related-memory source content for inspect regression testing.",
             title="Default Related Source",
@@ -772,13 +772,13 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(relation["status"], "ok")
         self.assertEqual(relation["data"]["created_count"], 1)
 
-        result = tools.get_related_memories(entity_id=a_id, direction="outbound")["data"]
+        result = tools.get_related_memories(memory_id=a_id, direction="outbound")["data"]
 
         self.assertTrue(result["related_memories"])
         for item in result["related_memories"]:
-            self.assertEqual(set(item.keys()), {"id", "title", "depth"})
+            self.assertEqual(set(item.keys()), {"memory_id", "title", "depth"})
 
-    def test_get_related_memories_include_inspect_true_embeds_fields_without_lineage(self):
+    def test_get_related_memories_include_summary_true_embeds_fields_without_lineage(self):
         stored_a = tools.store_memory(
             content="Embedded inspect source content for related-memory regression testing.",
             title="Embedded Inspect Source",
@@ -799,18 +799,18 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(relation["data"]["created_count"], 1)
 
         result = tools.get_related_memories(
-            entity_id=a_id,
+            memory_id=a_id,
             direction="outbound",
-            include_inspect=True,
+            include_summary=True,
         )["data"]
-        target = next(item for item in result["related_memories"] if item["id"] == b_id)
+        target = next(item for item in result["related_memories"] if item["memory_id"] == b_id)
 
         for field in ("snippet", "status", "tags", "metadata"):
             self.assertIn(field, target)
         self.assertNotIn("lineage", target)
         self.assertNotIn("content", target)
 
-    def test_get_related_memories_include_inspect_does_not_bump_last_accessed_at(self):
+    def test_get_related_memories_include_summary_does_not_bump_last_accessed_at(self):
         stored_a = tools.store_memory(
             content="Access-time source content for related-memory regression testing.",
             title="Access-Time Source",
@@ -834,15 +834,15 @@ class TestMCPToolsWrapper(unittest.TestCase):
             "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
         ).fetchone()[0]
         result = tools.get_related_memories(
-            entity_id=a_id,
+            memory_id=a_id,
             direction="outbound",
-            include_inspect=True,
+            include_summary=True,
         )["data"]
         after = self.conn.execute(
             "SELECT last_accessed_at FROM entities WHERE id = ?", (b_id,)
         ).fetchone()[0]
 
-        self.assertTrue(any(item["id"] == b_id for item in result["related_memories"]))
+        self.assertTrue(any(item["memory_id"] == b_id for item in result["related_memories"]))
         self.assertEqual(after, before)
 
     def test_manage_relation_invalidate_mode(self):
@@ -1432,7 +1432,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "get_lineage",
-            {"entity_id": revised["data"]["successor_memory_id"], "direction": "ancestors"},
+            {"memory_id": revised["data"]["successor_memory_id"], "direction": "ancestors"},
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(private["data"]["memory_id"], str(result))
@@ -1476,7 +1476,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "get_related_memories",
-            {"entity_id": shared["data"]["memory_id"]},
+            {"memory_id": shared["data"]["memory_id"]},
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(private["data"]["memory_id"], str(result))
@@ -1511,7 +1511,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "get_related_memories",
-            {"entity_id": "Duplicate Title Collision"},
+            {"memory_id": "Duplicate Title Collision"},
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(colliding["data"]["memory_id"], str(result))
@@ -1541,7 +1541,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "get_lineage",
-            {"entity_id": "Duplicate Lineage Title Collision", "direction": "ancestors"},
+            {"memory_id": "Duplicate Lineage Title Collision", "direction": "ancestors"},
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(colliding["data"]["memory_id"], str(result))
@@ -1561,7 +1561,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [private["data"]["memory_id"]]},
+            {"memory_ids": [private["data"]["memory_id"]]},
         )
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
@@ -1605,8 +1605,11 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [shared["data"]["memory_id"]]},
+            {"memory_ids": [shared["data"]["memory_id"]]},
         )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("data", result)
+        self.assertIn("memories", result["data"])
         self.assertNotIn(private["data"]["memory_id"], str(result))
         self.assertNotIn("Private local neighbor", str(result))
 
@@ -1636,8 +1639,11 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [revised["data"]["successor_memory_id"]]},
+            {"memory_ids": [revised["data"]["successor_memory_id"]]},
         )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("data", result)
+        self.assertIn("memories", result["data"])
         self.assertNotIn(private["data"]["memory_id"], str(result))
         self.assertNotIn("Private local predecessor", str(result))
 
@@ -1679,8 +1685,11 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [shared["data"]["memory_id"]]},
+            {"memory_ids": [shared["data"]["memory_id"]]},
         )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("data", result)
+        self.assertIn("memories", result["data"])
         self.assertNotIn(private["data"]["memory_id"], str(result))
         self.assertNotIn("Private conflicting memory", str(result))
 
@@ -1717,11 +1726,18 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
             (private_id, embedding),
         )
         self.conn.commit()
-        result = await self._call_as(
-            "owner_b",
+        result = tools.DirectDispatchBackend().call(
             "retrieve_context",
-            {"strategy": "global", "query": "private global community member"},
+            {
+                "entity_ids": None,
+                "query": "private global community member",
+                "budget_tokens": None,
+                "strategy": "global",
+                "agent_id": "owner_b",
+            },
         )
+        self.assertNotIn("status", result)
+        self.assertIn("memories", result)
         self.assertNotIn(private_id, str(result))
         self.assertNotIn("Private global community member", str(result))
 
@@ -1772,8 +1788,11 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         result = await self._call_as(
             "owner_b",
             "retrieve_context",
-            {"entity_ids": [shared_id]},
+            {"memory_ids": [shared_id]},
         )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("data", result)
+        self.assertIn("memories", result["data"])
         self.assertNotIn(private_id, str(result))
         self.assertNotIn("Private orphan community member", str(result))
 

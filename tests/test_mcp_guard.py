@@ -24,7 +24,6 @@ _SKIP_REASONS = {
         "merge_tags": "Published schema has no required field.",
         "search_memory": "Published schema has no required field.",
         "search_traces": "Published schema has no required field.",
-        "retrieve_context": "Published schema has no required field.",
         "get_events": "Published schema has no required field.",
     },
     "typed": {},
@@ -33,7 +32,6 @@ _SKIP_REASONS = {
         "list_predicates": "Every published parameter accepts null.",
         "merge_tags": "Every published parameter accepts null.",
         "search_traces": "Every published parameter accepts null.",
-        "retrieve_context": "Every published parameter accepts null.",
     },
 }
 

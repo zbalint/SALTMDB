@@ -52,17 +52,17 @@ class TestPhase3McpSurface(unittest.TestCase):
         )
         self.assertEqual(
             list(inspect.signature(tools.get_lineage).parameters),
-            ["entity_id", "direction", "max_depth"],
+            ["memory_id", "direction", "max_depth"],
         )
         self.assertEqual(
             list(inspect.signature(tools.get_related_memories).parameters),
-            ["entity_id", "max_depth", "direction", "include_inspect"],
+            ["memory_id", "max_depth", "direction", "include_summary"],
         )
 
     def test_graph_tools_forward_normalized_calls(self):
         tools.get_memory(memory_id="memory-id")
-        tools.get_lineage(entity_id="memory-id")
-        tools.get_related_memories(entity_id="memory-id")
+        tools.get_lineage(memory_id="memory-id")
+        tools.get_related_memories(memory_id="memory-id")
         self.assertEqual(
             [name for name, _kwargs in tools._backend.calls],
             ["get_memory", "get_lineage", "get_related_memories"],
@@ -75,6 +75,15 @@ class TestPhase3McpSurface(unittest.TestCase):
             self.assertIn(name, protocol.READ_TOOLS)
             self.assertNotIn(name, protocol.WRITE_TOOLS)
         self.assertNotIn("inspect_graph", protocol.READ_TOOLS)
+
+    def test_graph_tools_are_read_only_across_all_registries(self):
+        names = ("get_lineage", "get_related_memories", "retrieve_context")
+        for name in names:
+            self.assertIn(name, protocol.READ_TOOLS)
+            self.assertIn(name, dispatch.DISPATCH_TABLE)
+            self.assertNotIn(name, dispatch.MUTATING_TOOLS)
+            self.assertNotIn(name, protocol.WRITE_TOOLS)
+        self.assertIn("retrieve_context", protocol.READ_TOOLS)
 
     def test_protocol_classifies_api_ergonomics_gap_tools_correctly(self):
         # API-ergonomics Gap 1/2: both new tools must land in the daemon's crash/in-flight-write

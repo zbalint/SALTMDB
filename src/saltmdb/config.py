@@ -311,6 +311,9 @@ CONTENT_FILE_DUMP_THRESHOLD_CHARS = 20000
 # Maximum cumulative inline content returned by get_memories(detail="full").
 GET_MEMORIES_INLINE_BUDGET_CHARS = 40000
 
+# Maximum length of an agent-facing memory id/reference, including exact titles.
+MEMORY_REF_MAX_CHARS = 200
+
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"
 RETRY_MAX_ATTEMPTS = 3  # up to 3 retries beyond the first attempt (4 tries total)

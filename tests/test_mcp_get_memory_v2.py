@@ -54,7 +54,7 @@ def test_schemas_are_exact_v2():
     memory_ids = batch.inputSchema["properties"]["memory_ids"]
     assert memory_ids["minItems"] == 1
     assert memory_ids["maxItems"] == 20
-    assert memory_ids["items"]["maxLength"] == 128
+    assert memory_ids["items"]["maxLength"] == 200
 
 
 def test_full_and_summary_records_have_public_shape(configured):
@@ -328,11 +328,56 @@ def test_batch_bounds_are_enforced(configured):
     )
     service = dispatch.memory_service.get_memory
     with patch.object(dispatch.memory_service, "get_memory", wraps=service) as service_call:
-        oversized = tools.get_memories(["x" * 129])
+        oversized = tools.get_memories(["x" * 201])
         too_many = tools.get_memories([str(index) for index in range(21)])
     assert oversized["status"] == "rejected"
     assert too_many["status"] == "rejected"
     service_call.assert_not_called()
+
+
+def test_single_memory_id_boundaries_reject_without_backend(configured):
+    service = dispatch.memory_service.get_memory
+    with patch.object(dispatch.memory_service, "get_memory", wraps=service) as service_call:
+        empty = call("get_memory", {"memory_id": ""})
+        oversized = call("get_memory", {"memory_id": "x" * 201})
+    assert empty["status"] == "rejected"
+    assert oversized["status"] == "rejected"
+    service_call.assert_not_called()
+
+
+def test_exact_two_hundred_character_ids_reach_single_and_batch_dispatch(configured):
+    title = "G" * 200
+    data = store(title)
+    single = call("get_memory", {"memory_id": title})
+    batch = call("get_memories", {"memory_ids": [title]})
+    assert single["status"] == "ok", single
+    assert single["data"]["memory_id"] == data["memory_id"]
+    assert batch["status"] == "ok", batch
+    assert batch["data"]["items"][0]["memory"]["memory_id"] == data["memory_id"]
+
+
+def test_empty_batch_memory_id_rejects_through_guard_without_backend(configured):
+    service = dispatch.memory_service.get_memory
+    with patch.object(dispatch.memory_service, "get_memory", wraps=service) as service_call:
+        result = tools.get_memories([""])
+    assert result["status"] == "rejected"
+    assert result["errors"][0]["field"] == "memory_ids[0]"
+    service_call.assert_not_called()
+
+
+def test_dispatcher_batch_bound_message_is_literal(configured):
+    result = dispatch._dispatch_get_memories(
+        memory_ids=["x" * 201],
+        detail="full",
+        include_trace_provenance=False,
+        agent_id="s4b-test-agent",
+    )
+    assert isinstance(result, dict)
+    assert result["status"] == "rejected"
+    assert result["errors"][0]["field"] == "memory_ids[0]"
+    assert result["errors"][0]["message"] == (
+        "memory_ids entries must be 1 to 200 characters after stripping"
+    )
 
 
 def test_entity_id_rename_and_removed_inspect_tool(configured):

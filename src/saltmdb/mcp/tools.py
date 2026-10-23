@@ -11,7 +11,8 @@ import re
 import threading
 from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
-from saltmdb.config import is_trace_capture_enabled
+from saltmdb.config import MEMORY_REF_MAX_CHARS, is_trace_capture_enabled
+from saltmdb.mcp.public_shapes import context_data, lineage_data, memory_record, related_data
 from saltmdb.daemon import protocol
 from saltmdb.utils import error_codes
 from saltmdb.utils.envelope import error, ok, rejected, warning
@@ -1255,7 +1256,7 @@ def supersede_memory(
 
 @mcp.tool()
 def get_memory(
-    memory_id: str,
+    memory_id: Annotated[str, Field(min_length=1, max_length=MEMORY_REF_MAX_CHARS)],
     detail: Literal["full", "summary"] = "full",
     include_trace_provenance: bool = False,
 ) -> dict:
@@ -1313,7 +1314,7 @@ def _map_batch_read_result(item: dict[str, Any]) -> dict[str, Any]:
 @mcp.tool()
 def get_memories(
     memory_ids: Annotated[
-        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        list[Annotated[str, Field(min_length=1, max_length=MEMORY_REF_MAX_CHARS)]],
         Field(min_length=1, max_length=20),
     ],
     detail: Literal["full", "summary"] = "full",
@@ -1392,6 +1393,12 @@ _ERROR_FIELD_REMAP_TOOLS = {
     "supersede_memory",
     "set_core_memory",
     "review_core_memory",
+    "get_lineage",
+    "get_related_memories",
+    "retrieve_context",
+}
+_ERROR_FIELD_REMAPS = {
+    "retrieve_context": {"entity_id": "memory_id", "entity_ids": "memory_ids"},
 }
 
 
@@ -1403,24 +1410,31 @@ def _wrap_string_result(result):
     return result
 
 
-def _remap_public_errors(errors):
+def _remap_public_errors(errors, field_map: dict[str, str] | None = None):
+    mapping = field_map or {"entity_id": "memory_id"}
     return [
-        {**item, "field": "memory_id"}
-        if isinstance(item, dict) and item.get("field") == "entity_id"
+        {**item, "field": mapping.get(item["field"], item["field"])}
+        if isinstance(item, dict) and item.get("field") in mapping
         else item
         for item in errors
     ]
 
 
 def _remap_public_data(tool_name: str, data: dict) -> dict:
-    data = dict(data)
-    if tool_name in _ID_RENAME_TO_MEMORY_ID_TOOLS and "id" in data:
-        data["memory_id"] = data.pop("id")
+    if tool_name == "get_memory":
+        return memory_record(data)
+    if tool_name == "get_lineage":
+        return lineage_data(data)
+    if tool_name == "get_related_memories":
+        return related_data(data)
+    result = dict(data)
+    if tool_name in _ID_RENAME_TO_MEMORY_ID_TOOLS and "id" in result:
+        result["memory_id"] = result.pop("id")
     if tool_name in {"revise_memory", "supersede_memory"}:
         for old_key, public_key in _REPLACEMENT_ID_MAP.items():
-            if old_key in data:
-                data[public_key] = data.pop(old_key)
-    return data
+            if old_key in result:
+                result[public_key] = result.pop(old_key)
+    return result
 
 
 def _to_public_write_result(tool_name: str, result):
@@ -1432,7 +1446,7 @@ def _to_public_write_result(tool_name: str, result):
         public_result["data"] = _remap_public_data(tool_name, data)
     errors = public_result.get("errors")
     if tool_name in _ERROR_FIELD_REMAP_TOOLS and isinstance(errors, list):
-        public_result["errors"] = _remap_public_errors(errors)
+        public_result["errors"] = _remap_public_errors(errors, _ERROR_FIELD_REMAPS.get(tool_name))
     return public_result
 
 
@@ -1662,173 +1676,85 @@ def get_trace(trace_id: str) -> dict:
 
 @mcp.tool()
 def get_lineage(
-    entity_id: str,
+    memory_id: Annotated[str, Field(min_length=1, max_length=MEMORY_REF_MAX_CHARS)],
     direction: Literal["ancestors", "descendants"] = "ancestors",
-    max_depth: int = 5,
+    max_depth: Annotated[int, Field(ge=1, le=10)] = 5,
 ) -> dict:
-    """Traverses a memory's revision/supersession/consolidation lineage in either direction --
-    `ancestors` shows where it came from, `descendants` shows what it became. Archived nodes
-    remain fully visible, so historical provenance is never hidden by an archive.
+    """Use this to see where a memory came from or what replaced it (revision, supersession, consolidation history); use get_related_memories for manage_relation edges.
 
-    direction: "ancestors" (default) or "descendants". max_depth caps traversal hops (default 5).
-    Private roots owned by another caller resolve as unknown; hidden lineage nodes and edges
-    are omitted from otherwise visible roots.
-
-    Returns `{"status": "ok", "data": {"entity_id": ..., "direction": ..., "root": {...},
-    "nodes": [...], "edges": [...], "total": ..., "total_nodes": ..., "graph_exhausted": ...,
-    "point_in_time": ..., "max_depth": ...}, "warnings": [...]}` -- `nodes` holds every node
-    found in the requested `direction` (the key is always `nodes`, never renamed to
-    `ancestors`/`descendants` -- `direction` itself is the only place those two words appear in
-    the response); `edges` lists the connecting lineage relations, each with
-    `source_id`/`target_id`/`predicate`/`depth`/`source_title`/`source_status`/`target_title`/
-    `target_status`. `graph_exhausted` is `true` when the traversal reached every real edge
-    within `max_depth` (nothing was cut off). `{"status": "rejected", "errors": [{"code":
-    "VALIDATION_ERROR", "message": "...", "field": "entity_id" | "direction" | "max_depth"}]}`
-    for a missing/malformed parameter.
-
-    Example: `get_lineage(entity_id="a1b2c3", direction="descendants")` to see every memory that
-    eventually replaced this one.
+    ``memory_id`` accepts an unambiguous prefix or exact title. Private roots and hidden lineage
+    nodes are omitted for other agents. ``max_depth`` is bounded to 1 through 10.
     """
-    agent_id_ = _effective_agent_id()
-    return _backend_or_raise().call(
+    result = _backend_or_raise().call(
         "get_lineage",
         {
-            "entity_id": entity_id,
+            "entity_id": memory_id,
             "direction": direction,
             "max_depth": max_depth,
-            "agent_id": agent_id_,
+            "agent_id": _effective_agent_id(),
         },
     )
+    return _to_public_write_result("get_lineage", result)
 
 
 @mcp.tool()
 def get_related_memories(
-    entity_id: str,
-    max_depth: int = 5,
+    memory_id: Annotated[str, Field(min_length=1, max_length=MEMORY_REF_MAX_CHARS)],
+    max_depth: Annotated[int, Field(ge=1, le=10)] = 5,
     direction: Literal["outbound", "inbound", "both"] = "both",
-    include_inspect: bool = False,
+    include_summary: bool = False,
 ) -> dict:
-    """Traverses semantic relations (manage_relation edges, not lineage) from one memory for up
-    to `max_depth` hops. Use get_lineage instead for revision/supersession/consolidation history;
-    this tool is for the separate graph of relations you create via manage_relation.
+    """Use this to walk the relations you created with manage_relation from one memory; use get_lineage for revision history and retrieve_context for a ready budgeted bundle.
 
-    direction="both" (default) walks outbound and inbound edges independently and merges the
-    results (a union of two single-direction traversals, not a true mixed-direction walk) --
-    pass "outbound" or "inbound" to walk only one. include_inspect=True inlines each returned
-    node's summary fields (no full content/lineage). Private roots owned by another caller
-    resolve as unknown; hidden neighbors are omitted.
-
-    Returns `{"status": "ok", "data": {"root": {...}, "related_memories": [...],
-    "total_related_found": ..., "max_depth": ...}, "warnings": [...]}` -- `related_memories` is
-    the one and only node-list key in the response; no other key duplicates it under a different
-    name. `{"status": "rejected", "errors": [{"code": "VALIDATION_ERROR", "message": "..."}]}`
-    for an unresolvable `entity_id`.
-
-    Example: `get_related_memories(entity_id="a1b2c3", direction="outbound", max_depth=2)`.
+    ``total_edges`` counts relation edges. ``include_summary`` adds summary fields without
+    content, lineage, or a last-access timestamp update. Private roots and hidden neighbors are
+    omitted for other agents.
     """
-    agent_id_ = _effective_agent_id()
-    return _backend_or_raise().call(
+    result = _backend_or_raise().call(
         "get_related_memories",
         {
-            "entity_id": entity_id,
+            "entity_id": memory_id,
             "max_depth": max_depth,
             "direction": direction,
-            "include_inspect": include_inspect,
-            "agent_id": agent_id_,
+            "include_inspect": include_summary,
+            "agent_id": _effective_agent_id(),
         },
     )
+    return _to_public_write_result("get_related_memories", result)
 
 
 @mcp.tool()
 def retrieve_context(
-    entity_ids: list[str] | None = None,
-    query: str | None = None,
-    budget_tokens: int | None = None,
-    strategy: Literal["local", "global"] | None = None,
+    memory_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=MEMORY_REF_MAX_CHARS)]],
+        Field(min_length=1, max_length=20),
+    ],
+    budget_tokens: Annotated[int | None, Field(ge=1)] = None,
 ) -> dict:
-    """Assemble a budget-bounded memory context around a known anchor in one call: one-hop graph
-    expansion, contradiction surfacing, lifecycle history, and token-budget packing -- everything
-    get_related_memories + get_lineage would otherwise require composing by hand. This tool does
-    not search; find the memory you want with search_memory first, then hand its id here to pull
-    in what's connected to it. Using only search_memory or only retrieve_context is a usage
-    anti-pattern -- they are complementary, not alternatives. No `memories[]` item, of either
-    strategy, ever carries full body content -- call get_memory afterward, selectively for
-    whichever returned items you'll actually cite, quote, or act on. Private anchors owned by
-    another caller resolve as unknown. Both strategies include only shared or owned memories
-    in expansion, lineage, conflicts, and community results.
+    """Use this when you already hold anchor ids and want their connected context (graph neighbours, contradictions, lifecycle history) packed into a token budget in one call; use search_memory first to find the anchors.
 
-    Pass exactly one of entity_ids or query, matching your strategy -- never both, never neither.
-    strategy="local" (default): entity_ids is required -- one or more memory IDs you already have
-    (typically from your own prior search_memory call, get_lineage, or get_related_memories); each
-    is resolved the same flexible way get_memory resolves entity_id (full ID, short prefix, or
-    exact title). Every unresolvable or ambiguous id in the list rejects the whole call -- no
-    silent partial-list degradation. strategy="global": query is required instead (unchanged) --
-    it seeds from the nearest community-detection clusters by query-embedding similarity for
-    whole-topic breadth, trading graph-local depth for topic coverage; this strategy has its own
-    separate, not-yet-redesigned entity-anchored seeding path tracked in a follow-up effort, not
-    available yet. budget_tokens caps the total token payload of `memories[]` (server
-    default/ceiling apply if omitted).
-
-    **Return shape note**: on success this tool does NOT use the `{"status": "ok", "data": ...}`
-    envelope other SALTMDB tools use -- it returns its own bespoke top-level shape directly. For
-    `strategy="local"` that top-level shape echoes the caller's own anchor back as `entity_ids`:
-    `{"entity_ids": [...], "memories": [...], "edges": [...], "lineage": {...},
-    "conflict_sets": [...], "metadata": {...}}`. For `strategy="global"` it instead echoes `query`
-    in that same top-level slot (unchanged) -- the two strategies' envelopes differ in this one
-    field while that asymmetry persists. Only a caller-input problem (a missing/empty/wrong-type
-    `entity_ids` for `local`, an unresolvable or ambiguous id anywhere in the list, or a missing
-    `query` for `global`) returns the standard `{"status": "rejected", "errors": [{"code": ...,
-    "field": ...}]}` envelope instead -- check for a top-level `"status"` key to distinguish the
-    two: its presence means rejection, its absence means the bespoke success shape above.
-
-    Each `memories[]` item is tagged `inclusion`: `"primary"` (a caller-supplied anchor),
-    `"expansion"` (reached via one-hop graph traversal), or `"conflict_only"` (force-included
-    because it contradicts something else in the result) for `strategy="local"`; or
-    `"community_representative"`/`"community_member"` for `strategy="global"` (which never
-    populates `edges`/`lineage`/`conflict_sets` at all -- always `[]`/`{}` -- and uses
-    `metadata.community` in place of `metadata.fan_out`). Every item's own `retrieval_provenance`
-    explains how it entered the result. Unlike before, a `strategy="local"` primary item never
-    carries `relevance_preview`/`relevance_preview_meta` -- those were derived from query text,
-    which this strategy no longer has; you already know why you picked that anchor. For
-    `strategy="local"`, `lineage` surfaces whether an anchor or expansion item was itself
-    revised from an earlier version -- useful for finding a memory's current, most-final state
-    among several that discuss the same evolving topic.
-
-    `edges` (for `strategy="local"`) lists only relations directly between two entries in your
-    own `entity_ids` anchor set -- never a relation from an anchor to one of its expansion
-    neighbors (that provenance lives on the neighbor's own `retrieval_provenance` instead). A
-    single-anchor call always returns `edges: []`; that reflects this scope, not an empty
-    expansion.
-
-    `budget_tokens` packing is not anchor-aware: a caller-supplied anchor in `entity_ids` can
-    still be dropped out of `memories[]` entirely if the budget is too small to fit it (check
-    `metadata.budget.primary_dropped_count`/`primary_truncated` rather than assuming every
-    anchor you passed is present in the result), and `edges` can reference an entity_id that
-    did not survive packing. Prefer the server default budget unless you have verified a custom
-    one fits your anchors.
+    No item carries body content; call get_memory for what you will cite. A too-small budget can
+    drop an anchor, so inspect ``metadata.budget.primary_dropped_count``. Inclusion is labeled
+    ``primary``, ``expansion``, ``conflict_only``, or ``orphan_community``. Every anchor must
+    resolve for the caller, including private-memory ownership checks.
     """
-    agent_id_ = _effective_agent_id()
-    if strategy == "global":
-        return _backend_or_raise().call(
-            "retrieve_context",
-            {
-                "entity_ids": None,
-                "query": query,
-                "budget_tokens": budget_tokens,
-                "strategy": "global",
-                "agent_id": agent_id_,
-            },
-        )
-    return _backend_or_raise().call(
+    result = _backend_or_raise().call(
         "retrieve_context",
         {
-            "entity_ids": entity_ids,
+            "entity_ids": memory_ids,
             "query": None,
             "budget_tokens": budget_tokens,
             "strategy": "local",
-            "agent_id": agent_id_,
+            "agent_id": _effective_agent_id(),
         },
     )
+    if not isinstance(result, dict):
+        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+    if "status" not in result:
+        return ok(context_data(result))
+    if result.get("status") == "rejected":
+        return _to_public_write_result("retrieve_context", result)
+    return result
 
 
 @mcp.tool()
