@@ -60,8 +60,8 @@ class TestSearchMemoryDriftFlag(unittest.TestCase):
         clean_id = clean_res["data"]["memory_id"]
 
         # Search mode="broad" (default)
-        search_res = tools.search_memory(query_keywords="Memory Test", mode="broad")
-        results_by_id = {item["id"]: item for item in search_res}
+        search_res = tools.search_memory(query="Memory Test", mode="broad")
+        results_by_id = {item["memory_id"]: item for item in search_res["data"]["items"]}
 
         # (a) memory with drift_flag -> item has drift_flag matching input
         self.assertIn(entity_id, results_by_id)

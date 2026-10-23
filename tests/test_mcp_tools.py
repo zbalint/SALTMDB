@@ -59,7 +59,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
     def test_missing_startup_owner_explains_environment_configuration(self):
         SESSION_IDENTITY.reset()
         with self.assertRaises(ValueError) as ctx:
-            tools.search_memory(query_keywords="first call identity probe")
+            tools.search_memory(query="first call identity probe")
         message = str(ctx.exception)
         self.assertIn("SALTMDB_AGENT_ID", message)
         self.assertIn("restart", message)
@@ -569,7 +569,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
 
         # Confirm it also round-trips through search_memory's echoed field.
         search_res = tools.search_memory(memory_type_filter="preference")
-        ids = {r["id"] for r in search_res}
+        ids = {r["memory_id"] for r in search_res["data"]["items"]}
         self.assertIn(entity_id, ids)
 
     def test_search_memory_memory_type_filter_round_trip(self):
@@ -587,8 +587,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
 
         results = tools.search_memory(memory_type_filter="fact")
-        self.assertTrue(len(results) > 0)
-        for r in results:
+        self.assertTrue(len(results["data"]["items"]) > 0)
+        for r in results["data"]["items"]:
             self.assertEqual(r["memory_type"], "fact")
 
     def test_graph_tools_are_split_by_entry_condition(self):
@@ -1880,20 +1880,20 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
     tearDown = TestConsolidateMemoriesOutputSchema.tearDown
 
     async def test_search_memory_rejects_unknown_query_argument(self):
-        result = await tools.mcp.call_tool("search_memory", {"query": "anything"})
+        result = await tools.mcp.call_tool("search_memory", {"query_keywords": "anything"})
         payload = json.loads(result[0].text)
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["errors"][0]["code"], "UNKNOWN_FIELD")
-        self.assertEqual(payload["errors"][0]["field"], "query")
+        self.assertEqual(payload["errors"][0]["field"], "query_keywords")
 
-    async def test_search_memory_accepts_query_keywords_argument(self):
+    async def test_search_memory_accepts_query_argument(self):
         memory = tools.store_memory(
             title="Anything argument validation",
             content="Anything is the keyword for this isolated argument validation record.",
         )
-        result = await tools.mcp.call_tool("search_memory", {"query_keywords": "anything"})
+        result = await tools.mcp.call_tool("search_memory", {"query": "anything"})
         self.assertEqual(
-            json.loads(result[0].text)["id"],
+            json.loads(result[0].text)["data"]["items"][0]["memory_id"],
             memory["data"]["memory_id"],
         )
 
@@ -1904,14 +1904,14 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
         )
         result = await tools.mcp.call_tool(
             "search_memory",
-            {"query_keywords": "diagnosticmcp", "return_diagnostics": True},
+            {"query": "diagnosticmcp", "return_diagnostics": True},
         )
         payload = json.loads(result[0].text)
         self.assertEqual(
-            {row["id"] for row in payload["results"]},
+            {row["memory_id"] for row in payload["data"]["items"]},
             {memory["data"]["memory_id"]},
         )
-        self.assertTrue(payload["diagnostics"]["candidates"])
+        self.assertTrue(payload["data"]["diagnostics"]["candidates"])
 
     async def test_search_memory_default_wire_shape_has_no_output_schema(self):
         registered = [
@@ -1923,8 +1923,8 @@ class TestMCPToolArgumentValidation(unittest.IsolatedAsyncioTestCase):
         capture = _CaptureBackend()
         previous = tools._set_backend_for_test(capture)
         try:
-            tools.search_memory(query_keywords="diagnostic-forward", return_diagnostics=True)
-            tools.search_memory(query_keywords="diagnostic-forward")
+            tools.search_memory(query="diagnostic-forward", return_diagnostics=True)
+            tools.search_memory(query="diagnostic-forward")
         finally:
             tools._set_backend_for_test(previous)
         self.assertTrue(capture.calls[0][1]["return_diagnostics"])
@@ -1942,11 +1942,11 @@ os.environ["SALTMDB_AGENT_ID"] = "test_agent"
 from saltmdb.mcp.server import mcp
 
 async def main():
-    result = await mcp.call_tool("search_memory", {"query": "x"})
+    result = await mcp.call_tool("search_memory", {"query_keywords": "x"})
     payload = json.loads(result[0].text)
     assert payload["status"] == "rejected", payload
     assert payload["errors"][0]["code"] == "UNKNOWN_FIELD", payload
-    assert payload["errors"][0]["field"] == "query", payload
+    assert payload["errors"][0]["field"] == "query_keywords", payload
 
 asyncio.run(main())
 """

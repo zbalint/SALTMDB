@@ -33,3 +33,6 @@ INTERNAL_ERROR = "INTERNAL_ERROR"
 """An unexpected exception was caught at a tool's own top-level handler -- not a caller-input
 problem. Distinguishes an unanticipated server-side fault from every other code above, all of
 which describe an anticipated, nameable rejection reason."""
+
+NO_MATCH = "NO_MATCH"
+"""A strict search abstained because no hit passed its relevance gate."""

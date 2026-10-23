@@ -13,6 +13,8 @@ from saltmdb.mcp.server import mcp
 from saltmdb.daemon import client as daemon_client
 from saltmdb.config import is_trace_capture_enabled
 from saltmdb.daemon import protocol
+from saltmdb.utils import error_codes
+from saltmdb.utils.envelope import error, ok, rejected, warning
 
 
 logger = logging.getLogger(__name__)
@@ -568,97 +570,175 @@ def store_memory(
     )
 
 
+MAX_SEARCH_OFFSET = 1000
+
+
+def _search_cursor_offset(cursor: str | None) -> tuple[int, dict[str, Any] | None]:
+    if cursor is None:
+        return 0, None
+    match = re.fullmatch(r"offset:(0|[1-9][0-9]{0,3})", cursor)
+    if match is None:
+        return 0, rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    f"cursor must match offset:<0..{MAX_SEARCH_OFFSET}>.",
+                    "cursor",
+                )
+            ]
+        )
+    offset = int(match.group(1))
+    if offset > MAX_SEARCH_OFFSET:
+        return 0, rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    f"cursor offset must be at most {MAX_SEARCH_OFFSET}.",
+                    "cursor",
+                )
+            ]
+        )
+    return offset, None
+
+
+def _compact_search_item(
+    item: dict[str, Any],
+    detail: Literal["compact", "preview"],
+    include_related: bool,
+    mode: str | None,
+) -> dict[str, Any]:
+    compact = {
+        "memory_id": item["id"],
+        "title": item["title"],
+        "snippet": item["snippet"],
+        "score": item["score"],
+        "memory_type": item["memory_type"],
+        "is_core": item["is_core"],
+        "created_at": item["created_at"],
+    }
+    if "drift_flag" in item:
+        compact["drift_flag"] = item["drift_flag"]
+    if mode == "history" and "is_superseded" in item:
+        compact["is_superseded"] = item["is_superseded"]
+    if detail == "preview":
+        compact.update(
+            {
+                key: item[key]
+                for key in ("relevance_preview", "relevance_preview_meta", "trace_evidence_count")
+                if key in item
+            }
+        )
+    if include_related and "related_entities" in item:
+        compact["related_entities"] = item["related_entities"]
+    return compact
+
+
+def _search_service_error(raw: Any) -> str | None:
+    if isinstance(raw, dict):
+        if raw.get("error") is not None:
+            return str(raw["error"])
+        diagnostics = raw.get("diagnostics")
+        if isinstance(diagnostics, dict) and diagnostics.get("error") is not None:
+            return str(diagnostics["error"])
+    elif isinstance(raw, list):
+        if raw and isinstance(raw[0], dict) and raw[0].get("error") is not None:
+            return str(raw[0]["error"])
+    elif not isinstance(raw, (dict, list)):
+        return "Search returned an invalid result."
+    return None
+
+
+def _search_results(raw: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if isinstance(raw, dict):
+        return raw.get("results", []), raw.get("diagnostics")
+    return raw, None
+
+
+def _search_envelope(
+    raw: Any,
+    limit: int,
+    offset: int,
+    detail: Literal["compact", "preview"],
+    include_related: bool,
+    mode: str | None,
+) -> dict[str, Any]:
+    service_error = _search_service_error(raw)
+    if service_error is not None:
+        return rejected([error(error_codes.INTERNAL_ERROR, service_error)])
+    results, diagnostics = _search_results(raw)
+    items = [_compact_search_item(item, detail, include_related, mode) for item in results[:limit]]
+    has_more = len(results) > limit
+    data: dict[str, Any] = {
+        "items": items,
+        "has_more": has_more,
+        "next_cursor": f"offset:{offset + limit}" if has_more else None,
+    }
+    if diagnostics is not None:
+        data["diagnostics"] = dict(diagnostics)
+        data["diagnostics"]["result_count"] = len(items)
+    warnings = []
+    if mode == "strict" and not items:
+        warnings.append(
+            warning(
+                error_codes.NO_MATCH,
+                "mode=strict returned no hit that passed the relevance gate; retry broad mode if needed.",
+            )
+        )
+    return ok(data, warnings=warnings)
+
+
 @mcp.tool(
-    description="""Find individual memories matching a query or filters -- for locating a
-    specific record, a duplicate check before storing, or historical/exploratory search. For
-    task context assembled from matches AND their graph connections/lifecycle/conflicts in one
-    call, use retrieve_context instead: pass one or more hit ids from here as its entity_ids
-    anchor. retrieve_context performs no search of its own, so the two are complementary, not
-    redundant -- use this tool first to find/verify an anchor, then retrieve_context to expand
-    around it. Results are ranked by relevance, but the single most complete or authoritative
-    answer is not always the top hit -- it can rank 3rd-4th behind memories that only mention
-    the same keywords in passing; scan more than the first result before concluding nothing
-    useful exists.
-
-    query_keywords is the search text (omit it to browse by tags_filter/context_id/etc. alone).
-    mode controls result filtering: "broad" (default) is ordinary hybrid ranking; "strict"
-    resolves superseded matches (memories actually replaced via supersede_memory/revise_memory)
-    and abstains (returns []) rather than return a weakly-relevant result -- it does not resolve
-    which fact is current within an unstructured chronological history of events/facts (a bug
-    investigated across several attempts, for instance); "history" keeps superseded results
-    visible, labeled. tags_filter/context_id/memory_type_filter narrow the search; limit caps
-    result count (default 5); cursor pages through a larger result set (there is no separate
-    more-pages-remaining or total-count signal today -- an empty next page is your only current
-    indicator that pagination is exhausted). agent_session_id filters to memories whose *creation*
-    session matches -- a memory created earlier and only revised/touched again during that
-    session will NOT match, since there is no separate filter for most-recently-touched session;
-    don't rely on this parameter alone to reconstruct everything a session worked on. is_core
-    restricts to the small, always-active core
-    tier (a scarce bootstrap-delivery mechanism, capped at a handful of entries) -- most durable
-    rules, preferences, and exceptions are deliberately NOT core, so a missing is_core=True hit
-    is not evidence that no rule or exception exists; omit is_core (or pass False) when checking
-    whether a rule has an exception, and rely on an unfiltered search instead.
-
-    Returns a bare list of memory dicts -- NOT the `{"status": ..., "data": ...}` envelope shape
-    other SALTMDB tools use; each list item has its own fields (id, title, score, snippet, etc.)
-    directly at the top level. An internal fault returns a one-item list `[{"error": "..."}]`
-    rather than raising -- check for an `"id"` key's absence to detect this rare case, since it is
-    the one property that reliably distinguishes it from every real result item.
-
-    A result item may carry `relevance_preview`/`relevance_preview_meta` (a hint for whether to
-    call get_memory, never a substitute for it -- absence of a detail from the preview is not
-    evidence it's absent from the memory) or `drift_flag` (advisory only, re-verify the citation
-    yourself rather than trusting either the flag or the original claim).
-
-    return_diagnostics=True changes the return shape from a list of results to
-    `{"results": [...], "diagnostics": {...}}`; when omitted or false, the default return
-    shape is unchanged. `diagnostics["candidates"]` carries the per-candidate evidence fields
-    (`entity_id`, `provenance`, `rrf_score`, `in_fts`, `in_fts_and`, `in_fts_or_only`, `fts_rank`,
-    `fts_bm25`, `in_semantic`, `semantic_rank`, `semantic_distance`, `dual_channel`, `topic_score`,
-    `semantic_verdict`, `is_resolved_head`, `predecessor_grounded`, `cross_encoder_score`,
-    `pool_rank`, and `final_rank`), capped at 50 records; `candidate_pool_size` reports the
-    uncapped pool count. These records contain ids and numbers only, never memory text; use
-    get_memory for content. `final_rank` is absolute across the full ordered pool, and `None`
-    means the candidate was dropped after ranking.
-    When chunk or retrieval-text candidate channels are enabled, `rrf_score` includes channels
-    not represented by `fts_rank` and `semantic_rank`, so those ranks alone cannot reproduce it.
-    Use this opt-in flag to investigate ranking, not for ordinary retrieval.
-    """
+    description="""Use this to find memories by text or filters; use get_memory when you already
+have an id and retrieve_context to expand around hits. The query is optional for browsing, and
+mode accepts broad (default), strict (abstention on weak matches), or history (superseded hits
+labelled). Results are relevance-ranked, and the best answer may not be first. is_core filters
+the scarce bootstrap tier, so a missing core hit is not evidence that no rule exists.
+agent_session_id matches the creation session only. limit, has_more, and next_cursor page results;
+compact items contain memory_id, title, snippet, score, memory_type, is_core, created_at and
+optional drift_flag/is_superseded. detail='preview' adds relevance_preview,
+relevance_preview_meta and trace_evidence_count; include_related adds related_entities, and
+diagnostics are opt-in. Results after the first 10 are not cross-encoder reranked. Each page
+requests limit+1; while offset+limit+1 is within the 20-candidate window, its first limit items
+match a plain limit request, while wider windows may reorder candidates as documented by the
+search service.""",
 )
 def search_memory(
-    query_keywords: str | None = None,
-    limit: int | None = None,
+    query: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=50)] = 5,
     cursor: str | None = None,
     context_id: str | None = None,
     agent_session_id: str | None = None,
-    tags_filter: list[str] | None = None,
+    tags_filter: Annotated[list[str], Field(max_length=20)] | None = None,
     memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"]
     | None = None,
     is_core: bool | None = None,
-    include_related: bool | None = None,
+    include_related: bool = False,
     mode: Literal["strict", "broad", "history"] | None = None,
-    return_diagnostics: bool | None = None,
-) -> Any:
-    agent_id_ = _effective_agent_id()
+    detail: Literal["compact", "preview"] = "compact",
+    return_diagnostics: bool = False,
+) -> dict:
+    offset, cursor_error = _search_cursor_offset(cursor)
+    if cursor_error is not None:
+        return cursor_error
     tags_filter_ = _normalize_list_or_str(tags_filter) if tags_filter else None
-
-    return _backend_or_raise().call(
+    raw = _backend_or_raise().call(
         "search_memory",
         {
-            "agent_id": agent_id_,
-            "query_keywords": query_keywords,
+            "agent_id": _effective_agent_id(),
+            "query_keywords": query,
             "tags_filter": tags_filter_,
-            "limit": limit if limit is not None else 5,
+            "limit": limit + 1,
             "context_id": context_id,
             "agent_session_id": agent_session_id,
             "is_core": is_core,
             "memory_type_filter": memory_type_filter,
             "cursor": cursor,
             "mode": mode if mode is not None else "broad",
-            "include_related": include_related if include_related is not None else True,
-            "return_diagnostics": return_diagnostics if return_diagnostics is not None else False,
+            "include_related": include_related,
+            "return_diagnostics": return_diagnostics,
         },
     )
+    return _search_envelope(raw, limit, offset, detail, include_related, mode)
 
 
 @mcp.tool()

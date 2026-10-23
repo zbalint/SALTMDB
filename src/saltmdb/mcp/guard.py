@@ -17,6 +17,14 @@ from saltmdb.utils.envelope import error, rejected
 
 logger = logging.getLogger(__name__)
 
+RENAMED_FIELDS: dict[str, dict[str, str]] = {
+    "search_memory": {"query_keywords": "query"},
+    "revise_memory": {"entity_id": "memory_id"},
+    "supersede_memory": {"entity_id": "memory_id"},
+    "review_core_memory": {"entity_id": "memory_id"},
+}
+
+
 REMOVED_TOOLS: dict[str, str] = {}
 
 
@@ -81,18 +89,22 @@ class GuardedFastMCP(FastMCP):
         self, name: str, schema: MCPTool, submitted: dict[str, Any], properties: list[str]
     ) -> Any:
         tool_func = getattr(importlib.import_module("saltmdb.mcp.tools"), name)
-        corrected = build_corrected_call(tool_func, submitted, {})
+        renamed = RENAMED_FIELDS.get(name, {})
+        fixes = {
+            new: submitted[old]
+            for old, new in renamed.items()
+            if old in submitted and new not in submitted
+        }
+        corrected = build_corrected_call(tool_func, submitted, fixes)
         valid_fields = ", ".join(properties)
-        errors = [
-            error(
-                "UNKNOWN_FIELD",
-                f"Unknown field '{key}'; valid fields: {valid_fields}.",
-                key,
-                corrected_call=corrected,
-            )
-            for key in submitted
-            if key not in properties
-        ]
+        errors = []
+        for key in submitted:
+            if key in properties:
+                continue
+            message = f"Unknown field '{key}'; valid fields: {valid_fields}."
+            if key in renamed:
+                message += f" It was renamed to '{renamed[key]}'."
+            errors.append(error("UNKNOWN_FIELD", message, key, corrected_call=corrected))
         return self._result(rejected(errors), schema)
 
     def _validation_result(self, schema: MCPTool, cause: ValidationError) -> Any:

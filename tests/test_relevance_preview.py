@@ -109,10 +109,14 @@ class TestRelevancePreviewMCP(unittest.TestCase):
             patch.object(embedding_service, "embed_query_texts", return_value=[_axis_vector(0)]),
         ):
             results = tools.search_memory(
-                query_keywords="preview needle", limit=5, mode="broad", include_related=False
+                query="preview needle",
+                limit=5,
+                mode="broad",
+                include_related=False,
+                detail="preview",
             )
 
-        results_by_id = {item["id"]: item for item in results}
+        results_by_id = {item["memory_id"]: item for item in results["data"]["items"]}
         self.assertIn(long_id, results_by_id)
         self.assertIn(short_id, results_by_id)
         expected_meta = {
@@ -142,9 +146,9 @@ class TestRelevancePreviewMCP(unittest.TestCase):
 
         results = tools.search_memory(tags_filter=["#preview-browse"], limit=5)
 
-        results_by_id = {item["id"]: item for item in results}
+        results_by_id = {item["memory_id"]: item for item in results["data"]["items"]}
         self.assertIn(entity_id, results_by_id)
-        for item in results:
+        for item in results["data"]["items"]:
             self.assertNotIn("relevance_preview", item)
             self.assertNotIn("relevance_preview_meta", item)
 

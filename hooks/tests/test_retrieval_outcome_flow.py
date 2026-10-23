@@ -228,3 +228,49 @@ def test_sessions_do_not_share_pending_state(tmp_path):
         "saltmdb-stop-retrieval-outcome-gate", {"session_id": "sess-d2"}, home=tmp_path
     )
     assert other_session_result == {}
+
+
+def test_strict_no_match_warning_nudges_across_envelope(tmp_path):
+    result = _run_hook(
+        "saltmdb-post-tool-response-nudges",
+        {
+            "tool_name": "mcp__saltmdb__search_memory",
+            "session_id": "sess-no-match",
+            "tool_input": {"query": "missing", "mode": "strict"},
+            "tool_response": {
+                "status": "ok",
+                "data": {"items": [], "has_more": False, "next_cursor": None},
+                "warnings": [{"code": "NO_MATCH"}],
+            },
+        },
+        home=tmp_path,
+    )
+    assert 'search_memory(mode="strict") returned []' in result["systemMessage"]
+
+
+def test_strict_without_no_match_does_not_nudge(tmp_path):
+    result = _run_hook(
+        "saltmdb-post-tool-response-nudges",
+        {
+            "tool_name": "mcp__saltmdb__search_memory",
+            "session_id": "sess-no-warning",
+            "tool_input": {"query": "missing", "mode": "strict"},
+            "tool_response": {"status": "ok", "data": {"items": []}},
+        },
+        home=tmp_path,
+    )
+    assert result == {}
+
+
+def test_no_match_without_strict_does_not_nudge(tmp_path):
+    result = _run_hook(
+        "saltmdb-post-tool-response-nudges",
+        {
+            "tool_name": "mcp__saltmdb__search_memory",
+            "session_id": "sess-broad-warning",
+            "tool_input": {"query": "missing", "mode": "broad"},
+            "tool_response": {"warnings": [{"code": "NO_MATCH"}]},
+        },
+        home=tmp_path,
+    )
+    assert result == {}

@@ -94,7 +94,7 @@ class TestRpcBackendIdentityWiring(unittest.TestCase):
         capture = unittest.mock.Mock()
         previous = mcp_tools._set_backend_for_test(capture)
         try:
-            mcp_tools.search_memory(query_keywords="probe")
+            mcp_tools.search_memory(query="probe")
         finally:
             mcp_tools._set_backend_for_test(previous)
         self.assertEqual(capture.call.call_args.args[1]["agent_id"], "claude")

@@ -53,7 +53,6 @@ STORE_MEMORY_PATTERN = "store_memory"
 # ~88% of calls in practice (see memory 3929f211-fd5c-4682-801f-1761d7fac1b9).
 DUPLICATE_FALLBACK_PATTERN = re.compile(r'"duplicate_candidates"\s*:\s*\[\s*\{')
 NEAR_DUPLICATE_PATTERN = re.compile(r'"NEAR_DUPLICATE"')
-EMPTY_RESULT_PATTERN = re.compile(r'"result"\s*:\s*\[\]\s*[,}]')
 
 
 def emit_nudge(reason: str) -> None:
@@ -150,11 +149,7 @@ def handle_search_memory(data: dict, resp_text: str, session_id: str) -> None:
     write_count(search_memory_called_flag_path(session_id), 1)
 
     input_text = json.dumps(data)
-    if (
-        '"mode"' in input_text
-        and '"strict"' in input_text
-        and EMPTY_RESULT_PATTERN.search(resp_text)
-    ):
+    if '"mode"' in input_text and '"strict"' in input_text and "NO_MATCH" in resp_text:
         emit_nudge(
             'SALTMDB nudge: search_memory(mode="strict") returned []. This is a valid '
             "abstention, not an error -- but before treating this as 'nothing exists', consider "

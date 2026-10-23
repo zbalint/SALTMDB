@@ -1179,7 +1179,7 @@ def _base_search_item(r, offset, limit):
         eweight,
         eis_core,
         score,
-        _created,
+        created,
         _updated,
         _owner,
         _scope,
@@ -1204,6 +1204,7 @@ def _base_search_item(r, offset, limit):
         "weight": eweight,
         "is_core": bool(eis_core),
         "memory_type": ememory_type,
+        "created_at": created,
         "cursor": f"offset:{offset + limit}",
     }
     return item, drift_flag, eid

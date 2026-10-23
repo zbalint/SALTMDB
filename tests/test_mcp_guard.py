@@ -33,7 +33,6 @@ _SKIP_REASONS = {
         "search_tags": "Every published parameter accepts null.",
         "list_predicates": "Every published parameter accepts null.",
         "merge_tags": "Every published parameter accepts null.",
-        "search_memory": "Every published parameter accepts null.",
         "search_traces": "Every published parameter accepts null.",
         "retrieve_context": "Every published parameter accepts null.",
     },
@@ -128,9 +127,9 @@ class TestMCPGuard(unittest.IsolatedAsyncioTestCase):
             [(item["code"], item["field"]) for item in result["errors"]],
             [("VALIDATION_ERROR", "title"), ("VALIDATION_ERROR", "tags")],
         )
-        wrong_type = await mcp_contract.call("search_memory", {"query_keywords": ["wrong"]})
+        wrong_type = await mcp_contract.call("search_memory", {"query": ["wrong"]})
         self.assertEqual(wrong_type["errors"][0]["code"], "VALIDATION_ERROR")
-        self.assertEqual(wrong_type["errors"][0]["field"], "query_keywords")
+        self.assertEqual(wrong_type["errors"][0]["field"], "query")
 
     async def test_missing_required_field_is_rejected(self):
         result = await mcp_contract.call("store_memory", {})
