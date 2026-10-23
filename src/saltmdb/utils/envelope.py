@@ -77,6 +77,11 @@ def rejected(
     return envelope
 
 
+def internal_error() -> dict[str, Any]:
+    """Build the fixed rejection for an unexpected fault: no detail reaches the caller."""
+    return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+
+
 def is_rejected(envelope: dict[str, Any]) -> bool:
     return isinstance(envelope, dict) and envelope.get("status") == "rejected"
 

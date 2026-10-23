@@ -15,7 +15,7 @@ from saltmdb.config import MEMORY_REF_MAX_CHARS, is_trace_capture_enabled
 from saltmdb.mcp.public_shapes import context_data, lineage_data, memory_record, related_data
 from saltmdb.daemon import protocol
 from saltmdb.utils import error_codes
-from saltmdb.utils.envelope import error, ok, rejected, warning
+from saltmdb.utils.envelope import error, internal_error, ok, rejected, warning
 
 
 logger = logging.getLogger(__name__)
@@ -1340,10 +1340,10 @@ def get_memories(
     if isinstance(result, dict):
         return result
     if not isinstance(result, list):
-        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+        return internal_error()
     items = [_map_batch_read_result(item) for item in result]
     if any(item["outcome"] == "internal_error" for item in items):
-        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+        return internal_error()
     return ok({"items": items})
 
 
@@ -1749,7 +1749,7 @@ def retrieve_context(
         },
     )
     if not isinstance(result, dict):
-        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+        return internal_error()
     if "status" not in result:
         return ok(context_data(result))
     if result.get("status") == "rejected":

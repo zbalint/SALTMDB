@@ -13,7 +13,7 @@ from mcp.types import TextContent, Tool as MCPTool
 from pydantic import ValidationError
 
 from saltmdb.utils.corrected_call import build_corrected_call
-from saltmdb.utils.envelope import error, rejected
+from saltmdb.utils.envelope import error, internal_error, rejected
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class GuardedFastMCP(FastMCP):
 
     @staticmethod
     def _safe_internal_error() -> ToolError:
-        envelope = rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+        envelope = internal_error()
         return ToolError(json.dumps(envelope))
 
     def _unknown_tool(self, name: str, schemas: dict[str, MCPTool]) -> Any:
