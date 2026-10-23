@@ -100,3 +100,10 @@ D9. The BL-071 row is closed with the commit; the BL-058 row keeps its note that
 ## 9. Acceptance
 
 All commands from section 6 exit 0; the new tests are red on the old code where the behaviour is new (`set_core_memory` does not exist; the `review_core_memory` schema test) and are contract tests where noted (identical-repeat no-op follows from step 6 and has no old counterpart); a mutation table (mutant to killing repo test) for the section 4 sample; the complexity and parameter-count numbers; `git status --short` shows only the files of section 3.
+
+## Amendment 1 (2026-10-23)
+
+Found by the developer's full `./verify` (three failures) and verified by the architect against the tree.
+
+1. D7 omitted two tests that hard-code the number of published tools. Adding `set_core_memory` makes it 25, so the assertion and its comment change from 24 to 25 in exactly these places: `tests/test_phase3_mcp_surface.py` (`test_tool_count_and_registration`, lines 36 to 44) and `tests/test_phase4_mcp_surface.py` (`test_lifecycle_tools_are_typed_and_old_name_is_not_public`, around line 43). Those two files are added to the scope of section 3 for that edit only (the S4b edits to the same lines come later: `inspect_memory` out, `get_memories` in).
+2. `tests/test_phase3_mcp_surface.py::test_protocol_classifies_api_ergonomics_gap_tools_correctly` failed because the developer's `dispatch.py` edit REPLACED `"update_memory_metadata"` with `"set_core_memory"` in `MUTATING_TOOLS` instead of adding the new name. That is a regression in the diff, not a pre-existing failure or a spec conflict: `MUTATING_TOOLS` must keep every entry it has and gain `"set_core_memory"`. Acceptance gains a check: `git diff src/saltmdb/daemon/dispatch.py` shows no removed entry in `MUTATING_TOOLS`, `DISPATCH_TABLE` or `WRITE_TOOLS`.
