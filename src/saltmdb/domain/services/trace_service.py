@@ -463,7 +463,7 @@ def search_traces(
             warnings.append(
                 warning(
                     "TRACE_SEARCH_NOT_YET_SEMANTIC",
-                    "query_keywords is accepted but has no ranking effect in Phase 1.",
+                    "query is accepted but has no ranking effect in Phase 1.",
                 )
             )
         return ok(

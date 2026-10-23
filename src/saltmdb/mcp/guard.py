@@ -29,11 +29,34 @@ RENAMED_FIELDS: dict[str, dict[str, str]] = {
         "include_inspect": "include_summary",
     },
     "retrieve_context": {"entity_ids": "memory_ids"},
+    "search_traces": {"query_keywords": "query", "entity_id": "memory_id"},
+    "get_events": {"offset": "cursor"},
 }
+
+
+def _offset_cursor(value: Any) -> str | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10000:
+        return f"offset:{value}"
+    return None
+
+
+RENAMED_VALUE_CONVERTERS = {("get_events", "offset"): _offset_cursor}
 
 REMOVED_TOOLS: dict[str, str] = {
     "inspect_memory": 'inspect_memory was merged into get_memory(memory_id, detail="summary").',
 }
+
+
+def _rename_fixes(name: str, submitted: dict[str, Any]) -> dict[str, Any]:
+    fixes = {}
+    for old, new in RENAMED_FIELDS.get(name, {}).items():
+        if old not in submitted or new in submitted:
+            continue
+        converter = RENAMED_VALUE_CONVERTERS.get((name, old))
+        value = converter(submitted[old]) if converter is not None else submitted[old]
+        if value is not None:
+            fixes[new] = value
+    return fixes
 
 
 class GuardedFastMCP(FastMCP):
@@ -98,11 +121,7 @@ class GuardedFastMCP(FastMCP):
     ) -> Any:
         tool_func = getattr(importlib.import_module("saltmdb.mcp.tools"), name)
         renamed = RENAMED_FIELDS.get(name, {})
-        fixes = {
-            new: submitted[old]
-            for old, new in renamed.items()
-            if old in submitted and new not in submitted
-        }
+        fixes = _rename_fixes(name, submitted)
         corrected = build_corrected_call(tool_func, submitted, fixes)
         valid_fields = ", ".join(properties)
         errors = []

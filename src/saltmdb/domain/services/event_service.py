@@ -179,7 +179,7 @@ def get_recent_events(
             SELECT id, timestamp, agent_id, type, content, error_code, agent_session_id, context_id
             FROM events
             {where_sql}
-            ORDER BY timestamp {direction}
+            ORDER BY timestamp {direction}, rowid {direction}
             LIMIT ? OFFSET ?
         """,
             params + [limit, offset],

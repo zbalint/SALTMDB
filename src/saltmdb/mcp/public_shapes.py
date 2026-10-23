@@ -148,3 +148,42 @@ def context_data(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(result.get("conflict_sets"), list):
         result["conflict_sets"] = [_context_conflict_set(item) for item in result["conflict_sets"]]
     return result
+
+
+def trace_preview(item: dict[str, Any]) -> dict[str, Any]:
+    """Convert a trace preview without mutating the service result."""
+    result = dict(item)
+    if "linked_entity_ids" in result:
+        result["linked_memory_ids"] = result.pop("linked_entity_ids")
+    return result
+
+
+def trace_record(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert a complete trace record and nested links without mutating input."""
+    result = dict(data)
+    if "id" in result:
+        result["trace_id"] = result.pop("id")
+    links = result.get("trace_memory_links")
+    if isinstance(links, list):
+        converted = []
+        for link in links:
+            if isinstance(link, dict):
+                item = dict(link)
+                if "entity_id" in item:
+                    item["memory_id"] = item.pop("entity_id")
+                converted.append(item)
+            else:
+                converted.append(link)
+        result["trace_memory_links"] = converted
+    return result
+
+
+def page(rows: list[Any], limit: int, offset: int) -> dict[str, Any]:
+    """Build the uniform list payload from a bounded lookahead result."""
+    items = list(rows[:limit])
+    has_more = len(rows) > limit
+    return {
+        "items": items,
+        "has_more": has_more,
+        "next_cursor": f"offset:{offset + limit}" if has_more else None,
+    }

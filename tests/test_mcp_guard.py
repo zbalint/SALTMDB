@@ -28,10 +28,7 @@ _SKIP_REASONS = {
     },
     "typed": {},
     "nullable": {
-        "search_tags": "Every published parameter accepts null.",
-        "list_predicates": "Every published parameter accepts null.",
         "merge_tags": "Every published parameter accepts null.",
-        "search_traces": "Every published parameter accepts null.",
     },
 }
 

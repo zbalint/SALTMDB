@@ -33,8 +33,8 @@ from saltmdb.domain.services.memory_service import Provenance, CoreDeclaration
 from typing import Any, Literal
 
 from saltmdb.utils import error_codes
-
 from saltmdb.utils.envelope import error, rejected
+from saltmdb.utils.pagination import cursor_offset
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +62,29 @@ def _optional_bool(kw: dict[str, Any], key: str, default: bool) -> bool:
     return value
 
 
-def _optional_int(kw: dict[str, Any], key: str, default: int) -> int:
+def _optional_int(
+    kw: dict[str, Any],
+    key: str,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     value = kw.get(key)
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
         raise _DispatchValidationError(
             rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be an integer", key)])
+        )
+    if minimum is not None and value < minimum:
+        raise _DispatchValidationError(
+            rejected(
+                [error(error_codes.VALIDATION_ERROR, f"{key} must be at least {minimum}", key)]
+            )
+        )
+    if maximum is not None and value > maximum:
+        raise _DispatchValidationError(
+            rejected([error(error_codes.VALIDATION_ERROR, f"{key} must be at most {maximum}", key)])
         )
     return value
 
@@ -806,6 +822,11 @@ def _dispatch_get_related_memories(**kw):
 
 
 def _dispatch_get_events(**kw):
+    try:
+        limit = _optional_int(kw, "limit", 20, 1, 101)
+        offset = _optional_int(kw, "offset", 0, 0, 10000)
+    except _DispatchValidationError as exc:
+        return exc.payload
     return event_service.get_recent_events(
         context_id=kw.get("context_id"),
         agent_id=kw.get("agent_id"),
@@ -813,9 +834,47 @@ def _dispatch_get_events(**kw):
         agent_session_id=kw.get("agent_session_id"),
         event_id=kw.get("event_id"),
         order=kw.get("order") or "newest_first",
-        limit=kw.get("limit") or 20,
-        offset=kw.get("offset") or 0,
+        limit=limit,
+        offset=offset,
         full_content=bool(kw.get("full_content")),
+    )
+
+
+def _dispatch_search_tags(**kw):
+    try:
+        limit = _optional_int(kw, "limit", 50, 1, 101)
+        offset = _optional_int(kw, "offset", 0, 0, 10000)
+    except _DispatchValidationError as exc:
+        return exc.payload
+    return memory_service.search_tags(domain=kw.get("domain"), limit=limit, offset=offset)
+
+
+def _dispatch_list_predicates(**kw):
+    try:
+        limit = _optional_int(kw, "limit", 50, 1, 101)
+        offset = _optional_int(kw, "offset", 0, 0, 10000)
+    except _DispatchValidationError as exc:
+        return exc.payload
+    return relation_service.list_predicates(query=kw.get("query"), limit=limit, offset=offset)
+
+
+def _dispatch_search_traces(**kw):
+    try:
+        limit = _optional_int(kw, "limit", 5, 1, 51)
+        _, cursor_error = cursor_offset(kw.get("cursor"), 10000)
+        if cursor_error is not None:
+            raise _DispatchValidationError(
+                rejected([error(error_codes.VALIDATION_ERROR, cursor_error, "cursor")])
+            )
+    except _DispatchValidationError as exc:
+        return exc.payload
+    return trace_service.search_traces(
+        agent_session_id=kw.get("agent_session_id"),
+        entity_id=kw.get("entity_id"),
+        query_keywords=kw.get("query_keywords"),
+        limit=limit,
+        cursor=kw.get("cursor"),
+        coordinator=kw.get("coordinator"),
     )
 
 
@@ -871,8 +930,8 @@ def _dispatch_retrieve_context(**kw):
 DISPATCH_TABLE = {
     # One-liners
     "log_event": lambda **kw: event_service.log_event(**kw),
-    "search_tags": lambda **kw: memory_service.search_tags(**kw),
-    "list_predicates": lambda **kw: relation_service.list_predicates(**kw),
+    "search_tags": _dispatch_search_tags,
+    "list_predicates": _dispatch_list_predicates,
     "merge_tags": lambda **kw: librarian_service.merge_tags(**kw),
     # Multi-branch
     "store_memory": _dispatch_store_memory,
@@ -897,7 +956,7 @@ DISPATCH_TABLE = {
     "capture_trace_start": lambda **kw: trace_service.capture_trace_start(**kw),
     "capture_trace_memory_link": lambda **kw: trace_service.capture_trace_memory_link(**kw),
     "capture_trace_complete": lambda **kw: trace_service.capture_trace_complete(**kw),
-    "search_traces": lambda **kw: trace_service.search_traces(**kw),
+    "search_traces": _dispatch_search_traces,
     "get_trace": lambda **kw: trace_service.get_trace(**kw),
 }
 

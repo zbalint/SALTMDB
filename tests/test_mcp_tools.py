@@ -283,10 +283,10 @@ class TestMCPToolsWrapper(unittest.TestCase):
             content="Event mode test",
             context_id="ctx_get_events_modes_test",
         )
-        events = tools.get_events(agent_id="test_agent")
+        events = tools.get_events(agent_id="test_agent")["data"]["items"]
         self.assertTrue(len(events) > 0)
 
-        context_events = tools.get_events(context_id="ctx_get_events_modes_test")
+        context_events = tools.get_events(context_id="ctx_get_events_modes_test")["data"]["items"]
         self.assertTrue(len(context_events) > 0)
         self.assertTrue(all(e["context_id"] == "ctx_get_events_modes_test" for e in context_events))
 
@@ -298,7 +298,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         tags = tools.search_tags(query="data")
         self.assertEqual(tags["status"], "ok")
-        self.assertIsInstance(tags["data"], list)
+        self.assertIsInstance(tags["data"]["items"], list)
 
     def _tag_count_for_entity(self, entity_id):
         return self.conn.execute(
@@ -429,7 +429,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(inv_res["data"]["items"][0]["action"], "invalidate")
 
     def test_list_predicates_tool(self):
-        results = tools.list_predicates(query="elaborates")["data"]
+        results = tools.list_predicates(query="elaborates")["data"]["items"]
         names = {r["name"] for r in results}
         self.assertIn("elaborates_on", names)
 
@@ -441,7 +441,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.list_predicates(limit=3)["data"]
+        results = tools.list_predicates(limit=3)["data"]["items"]
         self.assertEqual(len(results), 3)
 
     def test_search_tags_respects_explicit_limit_kwarg(self):
@@ -452,38 +452,20 @@ class TestMCPToolsWrapper(unittest.TestCase):
             )
         self.conn.commit()
 
-        results = tools.search_tags(limit=3)["data"]
+        results = tools.search_tags(limit=3)["data"]["items"]
         self.assertEqual(len(results), 3)
 
-    def test_list_predicates_explicit_zero_limit_is_respected_not_defaulted(self):
-        for i in range(5):
-            self.conn.execute(
-                "INSERT INTO predicates (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (f"zero-limit-pred-{i}", f"zero_limit_predicate_{i}", f"zero_limit_predicate_{i}"),
-            )
-        self.conn.commit()
+    def test_list_predicates_explicit_zero_limit_is_rejected(self):
+        result = tools.list_predicates(limit=0)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertEqual(result["errors"][0]["field"], "limit")
 
-        results = tools.list_predicates(limit=0)["data"]
-        self.assertEqual(
-            len(results),
-            0,
-            "an explicit limit=0 must be honored (LIMIT 0), not silently replaced by the default 50",
-        )
-
-    def test_search_tags_explicit_zero_limit_is_respected_not_defaulted(self):
-        for i in range(5):
-            self.conn.execute(
-                "INSERT INTO tags (id, name, normalized_name, canonical_id) VALUES (?, ?, ?, NULL)",
-                (f"zero-limit-tag-{i}", f"#zero_limit_tag_{i}", f"zerolimittag{i}"),
-            )
-        self.conn.commit()
-
-        results = tools.search_tags(limit=0)["data"]
-        self.assertEqual(
-            len(results),
-            0,
-            "an explicit limit=0 must be honored (LIMIT 0), not silently replaced by the default 50",
-        )
+    def test_search_tags_explicit_zero_limit_is_rejected(self):
+        result = tools.search_tags(limit=0)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
+        self.assertEqual(result["errors"][0]["field"], "limit")
 
     def test_manage_relation_predicate_canonicalization(self):
         res1 = tools.store_memory(
@@ -1150,24 +1132,20 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
 
     def test_get_events_pagination(self):
-        # Phase 6 (plan §5.7): get_events collapsed to one unconditional SELECT ... LIMIT ?
-        # OFFSET ? -- no more status_filter/dismiss-driven pagination semantics (dismiss_event
-        # itself was removed this phase). Extracted from the old
-        # test_get_events_pagination_and_filtering, keeping only the plain limit/offset
-        # assertion that is still meaningful under the new contract.
         for _ in range(5):
             tools.log_event(
                 event_type="consolidation_request",
                 content="{}",
             )
 
-        page1 = tools.get_events(agent_id="test_agent", limit=2, offset=0)
-        self.assertEqual(len(page1), 2)
-
-        page2 = tools.get_events(agent_id="test_agent", limit=2, offset=2)
-        self.assertEqual(len(page2), 2)
-
-        self.assertNotEqual(page1[0]["id"], page2[0]["id"])
+        page1 = tools.get_events(agent_id="test_agent", limit=2)
+        self.assertEqual(len(page1["data"]["items"]), 2)
+        self.assertTrue(page1["data"]["has_more"])
+        page2 = tools.get_events(
+            agent_id="test_agent", limit=2, cursor=page1["data"]["next_cursor"]
+        )
+        self.assertEqual(len(page2["data"]["items"]), 2)
+        self.assertNotEqual(page1["data"]["items"][0]["id"], page2["data"]["items"][0]["id"])
 
     def test_mcp_tool_count_regression_guard(self):
         registered_count = len(tools.mcp._tool_manager._tools)
@@ -2506,19 +2484,17 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         tools.log_event(event_type="issue", content="ctx A event", context_id="ctx_A")
         tools.log_event(event_type="issue", content="ctx B event", context_id="ctx_B")
 
-        events = tools.get_events(context_id="ctx_A")
+        events = tools.get_events(context_id="ctx_A")["data"]["items"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["context_id"], "ctx_A")
 
     def test_agent_id_filters_correctly(self):
         tools.log_event(event_type="issue", content="agent one event")
-        # Owner identity is startup configuration (immutable for the adapter process) -- reset
-        # between calls attributed to a different agent, exactly like starting a new MCP process.
         SESSION_IDENTITY.reset()
         SESSION_IDENTITY.configure_agent_id("agent_two")
         tools.log_event(event_type="issue", content="agent two event")
 
-        events = tools.get_events(agent_id="test_agent")
+        events = tools.get_events(agent_id="test_agent")["data"]["items"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["agent_id"], "test_agent")
 
@@ -2526,7 +2502,7 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         tools.log_event(event_type="issue", content="an issue")
         tools.log_event(event_type="decision", content="a decision")
 
-        events = tools.get_events(agent_id="test_agent", event_type="decision")
+        events = tools.get_events(agent_id="test_agent", event_type="decision")["data"]["items"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "decision")
 
@@ -2541,7 +2517,7 @@ class TestGetEventsEndToEnd(unittest.TestCase):
             db_connection=self.conn,
         )
 
-        events = tools.get_events(agent_session_id=session_id)
+        events = tools.get_events(agent_session_id=session_id)["data"]["items"]
         self.assertTrue(len(events) >= 1)
         self.assertTrue(all(e["agent_session_id"] == session_id for e in events))
 
@@ -2550,23 +2526,35 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         tools.log_event(event_type="issue", content="second")
         tools.log_event(event_type="issue", content="third")
 
-        newest_first = tools.get_events(agent_id="test_agent", order="newest_first")
-        oldest_first = tools.get_events(agent_id="test_agent", order="oldest_first")
+        newest_first = tools.get_events(agent_id="test_agent", order="newest_first")["data"][
+            "items"
+        ]
+        oldest_first = tools.get_events(agent_id="test_agent", order="oldest_first")["data"][
+            "items"
+        ]
 
         self.assertEqual(len(newest_first), 3)
         self.assertEqual(len(oldest_first), 3)
         self.assertEqual(list(reversed(newest_first)), oldest_first)
         self.assertNotEqual([e["id"] for e in newest_first], [e["id"] for e in oldest_first])
 
-    def test_limit_and_offset_paginate_correctly(self):
+    def test_limit_and_cursor_paginate_correctly(self):
         for i in range(5):
             tools.log_event(event_type="issue", content=f"paged {i}")
 
-        page1 = tools.get_events(agent_id="test_agent", order="oldest_first", limit=2, offset=0)
-        page2 = tools.get_events(agent_id="test_agent", order="oldest_first", limit=2, offset=2)
-        self.assertEqual(len(page1), 2)
-        self.assertEqual(len(page2), 2)
-        self.assertNotEqual([e["id"] for e in page1], [e["id"] for e in page2])
+        page1 = tools.get_events(agent_id="test_agent", order="oldest_first", limit=2)
+        page2 = tools.get_events(
+            agent_id="test_agent",
+            order="oldest_first",
+            limit=2,
+            cursor=page1["data"]["next_cursor"],
+        )
+        self.assertEqual(len(page1["data"]["items"]), 2)
+        self.assertEqual(len(page2["data"]["items"]), 2)
+        self.assertNotEqual(
+            [e["id"] for e in page1["data"]["items"]],
+            [e["id"] for e in page2["data"]["items"]],
+        )
 
     def test_removed_kwargs_raise_type_error(self):
         for bad_kwargs in (
@@ -2580,21 +2568,19 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         long_content = "x" * 1500
         tools.log_event(event_type="issue", content=long_content)
 
-        truncated = tools.get_events(agent_id="test_agent")
+        truncated = tools.get_events(agent_id="test_agent")["data"]["items"]
         self.assertTrue(truncated[0]["content"].endswith("[TRUNCATED]"))
         self.assertEqual(len(truncated[0]["content"]), len("x" * 1000 + " [TRUNCATED]"))
 
-        full = tools.get_events(agent_id="test_agent", full_content=True)
+        full = tools.get_events(agent_id="test_agent", full_content=True)["data"]["items"]
         self.assertEqual(full[0]["content"], long_content)
         self.assertNotIn("[TRUNCATED]", full[0]["content"])
 
     def test_default_still_truncates_long_content(self):
-        # Regression guard: adding full_content/event_id must not change the existing default
-        # (full_content omitted) truncation behavior for ordinary list calls.
         long_content = "y" * 2000
         tools.log_event(event_type="issue", content=long_content)
 
-        events = tools.get_events(agent_id="test_agent")
+        events = tools.get_events(agent_id="test_agent")["data"]["items"]
         self.assertTrue(events[0]["content"].endswith("[TRUNCATED]"))
         self.assertLess(len(events[0]["content"]), len(long_content))
 
@@ -2603,11 +2589,10 @@ class TestGetEventsEndToEnd(unittest.TestCase):
         tools.log_event(event_type="issue", content=long_content)
         tools.log_event(event_type="issue", content="short other event")
 
-        # Discover the long event's id the way a real caller would: from a truncated list result.
-        listed = tools.get_events(agent_id="test_agent", event_type="issue")
+        listed = tools.get_events(agent_id="test_agent", event_type="issue")["data"]["items"]
         target_id = next(e["id"] for e in listed if e["content"].endswith("[TRUNCATED]"))
 
-        matched = tools.get_events(event_id=target_id)
+        matched = tools.get_events(event_id=target_id)["data"]["items"]
         self.assertEqual(len(matched), 1)
         self.assertEqual(matched[0]["id"], target_id)
         self.assertEqual(matched[0]["content"], long_content)
@@ -2616,7 +2601,7 @@ class TestGetEventsEndToEnd(unittest.TestCase):
     def test_event_id_filter_no_match_returns_empty_list(self):
         tools.log_event(event_type="issue", content="irrelevant")
         matched = tools.get_events(event_id="00000000-0000-0000-0000-000000000000")
-        self.assertEqual(matched, [])
+        self.assertEqual(matched["data"], {"items": [], "has_more": False, "next_cursor": None})
 
 
 class TestLogEventEndToEnd(unittest.TestCase):

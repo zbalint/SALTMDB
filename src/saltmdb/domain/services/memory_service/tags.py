@@ -215,7 +215,11 @@ def resolve_or_create_tag(conn, tag_name: str, agent_id: str = None) -> str | No
 
 # NOTE: this 'domain' param is a tag-name substring filter, unrelated to the entities table.
 def search_tags(
-    domain: str = None, limit: int = 50, db_connection=None, db_path: str = None
+    domain: str = None,
+    limit: int = 50,
+    offset: int = 0,
+    db_connection=None,
+    db_path: str = None,
 ) -> dict:
     """Queries canonical tags (agent API redesign plan §5.12, Phase 6 item 27: renamed from
     get_canonical_tags -- advisory discovery, not a prerequisite)."""
@@ -231,22 +235,25 @@ def search_tags(
 
     try:
         if domain:
+            escaped = domain.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             cursor = conn.execute(
                 """
                 SELECT id, name FROM tags
-                WHERE canonical_id IS NULL AND name LIKE ?
-                LIMIT ?
+                WHERE canonical_id IS NULL AND name LIKE ? ESCAPE ?
+                ORDER BY name, id
+                LIMIT ? OFFSET ?
             """,
-                (f"%{domain}%", limit),
+                (f"%{escaped}%", "\\", limit, offset),
             )
         else:
             cursor = conn.execute(
                 """
                 SELECT id, name FROM tags
                 WHERE canonical_id IS NULL
-                LIMIT ?
+                ORDER BY name, id
+                LIMIT ? OFFSET ?
             """,
-                (limit,),
+                (limit, offset),
             )
         rows = cursor.fetchall()
         return envelope_ok([{"id": r[0], "name": r[1]} for r in rows])

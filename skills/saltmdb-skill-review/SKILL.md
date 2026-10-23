@@ -28,7 +28,10 @@ This skill defines the "Codify" stage of SALTMDB's closed self-correction loop. 
 
 ### 1. Mine Telemetry
 - Check for prior `[SALTMDB Skill-Review Sweep]` memories using `search_memory` to determine the last review date. If found, only mine events created after that date.
-- Retrieve events via `get_events` for `event_type="issue"` and separately `event_type="retrieval_outcome"` (`order="oldest_first"`, limit ~300 each).
+- Retrieve events via `get_events` for `event_type="issue"` and separately for
+  `event_type="retrieval_outcome"` (`order="oldest_first"`, `limit=100` per page). Follow
+  `next_cursor` while `has_more` is true until every event since the last sweep is read; cap at
+  3 pages per type and say so if the cap is reached. The call returns `data.items`.
 - **Noise Filtering**: Evaluate event content to discard synthetic test data or unrelated-domain noise. Do NOT filter strictly by `agent_id` blocklists, as legitimate subagents use fixed role IDs.
 
 ### 2. Diagnose Patterns

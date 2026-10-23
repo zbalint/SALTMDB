@@ -50,6 +50,19 @@ def test_review_prompt_contains_key_elements():
     assert "20" in prompt
 
 
+def test_review_prompt_and_skill_use_v2_event_paging():
+    sweep = _load_module("saltmdb-skill-review-sweep")
+    prompt = sweep.REVIEW_PROMPT
+    skill = (HOOKS_DIR.parent / "skills" / "saltmdb-skill-review" / "SKILL.md").read_text()
+    for text in (prompt, skill):
+        assert "limit=100" in text
+        assert "next_cursor" in text
+        assert "has_more" in text
+        assert "3 pages per type" in text
+        assert "limit 300" not in text
+        assert "limit ~300" not in text
+
+
 def test_run_quiet_imported_from_common():
     """Verify run_quiet is imported from _saltmdb_hook_common in both sweep scripts."""
     pre_compact = _load_module("saltmdb-pre-compact-sweep")

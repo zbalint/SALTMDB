@@ -116,7 +116,11 @@ def resolve_or_create_predicate(conn, predicate_name: str) -> str | None:
 
 
 def list_predicates(
-    query: str = None, limit: int = 50, db_connection=None, db_path: str = None
+    query: str = None,
+    limit: int = 50,
+    offset: int = 0,
+    db_connection=None,
+    db_path: str = None,
 ) -> dict:
     """Lists the closed relation-predicate vocabulary (agent API redesign plan §5.12, Phase 6
     item 27: renamed from get_canonical_predicates). Mirrors memory_service.search_tags for the
@@ -129,13 +133,25 @@ def list_predicates(
         should_close = True
     try:
         if query:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             cursor = conn.execute(
-                "SELECT id, name FROM predicates WHERE canonical_id IS NULL AND name LIKE ? LIMIT ?",
-                (f"%{query}%", limit),
+                """
+                SELECT id, name FROM predicates
+                WHERE canonical_id IS NULL AND name LIKE ? ESCAPE ?
+                ORDER BY name, id
+                LIMIT ? OFFSET ?
+                """,
+                (f"%{escaped}%", "\\", limit, offset),
             )
         else:
             cursor = conn.execute(
-                "SELECT id, name FROM predicates WHERE canonical_id IS NULL LIMIT ?", (limit,)
+                """
+                SELECT id, name FROM predicates
+                WHERE canonical_id IS NULL
+                ORDER BY name, id
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
             )
         rows = []
         for row in cursor.fetchall():
