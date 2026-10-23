@@ -22,10 +22,12 @@ RENAMED_FIELDS: dict[str, dict[str, str]] = {
     "revise_memory": {"entity_id": "memory_id"},
     "supersede_memory": {"entity_id": "memory_id"},
     "review_core_memory": {"entity_id": "memory_id"},
+    "get_memory": {"entity_id": "memory_id"},
 }
 
-
-REMOVED_TOOLS: dict[str, str] = {}
+REMOVED_TOOLS: dict[str, str] = {
+    "inspect_memory": 'inspect_memory was merged into get_memory(memory_id, detail="summary").',
+}
 
 
 class GuardedFastMCP(FastMCP):

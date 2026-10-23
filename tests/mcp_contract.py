@@ -31,7 +31,7 @@ TOOL_NAMES = (
     "capture_trace_complete",
     "search_traces",
     "get_trace",
-    "inspect_memory",
+    "get_memories",
     "get_lineage",
     "get_related_memories",
     "retrieve_context",

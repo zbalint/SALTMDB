@@ -23,7 +23,6 @@ _SKIP_REASONS = {
         "list_predicates": "Published schema has no required field.",
         "merge_tags": "Published schema has no required field.",
         "search_memory": "Published schema has no required field.",
-        "get_memory": "Published schema has no required field.",
         "search_traces": "Published schema has no required field.",
         "retrieve_context": "Published schema has no required field.",
         "get_events": "Published schema has no required field.",

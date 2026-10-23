@@ -188,6 +188,25 @@ def _optional_lineage_direction(kw: dict[str, Any]) -> Literal["ancestors", "des
     )
 
 
+def _optional_detail(kw: dict[str, Any]) -> Literal["full", "summary"]:
+    value = kw.get("detail")
+    if value is None:
+        return "full"
+    if value not in {"full", "summary"}:
+        raise _DispatchValidationError(
+            rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "detail must be 'full' or 'summary'",
+                        "detail",
+                    )
+                ]
+            )
+        )
+    return value
+
+
 def _required_str(kw: dict[str, Any], key: str) -> str:
     value = kw.get(key)
     if not isinstance(value, str) or not value:
@@ -338,24 +357,100 @@ def _dispatch_get_memory(**kw):
     """Fetch one entity through the explicit-ID service contract, owner-scoped."""
     try:
         entity_id = _required_str(kw, "entity_id")
+        detail = _optional_detail(kw)
         include_trace_provenance = _optional_bool(kw, "include_trace_provenance", False)
     except _DispatchValidationError as exc:
         return exc.payload
-    if include_trace_provenance:
-        return memory_service.get_memory(
-            entity_id=entity_id,
-            agent_id=kw.get("agent_id"),
-            include_trace_provenance=True,
+    service = memory_service.get_memory if detail == "full" else memory_service.inspect_memory
+    return service(
+        entity_id=entity_id,
+        agent_id=kw.get("agent_id"),
+        include_trace_provenance=include_trace_provenance,
+    )
+
+
+def _validate_memory_ids(memory_ids: list[str]) -> dict[str, Any] | None:
+    if not 1 <= len(memory_ids) <= 20:
+        return rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    "memory_ids must contain between 1 and 20 ids",
+                    "memory_ids",
+                )
+            ]
         )
-    return memory_service.get_memory(entity_id=entity_id, agent_id=kw.get("agent_id"))
+    normalized_ids = [memory_id.strip() for memory_id in memory_ids]
+    for index, memory_id in enumerate(normalized_ids):
+        if not memory_id or len(memory_id) > 128:
+            return rejected(
+                [
+                    error(
+                        error_codes.VALIDATION_ERROR,
+                        "memory_ids entries must be 1 to 128 characters after stripping",
+                        f"memory_ids[{index}]",
+                    )
+                ]
+            )
+    if len(set(normalized_ids)) != len(normalized_ids):
+        return rejected(
+            [
+                error(
+                    error_codes.VALIDATION_ERROR,
+                    "memory_ids must not contain duplicate ids",
+                    "memory_ids",
+                )
+            ]
+        )
+    return None
 
 
-def _dispatch_inspect_memory(**kw):
+def _apply_inline_budget(data: dict[str, Any], remaining: int) -> int:
+    content = data.get("content")
+    if not isinstance(content, str):
+        return remaining
+    from saltmdb.utils.text import large_content_descriptor
+
+    descriptor = large_content_descriptor(content, threshold=remaining)
+    if "content" not in descriptor:
+        data.pop("content", None)
+    data.update(descriptor)
+    return remaining - len(content) if "content" in descriptor else remaining
+
+
+def _dispatch_get_memories(**kw):
     try:
-        entity_id = _required_str(kw, "entity_id")
+        memory_ids = _required_str_list(kw, "memory_ids")
+        detail = _optional_detail(kw)
+        include_trace_provenance = _optional_bool(kw, "include_trace_provenance", False)
     except _DispatchValidationError as exc:
         return exc.payload
-    return memory_service.inspect_memory(entity_id=entity_id, agent_id=kw.get("agent_id"))
+    validation = _validate_memory_ids(memory_ids)
+    if validation is not None:
+        return validation
+    from saltmdb.config import GET_MEMORIES_INLINE_BUDGET_CHARS, get_db_path
+    from saltmdb.db.connection import close_connection, get_connection
+
+    conn = get_connection(get_db_path())
+    remaining = GET_MEMORIES_INLINE_BUDGET_CHARS
+    service = memory_service.get_memory if detail == "full" else memory_service.inspect_memory
+    items: list[dict[str, Any]] = []
+    try:
+        for requested_id in memory_ids:
+            result = service(
+                entity_id=requested_id,
+                db_connection=conn,
+                agent_id=kw.get("agent_id"),
+                include_trace_provenance=include_trace_provenance,
+            )
+            if detail == "full" and result.get("status") == "ok":
+                data = result.get("data")
+                if isinstance(data, dict):
+                    remaining = _apply_inline_budget(data, remaining)
+            items.append({"requested_id": requested_id, "result": result})
+    finally:
+        close_connection(conn)
+    return items
 
 
 def _dispatch_archive_memory(**kw):
@@ -781,7 +876,7 @@ DISPATCH_TABLE = {
     "store_memory": _dispatch_store_memory,
     "search_memory": _dispatch_search_memory,
     "get_memory": _dispatch_get_memory,
-    "inspect_memory": _dispatch_inspect_memory,
+    "get_memories": _dispatch_get_memories,
     "archive_memory": _dispatch_archive_memory,
     "manage_relation": _dispatch_manage_relation,
     "revise_memory": _dispatch_revise_memory,

@@ -52,7 +52,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         entity_id = res["data"]["memory_id"]
 
-        result = tools.get_memory(entity_id=entity_id)
+        result = tools.get_memory(memory_id=entity_id)
         self.assertEqual(result["status"], "ok")
         self.assertIn("Full content text of target chunk", result["data"]["content"])
 
@@ -606,7 +606,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         lineage = tools.get_lineage(entity_id=id1)
         self.assertIsInstance(lineage, dict)
 
-        memory = tools.get_memory(entity_id=id1)
+        memory = tools.get_memory(memory_id=id1)
         self.assertEqual(memory["status"], "ok")
 
     def test_graph_tools_honor_depth_limits(self):
@@ -682,7 +682,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
         self.assertEqual(stored["status"], "ok")
 
-        result = tools.inspect_memory(entity_id=stored["data"]["memory_id"])
+        result = tools.get_memory(memory_id=stored["data"]["memory_id"], detail="summary")
 
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("content", result["data"])
@@ -707,8 +707,8 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.assertEqual(stored["status"], "ok")
         entity_id = stored["data"]["memory_id"]
 
-        get_result = tools.get_memory(entity_id=entity_id)
-        inspect_result = tools.inspect_memory(entity_id=entity_id)
+        get_result = tools.get_memory(memory_id=entity_id)
+        inspect_result = tools.get_memory(memory_id=entity_id, detail="summary")
 
         self.assertEqual(
             set(get_result["data"].keys()) - {"content"},
@@ -716,7 +716,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         )
 
     def test_inspect_memory_unknown_entity_id_rejected(self):
-        result = tools.inspect_memory(entity_id="totally-fake-id-000")
+        result = tools.get_memory(memory_id="totally-fake-id-000", detail="summary")
 
         self.assertEqual(result["status"], "rejected")
 
@@ -741,7 +741,7 @@ class TestMCPToolsWrapper(unittest.TestCase):
         self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
         self.conn.commit()
 
-        result = tools.inspect_memory(entity_id=shared_prefix)
+        result = tools.get_memory(memory_id=shared_prefix, detail="summary")
 
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "AMBIGUOUS_ID_PREFIX")
@@ -1214,35 +1214,24 @@ class TestGetMemoryAlias(unittest.IsolatedAsyncioTestCase):
         content = result[0] if isinstance(result[0], list) else result
         return json.loads(content[0].text)
 
-    async def test_alias_fetches_stored_memory(self):
+    async def test_memory_id_fetches_stored_memory(self):
         result = await self._get_memory({"memory_id": self.entity_id})
         self.assertEqual(result["status"], "ok", result)
-        self.assertEqual(result["data"]["id"], self.entity_id)
+        self.assertEqual(result["data"]["memory_id"], self.entity_id)
+        self.assertNotIn("id", result["data"])
 
-    async def test_equal_aliases_fetch_stored_memory(self):
-        result = await self._get_memory({"entity_id": self.entity_id, "memory_id": self.entity_id})
-        self.assertEqual(result["status"], "ok", result)
-        self.assertEqual(result["data"]["id"], self.entity_id)
-
-    async def test_conflicting_aliases_reject_without_backend_call(self):
-        capture = _CaptureBackend()
-        previous = tools._set_backend_for_test(capture)
-        try:
-            result = await self._get_memory(
-                {"entity_id": self.entity_id, "memory_id": "different-id"}
-            )
-        finally:
-            tools._set_backend_for_test(previous)
+    async def test_entity_id_is_rejected_with_corrected_call(self):
+        result = await self._get_memory({"entity_id": self.entity_id})
         self.assertEqual(result["status"], "rejected", result)
-        self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
-        self.assertEqual(result["errors"][0]["field"], "memory_id")
-        self.assertEqual(capture.calls, [])
+        self.assertEqual(result["errors"][0]["code"], "UNKNOWN_FIELD")
+        self.assertEqual(result["errors"][0]["field"], "entity_id")
+        self.assertEqual(result["errors"][0]["corrected_call"], {"memory_id": self.entity_id})
 
     async def test_missing_identifier_rejects(self):
         result = await self._get_memory({})
         self.assertEqual(result["status"], "rejected", result)
         self.assertEqual(result["errors"][0]["code"], "VALIDATION_ERROR")
-        self.assertEqual(result["errors"][0]["field"], "entity_id")
+        self.assertEqual(result["errors"][0]["field"], "memory_id")
 
     async def test_unknown_identifier_name_is_rejected_with_envelope(self):
         result = await self._get_memory({"id": self.entity_id})
@@ -1250,14 +1239,11 @@ class TestGetMemoryAlias(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["errors"][0]["code"], "UNKNOWN_FIELD")
         self.assertEqual(result["errors"][0]["field"], "id")
 
-    async def test_alias_resolves_unambiguous_prefix_like_entity_id(self):
+    async def test_memory_id_resolves_unambiguous_prefix(self):
         prefix = self.entity_id[:8]
-        canonical = await self._get_memory({"entity_id": prefix})
-        alias = await self._get_memory({"memory_id": prefix})
-        self.assertEqual(canonical["status"], "ok", canonical)
-        self.assertEqual(alias["status"], "ok", alias)
-        self.assertEqual(canonical["data"]["id"], self.entity_id)
-        self.assertEqual(alias["data"]["id"], self.entity_id)
+        result = await self._get_memory({"memory_id": prefix})
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["memory_id"], self.entity_id)
 
 
 class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
@@ -1308,11 +1294,11 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         private_id = private["data"]["memory_id"]
         shared_id = shared["data"]["memory_id"]
 
-        owner_a_private = await self._call_as("owner_a", "get_memory", {"entity_id": private_id})
-        owner_b_private = await self._call_as("owner_b", "get_memory", {"entity_id": private_id})
-        unknown = await self._call_as("owner_b", "get_memory", {"entity_id": "missing-id"})
-        owner_a_shared = await self._call_as("owner_a", "get_memory", {"entity_id": shared_id})
-        owner_b_shared = await self._call_as("owner_b", "get_memory", {"entity_id": shared_id})
+        owner_a_private = await self._call_as("owner_a", "get_memory", {"memory_id": private_id})
+        owner_b_private = await self._call_as("owner_b", "get_memory", {"memory_id": private_id})
+        unknown = await self._call_as("owner_b", "get_memory", {"memory_id": "missing-id"})
+        owner_a_shared = await self._call_as("owner_a", "get_memory", {"memory_id": shared_id})
+        owner_b_shared = await self._call_as("owner_b", "get_memory", {"memory_id": shared_id})
 
         self.assertIn("Owner A private body", owner_a_private["data"]["content"])
         self.assertEqual(owner_b_private["status"], unknown["status"])
@@ -1333,7 +1319,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(private["status"], "ok", private)
         prefix = private["data"]["memory_id"][:8]
-        result = await self._call_as("owner_b", "get_memory", {"entity_id": prefix})
+        result = await self._call_as("owner_b", "get_memory", {"memory_id": prefix})
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
         self.assertNotIn(private["data"]["memory_id"], str(result))
@@ -1368,11 +1354,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         )
         self.conn.commit()
         self.conn.execute("PRAGMA foreign_keys = ON")
-        result = await self._call_as(
-            "owner_b",
-            "get_memory",
-            {"entity_id": shared_id[:8]},
-        )
+        result = await self._call_as("owner_b", "get_memory", {"memory_id": shared_id[:8]})
         self.assertNotIn(colliding_private_id, str(result))
         self.assertNotIn("Private prefix match", str(result))
 
@@ -1388,7 +1370,9 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(private["status"], "ok", private)
         private_id = private["data"]["memory_id"]
-        result = await self._call_as("owner_b", "inspect_memory", {"entity_id": private_id})
+        result = await self._call_as(
+            "owner_b", "get_memory", {"memory_id": private_id, "detail": "summary"}
+        )
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["errors"][0]["code"], "UNKNOWN_ENTITY_ID")
         self.assertNotIn("Private inspection target", str(result))
@@ -1417,7 +1401,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(revised["status"], "ok", revised)
         shared_id = revised["data"]["successor_memory_id"]
-        result = await self._call_as("owner_b", "get_memory", {"entity_id": shared_id})
+        result = await self._call_as("owner_b", "get_memory", {"memory_id": shared_id})
         self.assertEqual(result["status"], "ok", result)
         self.assertNotIn(private["data"]["memory_id"], str(result))
         self.assertNotIn("Private lineage predecessor", str(result))
@@ -1813,7 +1797,7 @@ class TestPrivateMemoryMCPAccess(unittest.IsolatedAsyncioTestCase):
         owner_a_view = await self._call_as(
             "owner_a",
             "get_memory",
-            {"entity_id": private_id},
+            {"memory_id": private_id},
         )
         self.assertEqual(result["status"], "rejected")
         self.assertNotIn("intruder", owner_a_view["data"]["metadata"])
@@ -2144,7 +2128,7 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("updated", result["data"]["message"])
 
-        fetched = tools.get_memory(entity_id=entity_id)
+        fetched = tools.get_memory(memory_id=entity_id)
         self.assertEqual(
             fetched["data"]["metadata"],
             {"a": 1, "b": 99, "c": 3},
@@ -2158,7 +2142,7 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("unchanged", result["data"]["message"])
 
-        fetched = tools.get_memory(entity_id=entity_id)
+        fetched = tools.get_memory(memory_id=entity_id)
         self.assertEqual(fetched["data"]["metadata"], {"a": 1, "b": 2})
 
     def test_nonexistent_entity_id_returns_error_string(self):
@@ -2238,7 +2222,7 @@ class TestUpdateMemoryMetadataTool(unittest.TestCase):
         ).fetchone()
         self.assertEqual(after, before)
 
-        fetched = tools.get_memory(entity_id=entity_id)
+        fetched = tools.get_memory(memory_id=entity_id)
         self.assertEqual(
             fetched["data"]["metadata"],
             {"note": "changed", "extra": True},

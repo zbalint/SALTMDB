@@ -158,7 +158,7 @@ class TestContentFilePathMcpSurface(unittest.TestCase):
         self.assertGreater(len(large_body), CONTENT_FILE_DUMP_THRESHOLD_CHARS)
         stored = tools.store_memory(title="Large memory", tags=["#large"], content=large_body)
         self.assertEqual(stored["status"], "ok")
-        fetched = tools.get_memory(entity_id=stored["data"]["memory_id"])
+        fetched = tools.get_memory(memory_id=stored["data"]["memory_id"])
         self.assertNotIn("content", fetched["data"])
         self.assertEqual(fetched["data"]["content_preview"], large_body[:500])
         stored_content = self.conn.execute(

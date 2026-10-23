@@ -45,7 +45,11 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         self.assertEqual(
             _dispatch_get_memory(entity_id="entity-id", agent_id="test_agent"), "content"
         )
-        fetch.assert_called_once_with(entity_id="entity-id", agent_id="test_agent")
+        fetch.assert_called_once_with(
+            entity_id="entity-id",
+            agent_id="test_agent",
+            include_trace_provenance=False,
+        )
 
     @patch("saltmdb.daemon.dispatch.relation_service.get_lineage", return_value={"nodes": []})
     def test_get_lineage_defaults_to_ancestor_traversal(self, lineage):

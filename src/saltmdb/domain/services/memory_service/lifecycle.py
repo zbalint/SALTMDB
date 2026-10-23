@@ -1287,6 +1287,7 @@ def inspect_memory(
     *,
     max_depth: int = 10,
     agent_id: str | None = None,
+    include_trace_provenance: bool = False,
 ) -> dict:
     """Lighter-weight sibling to get_memory: identical field set minus `content` (replaced by a
     `snippet`). Lineage IS included here (matching get_memory's own already-accepted cost for a
@@ -1334,6 +1335,7 @@ def inspect_memory(
             touch=True,
             max_depth=max_depth,
             agent_id=agent_id,
+            include_trace_provenance=include_trace_provenance,
         )
         if data is None:
             return rejected(

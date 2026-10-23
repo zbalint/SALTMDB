@@ -48,7 +48,7 @@ class TestPhase3McpSurface(unittest.TestCase):
     def test_graph_tools_have_small_explicit_schemas(self):
         self.assertEqual(
             list(inspect.signature(tools.get_memory).parameters),
-            ["entity_id", "include_trace_provenance", "memory_id"],
+            ["memory_id", "detail", "include_trace_provenance"],
         )
         self.assertEqual(
             list(inspect.signature(tools.get_lineage).parameters),
@@ -60,7 +60,7 @@ class TestPhase3McpSurface(unittest.TestCase):
         )
 
     def test_graph_tools_forward_normalized_calls(self):
-        tools.get_memory(entity_id="memory-id")
+        tools.get_memory(memory_id="memory-id")
         tools.get_lineage(entity_id="memory-id")
         tools.get_related_memories(entity_id="memory-id")
         self.assertEqual(
@@ -84,12 +84,10 @@ class TestPhase3McpSurface(unittest.TestCase):
         # SALTMDB memory 70cbcfc1 for the real gap this regression-guards against.
         self.assertIn("update_memory_metadata", protocol.WRITE_TOOLS)
         self.assertNotIn("update_memory_metadata", protocol.READ_TOOLS)
-        self.assertIn("inspect_memory", protocol.READ_TOOLS)
+        self.assertNotIn("inspect_memory", protocol.READ_TOOLS)
         self.assertNotIn("inspect_memory", protocol.WRITE_TOOLS)
-        # Both must also be registered for real dispatch, and inspect_memory must not be a
-        # coordinator-serialized mutating call (matches get_memory's own read-only treatment).
-        self.assertIn("update_memory_metadata", dispatch.DISPATCH_TABLE)
-        self.assertIn("inspect_memory", dispatch.DISPATCH_TABLE)
+        self.assertIn("get_memories", protocol.READ_TOOLS)
+        self.assertIn("get_memories", dispatch.DISPATCH_TABLE)
         self.assertIn("update_memory_metadata", dispatch.MUTATING_TOOLS)
         self.assertNotIn("inspect_memory", dispatch.MUTATING_TOOLS)
 

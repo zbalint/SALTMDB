@@ -240,14 +240,16 @@ import os  # noqa: E402
 import uuid  # noqa: E402
 
 
-def large_content_descriptor(content: str) -> dict:
+def large_content_descriptor(content: str, threshold: int | None = None) -> dict:
     """Return ``{'content': content}`` unchanged for an ordinary-sized payload, or dump it to a
-    local file and return ``{'content_file_path': path, 'content_preview': content[:500]}`` once
-    it exceeds ``CONTENT_FILE_DUMP_THRESHOLD_CHARS`` -- keeps a single large memory from tripping
-    an MCP client's own response-size limit (see config.CONTENT_FILE_DUMP_THRESHOLD_CHARS)."""
+    local file and return ``{'content_file_path': path, 'content_preview': content[:500]}`` once it
+    exceeds ``threshold`` (or ``CONTENT_FILE_DUMP_THRESHOLD_CHARS`` when omitted)."""
     from saltmdb.config import CONTENT_FILE_DUMP_THRESHOLD_CHARS, get_content_dump_dir
 
-    if not isinstance(content, str) or len(content) <= CONTENT_FILE_DUMP_THRESHOLD_CHARS:
+    effective_threshold = (
+        CONTENT_FILE_DUMP_THRESHOLD_CHARS if threshold is None else max(0, threshold)
+    )
+    if not isinstance(content, str) or len(content) <= effective_threshold:
         return {"content": content}
     # shortcut: no retention/cleanup policy for dumped files -- each oversized read/write leaves
     # a new file in get_content_dump_dir() forever. Add a periodic sweep (age- or count-based) if

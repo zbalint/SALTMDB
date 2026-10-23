@@ -308,6 +308,8 @@ QG_OVERSIZED_PAYLOAD_THRESHOLD = 8000
 # 2026-09-14 when a ~94KB supersede_memory response for one exceeded the calling agent's own
 # tool-output limit.
 CONTENT_FILE_DUMP_THRESHOLD_CHARS = 20000
+# Maximum cumulative inline content returned by get_memories(detail="full").
+GET_MEMORIES_INLINE_BUDGET_CHARS = 40000
 
 # SQLite write-transaction retry/backoff (src/saltmdb/db/connection.py:write_transaction_retrying)
 # Applied on top of (not instead of) PRAGMA busy_timeout; only catches "database is locked"

@@ -105,7 +105,7 @@ class TestMCPWriteToolsV2(unittest.IsolatedAsyncioTestCase):
             {"memory_id": memory_id, "metadata": {"remove": None, "nested": {"x": None}}},
         )
         self.assertIn("deleted (1 key(s): remove)", updated["data"]["message"])
-        fetched = await mcp_contract.call("get_memory", {"entity_id": memory_id})
+        fetched = await mcp_contract.call("get_memory", {"memory_id": memory_id})
         self.assertNotIn("remove", fetched["data"]["metadata"])
         self.assertEqual(fetched["data"]["metadata"]["nested"], {"x": None})
 

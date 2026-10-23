@@ -43,7 +43,7 @@ READ_TOOLS = frozenset(
         "search_tags",
         "list_predicates",
         "get_memory",
-        "inspect_memory",
+        "get_memories",
         "get_lineage",
         "get_related_memories",
         "retrieve_context",

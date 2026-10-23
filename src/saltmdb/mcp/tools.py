@@ -204,7 +204,7 @@ _AGENT_ID_INJECTED_TOOLS = frozenset(
         "revise_memory",
         "supersede_memory",
         "get_memory",
-        "inspect_memory",
+        "get_memories",
         "get_lineage",
         "get_related_memories",
         "set_core_memory",
@@ -1255,64 +1255,95 @@ def supersede_memory(
 
 @mcp.tool()
 def get_memory(
-    entity_id: str | None = None,
+    memory_id: str,
+    detail: Literal["full", "summary"] = "full",
     include_trace_provenance: bool = False,
-    memory_id: str | None = None,
 ) -> dict:
-    """Retrieves ONE memory in full, by exact ID or an unambiguous ID prefix -- when you already
-    know (or can uniquely identify) which memory you want. Use search_memory instead to find a
-    memory by content/tags/context when you don't already have its ID.
+    """Use this to read one memory you already have an id for, in full by default; use
+    search_memory to find memories and get_memories for several ids.
 
-    `memory_id` is accepted as an alias for `entity_id`; pass one of them.
-
-    Explicit retrieval includes archived memories (an archived ID is never silently redirected to
-    a successor) and always returns full content, status, and lineage -- unlike search_memory's
-    result items, which carry only a snippet/preview. A private memory owned by another caller
-    resolves as unknown; prefix candidates and lineage include only shared or owned memories.
-
-    Returns `{"status": "ok", "data": {"id", "title", "content", "tags", "status", "lineage",
-    ...}, "warnings": [...]}`. `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID" |
-    "AMBIGUOUS_ID_PREFIX", "message": "...", "field": "entity_id"}]}` when the ID doesn't resolve
-    to exactly one memory -- `AMBIGUOUS_ID_PREFIX` names the matching candidates so you can
-    disambiguate with a longer prefix. Missing-argument and conflicting-alias cases return
-    `VALIDATION_ERROR`.
-
-    Example: `get_memory(entity_id="a1b2c3")`.
+    An id may be an unambiguous prefix or an exact title of an active memory. Archived memories
+    are returned without successor redirection; private memories owned by another agent read as
+    unknown. ``detail="summary"`` returns a snippet instead of content, and
+    ``include_trace_provenance`` adds trace provenance.
     """
-    from saltmdb.utils import error_codes
-    from saltmdb.utils.envelope import error, rejected
-
-    if entity_id is not None and memory_id is not None and entity_id != memory_id:
-        return rejected(
-            [
-                error(
-                    error_codes.VALIDATION_ERROR,
-                    "entity_id and memory_id are aliases; pass one, or the same value in both.",
-                    "memory_id",
-                )
-            ]
-        )
-    resolved = entity_id if entity_id is not None else memory_id
-    if resolved is None:
-        return rejected(
-            [
-                error(
-                    error_codes.VALIDATION_ERROR,
-                    "entity_id is required (memory_id is accepted as an alias).",
-                    "entity_id",
-                )
-            ]
-        )
-
-    agent_id_ = _effective_agent_id()
-    return _backend_or_raise().call(
+    result = _backend_or_raise().call(
         "get_memory",
         {
-            "entity_id": resolved,
-            "agent_id": agent_id_,
+            "entity_id": memory_id,
+            "detail": detail,
+            "agent_id": _effective_agent_id(),
             "include_trace_provenance": include_trace_provenance,
         },
     )
+    return _to_public_write_result("get_memory", result)
+
+
+def _map_batch_read_result(item: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"requested_id": None, "outcome": "internal_error", "memory": None}
+    requested_id = item.get("requested_id")
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return {"requested_id": requested_id, "outcome": "internal_error", "memory": None}
+    if result.get("status") == "ok" and isinstance(result.get("data"), dict):
+        return {
+            "requested_id": requested_id,
+            "outcome": "ok",
+            "memory": _remap_public_data("get_memory", result["data"]),
+        }
+    errors = result.get("errors")
+    first = errors[0] if isinstance(errors, list) and errors else {}
+    code = first.get("code")
+    if code == "UNKNOWN_ENTITY_ID":
+        return {"requested_id": requested_id, "outcome": "not_found", "memory": None}
+    if code == "AMBIGUOUS_ID_PREFIX":
+        mapped = {
+            "requested_id": requested_id,
+            "outcome": "ambiguous",
+            "memory": None,
+            "candidates": first.get("candidates", []),
+        }
+        if first.get("candidates_truncated"):
+            mapped["candidates_truncated"] = True
+        return mapped
+    return {"requested_id": requested_id, "outcome": "internal_error", "memory": None}
+
+
+@mcp.tool()
+def get_memories(
+    memory_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]],
+        Field(min_length=1, max_length=20),
+    ],
+    detail: Literal["full", "summary"] = "full",
+    include_trace_provenance: bool = False,
+) -> dict:
+    """Use this to read several memories by id in one call (at most 20, results in request order,
+    one outcome per id).
+
+    An id may be an unambiguous prefix or an exact title of an active memory. Archived memories
+    are returned without successor redirection; private memories owned by another agent read as
+    unknown. ``detail="summary"`` returns snippets instead of content, and
+    ``include_trace_provenance`` adds trace provenance.
+    """
+    result = _backend_or_raise().call(
+        "get_memories",
+        {
+            "memory_ids": memory_ids,
+            "detail": detail,
+            "agent_id": _effective_agent_id(),
+            "include_trace_provenance": include_trace_provenance,
+        },
+    )
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, list):
+        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+    items = [_map_batch_read_result(item) for item in result]
+    if any(item["outcome"] == "internal_error" for item in items):
+        return rejected([error("INTERNAL_ERROR", "Tool execution failed unexpectedly.")])
+    return ok({"items": items})
 
 
 # Writes this adapter process itself performed and has not yet attached to a trace. The harness
@@ -1344,6 +1375,7 @@ def _written_ids(tool_name: str, result: dict) -> list[str]:
 
 
 _ID_RENAME_TO_MEMORY_ID_TOOLS = {
+    "get_memory",
     "store_memory",
     "update_memory_metadata",
     "set_core_memory",
@@ -1354,6 +1386,7 @@ _REPLACEMENT_ID_MAP = {
     "new_id": "successor_memory_id",
 }
 _ERROR_FIELD_REMAP_TOOLS = {
+    "get_memory",
     "update_memory_metadata",
     "revise_memory",
     "supersede_memory",
@@ -1628,27 +1661,6 @@ def get_trace(trace_id: str) -> dict:
 
 
 @mcp.tool()
-def inspect_memory(entity_id: str) -> dict:
-    """Lighter-weight sibling to get_memory: identical field set minus `content`, replaced by a
-    short `snippet` (first ~3 non-heading lines, truncated). Use this when you want to confirm a
-    memory's identity/metadata/lineage, or aren't yet sure this is the one you want, without
-    pulling the full body -- get_memory is the only path to full content once you're sure.
-    Private memories owned by another caller resolve as unknown, including ID prefixes.
-
-    Returns `{"status": "ok", "data": {"id", "title", "snippet", "tags", "status", "lineage",
-    ...}, "warnings": [...]}`; `{"status": "rejected", "errors": [{"code": "UNKNOWN_ENTITY_ID" |
-    "AMBIGUOUS_ID_PREFIX", ...}]}` on the same conditions as get_memory.
-
-    Example: `inspect_memory(entity_id="a1b2c3")` to confirm which memory a search hit actually
-    is before deciding whether to pull it in full.
-    """
-    agent_id_ = _effective_agent_id()
-    return _backend_or_raise().call(
-        "inspect_memory", {"entity_id": entity_id, "agent_id": agent_id_}
-    )
-
-
-@mcp.tool()
 def get_lineage(
     entity_id: str,
     direction: Literal["ancestors", "descendants"] = "ancestors",
@@ -1703,7 +1715,7 @@ def get_related_memories(
     direction="both" (default) walks outbound and inbound edges independently and merges the
     results (a union of two single-direction traversals, not a true mixed-direction walk) --
     pass "outbound" or "inbound" to walk only one. include_inspect=True inlines each returned
-    node's inspect_memory fields (no full content/lineage). Private roots owned by another caller
+    node's summary fields (no full content/lineage). Private roots owned by another caller
     resolve as unknown; hidden neighbors are omitted.
 
     Returns `{"status": "ok", "data": {"root": {...}, "related_memories": [...],
