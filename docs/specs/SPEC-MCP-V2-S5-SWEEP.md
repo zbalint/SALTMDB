@@ -69,3 +69,12 @@ This slice is documentation. BACKLOG: BL-058 closed with the commit; BL-078 (tra
 | `capture_trace_*` stay registered through this slice | S4d spec amendment 7 of the parent | read |
 | the live hook sources differ from `hooks/` | parent M6 | recorded |
 | tests pinning the behaviours | `hooks/tests/test_retrieval_outcome_flow.py`, `hooks/tests/test_capture_hook_config.py` (unchanged), `hooks/tests/test_checkable_fact_drift_sweep.py` | grep |
+
+
+## Amendment 1 (2026-10-23)
+
+The developer reported `BLOCKED — SPEC ADJUDICATION REQUIRED`; both findings are real and were verified against `src/saltmdb/mcp/guard.py` (`_unknown_tool` answers a removed tool with a plain `REMOVED_TOOL` rejection and no `corrected_call`; S4b D6 locked that) and the live schemas (`search_traces` `limit` maximum 50, S4d D3).
+
+- A1.1 D8, the behaviour list, is corrected: "unknown fields are rejected with a `corrected_call` (when a rename or removal map entry gives the replacement); a removed TOOL name is rejected with the plain `REMOVED_TOOL` message that names the replacement, without a `corrected_call`".
+- A1.2 D8, the bounds list, is corrected: "list tools `limit` 1 to 100, except `search_traces` 1 to 50".
+- A1.3 No other change; scope and acceptance stand. The migration test (D8) additionally asserts that every removed tool named in the section is a key of `guard.REMOVED_TOOLS`.
