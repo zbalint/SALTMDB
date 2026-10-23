@@ -204,7 +204,9 @@ def test_strict_hits_have_no_match_warning(backend):
     assert result["warnings"] == []
 
 
-@pytest.mark.parametrize("cursor", ["bad", "offset:-1", "offset:abc", "offset:1001"])
+@pytest.mark.parametrize(
+    "cursor", ["bad", "offset:-1", "offset:abc", "offset:1001", "offset:01", "offset:1\u0662"]
+)
 def test_invalid_cursor_does_not_dispatch(cursor: str, backend):
     result = tools.search_memory(cursor=cursor)
     assert result["status"] == "rejected"

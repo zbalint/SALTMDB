@@ -576,7 +576,7 @@ MAX_SEARCH_OFFSET = 1000
 def _search_cursor_offset(cursor: str | None) -> tuple[int, dict[str, Any] | None]:
     if cursor is None:
         return 0, None
-    match = re.fullmatch(r"offset:(0|[1-9][0-9]{0,3})", cursor)
+    match = re.fullmatch(r"offset:(0|[1-9]\d{0,3})", cursor, re.ASCII)
     if match is None:
         return 0, rejected(
             [
