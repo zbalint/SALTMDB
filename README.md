@@ -15,7 +15,7 @@
 * **Mechanical Text Quality Gate & Duplicate Handling:** Sub-millisecond multi-stage pre-embedding quality evaluation plus SHA-256 exact-hash and cross-encoder near-duplicate detection on every write.
 * **Secrets Redaction:** Built-in regex scrubbing pipeline automatically redacts API keys, tokens, and private paths before any write. Custom patterns can be added via `.saltmdb_redact` in the working directory.
 * **Folksonomy & Canonical Tags:** Flexible tagging with alias resolution, canonical redirects, and write-time normalization to prevent fragmentation.
-* **Immutable Identity & Lineage:** Every memory's `entity_id` is permanent — a genuine content change (`revise_memory`/`supersede_memory`) always creates a new entity linked back to its predecessor (`revises`/`supersedes`), never mutated in place.
+* **Immutable Identity & Lineage:** Every memory's `memory_id` is permanent — a genuine content change (`revise_memory`/`supersede_memory`) always creates a new entity linked back to its predecessor (`revises`/`supersedes`), never mutated in place.
 * **Lossless Consolidation & Bi-Temporal Relations:** Synthesis soft-archives sources and never hard-deletes; relation edges carry independent system-time and event-time axes.
 * **Single-Owner Backend Daemon (memory-core rework, Track B):** Exactly one background daemon process opens SQLite for a given DB path; every MCP client and CLI entrypoint connects as a thin RPC adapter, with the Librarian and web viewer running in-process inside it.
 * **Automated Session Lifecycle Hooks:** Native integration with Claude Code, Google Antigravity CLI, and GitHub Copilot CLI session hooks — context-digest injection at startup, a pre-action memory search gate, pre-compaction memory sweeps, and a stop-time self-critique gate.
@@ -23,7 +23,7 @@
 
 * **Conversation-Trace Provenance (opt-in):** With `SALTMDB_TRACE_CAPTURE_ENABLED=true` and the capture hooks registered, each conversation turn's verbatim user prompt, any messages sent mid-turn, and final assistant message are stored, linked to the memories written in that turn, readable by any agent (`search_traces` / `get_trace`) and browsable in the viewer. The next session's bootstrap can carry a last-session handover built from these traces. Off by default; see [`SECURITY.md`](SECURITY.md) for what this stores.
 
-The server exposes **24 MCP tools** over stdio. Per this project's own design principle, SALTMDB is meant to be usable from those tool descriptions alone — read them directly from your MCP client rather than a hand-maintained duplicate here (source of truth: `src/saltmdb/mcp/tools.py`).
+The server exposes **25 MCP tools** over stdio. Per this project's own design principle, SALTMDB is meant to be usable from those tool descriptions alone — read them directly from your MCP client rather than a hand-maintained duplicate here (source of truth: `src/saltmdb/mcp/tools.py`).
 
 See **[docs/architecture.md](docs/architecture.md)** for the full technical detail behind every feature above, including the database schema, the daemon's process model, and the quality-gate/core-governance rules in full.
 

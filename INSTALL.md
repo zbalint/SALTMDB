@@ -52,7 +52,7 @@ uv run python -m saltmdb
   **Migrating from `SALTMDB_OWNER_ID`:** the old name still works and logs a deprecation warning.
   If both are set, `SALTMDB_AGENT_ID` wins (a second warning names both variables when they differ).
   Rename it in each MCP server entry at your convenience; the fallback will be removed in a later release.
-- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search -- note that with it disabled, `search_memory` calls that pass `query_keywords` return an error (`[{"error": "..."}]`) rather than falling back to FTS-only results; filter/tag-only browsing without `query_keywords` still works.
+- `SALTMDB_ENABLE_SEMANTIC`: Hybrid FTS5 + Dense Vector RRF search is enabled by default (`true`). Set to `false` (or `0`/`off`/`no`) to disable vector search -- note that with it disabled, `search_memory` calls that pass the public `query` field return an `INTERNAL_ERROR` rejection rather than falling back to FTS-only results; filter/tag-only browsing without `query` still works.
 - `SALTMDB_VIEWER_PORT`: Custom port for the database dashboard viewer (default: `8080`), read when the backend daemon starts the in-process viewer thread (see §5 — the `saltmdb-viewer` CLI no longer takes a `--port` flag).
 - `SALTMDB_VIEWER_HOST`: **Currently not consumed.** As of the Track B backend-daemon rework, the daemon binds the viewer directly to `127.0.0.1` (`src/saltmdb/daemon/server.py`) regardless of this variable — a known gap introduced by that change, not yet wired through. Loopback-only is the safe default in the meantime; there is no supported way to expose the viewer on the local network right now.
 - `SALTMDB_VIEWER_ENABLED`: Set to `false` (or `0`/`off`/`no`) to disable the backend daemon's in-process web viewer thread (default: `true`).
@@ -63,7 +63,7 @@ uv run python -m saltmdb
 - `SALTMDB_LOG_LEVEL`: Backend daemon log level (default: `INFO`).
 - `SALTMDB_CONTENT_DUMP_DIR`: Directory where oversized memory content is dumped for `content_file_path` reads (default: `~/.saltmdb/content_dumps`).
 - `SALTMDB_RERANKER_MODEL`: Enables the optional ONNX cross-encoder final-reranker stage of `search_memory` with a supported model name (default: unset, RRF ordering; see [`docs/architecture.md`](docs/architecture.md)).
-- `SALTMDB_DISABLE_COMMUNITY_DETECTION`: Set to any non-empty value to suppress the background Leiden community-detection recompute that backs `retrieve_context`'s global strategy; also suppressed under `SALTMDB_TEST_MODE`.
+- `SALTMDB_DISABLE_COMMUNITY_DETECTION`: Set to any non-empty value to suppress the background Leiden community-detection recompute used by local `retrieve_context` orphan-community inclusion; also suppressed under `SALTMDB_TEST_MODE`.
 
 
 ### Running the daemon persistently

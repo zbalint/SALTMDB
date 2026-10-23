@@ -245,7 +245,7 @@ def test_strict_no_match_warning_nudges_across_envelope(tmp_path):
         },
         home=tmp_path,
     )
-    assert 'search_memory(mode="strict") returned []' in result["systemMessage"]
+    assert "empty data.items" in result["systemMessage"]
 
 
 def test_strict_without_no_match_does_not_nudge(tmp_path):

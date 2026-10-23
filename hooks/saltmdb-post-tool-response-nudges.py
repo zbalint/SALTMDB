@@ -31,6 +31,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _saltmdb_hook_common import (  # noqa: E402
@@ -45,12 +46,10 @@ from _saltmdb_hook_common import (  # noqa: E402
     write_count,
 )
 
+MAX_RESPONSE_TEXT_BYTES = 1024 * 1024
 MANAGE_RELATION_PATTERN = "manage_relation"
 STORE_MEMORY_PATTERN = "store_memory"
-# Fallback only, when the response couldn't be parsed as JSON: require at least one object
-# inside the array, not just the bare key -- store_memory's response schema always carries
-# `"duplicate_candidates": []` even when empty, so matching the key alone false-positived on
-# ~88% of calls in practice (see memory 3929f211-fd5c-4682-801f-1761d7fac1b9).
+# Fallback only when the response cannot be parsed as JSON; require one object in the array.
 DUPLICATE_FALLBACK_PATTERN = re.compile(r'"duplicate_candidates"\s*:\s*\[\s*\{')
 NEAR_DUPLICATE_PATTERN = re.compile(r'"NEAR_DUPLICATE"')
 
@@ -65,7 +64,7 @@ def emit_nudge(reason: str) -> None:
     sys.exit(0)
 
 
-def response_text(data: dict) -> str:
+def response_text(data: dict[str, Any]) -> str:
     """tool_response can be a nested object (Claude Code) or a raw JSON string depending on
     harness -- try both: first as a native field, then fall back to the whole input."""
     for field in ("tool_response", "toolResponse", "response"):
@@ -75,34 +74,60 @@ def response_text(data: dict) -> str:
     return json.dumps(data)
 
 
-def response_object(data: dict):
-    """Return the parsed tool response as a dict when available, else None. Native object on
-    Claude Code; a raw JSON string on some other harnesses (parsed here); None if neither
-    yields a dict, in which case callers fall back to text matching."""
-    for field in ("tool_response", "toolResponse", "response"):
-        val = data.get(field)
-        if isinstance(val, dict):
-            return val
-        if isinstance(val, str) and val:
-            try:
-                parsed = json.loads(val)
-            except (json.JSONDecodeError, TypeError):
-                return None
-            return parsed if isinstance(parsed, dict) else None
+def _content_block_object(value: list[Any]) -> dict[str, Any] | None:
+    text = "".join(
+        block.get("text", "")
+        for block in value
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+    if not text or len(text.encode("utf-8")) > MAX_RESPONSE_TEXT_BYTES:
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _response_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return _content_block_object(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
     return None
 
 
-def has_real_duplicate_candidates(data: dict, resp_text: str) -> bool:
+def response_object(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the parsed tool response as a dict when available, else None."""
+    for field in ("tool_response", "toolResponse", "response"):
+        parsed = _response_value(data.get(field))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def has_real_duplicate_candidates(data: dict[str, Any], resp_text: str) -> bool:
     """True only when duplicate_candidates is a genuinely non-empty list (or the NEAR_DUPLICATE
     warning code is present) -- not just because the response's always-present
     `"duplicate_candidates": []` key was matched as a bare substring."""
     obj = response_object(data)
     if isinstance(obj, dict):
-        nested = obj.get("data") if isinstance(obj.get("data"), dict) else {}
-        for candidates in (obj.get("duplicate_candidates"), nested.get("duplicate_candidates")):
+        nested_value = obj.get("data")
+        nested_candidates = (
+            nested_value.get("duplicate_candidates") if isinstance(nested_value, dict) else None
+        )
+        for candidates in (obj.get("duplicate_candidates"), nested_candidates):
             if isinstance(candidates, list) and candidates:
                 return True
-        return bool(NEAR_DUPLICATE_PATTERN.search(resp_text))
+        return False
     # Couldn't parse the response as an object -- fall back to a tightened regex that requires
     # at least one object inside the array, rather than matching the bare (always-present) key.
     return bool(
@@ -110,7 +135,7 @@ def has_real_duplicate_candidates(data: dict, resp_text: str) -> bool:
     )
 
 
-def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> None:
+def handle_store_memory(data: dict[str, Any], resp_text: str, transcript_path: str) -> None:
     if has_real_duplicate_candidates(data, resp_text):
         emit_nudge(
             "SALTMDB nudge: this store_memory call returned duplicate_candidates. Before "
@@ -139,7 +164,7 @@ def handle_store_memory(data: dict, resp_text: str, transcript_path: str) -> Non
         )
 
 
-def handle_search_memory(data: dict, resp_text: str, session_id: str) -> None:
+def handle_search_memory(data: dict[str, Any], resp_text: str, session_id: str) -> None:
     # Both flags first, unconditionally -- the empty-strict-result nudge below is allowed to
     # exit early via emit_nudge(), and both flags must be set regardless of whether that nudge
     # fires. search_memory_called_flag_path is the pre-tool search gate's primary "has
@@ -151,10 +176,10 @@ def handle_search_memory(data: dict, resp_text: str, session_id: str) -> None:
     input_text = json.dumps(data)
     if '"mode"' in input_text and '"strict"' in input_text and "NO_MATCH" in resp_text:
         emit_nudge(
-            'SALTMDB nudge: search_memory(mode="strict") returned []. This is a valid '
-            "abstention, not an error -- but before treating this as 'nothing exists', consider "
-            'retrying with mode="broad" or confirming this is genuinely new territory rather '
-            "than a phrasing mismatch."
+            'SALTMDB nudge: search_memory(mode="strict") returned an empty data.items page with '
+            "a NO_MATCH warning. This is a valid abstention, not an error -- but before treating "
+            "this as 'nothing exists', consider retrying with mode=\"broad\" or confirming this is "
+            "genuinely new territory rather than a phrasing mismatch."
         )
 
 

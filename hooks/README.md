@@ -118,7 +118,7 @@ nothing. It never blocks Copilot; failures go to `~/.saltmdb/hooks/trace-capture
 `SALTMDB_AGENT_ID` should be its own value (e.g. `copilot`). Not yet verified on native Windows:
 that the hook and the adapter see the same `COPILOT_LOADER_PID`, or the same parent pid. After enabling the examples in a live session,
 perform one successful `store_memory` and confirm a `trace_memory_links` row through `get_trace`
-or `search_traces(entity_id=...)`. A failed link is non-fatal for the calling hook.
+or `search_traces(memory_id=...)`. A failed link is non-fatal for the calling hook.
 
 ## Answer-side related memories (experimental, opt-in)
 

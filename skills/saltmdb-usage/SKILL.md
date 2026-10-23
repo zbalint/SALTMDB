@@ -86,14 +86,10 @@ not here).
   candidate fusion. A deployment-configured cross-encoder supplies final ordering when enabled;
   disabled/error paths retain RRF order. It returns 1-hop graph relations by default
   (`include_related=True`).
-- Mode selection: `mode` is **optional** — the only 3 valid values are `mode="strict"`,
-  `mode="history"`, and the default `mode="broad"`. Use `strict` when you specifically need
-  superseded matches resolved to their live successor and low-confidence results dropped
-  rather than returned (an empty `[]` result under strict mode is a valid, deliberate
-  abstention — not an error, and not proof nothing exists; consider retrying with `broad`
-  before concluding the territory is genuinely new). Use `history` to surface superseded
-  candidates explicitly tagged rather than hiding them. For ordinary retrieval, omit the
-  parameter entirely rather than typing `mode="broad"` explicitly.
+- Mode selection: `search_memory` accepts the optional modes `strict` and `history`; the default is
+  broad. Strict mode returns an envelope whose `data.items` is empty with a `NO_MATCH` warning
+  when it abstains. Successful list responses also carry `has_more` and `next_cursor`; follow the
+  cursor while `has_more` is true.
   - **If you are not fully confident of the exact spelling of a mode value, omit the
     parameter rather than guessing.** A wrong guess (e.g. `'hybrid'`, `'keyword'`) fails
     schema validation, and the resulting error does not enumerate the allowed values — so a
@@ -102,8 +98,8 @@ not here).
     correct mode list freshly loaded into its own context in the same turn (see fact memory
     `73be6566-37fa-451c-9fac-df9edef98f0f`). Don't retry a validation error with another
     guessed value — either omit `mode` or re-check this section for the exact spelling.
-- `manage_relation` accepts a `store_memory` status string or an exact title directly as
-  `source_id`/`target_id` — no need to manually parse a UUID out of a response string.
+- `manage_relation` takes a required `relations=[{source_id, target_id, predicate}]` batch; use
+  the memory references returned by the read tools rather than relying on service-layer names.
 - **Session recall**: a memory/event's `agent_session_id` (who created it) lets you pivot from
   one hit to everything else that session did — `search_memory(agent_session_id=<id>)` for its
   other memories, `get_events(agent_session_id=<id>, order='oldest_first')` for its event
@@ -122,8 +118,7 @@ This section is the workflow judgment on top of that: when and how to combine th
   attempts, a decision revised more than once): `search_memory` ranks saga nodes by text
   similarity, not by chronology or causality, and `mode="strict"` only resolves formal
   `supersede_memory`/`revise_memory` chains — neither tells you which fact in an unstructured
-  history of events/facts is now true. Anchor `retrieve_context(strategy="local")` on any node you
-  find instead and follow `resolves`/`corrects`/`elaborates_on`/`verifies` edges plus the
+  history of events/facts is now true. Anchor `retrieve_context(memory_ids=[...])` on any node you
   `lineage` field: this can surface a later, more final memory than the one you anchored on, and
   reveals whether the anchor itself was a revision of an earlier version.
 - **Before reaching for either tool**, check whether the question is really about your own
@@ -132,11 +127,11 @@ This section is the workflow judgment on top of that: when and how to combine th
   memories about *integrating* something, never the clean definition that already lives in your
   instructions. Absence of a SALTMDB hit, filtered or not, is never permission to proceed with
   something your own instructions forbid — it only means SALTMDB has nothing to add.
-- `retrieve_context`'s `global` strategy currently has known representative-selection/fan-out gaps
-  and no `entity_ids`-anchored redesign yet — prefer `local` for now.
+- `retrieve_context` is id-anchored only: pass `memory_ids=[...]` after resolving anchors with
+  `search_memory`; it has no public query or global strategy.
 
 ### Recommended chain
-`search_memory` (find/verify an anchor) → `retrieve_context(local, entity_ids=[...])`
+`search_memory` (find/verify an anchor) → `retrieve_context(memory_ids=[...])`
 (graph-expand around it) → `get_memory` (selectively, for whatever you'll actually cite). Skip
 straight to `retrieve_context` when you already trust an anchor id; skip both entirely when the
 answer is really "read your own loaded instructions."
@@ -180,11 +175,12 @@ spec), not only when a session ends.
    backlog row or event already records it; repo docs hold that repo's own contract and to-do list.
 2. Synthesize new permanent facts/rules/progress into `store_memory`.
 3. Link dependent/resolving relationships via `manage_relation`.
-4. **Correct stale memories on read.** Any time, not only during distillation: when a primary source (git, a file, a live
-   tool call) contradicts a memory you read in full with `get_memory` (a search preview is not enough), fix
-   it in the same turn: `revise_memory` when it was recorded wrong, `supersede_memory` when the
-   fact changed. For an inactive memory read its named successor first; with none, store a
-   correction and link it with `manage_relation(predicate="corrects")` (see Phase D step 4).
+4. **Correct stale memories on read.** Any time, not only during distillation: when a primary source
+   (git, a file, a live tool call) contradicts a memory you read in full with `get_memory` (a search
+   preview is not enough), fix it in the same turn: `revise_memory` when it was recorded wrong,
+   `supersede_memory` when the fact changed. For an inactive memory read its named successor first;
+   with none, store a correction and link it with
+   `manage_relation(relations=[{source_id: <new>, target_id: <stale>, predicate: "corrects"}])`.
    If memories conflict with each other, or you are still unsure, stop and ask rather than guess.
 5. **Retrieval-outcome telemetry** (pairs with the `saltmdb-stop-retrieval-outcome-gate.py` hook
    in `hooks/`, if installed): after acting on `search_memory` results, call
@@ -201,27 +197,29 @@ Purely agent-initiated — no background scanner triggers this for you. Two thin
 `store_memory` returning `duplicate_candidates` on a near-duplicate write, or (2) noticing
 redundant/overlapping raw memories yourself while searching.
 1. Retrieve the candidate entities (`get_memory`).
-2. Decide the shape: **multi-node synthesis** (`consolidate_memories` with multiple `parent_ids`)
-   when several memories hold complementary/overlapping/partial detail on the same topic —
-   `consolidate_memories` requires a minimum of two distinct active parent IDs, there is no
-   single-parent form; **single-node repair** (`revise_memory`, not `consolidate_memories`) when
-   one memory is already comprehensive and self-contained but needs a correction — don't
-   force-merge it with unrelated notes just because it surfaced as a duplicate candidate;
-   **straight replacement** (`supersede_memory`) when one candidate should simply replace another
-   with corrected/newer knowledge, not a synthesis of both.
+2. Decide the shape: **multi-node synthesis**
+   (`consolidate_memories(items=[{parent_memory_ids: [...], ...}])`) when several memories hold
+   complementary/overlapping/partial detail on the same topic —
+   `consolidate_memories` requires a minimum of two distinct active parent memory IDs, and there
+   is no single-parent form; **single-node repair** (`revise_memory`, not
+   `consolidate_memories`) when one memory is already comprehensive and self-contained but needs
+   a correction — don't force-merge it with unrelated notes just because it surfaced as a duplicate
+   candidate; **straight replacement** (`supersede_memory`) when one candidate should simply replace
+   another with corrected/newer knowledge, not a synthesis of both.
 3. Source memories are soft-archived and auto-linked via lineage edges — nothing is destroyed;
    full ancestry stays auditable via `get_lineage`.
-4. `revise_memory`/`supersede_memory`/`consolidate_memories` all hard-reject a target/parent
-   whose `status` isn't `'raw'` (`INACTIVE_TARGET`/`INACTIVE_PARENT`, zero side effects). To fix
-   a stale fact on an otherwise-fine consolidated memory without reviving it: `store_memory` a
-   small, self-contained correction, then `manage_relation(predicate="corrects", source_id=<new>,
-   target_id=<stale>)`. `corrects` is an ordinary agent-selectable predicate not subject to the
-   embedding-similarity governance gate, so it works even when content differs substantially.
+4. `revise_memory`/`supersede_memory`/`consolidate_memories` all hard-reject a target/parent whose
+   `status` isn't `'raw'` (`INACTIVE_TARGET`/`INACTIVE_PARENT`, zero side effects). To fix a stale
+   fact on an otherwise-fine consolidated memory without reviving it: `store_memory` a
+   small, self-contained correction, then
+   `manage_relation(relations=[{source_id: <new>, target_id: <stale>, predicate: "corrects"}])`.
+   `corrects` is an ordinary agent-selectable predicate not subject to the embedding-similarity
+   governance gate, so it works even when content differs substantially.
    `search_memory(mode="strict")` already ranks the corrector above the corrected memory
-   automatically — no `consolidate_memories` call is needed for a single correction.
+   automatically — no consolidation call is needed for a single correction.
 5. `revise_memory`/`supersede_memory` default to leaving the predecessor's own semantic relations
-   pointing at the now-archived old `entity_id` — reported back as `orphaned_semantic_edges` for
-   you to repoint by hand, one `manage_relation` call at a time. Pass `repoint_relations=True` to
+   pointing at the now-archived old `memory_id` — reported back as `orphaned_semantic_edges` for
+   you to repoint by hand, one `manage_relation` batch at a time. Pass `repoint_relations=True` to
    have the server atomically invalidate and recreate every one of those edges onto the new entity
    instead, in the same write. This is a judgment call, not a default-on convenience: reach for it
    when the replacement is genuinely identity-preserving continuity (a growing tracker/index

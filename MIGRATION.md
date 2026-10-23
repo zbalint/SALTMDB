@@ -320,3 +320,91 @@ DROP INDEX IF EXISTS idx_traces_agent_status;
 CREATE INDEX IF NOT EXISTS idx_entities_owner_scope ON entities(owner_id, scope);
 CREATE INDEX IF NOT EXISTS idx_traces_owner_status ON conversation_traces(owner_id, status);
 ```
+
+## Live cutover: MCP tool surface v2
+
+This release changes the agent-facing MCP contract without changing the database schema. The
+map covers every unreleased public-surface row since the installed commit, not only S1–S5.
+`capture_trace_start`, `capture_trace_memory_link`, and `capture_trace_complete` are unchanged
+hook-only tools in this release.
+
+### Tool map
+
+| Old public name | v2 public name | Spec |
+| :--- | :--- | :--- |
+| `inspect_memory` (removed) | `get_memory` with `detail="summary"` | S4B |
+| *(new)* | `get_memories` | S4B |
+| *(new)* | `set_core_memory` | S3C |
+| *(new)* | `update_memory_metadata` | S2 |
+
+### Parameter map
+
+| Old parameter or form | v2 parameter or form | Spec |
+| :--- | :--- | :--- |
+| `search_memory.query_keywords` | `search_memory.query` | S4A |
+| `get_memory.entity_id` | `get_memory.memory_id` | S4B |
+| `retrieve_context.entity_ids` | `retrieve_context.memory_ids` | S4C |
+| `manage_relation(source_id, target_id, predicate)` | `manage_relation.relations[]` | S2B |
+| `archive_memory.entity_id` | `archive_memory.memory_ids[]` | S2B |
+| `consolidate_memories.parent_ids` | `consolidate_memories.items[].parent_memory_ids` | S3A |
+| `search_traces.entity_id` | `search_traces.memory_id` | S4D |
+| `search_traces.query_keywords` | `search_traces.query` | S4D |
+| `get_events.offset` | `get_events.cursor` | S4D |
+| `get_related_memories.include_inspect` | `get_related_memories.include_summary` | S4C |
+
+### Response and behavior changes
+
+| Old response or behavior | v2 response or behavior | Spec |
+| :--- | :--- | :--- |
+| `data.id` | `data.memory_id` | S2 |
+| `data.old_id`/`data.new_id` | `data.predecessor_memory_id`/`data.successor_memory_id` *(not machine-checked: lifecycle response)* | S3B |
+| `data.results` | `data.items` plus `has_more` and `next_cursor` | S4A/S4D |
+| `entity_ids` in context output | `memory_ids` in the standard success envelope | S4C |
+| `linked_entity_ids` in trace previews | `linked_memory_ids` | S4D |
+| `total_dependencies_found`/`total_related_found` | `total_edges` | S4C |
+| Bare list or bespoke success shapes | Uniform `status`/`data`/`warnings`/`errors` envelopes, including `retrieve_context` successful responses | S1/S4C |
+| Unbounded pages and ids | Search `limit` 1–50 with cursor offset ≤1000; other list tools 1–100 except `search_traces` 1–50 with cursor offset ≤10000; memory references ≤200 characters; batch sizes are bounded | S4A–S4D |
+| Implicit core replacement | Explicit `CORE_DECISION_REQUIRED` or `core`/`demote_core` choice | S3A/S3B |
+| Partial relation/consolidation batches | Atomic batch behavior; all item errors identify their item path | S2B/S3A |
+| Unknown field silently accepted | Rejection with `corrected_call` when a rename map supplies one; removed tool names return plain `REMOVED_TOOL` naming the replacement | S1/S4B/S5 |
+| `retrieve_context` query/global strategy | `retrieve_context(memory_ids=[...])` only; community detection remains an internal local orphan-community aid | S4C/S5 |
+| `store_memory` create/update dual form | Create-only `store_memory`; use `update_memory_metadata` for shallow metadata changes, where a top-level `null` deletes the key | S2 |
+| Omitted `get_memory` detail | `get_memory` defaults to `detail="full"`; compact output is explicit | S4B |
+| Compact search snippets lacked a stable size | `search_memory(detail="compact")` returns a snippet of about 200 characters | S4A |
+| Claude Code may route an `INTERNAL_ERROR` rejection through `PostToolUseFailure` instead of `PostToolUse` (`isError`) | Unverified; hooks registered only on `PostToolUse` would not observe that failure path | S5/A2.3 |
+| A search page had no stable envelope or abstention signal | `data.items`, `has_more`, and `next_cursor` are always present; strict abstention is empty items with a `NO_MATCH` warning; service faults become `INTERNAL_ERROR` rejections and MCP `isError` is true | S4A |
+| `get_memory` accepted only full ids and redirected archived records | `memory_id` accepts an unambiguous prefix or exact title of an active memory; archived records are returned without successor redirection; ambiguous prefixes return candidates | S4B |
+| `get_memories` had no batch contract | 1–20 `memory_ids` (exact duplicate strings rejected; different prefix/title spellings may resolve to one memory), request order preserved, per-item `ok`/`not_found`/`ambiguous` outcomes; full reads consume a 40,000-character inline budget | S4B |
+| `store_memory` accepted both content sources or neither | Exactly one of `content` or `content_file_path` is required; both/neither reject before dispatch | S2 |
+| Metadata null values were retained | A top-level null in `update_memory_metadata` deletes that key; nested nulls remain data and an absent-key delete is a no-op | S2 |
+| Replacement silently inherited core and retrieval state | `revise_memory`/`supersede_memory` do not inherit core columns or `retrieval_text`; an active core predecessor requires an explicit `core` or `demote_core` decision, and public ids are predecessor/successor names | S3B |
+| Batch item bounds were implicit | `archive_memory.memory_ids` 1–50, `manage_relation.relations` 1–100, `consolidate_memories.items` 1–20, `retrieve_context.memory_ids` 1–20, `merge_tags.tags_to_merge` 1–50, `search_memory.tags_filter` ≤20 | S2B/S3A/S4A/S4C |
+| One generic id bound covered every read | `get_memories.memory_ids[]`, `get_memory.memory_id`, `get_lineage.memory_id`, `get_related_memories.memory_id`, and `retrieve_context.memory_ids[]` are each bounded at 200 characters | S4B/S4C |
+| Relation endpoint length was bounded with read references | Relation endpoints are bounded only by resolution, not by length; tracked as BL-081 | S2B |
+| Daemon clients reused old RPC dispatch names | Restart the daemon so `get_memories`, `set_core_memory`, and the v2 batch/read dispatch branches are loaded; wire-level daemon keys remain internal R9 names | S1–S4 |
+
+### Owner cutover checklist
+
+1. Stop every agent and the SALTMDB daemon. Back up `saltmdb.db` together with its `-wal` and
+   `-shm` files; the backup is mandatory even though S1–S5 leave the schema unchanged because
+   `init_db` migration code was refactored.
+2. Update the checkout and installed package, then restart the daemon. If a later slice changed
+   schema, apply that slice's migration row before starting clients.
+3. Run `scripts/check_surface_coupling.py` against the live hook sources and the shared agent
+   instruction sources that teach the tools. Fix findings in the source fragments and rerun the
+   instruction render procedure; never edit generated instruction files directly.
+4. Diff and merge the live hook sources with the repository `hooks/` copies where appropriate.
+   Do not overwrite intentional live differences: review the nudge, trace-capture, common,
+   retrieval-outcome, and circuit-breaker hooks, then rerun the scanner after the merge.
+5. Restart every MCP client so it reads the new tool list and schemas.
+6. Smoke-test through a real client: one `search_memory`, `get_memory`, `store_memory`, and
+   `get_events`; one captured trace with a memory link; and one Stop turn so the CLI-fed related
+   memories, session-start digest, and health JSON hooks visibly run. Optionally capture one
+   real PostToolUse payload's field names and value types with a temporary command hook, never
+   payload values.
+7. Roll back by stopping clients and the daemon, restoring the database backup (`saltmdb.db`,
+   `-wal`, and `-shm`) and the previous checkout, then restarting the previous package.
+
+The live hook sources and shared instruction sources are outside this repository and may differ
+from these checked-in copies. This checklist lists those owner-managed cutover items; S5 does
+not edit them.
