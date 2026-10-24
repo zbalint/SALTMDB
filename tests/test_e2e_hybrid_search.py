@@ -3,7 +3,7 @@ import tempfile
 import os
 import shutil
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, search_memory
+from saltmdb.domain.services.memory_service import store_memory, search_memory, SearchCriteria
 from saltmdb.domain.services.relation_service import store_relation
 
 
@@ -53,9 +53,9 @@ class TestE2EHybridSearch(unittest.TestCase):
         results = search_memory(
             query_keywords="Shor integer factorization QFT",
             agent_id="user1",
-            context_id="ctx_quantum",
             include_related=True,
             db_path=self.db_path,
+            criteria=SearchCriteria(context_id="ctx_quantum"),
         )
 
         self.assertTrue(len(results) > 0)
@@ -101,9 +101,9 @@ class TestE2EHybridSearch(unittest.TestCase):
         results = search_memory(
             query_keywords="co-resident relation pair related_entities visibility",
             agent_id="user1",
-            context_id="ctx_coresident",
             include_related=True,
             db_path=self.db_path,
+            criteria=SearchCriteria(context_id="ctx_coresident"),
         )
 
         result_ids = {r["id"] for r in results}

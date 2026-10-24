@@ -15,6 +15,8 @@ from saltmdb.domain.services.memory_service import (
     ranking,
     search_primitives,
     validation,
+    SearchCriteria,
+    SearchTuning,
 )
 
 
@@ -153,6 +155,36 @@ def _search_case(conn, path, options):
                 else {},
             )
         )
+        criteria_keys = (
+            "context_id",
+            "agent_session_id",
+            "tags_filter",
+            "tag_operator",
+            "metadata_filter",
+            "memory_type_filter",
+            "is_core",
+        )
+        tuning_keys = (
+            "cross_encoder_candidate_cap",
+            "cross_encoder_text_cap_chars",
+            "use_chunk_candidates",
+            "oversampling_multiplier",
+            "candidate_window",
+            "chunk_weight",
+            "use_retrieval_text_candidates",
+            "retrieval_fts_weight",
+            "retrieval_vector_weight",
+            "disable_semantic",
+            "prefer_durable_types",
+            "demote_superseded",
+            "collapse_supersedes_families",
+        )
+        criteria_values = {key: options.pop(key) for key in criteria_keys if key in options}
+        tuning_values = {key: options.pop(key) for key in tuning_keys if key in options}
+        if criteria_values:
+            options["criteria"] = SearchCriteria(**criteria_values)
+        if tuning_values:
+            options["tuning"] = SearchTuning(**tuning_values)
         return memory_service.search_memory(db_connection=conn, db_path=path, **options)
 
 
@@ -173,10 +205,10 @@ class TestSearchMemoryCharacterization:
         explained = memory_service.search_memory(
             query_keywords="needle",
             explain_mode=True,
-            tags_filter=["#missing"],
             return_diagnostics=True,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#missing"]),
         )
         assert explained["explain"]["invalid_tags_suggestions"] == ["#missing"]
         assert explained["diagnostics"]["candidate_pool_size"] == 0
@@ -185,10 +217,9 @@ class TestSearchMemoryCharacterization:
         conn, path = search_db
         relation = memory_service.search_memory(
             query_keywords=None,
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator="AND",
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#needle-tag", "#missing"], tag_operator="AND"),
         )
         assert relation == []
         conn.execute(
@@ -363,45 +394,45 @@ class TestSearchMemoryCharacterization:
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                context_id="ctx",
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(context_id="ctx"),
             )
         ] == ["b", "a"]
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                agent_session_id="session",
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(agent_session_id="session"),
             )
         ] == ["b"]
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                is_core=True,
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(is_core=True),
             )
         ] == ["b"]
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                memory_type_filter="procedure",
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(memory_type_filter="procedure"),
             )
         ] == ["c"]
 
@@ -412,22 +443,22 @@ class TestSearchMemoryCharacterization:
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                metadata_filter={"safe": "yes"},
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(metadata_filter={"safe": "yes"}),
             )
         ] == ["b", "a"]
         assert (
             memory_service.search_memory(
-                metadata_filter={"number": 7},
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(metadata_filter={"number": 7}),
             )
             == []
         )
@@ -437,23 +468,21 @@ class TestSearchMemoryCharacterization:
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                tags_filter=["#needle-tag"],
-                tag_operator="OR",
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(tags_filter=["#needle-tag"], tag_operator="OR"),
             )
         ] == ["b", "a"]
         assert memory_service.search_memory(
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator="OR",
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#needle-tag", "#missing"], tag_operator="OR"),
         ) == [
             {
                 "id": "b",
@@ -801,36 +830,35 @@ class TestSearchMemoryCharacterization:
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                is_core=False,
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(is_core=False),
             )
         ] == ["a", "c", "d"]
         assert [
             row["id"]
             for row in memory_service.search_memory(
-                memory_type_filter="fact",
                 query_keywords=None,
                 limit=10,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                criteria=SearchCriteria(memory_type_filter="fact"),
             )
         ] == ["d"]
 
     def test_unknown_tag_operator_uses_or_branch(self, search_db):
         conn, path = search_db
         rows = memory_service.search_memory(
-            tags_filter=["#needle-tag"],
-            tag_operator="AAA",
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#needle-tag"], tag_operator="AAA"),
         )
         assert [row["id"] for row in rows] == ["b", "a"]
 
@@ -852,9 +880,9 @@ class TestSearchMemoryCharacterization:
                 memory_service.search_memory(
                     query_keywords="needle",
                     mode=mode,
-                    collapse_supersedes_families=True,
                     db_connection=conn,
                     db_path=path,
+                    tuning=SearchTuning(collapse_supersedes_families=True),
                 )
 
     def test_unique_title_length_check_is_value_equality(self, search_db):
@@ -876,13 +904,12 @@ class TestSearchMemoryCharacterization:
     def test_unknown_operator_with_two_tags_stays_or(self, search_db):
         conn, path = search_db
         rows = memory_service.search_memory(
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator="A",
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#needle-tag", "#missing"], tag_operator="A"),
         )
         assert [row["id"] for row in rows] == ["b", "a"]
 
@@ -893,9 +920,9 @@ class TestSearchMemoryCharacterization:
             result = memory_service.search_memory(
                 query_keywords="needle",
                 mode=dynamic_broad,
-                collapse_supersedes_families=True,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(collapse_supersedes_families=True),
             )
         assert result[0]["error"].startswith("Semantic search is disabled")
 
@@ -936,13 +963,14 @@ class TestSearchMemoryCharacterization:
         conn, path = search_db
         dynamic_and = "".join(["A", "N", "D"])
         rows = memory_service.search_memory(
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator=dynamic_and,
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(
+                tags_filter=["#needle-tag", "#missing"], tag_operator=dynamic_and
+            ),
         )
         assert rows == []
 
@@ -954,25 +982,24 @@ class TestSearchMemoryCharacterization:
     def test_blank_tags_are_an_empty_filter(self, search_db):
         conn, path = search_db
         result = memory_service.search_memory(
-            tags_filter=[" ", ""],
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=[" ", ""]),
         )
         assert [row["id"] for row in result] == ["b", "a", "c", "d"]
 
     def test_or_filter_with_only_missing_tags_is_empty(self, search_db):
         conn, path = search_db
         result = memory_service.search_memory(
-            tags_filter=["#missing"],
-            tag_operator="OR",
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#missing"], tag_operator="OR"),
         )
         assert result == []
 
@@ -980,11 +1007,11 @@ class TestSearchMemoryCharacterization:
         conn, path = search_db
         result = memory_service.search_memory(
             query_keywords=None,
-            tags_filter=["#needle-tag"],
             explain_mode=True,
             return_diagnostics=True,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(tags_filter=["#needle-tag"]),
         )
         assert result["explain"]["invalid_tags_suggestions"] == []
 
@@ -1155,12 +1182,12 @@ class TestSearchMemoryCharacterization:
         history = _search_case(conn, path, {"mode": "".join(["his", "tory"]), "limit": 3})
         broad = _search_case(conn, path, {"mode": "".join(["br", "oad"]), "limit": 3})
         procedure = memory_service.search_memory(
-            memory_type_filter="".join(["pro", "cedure"]),
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=search_db[0],
             db_path=search_db[1],
+            criteria=SearchCriteria(memory_type_filter="".join(["pro", "cedure"])),
         )
         assert [row["id"] for row in strict] == ["b", "c"]
         assert [row["id"] for row in history] == ["a", "c", "b"]
@@ -1172,22 +1199,24 @@ class TestSearchMemoryCharacterization:
         runtime_or = "".join(["O", "R"])
         runtime_and = "and".upper()
         or_rows = memory_service.search_memory(
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator=runtime_or,
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(
+                tags_filter=["#needle-tag", "#missing"], tag_operator=runtime_or
+            ),
         )
         and_rows = memory_service.search_memory(
-            tags_filter=["#needle-tag", "#missing"],
-            tag_operator=runtime_and,
             query_keywords=None,
             limit=10,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(
+                tags_filter=["#needle-tag", "#missing"], tag_operator=runtime_and
+            ),
         )
         assert [row["id"] for row in or_rows] == ["b", "a"]
         assert and_rows == []
@@ -1239,13 +1268,15 @@ class TestSearchMemoryCharacterization:
         ):
             result = memory_service.search_memory(
                 query_keywords="needle",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.5,
-                retrieval_vector_weight=1.0,
                 return_diagnostics=True,
                 limit=3,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.5,
+                    retrieval_vector_weight=1.0,
+                ),
             )
         evidence = result["diagnostics"]["retrieval_text"]["candidate_evidence"]
         assert evidence == {
@@ -1584,11 +1615,11 @@ class TestSearchMemoryCharacterization:
         conn, path = search_db
         result = memory_service.search_memory(
             query_keywords=None,
-            memory_type_filter="fact",
             include_related=True,
             limit=10,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(memory_type_filter="fact"),
         )
         assert [row["id"] for row in result] == ["d"]
         assert result[0]["related_entities"] == []
@@ -1762,13 +1793,15 @@ class TestSearchMemoryCharacterization:
             result = memory_service.search_memory(
                 query_keywords="needle",
                 mode="strict",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.0,
-                retrieval_vector_weight=1.0,
                 limit=1,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.0,
+                    retrieval_vector_weight=1.0,
+                ),
             )
         assert result == []
         assert calls == [20]
@@ -1821,13 +1854,15 @@ class TestSearchMemoryCharacterization:
             result = memory_service.search_memory(
                 query_keywords="needle",
                 mode="strict",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.0,
-                retrieval_vector_weight=1.0,
                 limit=1,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.0,
+                    retrieval_vector_weight=1.0,
+                ),
             )
         assert result == []
         assert calls == [20, 40]
@@ -1906,10 +1941,10 @@ class TestSearchMemoryCharacterization:
         caplog.set_level("ERROR")
         result = memory_service.search_memory(
             query_keywords=None,
-            metadata_filter={"bad.key": "x"},
             return_diagnostics=True,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(metadata_filter={"bad.key": "x"}),
         )
         assert "metadata_filter key" in result["error"]
         assert "Error searching memory: metadata_filter key" in caplog.text
@@ -2010,14 +2045,14 @@ class TestSearchMemoryCharacterization:
         ):
             result = memory_service.search_memory(
                 query_keywords="needle",
-                use_chunk_candidates=True,
-                candidate_window=20,
-                oversampling_multiplier=4,
                 limit=1,
                 include_related=False,
                 return_diagnostics=True,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_chunk_candidates=True, candidate_window=20, oversampling_multiplier=4
+                ),
             )
         assert validation._validate_chunk_candidate_controls(True, 4, 20, None) == (
             4,
@@ -2122,11 +2157,11 @@ class TestSearchMemoryCharacterization:
         conn, path = search_db
         result = memory_service.search_memory(
             query_keywords=None,
-            metadata_filter=["ignored"],
             limit=3,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(metadata_filter=["ignored"]),
         )
         assert [row["id"] for row in result] == ["b", "a", "c"]
 
@@ -2207,14 +2242,16 @@ class TestSearchMemoryCharacterization:
         ):
             result = memory_service.search_memory(
                 query_keywords="needle",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.0,
-                retrieval_vector_weight=1.0,
                 return_diagnostics=True,
                 limit=2,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.0,
+                    retrieval_vector_weight=1.0,
+                ),
             )
         evidence = result["diagnostics"]["retrieval_text"]["candidate_evidence"]
         assert evidence["b"]["vector_rank"] == 1
@@ -2377,13 +2414,15 @@ class TestSearchMemoryCharacterization:
         ):
             result = memory_service.search_memory(
                 query_keywords="needle evidence",
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.0,
-                retrieval_vector_weight=1.0,
                 limit=1,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.0,
+                    retrieval_vector_weight=1.0,
+                ),
             )
         conn.set_trace_callback(None)
         assert result[0]["id"] == "a"
@@ -2440,12 +2479,14 @@ class TestSearchMemoryCharacterization:
                 query_keywords="needle",
                 cursor="offset:1",
                 limit=1,
-                use_retrieval_text_candidates=True,
-                retrieval_fts_weight=1.0,
-                retrieval_vector_weight=1.0,
                 include_related=False,
                 db_connection=conn,
                 db_path=path,
+                tuning=SearchTuning(
+                    use_retrieval_text_candidates=True,
+                    retrieval_fts_weight=1.0,
+                    retrieval_vector_weight=1.0,
+                ),
             )
             direct = search_primitives.retrieval_vector_search("needle", [], [], 1, path, offset=1)
         assert direct == [("b", 0.2)]
@@ -3068,11 +3109,11 @@ def test_search2_public_tag_filter_is_case_insensitive(search_db):
     conn, path = search_db
     result = memory_service.search_memory(
         query_keywords=None,
-        tags_filter=["#NEEDLE-TAG"],
         db_connection=conn,
         db_path=path,
         include_related=False,
         limit=5,
+        criteria=SearchCriteria(tags_filter=["#NEEDLE-TAG"]),
     )
     assert [item["id"] for item in result] == ["b", "a"]
 
@@ -3100,9 +3141,9 @@ def test_search2_public_retrieval_diagnostics_report_channels(search_db):
             db_connection=conn,
             db_path=path,
             include_related=False,
-            use_retrieval_text_candidates=True,
             return_diagnostics=True,
             limit=3,
+            tuning=SearchTuning(use_retrieval_text_candidates=True),
         )
     assert fts_search.call_args.args[5] == 0
     assert vector_search.call_args.args[5] == 0
@@ -3174,9 +3215,11 @@ def test_search2_asymmetric_retrieval_weights_are_not_swapped(search_db):
             db_path=path,
             db_connection=conn,
             include_related=False,
-            use_retrieval_text_candidates=True,
-            retrieval_fts_weight=0.5,
-            retrieval_vector_weight=1.5,
+            tuning=SearchTuning(
+                use_retrieval_text_candidates=True,
+                retrieval_fts_weight=0.5,
+                retrieval_vector_weight=1.5,
+            ),
         )
     assert fuse.call_args.kwargs["retrieval_fts_results"] == [("a", 0.1)]
     assert fuse.call_args.kwargs["retrieval_vector_results"] == [("a", 0.2)]
@@ -3218,7 +3261,7 @@ def test_search2_full_fts_window_does_not_mark_pool_exhausted(search_db):
             db_connection=conn,
             include_related=False,
             mode="strict",
-            candidate_window=3,
+            tuning=SearchTuning(candidate_window=3),
         )
     assert run_fts.call_count == 2
 
@@ -3240,12 +3283,12 @@ def test_valid_modes_do_not_emit_unknown_mode_warning(search_db, caplog):
 def test_case_insensitive_stored_tag_matches_filter(search_db):
     conn, path = search_db
     rows = memory_service.search_memory(
-        tags_filter=["#NEEDLE-TAG"],
         query_keywords=None,
         limit=10,
         include_related=False,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(tags_filter=["#NEEDLE-TAG"]),
     )
     assert [row["id"] for row in rows] == ["b", "a"]
 
@@ -3282,11 +3325,11 @@ def test_exact_title_identity_keeps_caller_filters_as_and(search_db):
     with patch("saltmdb.config.is_semantic_search_enabled", return_value=False):
         result = memory_service.search_memory(
             query_keywords="Filtered title",
-            context_id="missing-context",
             limit=1,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(context_id="missing-context"),
         )
     assert result[0]["error"].startswith("Semantic search is disabled")
 
@@ -3381,11 +3424,10 @@ def test_related_archived_endpoints_are_excluded_in_both_directions(search_db):
     result = memory_service.search_memory(
         query_keywords=None,
         agent_id="owner",
-        context_id="ctx",
-        is_core=False,
         limit=1,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(context_id="ctx", is_core=False),
     )
     assert result[0]["id"] == "a"
     assert all(item["id"] != "archived-related" for item in result[0]["related_entities"])
@@ -3408,11 +3450,10 @@ def test_related_expired_endpoints_are_excluded_in_both_directions(search_db):
     result = memory_service.search_memory(
         query_keywords=None,
         agent_id="owner",
-        context_id="ctx",
-        is_core=False,
         limit=1,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(context_id="ctx", is_core=False),
     )
     assert result[0]["id"] == "a"
     assert all(item["id"] != "expired-related" for item in result[0]["related_entities"])
@@ -3524,11 +3565,11 @@ def test_search_diagnostics_are_published_on_success_and_error(search_db):
         publish.reset_mock()
         error = memory_service.search_memory(
             query_keywords=None,
-            metadata_filter={"bad.key": "x"},
             return_diagnostics=True,
             include_related=False,
             db_connection=conn,
             db_path=path,
+            criteria=SearchCriteria(metadata_filter={"bad.key": "x"}),
         )
     assert publish.call_count == 1
     assert publish.call_args.args[0] is error["diagnostics"]
@@ -3589,10 +3630,10 @@ def test_search_error_logs_without_exception_info(search_db, caplog):
     caplog.set_level("ERROR")
     result = memory_service.search_memory(
         query_keywords=None,
-        metadata_filter={"bad.key": "x"},
         include_related=False,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(metadata_filter={"bad.key": "x"}),
     )
     assert result[0]["error"]
     records = [record for record in caplog.records if "Error searching memory" in record.message]
@@ -3638,22 +3679,22 @@ def test_cursor_offset_uses_first_numeric_segment_and_invalid_falls_back(search_
     page = memory_service.search_memory(
         query_keywords=None,
         agent_id="owner",
-        context_id="cursor-context",
         cursor="offset:3:4",
         limit=1,
         include_related=False,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(context_id="cursor-context"),
     )
     invalid = memory_service.search_memory(
         query_keywords=None,
         agent_id="owner",
-        context_id="cursor-context",
         cursor="offset:abc",
         limit=1,
         include_related=False,
         db_connection=conn,
         db_path=path,
+        criteria=SearchCriteria(context_id="cursor-context"),
     )
     assert page[0]["id"] == "cursor-1"
     assert page[0]["cursor"] == "offset:4"

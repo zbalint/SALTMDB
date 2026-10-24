@@ -33,17 +33,21 @@ class SearchMixin(ViewerHandlerProtocol):
                 "db_path": db_path or get_db_path(),
             }
             is_core_raw = query.get("is_core", [None])[0]
+            parsed_is_core = None
             if is_core_raw:
                 normalized_is_core = is_core_raw.strip().lower()
                 if normalized_is_core in ("true", "1", "yes"):
-                    search_kwargs["is_core"] = True
+                    parsed_is_core = True
                 elif normalized_is_core in ("false", "0", "no"):
-                    search_kwargs["is_core"] = False
+                    parsed_is_core = False
                 else:
                     raise ValueError("is_core must be one of true, 1, yes, false, 0, no")
             session_id_raw = query.get("agent_session_id", [None])[0]
-            if session_id_raw:
-                search_kwargs["agent_session_id"] = session_id_raw
+            if is_core_raw or session_id_raw:
+                search_kwargs["criteria"] = memory_service.SearchCriteria(
+                    is_core=parsed_is_core,
+                    agent_session_id=session_id_raw,
+                )
             results = memory_service.search_memory(**search_kwargs)
             if not isinstance(results, list):
                 message = (

@@ -107,9 +107,49 @@ def _validate_output_dir(path: Path) -> Path:
     return resolved
 
 
+def _map_flat_arguments(search: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    if "criteria" not in inspect.signature(search).parameters:
+        return dict(arguments)
+    from saltmdb.domain.services.memory_service import SearchCriteria, SearchTuning
+
+    criteria_names = (
+        "context_id",
+        "agent_session_id",
+        "tags_filter",
+        "tag_operator",
+        "metadata_filter",
+        "memory_type_filter",
+        "is_core",
+    )
+    tuning_names = (
+        "cross_encoder_candidate_cap",
+        "cross_encoder_text_cap_chars",
+        "use_chunk_candidates",
+        "oversampling_multiplier",
+        "candidate_window",
+        "chunk_weight",
+        "use_retrieval_text_candidates",
+        "retrieval_fts_weight",
+        "retrieval_vector_weight",
+        "disable_semantic",
+        "prefer_durable_types",
+        "demote_superseded",
+        "collapse_supersedes_families",
+    )
+    mapped = dict(arguments)
+    criteria = {name: mapped.pop(name) for name in criteria_names if name in mapped}
+    tuning = {name: mapped.pop(name) for name in tuning_names if name in mapped}
+    if criteria:
+        mapped["criteria"] = SearchCriteria(**criteria)
+    if tuning:
+        mapped["tuning"] = SearchTuning(**tuning)
+    return mapped
+
+
 def validate_arguments(search: Callable[..., Any], arguments: dict[str, Any]) -> None:
+    effective = _map_flat_arguments(search, arguments)
     accepted = set(inspect.signature(search).parameters)
-    unknown = sorted(set(arguments) - accepted)
+    unknown = sorted(set(effective) - accepted)
     if unknown:
         raise ValueError(f"unknown search_memory keyword(s): {', '.join(unknown)}")
 
@@ -680,7 +720,7 @@ def _call(
         call_arguments["db_path"] = str(db_path)
         started = time.perf_counter()
         try:
-            output = search(**call_arguments)
+            output = search(**_map_flat_arguments(search, call_arguments))
             result: dict[str, Any] = {"output": output}
         except Exception as error:  # per-call exceptions are part of the compared contract
             result = {

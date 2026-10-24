@@ -26,11 +26,12 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         call = search.call_args.kwargs
         self.assertFalse(call["explain_mode"])
         self.assertEqual(call["limit"], 5)
-        self.assertEqual(call["tag_operator"], "AND")
+        self.assertEqual(call["criteria"].tag_operator, "AND")
         self.assertEqual(call["mode"], "broad")
         self.assertTrue(call["include_related"])
-        self.assertFalse(call["prefer_durable_types"])
-        self.assertFalse(call["demote_superseded"])
+        tuning = call["tuning"]
+        self.assertFalse(tuning.prefer_durable_types)
+        self.assertFalse(tuning.demote_superseded)
 
     def test_consolidation_requires_title_and_content(self):
         result = _dispatch_commit_consolidation(parent_ids=["parent"], content="content")

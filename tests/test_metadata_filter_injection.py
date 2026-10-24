@@ -18,7 +18,7 @@ import shutil
 import json
 
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import search_memory
+from saltmdb.domain.services.memory_service import search_memory, SearchCriteria
 
 
 class TestMetadataFilterInjection(unittest.TestCase):
@@ -67,9 +67,9 @@ class TestMetadataFilterInjection(unittest.TestCase):
         malicious_key = "safe') OR 1=1 OR json_extract(e.metadata, '$.safe"
         results = search_memory(
             agent_id="attacker",
-            metadata_filter={malicious_key: "no-match"},
             db_path=self.db_path,
             include_related=False,
+            criteria=SearchCriteria(metadata_filter={malicious_key: "no-match"}),
         )
         self.assertEqual(len(results), 1)
         self.assertIn("error", results[0])
@@ -81,9 +81,9 @@ class TestMetadataFilterInjection(unittest.TestCase):
         malicious_key = "safe') OR 1=1 OR json_extract(e.metadata, '$.safe"
         results = search_memory(
             agent_id="attacker",
-            metadata_filter={malicious_key: "no-match"},
             db_path=self.db_path,
             include_related=False,
+            criteria=SearchCriteria(metadata_filter={malicious_key: "no-match"}),
         )
         returned_ids = {r["id"] for r in results if "id" in r}
         self.assertNotIn("victim-entity", returned_ids)
@@ -92,9 +92,9 @@ class TestMetadataFilterInjection(unittest.TestCase):
         """Well-formed keys/values continue to filter correctly (no functional regression)."""
         results = search_memory(
             agent_id="attacker",
-            metadata_filter={"safe": "yes"},
             db_path=self.db_path,
             include_related=False,
+            criteria=SearchCriteria(metadata_filter={"safe": "yes"}),
         )
         returned_ids = {r["id"] for r in results}
         self.assertIn("attacker-entity", returned_ids)

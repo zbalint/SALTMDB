@@ -25,6 +25,7 @@ from saltmdb.domain.services.memory_service import (
     retrieval_vector_search,
     search_memory,
     store_memory,
+    SearchTuning,
 )
 
 _UNSET = object()
@@ -280,11 +281,11 @@ class RetrievalTextTests(unittest.TestCase):
         ):
             result = search_memory(
                 query_keywords="diagnostic hidden retrieval phrase",
-                use_retrieval_text_candidates=True,
                 return_diagnostics=True,
                 db_connection=self.conn,
                 db_path=self.db_path,
                 limit=5,
+                tuning=SearchTuning(use_retrieval_text_candidates=True),
             )
         self.assertEqual(result["results"][0]["id"], entity_id)
         serialized = json.dumps(result, sort_keys=True)

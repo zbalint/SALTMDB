@@ -10,7 +10,7 @@ from saltmdb.utils.nlp import (
     validate_markdown_structure,
 )
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, search_memory
+from saltmdb.domain.services.memory_service import store_memory, search_memory, SearchCriteria
 
 
 class TestBugFixes(unittest.TestCase):
@@ -83,18 +83,16 @@ class TestBugFixes(unittest.TestCase):
         )
 
         res_or = search_memory(
-            tags_filter=["#tagAlpha", "#tagBeta"],
-            tag_operator="OR",
             agent_id="agent1",
             db_path=self.db_path,
+            criteria=SearchCriteria(tags_filter=["#tagAlpha", "#tagBeta"], tag_operator="OR"),
         )
         self.assertEqual(len(res_or), 2)
 
         res_and = search_memory(
-            tags_filter=["#tagAlpha", "#tagBeta"],
-            tag_operator="AND",
             agent_id="agent1",
             db_path=self.db_path,
+            criteria=SearchCriteria(tags_filter=["#tagAlpha", "#tagBeta"], tag_operator="AND"),
         )
         self.assertEqual(len(res_and), 1)
         self.assertEqual(res_and[0]["title"], "Memory A")

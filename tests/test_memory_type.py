@@ -7,7 +7,12 @@ import uuid
 from datetime import datetime, UTC
 
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, search_memory, scan_memories
+from saltmdb.domain.services.memory_service import (
+    store_memory,
+    search_memory,
+    scan_memories,
+    SearchCriteria,
+)
 
 
 class TestMemoryTypeStoreMemory(unittest.TestCase):
@@ -157,8 +162,8 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
 
         results = search_memory(
             agent_id="tester",
-            memory_type_filter="procedure",
             db_connection=self.conn,
+            criteria=SearchCriteria(memory_type_filter="procedure"),
         )
         self.assertTrue(len(results) > 0)
         ids = {r["id"] for r in results}
@@ -173,9 +178,8 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
 
         results = search_memory(
             agent_id="tester",
-            memory_type_filter="procedure",
-            is_core=True,
             db_connection=self.conn,
+            criteria=SearchCriteria(memory_type_filter="procedure", is_core=True),
         )
         ids = {r["id"] for r in results}
         self.assertIn(core_proc_id, ids)
@@ -188,8 +192,8 @@ class TestMemoryTypeSearchAndScan(unittest.TestCase):
 
         results = search_memory(
             agent_id="tester",
-            memory_type_filter="decision",
             db_connection=self.conn,
+            criteria=SearchCriteria(memory_type_filter="decision"),
         )
         matching = [r for r in results if r["id"] == entity_id]
         self.assertEqual(len(matching), 1)

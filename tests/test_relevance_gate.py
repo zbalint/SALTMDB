@@ -20,6 +20,7 @@ from saltmdb.domain.services.memory_service import (
     _run_fts_search,
     accept_or_abstain,
     search_memory,
+    SearchTuning,
 )
 
 
@@ -645,8 +646,7 @@ class TestSearchMemoryModeStrictSeam(unittest.TestCase):
                 db_path=self.db_path,
                 include_related=False,
                 mode="history",
-                prefer_durable_types=False,
-                demote_superseded=False,
+                tuning=SearchTuning(prefer_durable_types=False, demote_superseded=False),
             )
 
         self.assertEqual(

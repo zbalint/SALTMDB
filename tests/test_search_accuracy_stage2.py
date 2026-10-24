@@ -28,6 +28,7 @@ from saltmdb.domain.services.memory_service import (
     weighted_reciprocal_rank_fusion,
     get_last_search_diagnostics,
     orchestrator,
+    SearchTuning,
 )
 
 
@@ -245,8 +246,8 @@ class TestSupersedesFamilyCollapse(_DbFixture):
             search_memory(
                 query_keywords="mode validation",
                 mode="history",
-                collapse_supersedes_families=True,
                 db_path=self.db_path,
+                tuning=SearchTuning(collapse_supersedes_families=True),
             )
 
 
@@ -464,10 +465,10 @@ class TestSearchRankingDiagnostics(_DbFixture):
         result = search_memory(
             query_keywords="diagnosticquery",
             limit=10,
-            collapse_supersedes_families=True,
             return_diagnostics=True,
             db_connection=self.conn,
             db_path=self.db_path,
+            tuning=SearchTuning(collapse_supersedes_families=True),
         )
         assert isinstance(result, dict)
         by_id = {
@@ -578,13 +579,14 @@ class TestSearchOptionPropagation(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(items[0]["id"], "e1")
         call = search.call_args.kwargs
-        self.assertTrue(call["use_chunk_candidates"])
-        self.assertEqual(call["oversampling_multiplier"], 12)
-        self.assertEqual(call["candidate_window"], 60)
-        self.assertEqual(call["chunk_weight"], 1.5)
-        self.assertTrue(call["collapse_supersedes_families"])
-        self.assertEqual(call["cross_encoder_candidate_cap"], 20)
-        self.assertEqual(call["cross_encoder_text_cap_chars"], 2000)
+        tuning = call["tuning"]
+        self.assertTrue(tuning.use_chunk_candidates)
+        self.assertEqual(tuning.oversampling_multiplier, 12)
+        self.assertEqual(tuning.candidate_window, 60)
+        self.assertEqual(tuning.chunk_weight, 1.5)
+        self.assertTrue(tuning.collapse_supersedes_families)
+        self.assertEqual(tuning.cross_encoder_candidate_cap, 20)
+        self.assertEqual(tuning.cross_encoder_text_cap_chars, 2000)
 
     def test_daemon_dispatch_forwards_all_new_controls(self):
         with patch(
@@ -602,12 +604,13 @@ class TestSearchOptionPropagation(unittest.TestCase):
                 return_diagnostics=True,
             )
         call = search.call_args.kwargs
-        self.assertEqual(call["oversampling_multiplier"], 8)
-        self.assertEqual(call["candidate_window"], 40)
-        self.assertEqual(call["chunk_weight"], 1.5)
-        self.assertTrue(call["collapse_supersedes_families"])
-        self.assertEqual(call["cross_encoder_candidate_cap"], 15)
-        self.assertEqual(call["cross_encoder_text_cap_chars"], 2000)
+        tuning = call["tuning"]
+        self.assertEqual(tuning.oversampling_multiplier, 8)
+        self.assertEqual(tuning.candidate_window, 40)
+        self.assertEqual(tuning.chunk_weight, 1.5)
+        self.assertTrue(tuning.collapse_supersedes_families)
+        self.assertEqual(tuning.cross_encoder_candidate_cap, 15)
+        self.assertEqual(tuning.cross_encoder_text_cap_chars, 2000)
         self.assertTrue(call["return_diagnostics"])
 
 

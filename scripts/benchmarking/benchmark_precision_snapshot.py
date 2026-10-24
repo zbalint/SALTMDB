@@ -42,9 +42,10 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from saltmdb.db.connection import close_connection, get_connection
-from saltmdb.domain.services.memory_service import search_memory
+from saltmdb.domain.services.memory_service import SearchTuning, search_memory
 
 GOLDEN_SET_DEFAULT = Path(__file__).parent / "golden_queries.json"
 
@@ -187,14 +188,16 @@ def _run_query(
 
     t0 = time.perf_counter()
     try:
-        results = search_memory(
-            query_keywords=entry["query"],
-            limit=top_n,
-            include_related=False,
-            db_connection=conn,
-            db_path=db_path,
-            **search_flags,
-        )
+        search_kwargs: dict[str, Any] = {
+            "query_keywords": entry["query"],
+            "limit": top_n,
+            "include_related": False,
+            "db_connection": conn,
+            "db_path": db_path,
+        }
+        if search_flags:
+            search_kwargs["tuning"] = SearchTuning(**search_flags)
+        results = search_memory(**search_kwargs)
     except Exception as e:  # search_memory() itself is documented to catch+wrap; this is belt-
         # and-suspenders in case a caller-side issue (e.g. bad entry) raises before that.
         latency_ms = (time.perf_counter() - t0) * 1000

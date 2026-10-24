@@ -86,7 +86,7 @@ import time
 from pathlib import Path
 
 from saltmdb.config import get_db_path
-from saltmdb.domain.services.memory_service import search_memory
+from saltmdb.domain.services.memory_service import SearchTuning, search_memory
 
 POSITIVE_SET_DEFAULT = Path(__file__).parent / "golden_queries.json"
 NEGATIVE_SET_DEFAULT = Path(__file__).parent / "golden_queries_negative.json"
@@ -218,9 +218,11 @@ def _timed_search(db_path: str, cfg: dict, query: str, limit: int) -> tuple[list
         db_path=db_path,
         limit=limit,
         mode=cfg["mode"],
-        prefer_durable_types=cfg["prefer_durable_types"],
-        demote_superseded=cfg["demote_superseded"],
         include_related=False,
+        tuning=SearchTuning(
+            prefer_durable_types=cfg["prefer_durable_types"],
+            demote_superseded=cfg["demote_superseded"],
+        ),
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     return result, elapsed_ms

@@ -22,6 +22,7 @@ regardless of which submodule under this package a given log call physically liv
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,41 @@ class Provenance:
     agent_id: str | None = None
     context_id: str | None = None
     agent_session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchCriteria:
+    """What a search must match: tag, metadata, type, core, context and session filters."""
+
+    # tags_filter and metadata_filter are caller-owned mutable containers: frozen is shallow, and hash() raises when either is set; never use as a cache key.
+    context_id: str | None = None
+    agent_session_id: str | None = None
+    tags_filter: list | None = None
+    tag_operator: Literal["AND", "OR"] = "AND"
+    metadata_filter: dict | None = None
+    memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"] | None = (
+        None
+    )
+    is_core: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SearchTuning:
+    """Ranking and candidate-generation knobs; every default is the behaviour of a plain search."""
+
+    cross_encoder_candidate_cap: int | None = None
+    cross_encoder_text_cap_chars: int | None = None
+    use_chunk_candidates: bool = False
+    oversampling_multiplier: int | None = None
+    candidate_window: int | None = None
+    chunk_weight: float | None = None
+    use_retrieval_text_candidates: bool = False
+    retrieval_fts_weight: float | None = None
+    retrieval_vector_weight: float | None = None
+    disable_semantic: bool = False
+    prefer_durable_types: bool = False
+    demote_superseded: bool = False
+    collapse_supersedes_families: bool = False
 
 
 @dataclass(frozen=True, slots=True)

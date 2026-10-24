@@ -10,6 +10,7 @@ from saltmdb.domain.services.memory_service import (
     store_memory,
     search_memory,
     reciprocal_rank_fusion,
+    SearchTuning,
 )
 
 
@@ -397,10 +398,10 @@ class TestSearchScores(unittest.TestCase):
         ):
             results = search_memory(
                 query_keywords=title,
-                collapse_supersedes_families=True,
                 include_related=False,
                 db_connection=self.conn,
                 db_path=self.db_path,
+                tuning=SearchTuning(collapse_supersedes_families=True),
             )
 
         self.assertEqual([row["id"] for row in results], ["family-head"])

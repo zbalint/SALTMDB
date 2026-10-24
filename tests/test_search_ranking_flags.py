@@ -16,6 +16,7 @@ from saltmdb.domain.services.memory_service import (
     _apply_supersession_demotion,
     _apply_type_bias,
     search_memory,
+    SearchTuning,
 )
 
 
@@ -191,13 +192,13 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
         ):
             opted_out_results = search_memory(
                 query_keywords="type bias seam test",
-                prefer_durable_types=False,
                 db_path=self.db_path,
+                tuning=SearchTuning(prefer_durable_types=False),
             )
             biased_results = search_memory(
                 query_keywords="type bias seam test",
-                prefer_durable_types=True,
                 db_path=self.db_path,
+                tuning=SearchTuning(prefer_durable_types=True),
             )
             # Flag omitted entirely -- proves the evaluated False default actually takes effect
             # at the service layer, not just when passed explicitly. This only
@@ -237,13 +238,13 @@ class TestPart2SearchMemorySeam(unittest.TestCase):
         ):
             opted_out_results = search_memory(
                 query_keywords="supersession seam test",
-                demote_superseded=False,
                 db_path=self.db_path,
+                tuning=SearchTuning(demote_superseded=False),
             )
             demoted_results = search_memory(
                 query_keywords="supersession seam test",
-                demote_superseded=True,
                 db_path=self.db_path,
+                tuning=SearchTuning(demote_superseded=True),
             )
             # Flag omitted entirely -- proves the evaluated False default actually takes effect
             # at the service layer, not just when passed explicitly. This only

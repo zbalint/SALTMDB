@@ -22,6 +22,7 @@ from saltmdb.domain.services.memory_service import (
     _compute_bitemporal_target_ids,
     _compute_superseded_ids_bitemporal,
     search_memory,
+    SearchTuning,
 )
 
 
@@ -267,8 +268,7 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
                 db_path=self.db_path,
                 include_related=False,
                 mode="strict",
-                prefer_durable_types=False,
-                demote_superseded=False,
+                tuning=SearchTuning(prefer_durable_types=False, demote_superseded=False),
             )
 
         # Type bias runs first (sinks event_entity behind the two durable-typed ids, preserving
@@ -306,16 +306,14 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
                 query_keywords="q",
                 db_path=self.db_path,
                 include_related=False,
-                prefer_durable_types=False,
-                demote_superseded=False,
+                tuning=SearchTuning(prefer_durable_types=False, demote_superseded=False),
             )
             history_results = search_memory(
                 query_keywords="q",
                 db_path=self.db_path,
                 include_related=False,
                 mode="history",
-                prefer_durable_types=False,
-                demote_superseded=False,
+                tuning=SearchTuning(prefer_durable_types=False, demote_superseded=False),
             )
             # mode="strict" forces its own durable-type/demotion policy unconditionally,
             # ignoring the caller's own flag values -- omitting them here is intentionally inert.
@@ -402,8 +400,7 @@ class TestSearchMemoryStrictDefaultsSeam(unittest.TestCase):
                 db_path=self.db_path,
                 include_related=False,
                 mode="strict",
-                prefer_durable_types=True,
-                demote_superseded=True,
+                tuning=SearchTuning(prefer_durable_types=True, demote_superseded=True),
             )
 
         self.assertEqual([r["id"] for r in results], ["right", "wrong"])

@@ -42,6 +42,7 @@ from judge_pool import judge_version_fingerprint  # noqa: E402
 from saltmdb.config import get_db_path  # noqa: E402
 from saltmdb.db.connection import close_connection, get_connection  # noqa: E402
 from saltmdb.domain.services.memory_service import (  # noqa: E402
+    SearchTuning,
     get_last_search_diagnostics,
     search_memory,
 )
@@ -298,19 +299,21 @@ def run_one_config(
             db_connection=conn,
             limit=limit,
             mode=config["mode"],
-            prefer_durable_types=config["prefer_durable_types"],
-            demote_superseded=config["demote_superseded"],
-            cross_encoder_candidate_cap=config.get("cross_encoder_candidate_cap"),
-            cross_encoder_text_cap_chars=config.get("cross_encoder_text_cap_chars"),
-            use_chunk_candidates=config.get("use_chunk_candidates", False),
-            oversampling_multiplier=config.get("oversampling_multiplier"),
-            candidate_window=config.get("candidate_window"),
-            chunk_weight=config.get("chunk_weight"),
-            collapse_supersedes_families=config.get("collapse_supersedes_families", False),
-            use_retrieval_text_candidates=config.get("use_retrieval_text_candidates", False),
-            retrieval_fts_weight=config.get("retrieval_fts_weight"),
-            retrieval_vector_weight=config.get("retrieval_vector_weight"),
             include_related=False,
+            tuning=SearchTuning(
+                prefer_durable_types=config["prefer_durable_types"],
+                demote_superseded=config["demote_superseded"],
+                cross_encoder_candidate_cap=config.get("cross_encoder_candidate_cap"),
+                cross_encoder_text_cap_chars=config.get("cross_encoder_text_cap_chars"),
+                use_chunk_candidates=config.get("use_chunk_candidates", False),
+                oversampling_multiplier=config.get("oversampling_multiplier"),
+                candidate_window=config.get("candidate_window"),
+                chunk_weight=config.get("chunk_weight"),
+                collapse_supersedes_families=config.get("collapse_supersedes_families", False),
+                use_retrieval_text_candidates=config.get("use_retrieval_text_candidates", False),
+                retrieval_fts_weight=config.get("retrieval_fts_weight"),
+                retrieval_vector_weight=config.get("retrieval_vector_weight"),
+            ),
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         if isinstance(result, dict) and "error" in result:

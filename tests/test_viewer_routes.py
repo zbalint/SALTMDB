@@ -10,7 +10,7 @@ import numpy as np
 from saltmdb.db.schema import init_db
 from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.domain.services import relation_service
-from saltmdb.domain.services.memory_service import store_memory, Provenance
+from saltmdb.domain.services.memory_service import store_memory, Provenance, SearchCriteria
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -177,7 +177,7 @@ class TestViewerBrowseAndHybridSearch(unittest.TestCase):
             include_related=False,
             mode="broad",
             db_path=self.db_path,
-            agent_session_id="sess-alpha",
+            criteria=SearchCriteria(agent_session_id="sess-alpha"),
         )
 
 

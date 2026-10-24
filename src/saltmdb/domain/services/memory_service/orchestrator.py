@@ -28,7 +28,7 @@ from saltmdb.db.connection import get_connection, close_connection
 from saltmdb.utils.text import sanitize_fts_query, extract_title_and_snippet
 
 from . import ranking, search_primitives, tags, validation
-from ._shared import logger
+from ._shared import SearchCriteria, SearchTuning, logger
 
 # metadata_filter keys are interpolated into a json_extract('$.<key>') SQL path -- only the
 # value is bound as a parameter, so the key itself must be allowlisted before interpolation
@@ -1235,40 +1235,23 @@ def _search_error_result(e, diagnostics, return_diagnostics):
 
 
 def search_memory(
+    *,
     agent_id: str = None,
     query_keywords: str = None,
-    tags_filter: list = None,
-    metadata_filter: dict = None,
     explain_mode: bool = False,
     limit: int = 5,
-    context_id: str = None,
-    agent_session_id: str = None,
-    is_core: bool = None,
-    memory_type_filter: Literal["fact", "event", "procedure", "decision", "preference"] = None,
-    tag_operator: Literal["AND", "OR"] = "AND",
     cursor: str = None,
     include_related: bool = True,
-    prefer_durable_types: bool = False,
-    demote_superseded: bool = False,
-    cross_encoder_candidate_cap: int | None = None,
-    cross_encoder_text_cap_chars: int | None = None,
-    use_chunk_candidates: bool = False,
-    oversampling_multiplier: int | None = None,
-    candidate_window: int | None = None,
-    chunk_weight: float | None = None,
-    collapse_supersedes_families: bool = False,
     return_diagnostics: bool = False,
     mode: Literal["strict", "broad", "history"] = "broad",
-    disable_semantic: bool = False,
-    use_retrieval_text_candidates: bool = False,
-    retrieval_fts_weight: float | None = None,
-    retrieval_vector_weight: float | None = None,
+    criteria: SearchCriteria = SearchCriteria(),
+    tuning: SearchTuning = SearchTuning(),
     db_connection=None,
     db_path: str = None,
 ) -> list | dict:
     """Performs full-text keyword search and filtering in long-term memory.
 
-    disable_semantic (default False; Track B, scratch/plans/track_b_daemon_detailed.md §14): a
+    tuning.disable_semantic (default False; Track B, scratch/plans/track_b_daemon_detailed.md §14): a
     per-call override forcing the FTS-only path for this one request, regardless of the
     SALTMDB_ENABLE_SEMANTIC env var -- added because a persistent daemon reads its environment
     once at its own startup and holds it fixed, so a caller-side env mutation (as
@@ -1296,18 +1279,18 @@ def search_memory(
     - "broad": no chain resolution, no relevance gate, no `is_superseded` tagging. A literal
       title matching exactly one active entity within the caller's filters uses an identity fast
       path and returns that entity without running hybrid retrieval; title collisions retain the
-      ordinary hybrid order. Explicit `collapse_supersedes_families=True` takes precedence over
+      ordinary hybrid order. Explicit `tuning.collapse_supersedes_families=True` takes precedence over
       identity matching and stays on the ordinary pipeline so its canonical-family contract holds.
     - "strict": matched-but-superseded candidates are resolved and SUBSTITUTED with their live,
       multi-hop-revalidated `supersedes` successor (Part A); every surviving candidate must then
       independently clear a calibrated relevance-abstention gate (Part B) or is dropped. An empty
       result (`[]`) is a normal, successful outcome for a query with no sufficiently-grounded
       match -- not an error. Widens the candidate pool the same way the mandatory cross-encoder
-      stage/prefer_durable_types/demote_superseded already do, and retries with a larger pool (up to
-      STRICT_OVERFETCH_CANDIDATE_CAP) when resolution/dedup/the gate shrink the post-policy pool
+      stage/`tuning.prefer_durable_types`/`tuning.demote_superseded` already do, and retries with a larger pool
+      (up to STRICT_OVERFETCH_CANDIDATE_CAP) when resolution/dedup/the gate shrink the post-policy pool
       below what `offset`+`limit` needs (Part C2 -- pagination continuity across a rejection,
       substitution, or many-to-one dedup collapse). Additionally, unconditionally and regardless
-      of the `prefer_durable_types`/`demote_superseded` flags above: durable-type preference is
+      of the `tuning.prefer_durable_types`/`tuning.demote_superseded` fields above: durable-type preference is
       always applied, and a surviving candidate is demoted (never excluded -- it already cleared
       the gate on its own evidence) if it's still the target of a currently-valid `supersedes`
       edge Part A's resolver couldn't cleanly resolve (cycle/depth-cap/archived-intermediate
@@ -1334,36 +1317,39 @@ def search_memory(
 
     chunk_oversampling, chunk_window, configured_chunk_weight = (
         validation._validate_chunk_candidate_controls(
-            use_chunk_candidates, oversampling_multiplier, candidate_window, chunk_weight
+            tuning.use_chunk_candidates,
+            tuning.oversampling_multiplier,
+            tuning.candidate_window,
+            tuning.chunk_weight,
         )
     )
-    if collapse_supersedes_families and mode != "broad":
+    if tuning.collapse_supersedes_families and mode != "broad":
         raise ValueError("collapse_supersedes_families is supported only in broad mode")
     ce_candidate_cap, ce_text_cap = validation._validate_cross_encoder_controls(
-        cross_encoder_candidate_cap,
-        cross_encoder_text_cap_chars,
+        tuning.cross_encoder_candidate_cap,
+        tuning.cross_encoder_text_cap_chars,
         enabled=True,
     )
     configured_retrieval_fts_weight, configured_retrieval_vector_weight = (
         validation._validate_retrieval_text_controls(
-            use_retrieval_text_candidates,
-            retrieval_fts_weight,
-            retrieval_vector_weight,
+            tuning.use_retrieval_text_candidates,
+            tuning.retrieval_fts_weight,
+            tuning.retrieval_vector_weight,
         )
     )
     diagnostics: dict[str, Any] = {
-        "use_chunk_candidates": bool(use_chunk_candidates),
+        "use_chunk_candidates": bool(tuning.use_chunk_candidates),
         "chunk_candidate": {
-            "requested": bool(use_chunk_candidates),
+            "requested": bool(tuning.use_chunk_candidates),
             "oversampling_multiplier": chunk_oversampling,
             "candidate_window": chunk_window,
             "chunk_weight": configured_chunk_weight,
             "candidate_shortfall": 0,
             "executed": False,
         },
-        "collapse_supersedes_families": bool(collapse_supersedes_families),
+        "collapse_supersedes_families": bool(tuning.collapse_supersedes_families),
         "retrieval_text": {
-            "requested": bool(use_retrieval_text_candidates),
+            "requested": bool(tuning.use_retrieval_text_candidates),
             "retrieval_fts_weight": configured_retrieval_fts_weight,
             "retrieval_vector_weight": configured_retrieval_vector_weight,
             "fts_candidate_count": 0,
@@ -1389,14 +1375,20 @@ def search_memory(
     try:
         where_clauses, params = _build_search_filters(
             agent_id,
-            context_id,
-            agent_session_id,
-            is_core,
-            memory_type_filter,
-            metadata_filter,
+            criteria.context_id,
+            criteria.agent_session_id,
+            criteria.is_core,
+            criteria.memory_type_filter,
+            criteria.metadata_filter,
         )
-        tag_groups = _search_tag_groups(conn, tags_filter)
-        _append_search_tag_filters(tags_filter, tag_operator, tag_groups, where_clauses, params)
+        tag_groups = _search_tag_groups(conn, criteria.tags_filter)
+        _append_search_tag_filters(
+            criteria.tags_filter,
+            criteria.tag_operator,
+            tag_groups,
+            where_clauses,
+            params,
+        )
 
         sanitized_query = sanitize_fts_query(query_keywords) if query_keywords else ""
 
@@ -1405,7 +1397,7 @@ def search_memory(
                 conn,
                 mode,
                 sanitized_query,
-                tags_filter,
+                criteria.tags_filter,
                 where_clauses,
                 return_diagnostics,
                 diagnostics,
@@ -1422,13 +1414,13 @@ def search_memory(
         # Populated only under mode="history" -- ids in the final pool that are the target of a
         # currently-valid `supersedes` edge, tagged (not hidden/reordered) in the result item.
         superseded_ids: set = set()
-        if exact_title_id is not None and not collapse_supersedes_families:
+        if exact_title_id is not None and not tuning.collapse_supersedes_families:
             rows, superseded_ids = _fetch_exact_search_title(
                 conn, exact_title_id, offset, limit, mode, rows, superseded_ids
             )
         elif sanitized_query:
             assert query_keywords  # nosec B101 -- mypy narrowing only, not a runtime safety check
-            db_path = _semantic_search_db_path(db_path, disable_semantic)
+            db_path = _semantic_search_db_path(db_path, tuning.disable_semantic)
             controls = _SearchControls(
                 sanitized_query=sanitized_query,
                 query_keywords=query_keywords,
@@ -1436,18 +1428,18 @@ def search_memory(
                 mode=mode,
                 chunk_window=chunk_window,
                 chunk_oversampling=chunk_oversampling,
-                use_chunk_candidates=use_chunk_candidates,
-                use_retrieval_text_candidates=use_retrieval_text_candidates,
+                use_chunk_candidates=tuning.use_chunk_candidates,
+                use_retrieval_text_candidates=tuning.use_retrieval_text_candidates,
                 configured_chunk_weight=configured_chunk_weight,
                 configured_retrieval_fts_weight=configured_retrieval_fts_weight,
                 configured_retrieval_vector_weight=configured_retrieval_vector_weight,
                 ce_candidate_cap=ce_candidate_cap,
                 ce_text_cap=ce_text_cap,
-                cross_encoder_candidate_cap=cross_encoder_candidate_cap,
-                cross_encoder_text_cap_chars=cross_encoder_text_cap_chars,
-                prefer_durable_types=prefer_durable_types,
-                demote_superseded=demote_superseded,
-                collapse_supersedes_families=collapse_supersedes_families,
+                cross_encoder_candidate_cap=tuning.cross_encoder_candidate_cap,
+                cross_encoder_text_cap_chars=tuning.cross_encoder_text_cap_chars,
+                prefer_durable_types=tuning.prefer_durable_types,
+                demote_superseded=tuning.demote_superseded,
+                collapse_supersedes_families=tuning.collapse_supersedes_families,
                 return_diagnostics=return_diagnostics,
             )
             filters = _SearchFilters(where_clauses, params)

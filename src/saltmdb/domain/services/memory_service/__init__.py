@@ -33,6 +33,8 @@ from ._shared import (
     _search_pool,
     RETRIEVAL_TEXT_UNSET,
     Provenance,
+    SearchCriteria,
+    SearchTuning,
     CoreDeclaration,
     EntityAnnotations,
 )
@@ -111,6 +113,8 @@ __all__ = [
     "_search_pool",
     "RETRIEVAL_TEXT_UNSET",
     "Provenance",
+    "SearchCriteria",
+    "SearchTuning",
     "CoreDeclaration",
     "EntityAnnotations",
     "normalize_retrieval_text",

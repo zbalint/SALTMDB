@@ -292,6 +292,33 @@ def test_unknown_keyword_refused_before_search(runner):
         runner.validate_arguments(search, {"query_keywords": "fiction", "use_cross_encoder": True})
 
 
+def test_flat_arguments_group_for_new_search_signature(runner):
+    def search(*, query_keywords=None, criteria=None, tuning=None):
+        return query_keywords, criteria, tuning
+
+    arguments = {
+        "query_keywords": "fiction",
+        "agent_session_id": "session",
+        "is_core": True,
+        "use_chunk_candidates": True,
+        "candidate_window": 20,
+    }
+    mapped = runner._map_flat_arguments(search, arguments)
+    assert mapped["query_keywords"] == "fiction"
+    assert mapped["criteria"].agent_session_id == "session"
+    assert mapped["criteria"].is_core is True
+    assert mapped["tuning"].use_chunk_candidates is True
+    assert mapped["tuning"].candidate_window == 20
+
+
+def test_flat_arguments_remain_flat_for_old_search_signature(runner):
+    def search(*, query_keywords=None, tags_filter=None):
+        return query_keywords, tags_filter
+
+    arguments = {"query_keywords": "fiction", "tags_filter": ["#tag"]}
+    assert runner._map_flat_arguments(search, arguments) == arguments
+
+
 def test_isolated_interpreter_refused():
     result = subprocess.run(
         [sys.executable, "-I", str(SCRIPTS / "search_equivalence_gate.py"), "--help"],
