@@ -123,3 +123,13 @@ Most of this behaviour is pinned already; the developer lists the existing test 
 | `get_fresh_entity_centroids` is called with two positional arguments and asserted so | `phase4` ~902 | consultant read |
 | `validate_tag_names` is patched at its source module | `phase4` 380 to 384 | consultant read |
 | Tests reference none of the preflight helper names outside `relation_service.py` | `rg` over tests | consultant read |
+
+## Amendment 1 (2026-10-24): section 4 item 3 is written in the baseline call form, then moved to the new one
+
+The developer reported `BLOCKED` before any production edit. Section 4 item 3 names the 3-argument call `_consolidation_measure_cohesion(conn, [one_id], None)` and section 6 item 2 says that test passes on the unchanged code, but on the unchanged code the function has five parameters (`conn, resolved_parents, precomputed_centroids, precomputed_unresolved, precomputed_observed_state`, `relation_service.py` `_consolidation_measure_cohesion`) and returns the 4-tuple `(min_sim, offending_pair, unresolved, observed_state)` that `_consolidation_preflight` unpacks. The 3-argument call is a `TypeError` there, so the item cannot be green before the change. Verified: the baseline signature and its unpacking site read directly; no other caller or test references the function.
+
+A1.1 Item 3 is written FIRST in the baseline form: `_consolidation_measure_cohesion(conn, [one_id], None, None, None)`, unpacked as `min_sim, offending_pair, unresolved, observed_state`, asserting `min_sim == 1.0`, `offending_pair is None`, `unresolved == {}` and the one-entry `observed_state` with the parent's `(content_hash, status)`. It passes on the unchanged code (section 6 item 2 holds as written) and the literals come from that run.
+
+A1.2 After the change the developer makes exactly one mechanical edit to that test: the call becomes `_consolidation_measure_cohesion(conn, [one_id], None)` and the four assertions read the same values from the returned `_CohesionMeasurement` (`measurement.min_sim`, `.offending_pair`, `.unresolved`, `.observed_state`). No literal changes. The developer reports both runs (baseline form before, new form after).
+
+A1.3 Nothing else changes: section 4 item 2 stays the only RED test on the unchanged code; the section 6 item 5 single-parent mutant is still killed only by item 3; the tests for items 1, 2, 4 and 5 are unaffected. Scope is unchanged (`tests/test_consolidation_preflight.py` is the new test file named by the developer; it is in the section 0 test scope).
