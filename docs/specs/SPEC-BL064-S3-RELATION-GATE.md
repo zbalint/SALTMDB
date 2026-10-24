@@ -92,3 +92,22 @@ The gate is already pinned exactly. About 30 tests in `tests/test_relation_servi
 | The two rejection codes and the audit type appear in tests | `rg` count: 13, 4, 12 | probed |
 | No test patches any of the five helper names (private patches exist only for `_resolve_relation_endpoint`, `_consolidation_insert_lineage` and `_resolve_and_filter_parent_ids`) | `rg` over tests | probed by the consultant |
 | The project's S107 limit is 13 | Sonar issue text on `develop` | read |
+
+## Amendment 1 (2026-10-24): non-normalized predicate spellings reach the write
+
+Found at the design read of the first implementation by tracing the code and by an architect mutant run: `store_relation` validates the predicate with `_store_relation_predicate_error`, which calls `classify_predicate` on a NORMALIZED copy, and then forwards the RAW string to `_store_relation_write`. A spelling such as `Elaborates-On`, `ELABORATES_ON` or `elaborates on` therefore passes the check and arrives at the write with `request.predicate` different from `canonical_predicate`. Section 4's conclusion that no new test is needed was wrong: the mutants that read `request.predicate` instead of `canonical_predicate` in the gate, in the measurement, or in the INSERT parameters are observable through `store_relation`, and no existing test uses a non-snake-case strong predicate (the existing spelling test uses a weak predicate, `Depends-On`, around `tests/test_relation_service.py` 873).
+
+A1.1 Section 4 is replaced by the following requirement. The developer first writes these characterization tests (green on the UNCHANGED production code, since this is a refactor), each with literals taken from a run on that code, then keeps them green after the refactor:
+1. A strong predicate in a non-normalized spelling (`Elaborates-On`, then `ELABORATES_ON`) between two entities below the similarity threshold, no justification: the exact `REJECT_LOW_RELATION_SIMILARITY` envelope that the existing test at `TestStoreRelationBoundaries` 4138 pins for the snake-case spelling (message text included; compare it to the snake-case run).
+2. The same spelling with an existing active edge of a contradictory predicate on the same directional edge: the exact `REJECT_CONTRADICTORY_PREDICATE` envelope (the message names the CANONICAL predicate).
+3. The same spelling with a sufficient override on a passing pair: the stored row has `predicate = 'elaborates_on'` (read the `relations` row), and the returned message and `[canonicalized: ...]` note are pinned exactly as the unchanged code returns them.
+4. Repoint detection with the non-normalized spelling: same source, a different existing strong-predicate target; an accepted override invalidates the old edge only after the gate passes; a rejected attempt leaves it untouched.
+5. Two UNRESOLVED endpoints (both without usable content) with a strong predicate: the rejection message pins the exact `offending=` pair, which depends on the order in which the endpoints are passed to `get_fresh_entity_centroids`. If an existing test already pins it, name it.
+6. The core-target guard with the non-normalized spelling, if the unchanged code reaches it (the developer reports what the unchanged code does; pin it either way).
+The existing 297-test baseline stays green unchanged.
+
+A1.2 Scope: section 0 gains `tests/test_relation_service.py` (new characterization tests only, appended near `TestStoreRelationBoundaries`); acceptance 3 becomes: `git status --short` lists `src/saltmdb/domain/services/relation_service.py` and `tests/test_relation_service.py` and nothing else.
+
+A1.3 Acceptance 5 gains these mutants, each killed by a named test of A1.1: the gate's strong-predicate test reads `request.predicate`; the measurement's strong branch and contradiction-pair lookup read `request.predicate`; `_insert_relation_write` binds `request.predicate` in the INSERT; the repoint detection or the core guard reads `request.predicate`; the centroid list is passed as `[target, source]`. A survivor is reported; it is accepted only with a proof of equivalence (an input that cannot reach the write).
+
+A1.4 Section 2: keep the field comments in `_RelationWriteRequest` (`source_id` and `target_id`: `# resolved`; `predicate`: `# as requested; canonicalised inside the write`). The sentence in section 2 that calls both dataclasses unhashable-by-content is wrong for `_RelationWriteRequest` (all its fields are hashable); only `_GateMeasurement` carries the "not hashable" comment.
