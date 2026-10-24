@@ -142,3 +142,9 @@ A1.2 Section 3 D4, the test wrapper: in `tests/test_search_memory_characterizati
 A1.3 The `T ~nnn` test-line citations of section 4 and 5 drift after the codemod adds lines; locate every test by its NAME. The claim in section 8 about `dispatch.py` forwarding the flat names is true before S8 only; after S8 dispatch builds `SearchTuning(...)`.
 
 A1.4 Nothing else changes: scope, target types, decisions D1 to D3 and D5, tests and acceptance are as locked.
+
+## Amendment 2 (2026-10-24): two wording corrections to amendment 1
+
+A2.1 `_search_case` is excluded from the D4 alias list: it is a forwarding wrapper that A1.2 handles by translation, so the codemod does not treat it as an alias of `search_memory`. In A1.2, "another forwarding wrapper listed under D4" reads "reported under D4" (the list the developer reports).
+
+A2.2 The dispatch claim of amendment 1.3 applies to section 8 of this spec ("`dispatch._dispatch_search_memory` passes 28 keywords"): true before S8 only.

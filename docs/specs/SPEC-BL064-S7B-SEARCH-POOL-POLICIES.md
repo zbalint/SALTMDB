@@ -117,3 +117,7 @@ The consultant's read found S8 independent of 7a and 7b (see SPEC-BL064-S8 amend
 A1.1 Every `T ~nnn` / `tests/...` line citation in sections 4, 5 and 8 is a pre-S8 line number; if S8 landed first they have drifted. Locate each test by its NAME.
 
 A1.2 If S8 has landed, a new 7b test that calls `search_memory` directly passes the cap names inside `tuning=SearchTuning(cross_encoder_candidate_cap=..., cross_encoder_text_cap_chars=...)`; a new test written through the `_search_case` wrapper keeps the flat option keys (the wrapper translates them, S8 amendment 1.2). Behaviour, signatures and acceptance of 7b are unchanged.
+
+## Amendment 2 (2026-10-24): the dispatch claim of section 8
+
+The sentence of section 8 that says `dispatch.py` forwards the flat cap names is true before S8 only; after S8 it builds `SearchTuning(...)` (SPEC-BL064-S8 amendment 1.3 and 2.2).

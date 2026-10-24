@@ -165,3 +165,13 @@ Slice 10; `core_governance_service`; merging the preview and the in-transaction 
 ## Amendment 1 (2026-10-24): order when S10 lands first
 
 S10 may land before S9 (SPEC-BL064-S10 amendment 1). If it has, `store_memory` takes the grouped parameters (`provenance`, `core`, `annotations`, `scores`, `runtime`) and builds the 17-key `request` dict from them; S9 then replaces that dict build with the `_StoreRequest` build, reading the same values from the groups instead of the flat names, and locates `store_memory` and the dict by NAME, not by line number. Everything else in S9 (the typed stages, the signatures of the internals, tests and acceptance) is unchanged.
+
+## Amendment 2 (2026-10-24): tests, pass-through and weight when S10 landed first
+
+The consultant's review of amendment 1 found three gaps.
+
+A2.1 If S10 has landed, the section 4 tests (items 1 to 5 and 7) call `store_memory` with the groups: `provenance=Provenance(...)`, `core=CoreDeclaration(...)`, `annotations=EntityAnnotations(...)`, `scores=StoreScores(...)`, directly or through the `store` wrapper of `tests/test_memory_write_characterization.py` in its post-S10 form; item 4's `agent_session_id` is `provenance.agent_session_id`. Flat names are a `TypeError` after S10, so the tests are written against whichever signature the tree has when S9 starts.
+
+A2.2 If S10 has landed, `store_memory` passes the `core` and `annotations` objects it received straight into `_StoreRequest` (it does not rebuild `CoreDeclaration` / `EntityAnnotations` from fields). `_StoreRequest.weight` is the weight `_validate_store_basics` returns, never `scores.weight`.
+
+A2.3 Test line citations (for example the `_legacy_update_guard` patch near line 502 of `tests/test_memory_write_characterization.py`) are pre-S10 if S10 landed first: locate by test name.

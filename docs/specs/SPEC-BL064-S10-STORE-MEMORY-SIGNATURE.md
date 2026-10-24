@@ -125,3 +125,13 @@ A1.1 Wherever this spec says `store_memory` builds or packs the slice 9 `_StoreR
 A1.2 "It follows slice 9" in section 0 is superseded: S10 may land before or after S9. S10 must not be implemented while a S9 diff is uncommitted on the tree.
 
 A1.3 Nothing else changes: the group types, the 13-parameter pin, D1 to D3, the caller migration, tests and acceptance are as locked. Acceptance greps that name `_StoreRequest` apply only once S9 has landed.
+
+## Amendment 2 (2026-10-24): the exact values of the request dict before S9 (supersedes the value list of amendment 1.1)
+
+The consultant's review of amendment 1 checked it against `write.py` and found two errors: the value list named values the dict does not hold, and "unpacked at that single place" contradicts section 2. Verified at HEAD: `store_memory` builds a 17-key `request` dict, then passes it to `_prepare_store_operation(conn, request)`; `runtime.probe_sink` goes to `_probe_store_duplicates(probe_sink=...)`, `runtime.coordinator` to `trigger_librarian(db_path=..., coordinator=...)`, and `weight` in the dict is the DERIVED weight returned by `_validate_store_basics` (the second element of its result), not the raw parameter.
+
+A2.1 Until S9 has landed, the dict keeps its 17 keys, in this order, with these values: `content`, `title`, `retrieval_text`, `tags`, `scope`, `entity_id` from the parameters that stay flat; `metadata` and `memory_type` from `annotations`; `context_id` from `provenance`; `agent_id` from `provenance`; `is_core`, `core_reason`, `core_exit_condition`, `core_review_after`, `detail_memory_ids` from `core`; `agent_session_id` from `provenance`; and `weight` = the weight value returned by `_validate_store_basics(agent_id, content, scope, memory_type, scores)`, NEVER `scores.weight` (a caller who supplies any of relevance, impact, novelty, actionability gets a derived weight). The key order stays exactly `content, title, retrieval_text, metadata, context_id, tags, agent_id, scope, memory_type, entity_id, is_core, weight, core_reason, core_exit_condition, core_review_after, detail_memory_ids, agent_session_id`. The cast on `provenance.agent_id` is optional before S9 (the dict is untyped).
+
+A2.2 `runtime.probe_sink`, `runtime.coordinator` and `provenance.agent_session_id` (for the success envelope) are read at their existing sites, as section 2 says ("where it read the flat names"); they are not extra dict keys. The sentence "The groups are unpacked at that single place" in amendment 1.1 is superseded by A2.1 and A2.2.
+
+A2.3 Nothing else changes.
