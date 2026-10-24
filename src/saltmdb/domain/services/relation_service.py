@@ -5,7 +5,7 @@ import re
 import sqlite3
 from datetime import datetime, UTC
 from typing import Any, Literal, NamedTuple, cast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from saltmdb.config import (
     get_db_path,
     COHESION_MIN_PAIRWISE_THRESHOLD,
@@ -1115,120 +1115,113 @@ def _dependency_cte_sql(
     )
 
 
-def _append_dependency_row(
-    conn,
-    direction: Literal["outbound", "inbound"],
-    row: tuple,
-    include_inspect: bool,
-    max_depth: int,
-    agent_id: str | None,
-    seen_nodes: set[str],
-    seen_edges: set[str],
-    nodes: list[dict],
-    edges: list[dict],
-) -> None:
-    rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path = row
-    # row[6] == depth
-    reached_id, reached_title = (
-        (tgt_id, tgt_title) if direction == "outbound" else (src_id, src_title)
-    )
-    # The node newly discovered by this hop is the target for an outbound row, but the
-    # *source* for an inbound row -- inbound walks backward along each edge, so the node
-    # moving away from root is the edge's source, not its target.
-    if reached_id not in seen_nodes:
-        node = {"id": reached_id, "title": reached_title, "depth": depth}
+@dataclass(slots=True)
+class _DependencyGraph:
+    """The graph one dependency walk builds: root first, then nodes and edges in discovery order."""
+
+    conn: sqlite3.Connection
+    root_info: dict
+    include_inspect: bool
+    max_depth: int
+    agent_id: str | None
+    nodes: list[dict] = field(init=False, default_factory=list)
+    edges: list[dict] = field(init=False, default_factory=list)
+    seen_nodes: set[str] = field(init=False, default_factory=set)
+    seen_edges: set[str] = field(init=False, default_factory=set)
+
+    @classmethod
+    def start(
+        cls,
+        conn: sqlite3.Connection,
+        root_id: str,
+        root_info: dict,
+        include_inspect: bool,
+        max_depth: int,
+        agent_id: str | None,
+    ) -> "_DependencyGraph":
+        graph = cls(conn, root_info, include_inspect, max_depth, agent_id)
+        root = {"id": root_id, "title": root_info.get("title"), "depth": 0}
         if include_inspect:
-            from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
-
-            inspected = _assemble_memory_record(
-                conn,
-                reached_id,
-                include_content=False,
-                include_lineage=False,
-                touch=False,
-                max_depth=max_depth,
-                agent_id=agent_id,
-            )
+            inspected = graph._inspect(root_id)
             if inspected is not None:
-                node.update(inspected)
-        nodes.append(node)
-        seen_nodes.add(reached_id)
-    if rel_id in seen_edges:
-        # Multiple converging paths in a diamond-shaped graph can revisit the same
-        # relation once per incoming path (the CTE's cycle guard only stops a single
-        # path from looping, not distinct paths reconverging). Dedupe on the relation's
-        # own id, keeping the first (shallowest, per the sort above) occurrence.
-        return
-    seen_edges.add(rel_id)
-    edges.append(
-        {
-            "relation_id": rel_id,
-            "source_id": src_id,
-            "source_title": src_title,
-            "target_id": tgt_id,
-            "target_title": tgt_title,
-            "predicate": pred,
-            "depth": depth,
-        }
-    )
+                root.update(inspected)
+        graph.nodes.append(root)
+        graph.seen_nodes.add(root_id)
+        return graph
 
-
-def _build_dependency_result(
-    conn,
-    root_id: str,
-    root_info: dict,
-    tagged_rows: list,
-    include_inspect: bool,
-    max_depth: int,
-    agent_id: str | None,
-    point_in_time: str,
-) -> dict:
-    tagged_rows.sort(key=lambda item: item[1][6])
-    # Global shallowest-first ordering across both directions' independently-ordered result
-    # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
-    # direction's query happened to find a convergently-reachable relation first (matches
-    # the single-query ORDER BY dt.depth ASC invariant the pre-existing dedup comment below
-    # already documents for the outbound-only case).
-    nodes = [{"id": root_id, "title": root_info.get("title"), "depth": 0}]
-    if include_inspect:
+    def _inspect(self, memory_id: str) -> dict | None:
         from saltmdb.domain.services.memory_service.lifecycle import _assemble_memory_record
 
-        root_inspect = _assemble_memory_record(
-            conn,
-            root_id,
+        return _assemble_memory_record(
+            self.conn,
+            memory_id,
             include_content=False,
             include_lineage=False,
             touch=False,
-            max_depth=max_depth,
-            agent_id=agent_id,
+            max_depth=self.max_depth,
+            agent_id=self.agent_id,
         )
-        if root_inspect is not None:
-            nodes[0].update(root_inspect)
-    seen_nodes = {root_id}
-    edges: list[dict] = []
-    seen_edges: set[str] = set()
-    for direction, row in tagged_rows:
-        _append_dependency_row(
-            conn,
-            direction,
-            row,
-            include_inspect,
-            max_depth,
-            agent_id,
-            seen_nodes,
-            seen_edges,
-            nodes,
-            edges,
+
+    def add_row(
+        self,
+        direction: Literal["outbound", "inbound"],
+        row: tuple,
+    ) -> None:
+        rel_id, src_id, src_title, tgt_id, tgt_title, pred, depth, _raw_path = row
+        # row[6] == depth
+        reached_id, reached_title = (
+            (tgt_id, tgt_title) if direction == "outbound" else (src_id, src_title)
         )
-    return {
-        "root": root_info,
-        "total_dependencies_found": len(edges),
-        "graph_exhausted": len(edges) == 0
-        or max([e["depth"] for e in edges], default=0) < max_depth,
-        "dependencies": nodes,
-        "edges": edges,
-        "point_in_time": point_in_time,
-    }
+        # The node newly discovered by this hop is the target for an outbound row, but the
+        # *source* for an inbound row -- inbound walks backward along each edge, so the node
+        # moving away from root is the edge's source, not its target.
+        if reached_id not in self.seen_nodes:
+            node = {"id": reached_id, "title": reached_title, "depth": depth}
+            if self.include_inspect:
+                inspected = self._inspect(reached_id)
+                if inspected is not None:
+                    node.update(inspected)
+            self.nodes.append(node)
+            self.seen_nodes.add(reached_id)
+        if rel_id in self.seen_edges:
+            # Multiple converging paths in a diamond-shaped graph can revisit the same
+            # relation once per incoming path (the CTE's cycle guard only stops a single
+            # path from looping, not distinct paths reconverging). Dedupe on the relation's
+            # own id, keeping the first (shallowest, per the depth sort in add_rows) occurrence.
+            return
+        self.seen_edges.add(rel_id)
+        self.edges.append(
+            {
+                "relation_id": rel_id,
+                "source_id": src_id,
+                "source_title": src_title,
+                "target_id": tgt_id,
+                "target_title": tgt_title,
+                "predicate": pred,
+                "depth": depth,
+            }
+        )
+
+    def add_rows(self, tagged_rows: list[tuple[Literal["outbound", "inbound"], tuple]]) -> None:
+        tagged_rows.sort(key=lambda item: item[1][6])
+        # Global shallowest-first ordering across both directions' independently-ordered result
+        # sets, so the edge-dedup below keeps the shallowest occurrence regardless of which
+        # direction's query happened to find a convergently-reachable relation first (matches
+        # the single-query ORDER BY dt.depth ASC invariant the pre-existing dedup comment below
+        # already documents for the outbound-only case).
+        for direction, row in tagged_rows:
+            self.add_row(direction, row)
+
+    def result(self, point_in_time: str) -> dict:
+        return {
+            "root": self.root_info,
+            "total_dependencies_found": len(self.edges),
+            "graph_exhausted": len(self.edges) == 0
+            or max([e["depth"] for e in self.edges], default=0) < self.max_depth,
+            "dependencies": self.nodes,
+            "edges": self.edges,
+            "point_in_time": point_in_time,
+        }
 
 
 def _fetch_dependency_rows(
@@ -1313,9 +1306,16 @@ def analyze_dependencies(
         )
 
         tagged_rows = _fetch_dependency_rows(conn, direction, root_id, pit, max_depth, agent_id)
-        return _build_dependency_result(
-            conn, root_id, root_info, tagged_rows, include_inspect, max_depth, agent_id, pit
+        graph = _DependencyGraph.start(
+            conn,
+            root_id,
+            root_info,
+            include_inspect,
+            max_depth,
+            agent_id,
         )
+        graph.add_rows(tagged_rows)
+        return graph.result(pit)
     except Exception as e:
         logger.error("Error analyzing dependencies: %s", e)
         return {"error": str(e)}

@@ -1902,6 +1902,219 @@ class TestRelationPointInTime(unittest.TestCase):
         self.assertIn("ancestors", lineage_result)
         self.assertIn("point_in_time", lineage_result)
 
+    def test_analyze_dependencies_include_inspect_attaches_fields_and_preserves_key_order(self):
+        root = self._mk("Inspect Root")
+        mid = self._mk("Inspect Mid")
+        leaf = self._mk("Inspect Leaf")
+        store_relation(
+            source_id=root, target_id=mid, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=mid, target_id=leaf, predicate="depends_on", db_connection=self.conn
+        )
+
+        from saltmdb.domain.services.memory_service import lifecycle
+        # Deliberately patch the lazy-import location; the spec forbids hoisting this import.
+
+        with patch(
+            "saltmdb.domain.services.memory_service.lifecycle._assemble_memory_record",
+            wraps=lifecycle._assemble_memory_record,
+        ) as inspect:
+            result = analyze_dependencies(
+                root_entity_id=root,
+                include_inspect=True,
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(
+            list(result),
+            [
+                "root",
+                "total_dependencies_found",
+                "graph_exhausted",
+                "dependencies",
+                "edges",
+                "point_in_time",
+            ],
+        )
+        self.assertEqual(
+            result["root"],
+            {"id": root, "title": "Inspect Root", "status": "raw"},
+        )
+        expected_inspected_keys = {
+            "id",
+            "title",
+            "status",
+            "created_at",
+            "updated_at",
+            "last_accessed_at",
+            "agent_id",
+            "scope",
+            "is_core",
+            "parent_ids",
+            "valid_from",
+            "valid_to",
+            "metadata",
+            "context_id",
+            "memory_type",
+            "quality_score",
+            "quality_status",
+            "quality_flags",
+            "agent_session_id",
+            "last_touched_session_id",
+            "tags",
+            "snippet",
+            "depth",
+        }
+        self.assertEqual([node["id"] for node in result["dependencies"]], [root, mid, leaf])
+        for node in result["dependencies"]:
+            self.assertEqual(set(node), expected_inspected_keys)
+            self.assertEqual(list(node)[:3], ["id", "title", "depth"])
+            self.assertNotIn("content", node)
+            self.assertNotIn("lineage", node)
+        self.assertEqual(
+            [(node["id"], node["title"], node["depth"]) for node in result["dependencies"]],
+            [(root, "Inspect Root", 0), (mid, "Inspect Mid", 1), (leaf, "Inspect Leaf", 2)],
+        )
+        self.assertEqual(
+            [call.args[1] for call in inspect.call_args_list],
+            [root, mid, leaf],
+        )
+
+    def test_analyze_dependencies_include_inspect_diamond_inspects_each_node_once(self):
+        root = self._mk("Inspect Diamond Root")
+        a = self._mk("Inspect Diamond A")
+        b = self._mk("Inspect Diamond B")
+        c = self._mk("Inspect Diamond C")
+        tail = self._mk("Inspect Diamond Tail")
+        for source, target in ((root, a), (root, b), (a, c), (b, c), (c, tail)):
+            store_relation(
+                source_id=source,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+
+        from saltmdb.domain.services.memory_service import lifecycle
+        # Deliberately patch the lazy-import location; the spec forbids hoisting this import.
+
+        with patch(
+            "saltmdb.domain.services.memory_service.lifecycle._assemble_memory_record",
+            wraps=lifecycle._assemble_memory_record,
+        ) as inspect:
+            result = analyze_dependencies(
+                root_entity_id=root,
+                direction="both",
+                include_inspect=True,
+                db_connection=self.conn,
+            )
+
+        inspected_ids = [call.args[1] for call in inspect.call_args_list]
+        for entity_id in (root, a, b, c, tail):
+            self.assertEqual(inspected_ids.count(entity_id), 1)
+        relation_ids = [edge["relation_id"] for edge in result["edges"]]
+        self.assertEqual(len(relation_ids), len(set(relation_ids)))
+
+    def test_analyze_dependencies_include_inspect_none_keeps_reached_node_minimal(self):
+        root = self._mk("Inspect None Root")
+        missing = self._mk("Inspect None Target")
+        other = self._mk("Inspect Other Target")
+        for target in (missing, other):
+            store_relation(
+                source_id=root,
+                target_id=target,
+                predicate="depends_on",
+                db_connection=self.conn,
+            )
+
+        from saltmdb.domain.services.memory_service import lifecycle
+
+        real_inspect = lifecycle._assemble_memory_record
+
+        def inspect_with_missing(conn, resolved_id, **kwargs):
+            if resolved_id == missing:
+                return None
+            return real_inspect(conn, resolved_id, **kwargs)
+
+        # Deliberately patch the lazy-import location; the spec forbids hoisting this import.
+        with patch(
+            "saltmdb.domain.services.memory_service.lifecycle._assemble_memory_record",
+            side_effect=inspect_with_missing,
+        ):
+            result = analyze_dependencies(
+                root_entity_id=root,
+                include_inspect=True,
+                db_connection=self.conn,
+            )
+
+        nodes_by_id = {node["id"]: node for node in result["dependencies"]}
+        self.assertEqual(
+            nodes_by_id[missing], {"id": missing, "title": "Inspect None Target", "depth": 1}
+        )
+        self.assertIn("status", nodes_by_id[other])
+
+    def test_analyze_dependencies_fetches_rows_before_inspecting_root(self):
+        root = self._mk("Fetch Order Root")
+        with (
+            patch(
+                "saltmdb.domain.services.relation_service._fetch_dependency_rows",
+                side_effect=RuntimeError("fetch"),
+            ),
+            patch(
+                "saltmdb.domain.services.memory_service.lifecycle._assemble_memory_record",
+                side_effect=RuntimeError("inspect"),
+            ),
+        ):
+            result = analyze_dependencies(
+                root_entity_id=root,
+                include_inspect=True,
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(result, {"error": "fetch"})
+
+    def test_analyze_dependencies_both_sorts_rows_by_global_shallowest_depth(self):
+        upstream = self._mk("Sort Upstream")
+        root = self._mk("Sort Root")
+        mid = self._mk("Sort Mid")
+        leaf = self._mk("Sort Leaf")
+        store_relation(
+            source_id=upstream, target_id=root, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=root, target_id=mid, predicate="depends_on", db_connection=self.conn
+        )
+        store_relation(
+            source_id=mid, target_id=leaf, predicate="depends_on", db_connection=self.conn
+        )
+
+        result = analyze_dependencies(
+            root_entity_id=root,
+            direction="both",
+            db_connection=self.conn,
+        )
+
+        self.assertEqual([edge["depth"] for edge in result["edges"]], [1, 1, 2])
+        self.assertEqual(
+            [(edge["source_id"], edge["target_id"]) for edge in result["edges"]],
+            [(root, mid), (upstream, root), (mid, leaf)],
+        )
+
+    def test_analyze_dependencies_graph_exhausted_is_false_at_depth_cap(self):
+        root = self._mk("Inspect Cap Root")
+        target = self._mk("Inspect Cap Target")
+        store_relation(
+            source_id=root, target_id=target, predicate="depends_on", db_connection=self.conn
+        )
+
+        result = analyze_dependencies(
+            root_entity_id=root,
+            max_depth=1,
+            db_connection=self.conn,
+        )
+
+        self.assertFalse(result["graph_exhausted"])
+
 
 class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
     def setUp(self):
