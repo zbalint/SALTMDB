@@ -83,3 +83,13 @@ Existing pins: `tests/test_consolidation_batch_v2.py` (batch atomicity, per-item
 | Tests construct `_BulkContext` positionally and by keyword, and replace `_write_bulk_consolidations` by name with an argument-agnostic raising lambda | tests listed in section 0 | read |
 | `Provenance(agent_id, context_id, agent_session_id)` exists and `consolidate_memories` accepts it | `memory_service/_shared.py` 28; `relation_service.py` 2530 | read |
 | `bulk_commit_consolidation` passes the same three batch-wide values | `relation_service.py` 2981 to 3060 | partly read; the developer states the exact lines when editing |
+
+## Amendment 1 (2026-10-24): one reading of the failed-item bullet governs
+
+Section 2 states the failed item's index twice, in two bullets that disagree on the return shape of `_commit_bulk_consolidation_item`. The first says it returns ONLY the raw `consolidate_memories` result, with the status check, the `raise _BulkItemRejected(result, index)` and `_bulk_item_success(item, result)` in the loop. The second says it returns the raw result "together with the success dict (or the loop calls `consolidate_memories` through it and receives the raw result)". The second reading cannot work: the success dict reads `result["data"]`, which a rejected result does not have, and it would put a tuple back where the slice removes one. Found by the consultant's design read of the S6c diff; the developer had already implemented the first.
+
+A1.1 The first bullet governs: `_commit_bulk_consolidation_item(conn, item, parent_ids, bulk, provenance) -> dict` returns only the raw `consolidate_memories` result; the loop checks it, raises `_BulkItemRejected(result, index)` for a result that is not a dict with status `ok`, and otherwise appends `_bulk_item_success(item, result)`.
+
+A1.2 In the second bullet, the sentence from "`_commit_bulk_consolidation_item` returns" to "receives the raw result)" is superseded by A1.1. Everything else in that bullet stays in force: `_BulkItemRejected` gains `index: int` as its second positional argument, `str(exc)` does not change, `apply_consolidations` reads `exc.index`, `_commit_bulk_consolidation_item` keeps 5 parameters, and `consolidate_memories` is still called with keyword arguments only.
+
+A1.3 Nothing else changes: scope, tests and acceptance are as locked.
