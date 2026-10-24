@@ -139,7 +139,8 @@ Config lives in `pyproject.toml` under `[tool.ruff]`/`[tool.mypy]`/`[tool.bandit
   explicit direct dependency (2026-07-31) after deptry caught it being imported directly
   (`memory_service.py`, cosine similarity) while only present transitively via `fastembed`.
 * **Coverage and SonarQube Cloud** — CI runs the full test suite under `coverage.py`, uploads the
-  resulting report with a SonarQube analysis, and does not block on the quality gate. Run
+  resulting report with a SonarQube analysis, and fails the job when the quality gate fails
+  (`sonar.qualitygate.wait=true`). Run
   `scripts/prepush-sonar.sh` locally for the optional whole-suite check; it scans unpushed commits against `origin/develop` and refuses a dirty tree, an unchanged `origin/develop`, or a diverged branch.
 
 Run the complete verification gate locally before pushing:
