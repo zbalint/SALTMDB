@@ -1,0 +1,72 @@
+# SPEC-BL064-S6B-CONSOLIDATION-COMMIT
+
+## 0. Status
+
+LOCKED 2026-10-24
+
+- Backlog item: BL-064, slice 6b of 6a, 6b, 6c (the consolidation chain in `relation_service.py`). It follows 6a (`SPEC-BL064-S6A-CONSOLIDATION-PREFLIGHT`), whose types it uses: `_ConsolidationPlan` (fields `conn`, `owned`, `resolved_parents`, `cohesion`, `observed_state`, `content`), `_ConsolidationContent` (`redacted_content`, `clean_title`, `agent_val`, `content_hash`, `quality_score`, `quality_status`, `quality_flags_str`) and the existing `_ConsolidationCoreRequest`, `_ConsolidationCohesionResult`, `_ConsolidationEntityValues`. Shared `context_id`: `saltmdb-sonar-fix-2026-10`.
+- Baseline: `develop` with the preceding BL-064 slices committed (reference: `develop` at `0a01736` or later; `./verify` exits 0 there with 3657 passed, 10 skipped, 395 subtests passed; the slice's developer reruns `./verify` at the assigned HEAD and records the counts). Characterization baseline (run before and after): the eleven test files listed in 6a.
+- Location and branch: main checkout `/home/zbalint/workspace/SALTMDB`, branch `develop`.
+- Anchors: Line numbers in this spec are those of the tree at which it was written; locate every function by NAME (earlier slices shift the lines).
+- Test seams: `consolidate_memories` and `apply_consolidations`; the atomicity and batch suites that fault the transaction.
+- Scope (may edit): `src/saltmdb/domain/services/relation_service.py`, ONLY these functions: `_consolidation_commit`, `_consolidation_core_state`, `_consolidation_audit_override`, `_consolidation_archive_parents`, `_consolidation_collect_worklist`, `_consolidation_insert_entity` (its 7 content-field reads change to `values.content.*`; no other edit), the dataclass `_ConsolidationEntityValues`, and `consolidate_memories` (the construction of `entity_values` and the second half, from the `_write` closure through the success envelope); `tests/test_consolidation_commit.py` (new characterization tests only).
+- Does not touch: the preflight functions (6a), the bulk functions (6c), `_consolidation_revalidate`, `_consolidation_insert_lineage` (its exact arguments `(conn, resolved_parents, consolidated_id, now)` are called by a test wrapper), `_clear_archived_parent_vectors`, `consolidate_memories`' public signature and docstring, any SQL text, any threshold, any other module.
+- Names that tests pin and MUST stay: the module attributes `_consolidation_commit` (patched by `tests/test_consolidation_batch_v2.py` 648 and 931 with signature-agnostic fakes that raise), `_consolidation_insert_lineage` (wrapped by `tests/test_consolidation_atomicity.py` 504 to 516 and patched at 113 and 618), `_write_bulk_consolidations` (6c).
+- Hand-off rule: the developer leaves the diff uncommitted, unstaged and unmerged for review.
+
+## 1. Why
+
+The commit half has the opposite smell to the preflight: types already exist, but they are taken apart again. `_consolidation_commit` (8 parameters) receives `resolved_parents`, `observed_state`, `core_request`, `cohesion_result` and `entity_values` and then passes eleven of their fields as scalars to `_consolidation_audit_override` (9 parameters: `cohesion_result.override_applied`, `.min_sim`, `.offending_pair`, `.unresolved`, `.justification`, `entity_values.consolidated_id`, `.agent_val`) and to `_consolidation_archive_parents` (11 parameters: six fields of `entity_values`, plus a `placeholders` string that is a function of `resolved_parents` and `is_core_val`). `_consolidation_core_state` receives `redacted_content` separately although `entity_values.redacted_content` is the same value. `_consolidation_collect_worklist` appends into a list that the caller passes in (an out-parameter), and `consolidate_memories` clears and refills that list inside the retry closure `_write`, then reads it after the transaction.
+
+Rejected: a new dataclass for the commit (the existing ones already hold every value; only the unpacking is wrong); a generator for the worklist (the rows are read once and a list is returned); changing the order of the destructive writes (revalidate, core state, audit, insert entity, archive parents, collect worklist, insert lineage) or any SQL.
+
+## 2. Target shape
+
+No new types. One existing type changes: `_ConsolidationEntityValues` replaces its seven fields that duplicate `_ConsolidationContent` (`clean_title`, `redacted_content`, `agent_val`, `content_hash`, `quality_score`, `quality_status`, `quality_flags_str`) with one field `content: _ConsolidationContent` (the eight remaining fields stay: `consolidated_id`, `scope`, `weight`, `context_id`, `agent_session_id`, `metadata`, `memory_type`, `now`). `consolidate_memories` then builds it from 8 keyword arguments plus `content=plan.content` instead of 15; every reader changes from `values.clean_title` to `values.content.clean_title` and so on (`_consolidation_core_state`, `_consolidation_insert_entity`, `_consolidation_audit_override` via `values.content.agent_val`, `_consolidation_archive_parents`). The bound SQL values and their order are unchanged. Functions after the change (hand count, all positional):
+
+- `_consolidation_commit(conn, plan: _ConsolidationPlan, core_request, values: _ConsolidationEntityValues, tags) -> list[dict[str, str]]`: 5 parameters (was 8); `plan` carries `resolved_parents`, `observed_state` and `cohesion` (6a); it RETURNS the orphaned-edge worklist instead of filling a caller list. The steps and their order are today's.
+- `_consolidation_core_state(conn, resolved_parents, core_request, values) -> dict`: 4 parameters (was 5); uses `values.content.redacted_content`.
+- `_consolidation_audit_override(conn, resolved_parents, cohesion: _ConsolidationCohesionResult, values) -> None`: 4 parameters (was 9); the audit payload (`parent_ids`, `min_pairwise_similarity`, `threshold`, `offending_pair`, `unresolved`, `justification`, `consolidated_id`) and the `log_event(agent_id=values.content.agent_val, type="consolidation_gate_override", ...)` call are unchanged, including the raise when the audit event is rejected.
+- `_consolidation_archive_parents(conn, resolved_parents, values, tags, is_core_val) -> None`: 5 parameters (was 11); `placeholders` is built inside from `resolved_parents`; `consolidated_id` and `now` are read from `values`, and `clean_title`, `redacted_content`, `content_hash` and `agent_val` from `values.content`.
+- `_consolidation_collect_worklist(conn, resolved_parents) -> list[dict[str, str]]`: 2 parameters (was 4); builds its own `placeholders` and RETURNS the worklist (same dict shape and order as today: `predicate`, `other_endpoint`, `originating_parent`, `source_id`, `target_id`).
+- `consolidate_memories` (second half): the `_write` closure returns the worklist from `_consolidation_commit`; the single-call path assigns `orphaned_edges = write_transaction_retrying(conn, _commit_single)` where `_commit_single` returns the closure's result (`write_transaction_retrying` returns the callback's return value, see the claims table); the bulk path (`_bulk is not None`) assigns `orphaned_edges = _write(conn)`. The three envelope keys `orphaned_relations`, `orphaned_edge_worklist`, `orphaned_edges` keep carrying the same list object, as today.
+
+## 3. Decisions
+
+- D1. Behaviour is identical: the order of the writes, the TOCTOU revalidation first, every SQL statement and bound value, the audit event written before the entity insert and only when `override_applied`, the lineage rows after the worklist capture, the savepoint around the single-call commit and the vector clearing after it, the retry semantics (a retried transaction recomputes the worklist from scratch; nothing survives from an aborted attempt), the `CORE_DECISION_REQUIRED` and `CONSOLIDATION_FAILED` mapping, and the `finally` that closes an owned connection.
+- D2. The worklist is computed inside the transaction on every attempt and only the committed attempt's list reaches the envelope (today achieved by `orphaned_edges.clear()` in `_write`; after the change by returning a fresh list).
+- D2b. Lazy imports stay lazy: the `embedding_service` import inside `_consolidation_archive_parents` (tests patch `enqueue_embedding_jobs_for_entity` and `cancel_retrieval_embedding_jobs_for_entity` at their source module: `tests/test_consolidation_atomicity.py` 23, 197, 324; `phase4` 307; `tests/test_consolidation_grouping.py` 33; `tests/test_consolidation_is_core_inheritance.py` 30, 398, 630). `_consolidation_commit` uses only its `conn` parameter inside the savepoint, never `plan.conn`. The local `orphaned_edges: list = []` declared before the `try:` disappears (neither `except` branch reads it).
+- D3. `_ConsolidationEntityValues` is constructed in exactly one place (`consolidate_memories`) and no test references it (`rg` over tests/scripts/hooks: none), so the field change is test-safe. No `noqa`; the second `if cohesion.override_applied:` branch inside the audit function keeps its single responsibility.
+
+## 4. Tests (characterization, green before and after)
+
+Existing pins: override audit payload and atomicity (`tests/test_consolidate_memories_phase4.py`, `tests/test_consolidation_atomicity.py`, `tests/test_relation_service.py` ~2001 to 2300), core inheritance (`tests/test_consolidation_is_core_inheritance.py`), batch faults (`tests/test_consolidation_batch_v2.py`). Add, with literals from a run on the unchanged code, only what is not asserted exactly (the developer names the existing test per item first):
+1. The worklist: a consolidation of parents that have active semantic edges in both directions returns exactly the expected `orphaned_edges` list (dict keys and order, dedupe of an edge touching two parents, lineage predicates excluded) in all three envelope keys, and the three keys are the same list.
+2. Retry: ALREADY pinned: `test_single_rows_closure_rerun_deduplicates_orphaned_worklist` (`tests/test_consolidation_atomicity.py` 660 to 707, direct mode only: it patches the module's `write_transaction_retrying` with a fake that raises 'database is locked' after the callback and runs it again, and its fake returns the callback's result, so it keeps working once the closure returns the list). Cite it; do not add a duplicate. In coordinator mode `write_transaction_retrying` calls `fn` once and never retries.
+3. The audit payload of an override commit: every key and value (`parent_ids` as stored, `min_pairwise_similarity`, `threshold`, `offending_pair`, `unresolved`, `justification`, `consolidated_id`) and the event's `agent_id` equal to the writer, compared as a dict.
+4. The archive step: after a commit the parents are `archived` with the same `valid_to` as the new entity's `valid_from`, the consolidated entity has its tags and (when core) the `#core` tag, and embedding jobs are queued for it and cancelled for the parents.
+5. A rejected audit event (patch `log_event` at the module attribute: it is imported at the top of the module and must stay a module attribute; the fake returns a real rejected envelope `{"status": "rejected", "errors": [{"message": "..."}]}` because the raise reads `errors[0]["message"]`) aborts the whole consolidation: no new entity, parents still active.
+
+## 5. Out of scope
+
+6a and 6c; `_consolidation_revalidate`; the SQL; the MCP tool; any other change to `_consolidation_insert_entity` than the seven field reads.
+
+## 6. Acceptance
+
+1. `./verify` exits 0.
+2. The section 4 tests pass on the unchanged code and after the change (the developer reports both runs; the architect reruns on the final tree).
+3. `rg -n "orphaned_edges.clear\(\)" src` returns nothing; `rg -n "def _consolidation_(commit|core_state|audit_override|archive_parents|collect_worklist)" -A12 src/saltmdb/domain/services/relation_service.py` shows no parameter named `placeholders`, `cohesion_result`, `orphaned_edges` or `redacted_content` (judge: the architect reads the definitions).
+4. `git status --short` lists only the files of section 0.
+5. Mutation check on a scratch copy, killer named for each: audit written when `override_applied` is false; skip revalidate; the worklist includes lineage predicates; the worklist not deduplicated; a stale worklist reused across a retry; `values.now` replaced by a new timestamp in the archive step; skip the `#core` tag. ORDER of the writes (audit before the entity insert, archive after the insert, lineage after the worklist capture): three order mutants (audit after insert; archive before insert; lineage before the worklist capture) are EQUIVALENT in outcome (one transaction; the worklist query excludes the lineage predicates, so lineage rows never appear in it) unless the order is observed: kill them with a call-order spy (a parent `Mock` attached with `wraps=` to the module attributes `log_event`, `_consolidation_insert_entity`, `_consolidation_archive_parents`, `_consolidation_collect_worklist`, `_consolidation_insert_lineage`, asserting the call sequence), or declare each equivalent in the report with the reason. A surviving non-equivalent mutant is reported.
+6. Design read (architect and consultant): at most 5 parameters, no out-parameter, no dataclass unpacked into scalars, no duplicated value (the seven content fields now live only in `_ConsolidationContent`).
+
+## 7. Claims
+
+| Claim | Where | Verified |
+|---|---|---|
+| `_consolidation_commit` has 8 parameters, `_consolidation_audit_override` 9, `_consolidation_archive_parents` 11, `_consolidation_core_state` 5, `_consolidation_collect_worklist` 4 | `relation_service.py` 2105, 1893, 1992, 1860, 2059 (at `7c91992`) | read; scout AST scan |
+| `_consolidation_commit` passes seven and eleven scalar fields taken from the two dataclasses | `relation_service.py` 2105 to 2150 | read |
+| `consolidate_memories` clears and refills `orphaned_edges` inside `_write` and reads it after the transaction | `relation_service.py` ~2633 to 2680 | read |
+| `write_transaction_retrying` returns the callback's return value (its docstring: 'The return value of fn(c)'; both the in-transaction and the retry branch `return fn(...)`) | `db/connection.py` 180 to 210 | read |
+| Tests patch `_consolidation_commit` by name with fakes that ignore arguments and wrap `_consolidation_insert_lineage` with its original arguments | tests listed in section 0 | read |
+| `_consolidation_insert_entity` already takes `entity_values` whole; `_ConsolidationEntityValues` is built only in `consolidate_memories` and referenced by no test | `relation_service.py` 1936; `rg` over tests | read; probed |
