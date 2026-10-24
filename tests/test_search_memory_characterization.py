@@ -2838,6 +2838,23 @@ def test_search2_predecessor_topic_helper_pin():
 
 
 def _search2_predecessor_topic_pin():
+    controls = _search2_controls(query_keywords="needle", db_path="/tmp/search.db")
+    channels = orchestrator._ChannelRows(
+        [("a", "t", "c", 1, 0, -1.0)],
+        True,
+        [("b", 0.2)],
+        [],
+        [],
+        [],
+    )
+    no_fallback_channels = orchestrator._ChannelRows(
+        [("a", "t", "c", 1, 0, -1.0)],
+        False,
+        [("b", 0.2)],
+        [],
+        [],
+        [],
+    )
     with patch.object(
         search_primitives,
         "_score_topics_with_fallback",
@@ -2846,24 +2863,16 @@ def _search2_predecessor_topic_pin():
         orchestrator._resolve_predecessor_evidence(
             ["a", "b"],
             {"a": 1.0, "b": 0.5},
-            [("a", "t", "c", 1, 0, -1.0)],
-            [("b", 0.2)],
-            {"a"},
-            True,
-            "needle",
-            "/tmp/search.db",
+            channels,
+            controls,
         )
         assert score_topics.call_args.args == ("needle", ["a"], "/tmp/search.db")
         score_topics.reset_mock()
         orchestrator._resolve_predecessor_evidence(
             ["a", "b"],
             {"a": 1.0, "b": 0.5},
-            [("a", "t", "c", 1, 0, -1.0)],
-            [("b", 0.2)],
-            {"a"},
-            False,
-            "needle",
-            "/tmp/search.db",
+            no_fallback_channels,
+            controls,
         )
         score_topics.assert_not_called()
 
@@ -2898,6 +2907,9 @@ def test_search2_chain_resolution_helper_pin(search_db):
 
 def _search2_filter_pin(search_db):
     conn, _path = search_db
+    controls = _search2_controls(mode="strict")
+    filters = orchestrator._SearchFilters(["e.agent_id = ?"], ["owner"])
+    channels = orchestrator._ChannelRows([], False, [], [], [], [])
     with (
         patch.object(
             ranking,
@@ -2914,16 +2926,10 @@ def _search2_filter_pin(search_db):
     ):
         result = orchestrator._resolve_search_predecessors(
             conn,
-            "strict",
+            controls,
+            filters,
+            channels,
             {"a": 1.0},
-            ["e.agent_id = ?"],
-            ["owner"],
-            [],
-            [],
-            {"a"},
-            False,
-            "needle",
-            "/tmp/search.db",
         )
     assert result[0] == {"b": 1.0}
     assert resolve.call_args.args[2:] == (["e.agent_id = ?"], ["owner"])
@@ -3671,3 +3677,135 @@ def test_cross_encoder_score_is_rounded_to_six_decimals(search_db):
         0.223457,
         0.323457,
     }
+
+
+def test_search7a_channel_rows_derived_sets():
+    rows = orchestrator._ChannelRows(
+        [("fts-a", 1.0), ("fts-b", 0.5)],
+        True,
+        [("semantic-a", 0.2), ("semantic-b", 0.1)],
+        [],
+        [],
+        [],
+    )
+    assert rows.fts_ids == {"fts-a", "fts-b"}
+    assert rows.fts_and_ids == set()
+    assert rows.semantic_ids == {"semantic-a", "semantic-b"}
+
+    and_rows = orchestrator._ChannelRows(
+        [("fts-a", 1.0), ("fts-b", 0.5)],
+        False,
+        [("semantic-a", 0.2), ("semantic-b", 0.1)],
+        [],
+        [],
+        [],
+    )
+    assert and_rows.fts_and_ids == and_rows.fts_ids
+
+
+def test_search7a_predecessor_identity_and_non_strict_no_call(search_db):
+    conn, _path = search_db
+    filters = orchestrator._SearchFilters(["e.status != 'archived'"], [])
+    channels = orchestrator._ChannelRows([], False, [], [], [], [])
+    controls = _search2_controls(mode="broad")
+    rrf_map = {"a": 1.0}
+    with patch.object(ranking, "_resolve_supersession_chains") as resolve:
+        result = orchestrator._resolve_search_predecessors(
+            conn, controls, filters, channels, rrf_map
+        )
+    assert result[0] is rrf_map
+    resolve.assert_not_called()
+
+    strict_controls = _search2_controls(mode="strict")
+    with patch.object(ranking, "_resolve_supersession_chains", return_value={}):
+        strict_result = orchestrator._resolve_search_predecessors(
+            conn, strict_controls, filters, channels, rrf_map
+        )
+    assert strict_result[0] is rrf_map
+
+    empty = {}
+    empty_result = orchestrator._resolve_search_predecessors(
+        conn, strict_controls, filters, channels, empty
+    )
+    assert empty_result[0] is empty
+
+
+@pytest.mark.parametrize(
+    ("fts_count", "semantic_count", "retrieval_count", "expected_exhausted"),
+    [(1, 1, 1, True), (2, 2, 2, False), (1, 1, 2, False)],
+)
+def test_search7a_compute_pool_result_shape_with_retrieval(
+    search_db, fts_count, semantic_count, retrieval_count, expected_exhausted
+):
+    conn, _path = search_db
+    controls = _search2_controls(
+        mode="broad",
+        use_retrieval_text_candidates=True,
+        configured_retrieval_fts_weight=0.25,
+        configured_retrieval_vector_weight=0.75,
+    )
+    filters = orchestrator._SearchFilters(["e.status != 'archived'"], [])
+    diagnostics = {"retrieval_text": {}, "chunk_candidate": {}, "cross_encoder": {}}
+    fts = [("a", 1.0)] * fts_count
+    semantic = [("a", 0.2)] * semantic_count
+    retrieval = [("a", 0.3)] * retrieval_count
+    with (
+        patch.object(search_primitives, "_run_fts_search", return_value=(fts, False)),
+        patch.object(search_primitives, "semantic_search", return_value=semantic),
+        patch.object(search_primitives, "_run_retrieval_fts_search", return_value=retrieval),
+        patch.object(search_primitives, "retrieval_vector_search", return_value=retrieval),
+        patch.object(
+            search_primitives,
+            "weighted_reciprocal_rank_fusion",
+            return_value={"a": 1.0},
+        ),
+        patch.object(
+            orchestrator,
+            "_apply_search_pool_policies",
+            return_value=(["a"], {}, set()),
+        ),
+    ):
+        result = orchestrator._compute_search_pool(2, conn, filters, controls, diagnostics)
+    assert list(result) == [
+        "ordered_ids",
+        "fts_rows",
+        "cross_encoder_scores_map",
+        "superseded_ids",
+        "exhausted",
+        "rrf_score_map",
+        "chunk_diagnostics",
+    ]
+    assert isinstance(result["ordered_ids"], list)
+    assert isinstance(result["fts_rows"], list)
+    assert isinstance(result["cross_encoder_scores_map"], dict)
+    assert isinstance(result["superseded_ids"], set)
+    assert result["exhausted"] is expected_exhausted
+    assert isinstance(result["rrf_score_map"], dict)
+    assert isinstance(result["chunk_diagnostics"], dict)
+
+
+def test_search7a_chunk_diagnostics_replaces_initial_copy():
+    filters = orchestrator._SearchFilters(["e.status != 'archived'"], [])
+    controls = _search2_controls(use_chunk_candidates=True)
+    diagnostics = {"chunk_candidate": {"requested": True, "chunk_weight": 1.0}}
+    primitive_diagnostics = {
+        "requested_chunk_rows": 1,
+        "candidate_window": 10,
+        "oversampling_multiplier": 2,
+        "raw_chunk_rows": 1,
+        "unique_fresh_entities": 1,
+        "returned_entities": 1,
+        "candidate_shortfall": 0,
+    }
+    with patch.object(
+        search_primitives,
+        "chunk_candidate_search",
+        return_value=([("a", 0.1)], primitive_diagnostics),
+    ):
+        rows, chunk_diag = orchestrator._gather_chunk_candidates(filters, controls, diagnostics)
+    assert rows == [("a", 0.1)]
+    assert diagnostics["chunk_candidate"] is not primitive_diagnostics
+    assert set(diagnostics["chunk_candidate"]) == set(primitive_diagnostics) | {"executed"}
+    assert diagnostics["chunk_candidate"]["executed"] is True
+    assert "requested" not in diagnostics["chunk_candidate"]
+    assert chunk_diag is primitive_diagnostics

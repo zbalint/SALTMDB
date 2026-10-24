@@ -14,8 +14,8 @@ deferred follow-up work, see the refactor plan's section 3.
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Literal, cast
+from dataclasses import dataclass, field
+from typing import Any, Literal, NamedTuple, cast
 
 from saltmdb.config import (
     get_db_path,
@@ -35,6 +35,46 @@ from ._shared import logger
 # to prevent SQL predicate injection (e.g. a key like "safe') OR 1=1 OR json_extract(e.metadata, '$.safe").
 _METADATA_FILTER_KEY_RE = re.compile(r"^\w+$", re.ASCII)
 _METADATA_FILTER_KEY_PATTERN_TEXT = "^[A-Za-z0-9_]+$"
+
+
+@dataclass(frozen=True, slots=True)
+class _SearchFilters:
+    """The WHERE clauses and bound parameters of one search; read-only once built."""
+
+    # Must not be hashed or cached: carries lists.
+    where_clauses: list[str]
+    params: list
+
+
+@dataclass(slots=True)
+class _ChannelRows:
+    """Candidate rows from each retrieval channel of one pool pass, plus derived id sets."""
+
+    # Must not be hashed or cached: carries lists and derived sets.
+    fts_rows: list
+    used_or_fallback: bool
+    semantic_rows: list
+    chunk_rows: list
+    retrieval_fts_rows: list
+    retrieval_vector_rows: list
+    fts_ids: set[str] = field(init=False)
+    fts_and_ids: set[str] = field(init=False)
+    semantic_ids: set[str] = field(init=False)
+
+    def __post_init__(self):
+        self.fts_ids = {row[0] for row in self.fts_rows}
+        # True-AND-only id set (H1 fix): empty whenever used_or_fallback_ is True,
+        # since every row in fts_rows_ then came from the OR-joined retry, not a
+        # genuine AND match -- see _run_fts_search's own docstring for why this is a
+        # single pool-level bool, not a per-row property.
+        self.fts_and_ids = self.fts_ids if not self.used_or_fallback else set()
+        self.semantic_ids = {eid for eid, _ in self.semantic_rows}
+
+
+class _PredecessorResolution(NamedTuple):
+    rrf_map: dict[str, float]
+    resolved_from: dict[str, list[str]]
+    predecessor_grounded_map: dict[str, bool]
 
 
 def _apply_search_pool_policies(
@@ -194,33 +234,25 @@ def _record_retrieval_candidates(conn, retrieval_fts_rows_, retrieval_vector_row
 
 
 def _gather_retrieval_candidates(
-    conn,
-    sanitized_query,
-    query_keywords,
-    where_clauses,
-    params,
-    candidate_window,
-    db_path,
-    use_retrieval_text_candidates,
-    diagnostics,
-):
+    conn, filters, controls, candidate_window, diagnostics
+) -> tuple[list, list]:
     retrieval_fts_rows_: list[tuple[str, float]] = []
     retrieval_vector_rows_: list[tuple[str, float]] = []
-    if use_retrieval_text_candidates:
+    if controls.use_retrieval_text_candidates:
         retrieval_fts_rows_ = search_primitives._run_retrieval_fts_search(
             conn,
-            sanitized_query,
-            where_clauses,
-            params,
+            controls.sanitized_query,
+            filters.where_clauses,
+            filters.params,
             candidate_window,
             0,
         )
         retrieval_vector_rows_ = search_primitives.retrieval_vector_search(
-            query_keywords,
-            where_clauses,
-            params,
+            controls.query_keywords,
+            filters.where_clauses,
+            filters.params,
             candidate_window,
-            db_path,
+            controls.db_path,
             0,
         )
         retrieval_diag = diagnostics["retrieval_text"]
@@ -233,35 +265,26 @@ def _gather_retrieval_candidates(
     return retrieval_fts_rows_, retrieval_vector_rows_
 
 
-def _gather_chunk_candidates(
-    query_keywords,
-    where_clauses,
-    params,
-    chunk_window,
-    chunk_oversampling,
-    db_path,
-    use_chunk_candidates,
-    diagnostics,
-):
+def _gather_chunk_candidates(filters, controls, diagnostics) -> tuple[list, dict]:
     chunk_rows_: list[tuple[str, float]] = []
     chunk_diagnostics_: dict[str, Any] = {
         "requested_chunk_rows": 0,
-        "candidate_window": chunk_window,
-        "oversampling_multiplier": chunk_oversampling,
+        "candidate_window": controls.chunk_window,
+        "oversampling_multiplier": controls.chunk_oversampling,
         "raw_chunk_rows": 0,
         "unique_fresh_entities": 0,
         "returned_entities": 0,
         "candidate_shortfall": 0,
         "executed": False,
     }
-    if use_chunk_candidates:
+    if controls.use_chunk_candidates:
         chunk_rows_, chunk_diagnostics_ = search_primitives.chunk_candidate_search(
-            query_keywords,
-            where_clauses,
-            params,
-            chunk_window,
-            chunk_oversampling,
-            db_path,
+            controls.query_keywords,
+            filters.where_clauses,
+            filters.params,
+            controls.chunk_window,
+            controls.chunk_oversampling,
+            controls.db_path,
         )
         chunk_diagnostics_["executed"] = True
         diagnostics["chunk_candidate"] = dict(chunk_diagnostics_)
@@ -375,16 +398,7 @@ def _log_search_gap(
         )
 
 
-def _resolve_predecessor_evidence(
-    pre_pool_ids,
-    rrf_map,
-    fts_rows_,
-    semantic_rows_,
-    fts_ids_,
-    used_or_fallback_,
-    query_keywords,
-    db_path,
-):
+def _resolve_predecessor_evidence(pre_pool_ids, rrf_map, channels, controls) -> dict:
     # H1 predecessor-grounding fix: on-demand topic-score exactly the
     # OR-fallback-only subset of pre_pool_ids (true-AND pre-pool candidates
     # already have a sufficient DIRECT signal and skip this lookup) BEFORE
@@ -392,11 +406,13 @@ def _resolve_predecessor_evidence(
     # never get a semantic_verdict at all, silently always failing the
     # in_fts_or_only rule below regardless of its real topic relevance.
     pre_or_fallback_only_ids = (
-        [eid for eid in pre_pool_ids if eid in fts_ids_] if used_or_fallback_ else []
+        [eid for eid in pre_pool_ids if eid in channels.fts_ids]
+        if channels.used_or_fallback
+        else []
     )
     pre_topic_scores_map = (
         search_primitives._score_topics_with_fallback(
-            query_keywords, pre_or_fallback_only_ids, db_path
+            controls.query_keywords, pre_or_fallback_only_ids, controls.db_path
         )
         if pre_or_fallback_only_ids
         else {}
@@ -404,11 +420,11 @@ def _resolve_predecessor_evidence(
     return ranking._build_candidate_evidence(
         pre_pool_ids,
         rrf_map,
-        fts_rows_,
-        semantic_rows_,
+        channels.fts_rows,
+        channels.semantic_rows,
         pre_topic_scores_map,
         {},
-        used_or_fallback=used_or_fallback_,
+        used_or_fallback=channels.used_or_fallback,
     )
 
 
@@ -425,43 +441,25 @@ def _accumulate_resolved_predecessors(resolved_map, pre_evidence):
 
 
 def _resolve_search_predecessors(
-    conn,
-    mode,
-    rrf_map,
-    where_clauses,
-    params,
-    fts_rows_,
-    semantic_rows_,
-    fts_ids_,
-    used_or_fallback_,
-    query_keywords,
-    db_path,
-):
+    conn, controls, filters, channels, rrf_map
+) -> _PredecessorResolution:
     resolved_from_: dict[str, list[str]] = {}
     predecessor_grounded_map: dict[str, bool] = {}
-    if rrf_map and mode == "strict":
+    if rrf_map and controls.mode == "strict":
         # Part A: resolve off the ORIGINAL, un-substituted pool -- gap-gate below
         # also reads fts_ids_/semantic_ids_ pre-substitution, same invariant.
+        # ChannelRows derives those sets from the original rows.
         pre_pool_ids = list(rrf_map.keys())
         resolved_map = ranking._resolve_supersession_chains(
-            conn, pre_pool_ids, where_clauses, params
+            conn, pre_pool_ids, filters.where_clauses, filters.params
         )
         if resolved_map:
-            pre_evidence = _resolve_predecessor_evidence(
-                pre_pool_ids,
-                rrf_map,
-                fts_rows_,
-                semantic_rows_,
-                fts_ids_,
-                used_or_fallback_,
-                query_keywords,
-                db_path,
-            )
+            pre_evidence = _resolve_predecessor_evidence(pre_pool_ids, rrf_map, channels, controls)
             resolved_from_, predecessor_grounded_map = _accumulate_resolved_predecessors(
                 resolved_map, pre_evidence
             )
             rrf_map = ranking._substitute_resolved_heads(rrf_map, resolved_map)
-    return rrf_map, resolved_from_, predecessor_grounded_map
+    return _PredecessorResolution(rrf_map, resolved_from_, predecessor_grounded_map)
 
 
 def _run_cross_encoder_scoring(
@@ -704,14 +702,7 @@ def _explain_search(
     return explain_result
 
 
-def _compute_search_pool(
-    candidate_window: int,
-    conn,
-    where_clauses,
-    params,
-    controls,
-    diagnostics,
-):
+def _compute_search_pool(candidate_window: int, conn, filters, controls, diagnostics) -> dict:
     """One full FTS+semantic+RRF-fuse+[resolve+substitute]+[rerank]+[gate]+
     [ranking-flags] pass at a given candidate_window size (Part C pipeline
     ordering: RRF fusion -> gap-gate check off the ORIGINAL un-substituted sets ->
@@ -723,99 +714,64 @@ def _compute_search_pool(
     metadata for the mode="strict" overfetch retry loop below (Part C2) to decide
     whether widening further could help, and for row assembly afterward.
     """
-    sanitized_query = controls.sanitized_query
-    query_keywords = controls.query_keywords
-    db_path = controls.db_path
-    mode = controls.mode
-    chunk_window = controls.chunk_window
-    chunk_oversampling = controls.chunk_oversampling
-    use_chunk_candidates = controls.use_chunk_candidates
-    use_retrieval_text_candidates = controls.use_retrieval_text_candidates
-    configured_chunk_weight = controls.configured_chunk_weight
-    configured_retrieval_fts_weight = controls.configured_retrieval_fts_weight
-    configured_retrieval_vector_weight = controls.configured_retrieval_vector_weight
     fts_rows_, used_or_fallback_ = search_primitives._run_fts_search(
         conn,
-        sanitized_query,
-        where_clauses,
-        params,
+        controls.sanitized_query,
+        filters.where_clauses,
+        filters.params,
         candidate_window,
         0,
         return_fallback_flag=True,
     )
     semantic_rows_ = search_primitives.semantic_search(
-        query_keywords, where_clauses, params, candidate_window, db_path, 0
-    )
-    chunk_rows_, chunk_diagnostics_ = _gather_chunk_candidates(
-        query_keywords,
-        where_clauses,
-        params,
-        chunk_window,
-        chunk_oversampling,
-        db_path,
-        use_chunk_candidates,
-        diagnostics,
-    )
-    retrieval_fts_rows_, retrieval_vector_rows_ = _gather_retrieval_candidates(
-        conn,
-        sanitized_query,
-        query_keywords,
-        where_clauses,
-        params,
+        controls.query_keywords,
+        filters.where_clauses,
+        filters.params,
         candidate_window,
-        db_path,
-        use_retrieval_text_candidates,
-        diagnostics,
+        controls.db_path,
+        0,
     )
-
-    rrf_map = search_primitives.weighted_reciprocal_rank_fusion(
+    chunk_rows_, chunk_diagnostics_ = _gather_chunk_candidates(filters, controls, diagnostics)
+    retrieval_fts_rows_, retrieval_vector_rows_ = _gather_retrieval_candidates(
+        conn, filters, controls, candidate_window, diagnostics
+    )
+    channels = _ChannelRows(
         fts_rows_,
+        used_or_fallback_,
         semantic_rows_,
         chunk_rows_,
+        retrieval_fts_rows_,
+        retrieval_vector_rows_,
+    )
+    fused_map = search_primitives.weighted_reciprocal_rank_fusion(
+        channels.fts_rows,
+        channels.semantic_rows,
+        channels.chunk_rows,
         candidate_window,
-        chunk_weight=configured_chunk_weight,
-        retrieval_fts_results=retrieval_fts_rows_,
-        retrieval_vector_results=retrieval_vector_rows_,
-        retrieval_fts_weight=configured_retrieval_fts_weight,
-        retrieval_vector_weight=configured_retrieval_vector_weight,
+        chunk_weight=controls.configured_chunk_weight,
+        retrieval_fts_results=channels.retrieval_fts_rows,
+        retrieval_vector_results=channels.retrieval_vector_rows,
+        retrieval_fts_weight=controls.configured_retrieval_fts_weight,
+        retrieval_vector_weight=controls.configured_retrieval_vector_weight,
     )
     _record_retrieval_contributions(
-        use_retrieval_text_candidates,
+        controls.use_retrieval_text_candidates,
         diagnostics,
-        configured_retrieval_fts_weight,
-        configured_retrieval_vector_weight,
+        controls.configured_retrieval_fts_weight,
+        controls.configured_retrieval_vector_weight,
     )
-    # True-AND-only id set (H1 fix): empty whenever used_or_fallback_ is True,
-    # since every row in fts_rows_ then came from the OR-joined retry, not a
-    # genuine AND match -- see _run_fts_search's own docstring for why this is a
-    # single pool-level bool, not a per-row property.
-    fts_ids_ = {r[0] for r in fts_rows_}
-    fts_and_ids_ = fts_ids_ if not used_or_fallback_ else set()
-    semantic_ids_ = {eid for eid, _ in semantic_rows_}
-    rrf_map, resolved_from_, predecessor_grounded_map = _resolve_search_predecessors(
-        conn,
-        mode,
-        rrf_map,
-        where_clauses,
-        params,
-        fts_rows_,
-        semantic_rows_,
-        fts_ids_,
-        used_or_fallback_,
-        query_keywords,
-        db_path,
-    )
+    resolution = _resolve_search_predecessors(conn, controls, filters, channels, fused_map)
     ranked_pool_, cross_encoder_scores_map_, superseded_ids_ = _apply_search_pool_policies(
-        rrf_map,
-        fts_rows_,
-        semantic_rows_,
-        fts_ids_,
-        fts_and_ids_,
-        semantic_ids_,
-        used_or_fallback_,
+        resolution.rrf_map,
+        channels.fts_rows,
+        channels.semantic_rows,
+        channels.fts_ids,
+        channels.fts_and_ids,
+        channels.semantic_ids,
+        channels.used_or_fallback,
         conn,
-        resolved_from_,
-        predecessor_grounded_map,
+        resolution.resolved_from,
+        resolution.predecessor_grounded_map,
         controls,
         candidate_window,
         diagnostics,
@@ -825,19 +781,19 @@ def _compute_search_pool(
     # corpus is exhausted for this query at this window size; growing
     # candidate_window further cannot reveal more candidates (Part C2).
     exhausted_ = (
-        len(fts_rows_) < candidate_window
-        and len(semantic_rows_) < candidate_window
+        len(channels.fts_rows) < candidate_window
+        and len(channels.semantic_rows) < candidate_window
         and (
-            not use_retrieval_text_candidates
+            not controls.use_retrieval_text_candidates
             or (
-                len(retrieval_fts_rows_) < candidate_window
-                and len(retrieval_vector_rows_) < candidate_window
+                len(channels.retrieval_fts_rows) < candidate_window
+                and len(channels.retrieval_vector_rows) < candidate_window
             )
         )
     )
     return {
         "ordered_ids": ranked_pool_,
-        "fts_rows": fts_rows_,
+        "fts_rows": channels.fts_rows,
         "cross_encoder_scores_map": cross_encoder_scores_map_,
         "superseded_ids": superseded_ids_,
         "exhausted": exhausted_,
@@ -847,7 +803,7 @@ def _compute_search_pool(
         # assembled item's score is always the RRF fusion score, even when the
         # cross-encoder stage reordered `ordered_ids` (cross_encoder_score is
         # attached separately, it never replaces this field).
-        "rrf_score_map": rrf_map,
+        "rrf_score_map": resolution.rrf_map,
         "chunk_diagnostics": chunk_diagnostics_,
     }
 
@@ -985,7 +941,7 @@ def _semantic_search_db_path(db_path, disable_semantic):
         )
 
 
-def _search_window_pool(conn, where_clauses, params, controls, diagnostics, offset, limit, mode):
+def _search_window_pool(conn, filters, controls, diagnostics, offset, limit):
     # Widen the pool: the cross-encoder is unconditionally always on (see the
     # forcing-block comment near the top of this function), so this branch is now
     # always taken -- there's nothing meaningful to reorder/resolve/gate within
@@ -995,7 +951,7 @@ def _search_window_pool(conn, where_clauses, params, controls, diagnostics, offs
 
     base_window = max(offset + limit, RERANK_CANDIDATE_POOL_SIZE)
 
-    if mode == "strict":
+    if controls.mode == "strict":
         # Part C2 pagination redesign: resolution/dedup/the relevance gate can all
         # shrink the raw candidate_window's survivor count below offset+limit even
         # after the widening above. Re-run the WHOLE pass (from scratch, same
@@ -1032,22 +988,16 @@ def _search_window_pool(conn, where_clauses, params, controls, diagnostics, offs
         # first _compute_pool() call could silently run past the "absolute cap" the
         # config/docs promise.
         window = min(base_window, STRICT_OVERFETCH_CANDIDATE_CAP)
-        pool_result = _compute_search_pool(
-            window, conn, where_clauses, params, controls, diagnostics
-        )
+        pool_result = _compute_search_pool(window, conn, filters, controls, diagnostics)
         while (
             len(pool_result["ordered_ids"]) < offset + limit
             and not pool_result["exhausted"]
             and window < STRICT_OVERFETCH_CANDIDATE_CAP
         ):
             window = min(window * 2, STRICT_OVERFETCH_CANDIDATE_CAP)
-            pool_result = _compute_search_pool(
-                window, conn, where_clauses, params, controls, diagnostics
-            )
+            pool_result = _compute_search_pool(window, conn, filters, controls, diagnostics)
     else:
-        pool_result = _compute_search_pool(
-            base_window, conn, where_clauses, params, controls, diagnostics
-        )
+        pool_result = _compute_search_pool(base_window, conn, filters, controls, diagnostics)
     return pool_result
 
 
@@ -1500,9 +1450,8 @@ def search_memory(
                 collapse_supersedes_families=collapse_supersedes_families,
                 return_diagnostics=return_diagnostics,
             )
-            pool_result = _search_window_pool(
-                conn, where_clauses, params, controls, diagnostics, offset, limit, mode
-            )
+            filters = _SearchFilters(where_clauses, params)
+            pool_result = _search_window_pool(conn, filters, controls, diagnostics, offset, limit)
             fts_rows = pool_result["fts_rows"]
             cross_encoder_scores_map = pool_result["cross_encoder_scores_map"]
             superseded_ids = pool_result["superseded_ids"]
