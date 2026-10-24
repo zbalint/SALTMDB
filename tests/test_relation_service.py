@@ -4678,6 +4678,146 @@ class TestStoreRelationBoundaries(unittest.TestCase):
             [("existing", "2025-01-01"), ("raced", None)],
         )
 
+    def test_non_normalized_strong_predicate_rejects_low_similarity_with_canonical_message(self):
+        for predicate in ("Elaborates-On", "ELABORATES_ON"):
+            with (
+                self.subTest(predicate=predicate),
+                patch(
+                    self.module + "min_pairwise_cohesion", return_value=(0.4, ("source", "target"))
+                ),
+            ):
+                self.assertEqual(
+                    self._store(predicate=predicate),
+                    self._rejection(
+                        "REJECT_LOW_RELATION_SIMILARITY",
+                        "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.4000 < 0.6505, "
+                        "offending=('source', 'target')) Pass override_justification (>= 20 chars) "
+                        "to force this relation.",
+                    ),
+                )
+
+    def test_non_normalized_strong_predicate_rejects_canonical_contradiction(self):
+        for predicate in ("Elaborates-On", "ELABORATES_ON"):
+            with self.subTest(predicate=predicate):
+                self.conn.execute("DELETE FROM relations")
+                self.conn.commit()
+                self._edge("supersedes")
+                with patch(self.module + "min_pairwise_cohesion", return_value=(1.0, None)):
+                    self.assertEqual(
+                        self._store(predicate=predicate),
+                        self._rejection(
+                            "REJECT_CONTRADICTORY_PREDICATE",
+                            "Error: REJECT_CONTRADICTORY_PREDICATE (predicate='elaborates_on' "
+                            "conflicts with existing ['supersedes'] on this edge) Pass "
+                            "override_justification (>= 20 chars) to force this relation.",
+                        ),
+                    )
+
+    def test_non_normalized_override_stores_canonical_predicate_and_message(self):
+        predicate = "Elaborates-On"
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.4, ("source", "target"))):
+            result = self._store(predicate=predicate, override_justification="x" * 20)
+        self.assertEqual(result, self._success("elaborates_on"))
+        self.assertEqual(
+            self.conn.execute("SELECT source_id, target_id, predicate FROM relations").fetchall(),
+            [(self.source, self.target, "elaborates_on")],
+        )
+
+    def test_non_normalized_repoint_gates_before_invalidating_stale_edge(self):
+        predicate = "Elaborates-On"
+        self._edge("elaborates_on", target=self.other)
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.0, None)):
+            accepted = self._store(
+                predicate=predicate,
+                override_justification="accepted repoint override",
+            )
+        self.assertEqual(accepted, self._success("elaborates_on"))
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT target_id, valid_to FROM relations ORDER BY target_id"
+            ).fetchall(),
+            [(self.target, None), (self.other, self.now)],
+        )
+
+        self.conn.execute("DELETE FROM relations")
+        self.conn.commit()
+        self._edge("elaborates_on", target=self.other)
+        with patch(self.module + "min_pairwise_cohesion", return_value=(0.0, None)):
+            rejected_result = self._store(
+                predicate=predicate,
+                override_justification="x" * 19,
+            )
+        self.assertEqual(
+            rejected_result,
+            self._rejection(
+                "REJECT_LOW_RELATION_SIMILARITY",
+                "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.0000 < 0.6505, "
+                "offending=None) Pass override_justification (>= 20 chars) to force this relation.",
+            ),
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT target_id, valid_to FROM relations").fetchall(),
+            [(self.other, None)],
+        )
+
+    def test_non_normalized_unresolved_strong_predicate_pins_endpoint_order(self):
+        seen = []
+
+        def fake_centroids(entity_ids, conn):
+            seen.append(entity_ids)
+            self.assertEqual(entity_ids, [self.source, self.target])
+            return {}, {entity_id: "archived" for entity_id in entity_ids}, {}
+
+        with patch(
+            self.module + "get_fresh_entity_centroids",
+            side_effect=fake_centroids,
+        ):
+            self.assertEqual(
+                self._store(predicate="Elaborates-On"),
+                self._rejection(
+                    "REJECT_LOW_RELATION_SIMILARITY",
+                    "Error: REJECT_LOW_RELATION_SIMILARITY (similarity=0.0000 < 0.6505, "
+                    f"offending=('{self.source}', '<archived>'), "
+                    f"unresolved={{{self.source!r}: 'archived', {self.target!r}: 'archived'}}) "
+                    "Pass override_justification (>= 20 chars) to force this relation.",
+                ),
+            )
+        self.assertEqual(seen, [[self.source, self.target]])
+
+    def test_non_normalized_core_target_guard_uses_canonical_predicate(self):
+        self.conn.execute("UPDATE entities SET is_core=1, status='raw' WHERE id=?", (self.target,))
+        self.conn.commit()
+        self.assertEqual(
+            self._store(predicate="Elaborates-On"),
+            self._rejection(
+                "REJECT_CORE_ELABORATES_ON",
+                "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                "core memory are governed exclusively by that core's own "
+                "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                "-- manage_relation cannot create them directly.",
+                "predicate",
+            ),
+        )
+
+    def test_core_guard_runs_before_measurement_for_non_normalized_predicate(self):
+        self.conn.execute("UPDATE entities SET is_core=1, status='raw' WHERE id=?", (self.target,))
+        self.conn.commit()
+        with patch(
+            self.module + "get_fresh_entity_centroids",
+            side_effect=AssertionError("measurement should not run"),
+        ):
+            self.assertEqual(
+                self._store(predicate="Elaborates-On"),
+                self._rejection(
+                    "REJECT_CORE_ELABORATES_ON",
+                    "Error: REJECT_CORE_ELABORATES_ON - elaborates_on edges into an active "
+                    "core memory are governed exclusively by that core's own "
+                    "core_detail_memory_ids declaration (store_memory/commit_consolidation) "
+                    "-- manage_relation cannot create them directly.",
+                    "predicate",
+                ),
+            )
+
     def test_outer_transaction_does_not_commit_or_rollback_its_callers_work(self):
         self.conn.execute("BEGIN")
         self.assertEqual(self._store(_in_transaction=True), self._success())

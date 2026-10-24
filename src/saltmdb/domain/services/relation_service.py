@@ -191,25 +191,48 @@ def _resolve_relation_endpoint(conn, raw_id: str, label: str) -> tuple[str | Non
     return None, f"Error: UNKNOWN_ENTITY_ID - could not resolve {label} '{raw_id}'."
 
 
+@dataclass(frozen=True, slots=True)
+class _GateMeasurement:
+    """What the relation gate measured for one candidate edge."""
+
+    # not hashable: carries a dict/list
+    similarity: float
+    offending: tuple[str, str] | None
+    unresolved: dict[str, str]
+    contradictions: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _RelationWriteRequest:
+    """One validated store_relation call, ready for the transactional write."""
+
+    source_id: str  # resolved
+    target_id: str  # resolved
+    predicate: str  # as requested; canonicalised inside the write
+    valid_at: str | None
+    override_justification: str | None
+    agent_id: str | None
+    relation_id: str
+    now: str
+    allow_core_elaborates_on: bool
+
+
 def _relation_gate_rejection(
     canonical_predicate: str,
-    sim: float,
-    offending,
-    unresolved: dict[str, str],
-    contradictions: list[str],
+    measurement: _GateMeasurement,
     violations: list[str],
 ):
     reasons = []
     if "low_similarity" in violations:
         reasons.append(
-            f"REJECT_LOW_RELATION_SIMILARITY (similarity={sim:.4f} < "
-            f"{RELATION_GATE_MIN_SIMILARITY_THRESHOLD}, offending={offending}"
-            f"{', unresolved=' + str(unresolved) if unresolved else ''})"
+            f"REJECT_LOW_RELATION_SIMILARITY (similarity={measurement.similarity:.4f} < "
+            f"{RELATION_GATE_MIN_SIMILARITY_THRESHOLD}, offending={measurement.offending}"
+            f"{', unresolved=' + str(measurement.unresolved) if measurement.unresolved else ''})"
         )
     if "contradictory_predicate" in violations:
         reasons.append(
             f"REJECT_CONTRADICTORY_PREDICATE (predicate='{canonical_predicate}' "
-            f"conflicts with existing {contradictions} on this edge)"
+            f"conflicts with existing {measurement.contradictions} on this edge)"
         )
     message = (
         "Error: "
@@ -227,38 +250,25 @@ def _relation_gate_rejection(
 
 def _apply_relation_gate(
     conn,
-    resolved_source: str,
-    resolved_target: str,
+    request: _RelationWriteRequest,
     canonical_predicate: str,
-    sim: float,
-    offending,
-    unresolved: dict[str, str],
-    contradictions: list[str],
-    override_justification: str | None,
+    measurement: _GateMeasurement,
     agent_val: str,
-    relation_id: str,
 ):
     # D5: one unified override, one audit event covering both checks.
     violations = []
     if (
         canonical_predicate in RELATION_GATE_STRONG_PREDICATES
-        and sim < RELATION_GATE_MIN_SIMILARITY_THRESHOLD
+        and measurement.similarity < RELATION_GATE_MIN_SIMILARITY_THRESHOLD
     ):
         violations.append("low_similarity")
-    if contradictions:
+    if measurement.contradictions:
         violations.append("contradictory_predicate")
 
-    justification = (override_justification or "").strip()
+    justification = (request.override_justification or "").strip()
     if violations:
         if len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
-            return _relation_gate_rejection(
-                canonical_predicate,
-                sim,
-                offending,
-                unresolved,
-                contradictions,
-                violations,
-            )
+            return _relation_gate_rejection(canonical_predicate, measurement, violations)
 
         # Atomic audit trail -- written as the first write for this call, before the
         # relation itself, so any log_event failure rolls back the whole transaction
@@ -268,15 +278,15 @@ def _apply_relation_gate(
             type="relation_gate_override",
             content=json.dumps(
                 {
-                    "source_id": resolved_source,
-                    "target_id": resolved_target,
+                    "source_id": request.source_id,
+                    "target_id": request.target_id,
                     "predicate": canonical_predicate,
                     "violations": violations,
-                    "similarity": sim,
+                    "similarity": measurement.similarity,
                     "similarity_threshold": RELATION_GATE_MIN_SIMILARITY_THRESHOLD,
-                    "contradicting_predicates": contradictions,
+                    "contradicting_predicates": measurement.contradictions,
                     "justification": justification,
-                    "relation_id": relation_id,
+                    "relation_id": request.relation_id,
                 }
             ),
             db_connection=conn,
@@ -292,10 +302,9 @@ def _apply_relation_gate(
 
 def _relation_gate_measurements(
     conn,
-    resolved_source: str,
-    resolved_target: str,
+    request: _RelationWriteRequest,
     canonical_predicate: str,
-):
+) -> _GateMeasurement:
     # D3: similarity gate, strong (judgment) predicates only. An unresolved entity
     # (archived, no usable content) forces a gate failure requiring override -- same
     # convention as Phase 3/4's unresolved-centroid handling, not a silent pass.
@@ -303,7 +312,7 @@ def _relation_gate_measurements(
     unresolved: dict[str, str] = {}
     if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
         centroids, unresolved, _ = get_fresh_entity_centroids(
-            [resolved_source, resolved_target], conn
+            [request.source_id, request.target_id], conn
         )
         if unresolved:
             sim, offending = (
@@ -322,7 +331,7 @@ def _relation_gate_measurements(
         r[0]
         for r in conn.execute(
             "SELECT predicate FROM relations WHERE source_id = ? AND target_id = ? AND valid_to IS NULL",
-            (resolved_source, resolved_target),
+            (request.source_id, request.target_id),
         ).fetchall()
     }
     existing_predicates = {resolve_or_create_predicate(conn, ep) or ep for ep in existing_raw}
@@ -331,7 +340,7 @@ def _relation_gate_measurements(
         for ep in existing_predicates
         if frozenset({ep, canonical_predicate}) in RELATION_GATE_CONTRADICTORY_PREDICATE_PAIRS
     ]
-    return sim, offending, unresolved, contradictions
+    return _GateMeasurement(sim, offending, unresolved, contradictions)
 
 
 def _check_core_relation_guard(
@@ -369,12 +378,8 @@ def _check_core_relation_guard(
 
 def _insert_relation_write(
     conn,
-    resolved_source: str,
-    resolved_target: str,
+    request: _RelationWriteRequest,
     canonical_predicate: str,
-    valid_at: str | None,
-    relation_id: str,
-    now: str,
     repoint_stale_edge_id,
     note: str,
 ):
@@ -385,10 +390,10 @@ def _insert_relation_write(
     if repoint_stale_edge_id:
         conn.execute(
             "UPDATE relations SET invalid_at = ?, valid_to = ? WHERE id = ?",
-            (now, now, repoint_stale_edge_id),
+            (request.now, request.now, repoint_stale_edge_id),
         )
 
-    effective_valid_at = valid_at or now
+    effective_valid_at = request.valid_at or request.now
     cursor = conn.execute(
         """
         INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at)
@@ -396,12 +401,12 @@ def _insert_relation_write(
         ON CONFLICT(source_id, target_id, predicate) WHERE valid_to IS NULL DO NOTHING
     """,
         (
-            relation_id,
-            resolved_source,
-            resolved_target,
+            request.relation_id,
+            request.source_id,
+            request.target_id,
             canonical_predicate,
-            now,
-            now,
+            request.now,
+            request.now,
             effective_valid_at,
         ),
     )
@@ -411,12 +416,12 @@ def _insert_relation_write(
         # between the D1 check and this INSERT.
         existing = conn.execute(
             "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-            (resolved_source, resolved_target, canonical_predicate),
+            (request.source_id, request.target_id, canonical_predicate),
         ).fetchone()
-        existing_id = existing[0] if existing else relation_id
+        existing_id = existing[0] if existing else request.relation_id
         message = (
             f"Relation already exists (no-op): '{canonical_predicate}' between "
-            f"{resolved_source} and {resolved_target} (ID: {existing_id}){note}"
+            f"{request.source_id} and {request.target_id} (ID: {existing_id}){note}"
         )
         return envelope_ok(
             {"relation_id": existing_id, "message": message},
@@ -424,10 +429,10 @@ def _insert_relation_write(
         )
     return envelope_ok(
         {
-            "relation_id": relation_id,
+            "relation_id": request.relation_id,
             "message": (
                 f"Relation successfully stored: '{canonical_predicate}' between "
-                f"{resolved_source} and {resolved_target} (ID: {relation_id}){note}"
+                f"{request.source_id} and {request.target_id} (ID: {request.relation_id}){note}"
             ),
         }
     )
@@ -435,24 +440,18 @@ def _insert_relation_write(
 
 def _store_relation_write(
     conn,
-    resolved_source: str,
-    resolved_target: str,
-    predicate: str,
-    valid_at: str | None,
-    override_justification: str | None,
-    agent_id: str | None,
-    relation_id: str,
-    now: str,
-    allow_core_elaborates_on: bool,
+    request: _RelationWriteRequest,
 ):
-    normalized_requested = _normalize_predicate_name(predicate)
-    canonical_predicate = resolve_or_create_predicate(conn, predicate) or predicate
+    normalized_requested = _normalize_predicate_name(request.predicate)
+    canonical_predicate = resolve_or_create_predicate(conn, request.predicate) or request.predicate
     note = (
-        f" [canonicalized: requested '{predicate}', stored as '{canonical_predicate}']"
-        if predicate and normalized_requested and normalized_requested != canonical_predicate
+        f" [canonicalized: requested '{request.predicate}', stored as '{canonical_predicate}']"
+        if request.predicate
+        and normalized_requested
+        and normalized_requested != canonical_predicate
         else ""
     )
-    agent_val = agent_id or "system"
+    agent_val = request.agent_id or "system"
 
     # D1 (Phase 5 R2 fix #4): an existing active identical edge is a legitimate no-op --
     # short-circuit BEFORE any gate check runs, so re-submitting an already-active edge
@@ -461,12 +460,12 @@ def _store_relation_write(
     # ON CONFLICT(...) WHERE valid_to IS NULL constraint the INSERT below relies on.
     existing_edge = conn.execute(
         "SELECT id FROM relations WHERE source_id = ? AND target_id = ? AND predicate = ? AND valid_to IS NULL",
-        (resolved_source, resolved_target, canonical_predicate),
+        (request.source_id, request.target_id, canonical_predicate),
     ).fetchone()
     if existing_edge:
         message = (
             f"Relation already exists (no-op): '{canonical_predicate}' between "
-            f"{resolved_source} and {resolved_target} (ID: {existing_edge[0]}){note}"
+            f"{request.source_id} and {request.target_id} (ID: {existing_edge[0]}){note}"
         )
         return envelope_ok(
             {"relation_id": existing_edge[0], "message": message},
@@ -490,42 +489,33 @@ def _store_relation_write(
     if canonical_predicate in RELATION_GATE_STRONG_PREDICATES:
         repoint_row = conn.execute(
             "SELECT id FROM relations WHERE source_id = ? AND predicate = ? AND target_id != ? AND valid_to IS NULL",
-            (resolved_source, canonical_predicate, resolved_target),
+            (request.source_id, canonical_predicate, request.target_id),
         ).fetchone()
         repoint_stale_edge_id = repoint_row[0] if repoint_row else None
     core_rejection = _check_core_relation_guard(
-        conn, resolved_target, canonical_predicate, allow_core_elaborates_on
+        conn,
+        request.target_id,
+        canonical_predicate,
+        request.allow_core_elaborates_on,
     )
     if core_rejection is not None:
         return core_rejection
-    sim, offending, unresolved, contradictions = _relation_gate_measurements(
-        conn, resolved_source, resolved_target, canonical_predicate
-    )
+    measurement = _relation_gate_measurements(conn, request, canonical_predicate)
 
     gate_result = _apply_relation_gate(
         conn,
-        resolved_source,
-        resolved_target,
+        request,
         canonical_predicate,
-        sim,
-        offending,
-        unresolved,
-        contradictions,
-        override_justification,
+        measurement,
         agent_val,
-        relation_id,
     )
     if gate_result is not None:
         return gate_result
 
     return _insert_relation_write(
         conn,
-        resolved_source,
-        resolved_target,
+        request,
         canonical_predicate,
-        valid_at,
-        relation_id,
-        now,
         repoint_stale_edge_id,
         note,
     )
@@ -703,35 +693,24 @@ def store_relation(
 
     relation_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
+    request = _RelationWriteRequest(
+        resolved_source,
+        resolved_target,
+        predicate,
+        valid_at,
+        override_justification,
+        agent_id,
+        relation_id,
+        now,
+        _allow_core_elaborates_on,
+    )
     try:
         if _in_transaction:
-            result_msg = _store_relation_write(
-                conn,
-                resolved_source,
-                resolved_target,
-                predicate,
-                valid_at,
-                override_justification,
-                agent_id,
-                relation_id,
-                now,
-                _allow_core_elaborates_on,
-            )
+            result_msg = _store_relation_write(conn, request)
         else:
             result_msg = write_transaction_retrying(
                 conn,
-                lambda tx_conn: _store_relation_write(
-                    tx_conn,
-                    resolved_source,
-                    resolved_target,
-                    predicate,
-                    valid_at,
-                    override_justification,
-                    agent_id,
-                    relation_id,
-                    now,
-                    _allow_core_elaborates_on,
-                ),
+                lambda tx_conn: _store_relation_write(tx_conn, request),
             )
         if not _in_transaction:
             from saltmdb.domain.services.community_detection_service import (
