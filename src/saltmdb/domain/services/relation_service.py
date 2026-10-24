@@ -1799,6 +1799,54 @@ class _ConsolidationEntityValues:
     now: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ConsolidationRequest:
+    """The arguments of one consolidate call that the preflight needs."""
+
+    # Contains mutable state; must not be hashed or cached.
+    parent_ids: list[str]
+    title: str
+    content: str
+    tags: list[str] | None
+    override_justification: str | None
+    core_request: _ConsolidationCoreRequest
+    agent_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CohesionMeasurement:
+    # Contains mutable state; must not be hashed or cached.
+    min_sim: float
+    offending_pair: tuple[str, str] | None
+    unresolved: dict[str, str]
+    observed_state: dict[str, tuple[str, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsolidationContent:
+    # Contains mutable state; must not be hashed or cached.
+    redacted_content: str
+    clean_title: str
+    agent_val: str
+    content_hash: str
+    quality_score: float
+    quality_status: str
+    quality_flags_str: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsolidationPlan:
+    """Everything the preflight established; the commit and response read it."""
+
+    # Contains mutable state; must not be hashed or cached.
+    conn: sqlite3.Connection
+    owned: bool
+    resolved_parents: list[str]
+    cohesion: _ConsolidationCohesionResult
+    observed_state: dict[str, tuple[str, str]]
+    content: _ConsolidationContent
+
+
 def _consolidation_rejected(code: str, message: str) -> dict:
     """Build the Phase 4 mutation envelope for a validation rejection."""
     return rejected([envelope_error(code, message)])
@@ -2130,10 +2178,8 @@ def _consolidation_commit(
 def _consolidation_measure_cohesion(
     conn,
     resolved_parents,
-    precomputed_centroids,
-    precomputed_unresolved,
-    precomputed_observed_state,
-):
+    bulk: _BulkContext | None,
+) -> _CohesionMeasurement:
     # Pairwise cohesion gate (memory-core rework Phase 3, Part A). Centroid + MIN aggregation:
     # cheap at realistic parent_ids scale, and MIN (not MEAN) directly targets the "one diluted
     # outlier" failure mode that let `6a8fec3d` force-merge 37+ unrelated memories.
@@ -2157,13 +2203,14 @@ def _consolidation_measure_cohesion(
         min_sim, offending_pair = 1.0, None
     else:
         if (
-            precomputed_centroids is not None
-            and precomputed_unresolved is not None
-            and precomputed_observed_state is not None
+            bulk is not None
+            and bulk.precomputed_centroids is not None
+            and bulk.precomputed_unresolved is not None
+            and bulk.precomputed_observed_state is not None
         ):
-            centroids = precomputed_centroids
-            unresolved = precomputed_unresolved
-            observed_state = precomputed_observed_state
+            centroids = bulk.precomputed_centroids
+            unresolved = bulk.precomputed_unresolved
+            observed_state = bulk.precomputed_observed_state
         else:
             centroids, unresolved, observed_state = get_fresh_entity_centroids(
                 resolved_parents, conn
@@ -2176,32 +2223,24 @@ def _consolidation_measure_cohesion(
                     f"<{next(iter(unresolved.values()))}>",
                 ),
             )
-
         else:
             min_sim, offending_pair = min_pairwise_cohesion(centroids)
-
-    return min_sim, offending_pair, unresolved, observed_state
+    return _CohesionMeasurement(min_sim, offending_pair, unresolved, observed_state)
 
 
 def _consolidation_apply_cohesion_override(
-    conn,
     content,
     override_justification,
-    should_close,
-    min_sim,
-    offending_pair,
-    unresolved,
-):
+    measurement: _CohesionMeasurement,
+) -> tuple[str, _ConsolidationCohesionResult] | dict:
     justification = (override_justification or "").strip()
-    override_applied = min_sim < COHESION_MIN_PAIRWISE_THRESHOLD
+    override_applied = measurement.min_sim < COHESION_MIN_PAIRWISE_THRESHOLD
     if override_applied and len(justification) < COHESION_OVERRIDE_MIN_LENGTH:
-        if should_close:
-            close_connection(conn)
         return _consolidation_rejected(
             "REJECT_LOW_COHESION",
-            f"parent set fails pairwise similarity gate (min={min_sim:.4f} < "
-            f"{COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={offending_pair}"
-            f"{', unresolved=' + str(unresolved) if unresolved else ''}). Pass "
+            f"parent set fails pairwise similarity gate (min={measurement.min_sim:.4f} < "
+            f"{COHESION_MIN_PAIRWISE_THRESHOLD}, weakest pair={measurement.offending_pair}"
+            f"{', unresolved=' + str(measurement.unresolved) if measurement.unresolved else ''}). Pass "
             f"override_justification (>= {COHESION_OVERRIDE_MIN_LENGTH} chars) to force this merge.",
         )
 
@@ -2217,109 +2256,58 @@ def _consolidation_apply_cohesion_override(
         content = (
             f"{content}\n\n---\n"
             f"[Consolidation Override] This merge was forced past the automatic cohesion gate. "
-            f"The minimum pairwise similarity between parents was {min_sim:.4f}, below the "
+            f"The minimum pairwise similarity between parents was {measurement.min_sim:.4f}, below the "
             f"required threshold of {COHESION_MIN_PAIRWISE_THRESHOLD}. "
-            f"{'One or more parents had no usable content for scoring. ' if unresolved else ''}"
+            f"{'One or more parents had no usable content for scoring. ' if measurement.unresolved else ''}"
             f"Justification: {justification}"
         )
 
-    return content, justification, override_applied
-
-
-def _consolidation_cohesion(
-    conn,
-    resolved_parents,
-    override_justification,
-    should_close,
-    precomputed_centroids,
-    precomputed_unresolved,
-    precomputed_observed_state,
-    content,
-):
-    min_sim, offending_pair, unresolved, observed_state = _consolidation_measure_cohesion(
-        conn,
-        resolved_parents,
-        precomputed_centroids,
-        precomputed_unresolved,
-        precomputed_observed_state,
-    )
-    override_result = _consolidation_apply_cohesion_override(
-        conn,
-        content,
-        override_justification,
-        should_close,
-        min_sim,
-        offending_pair,
-        unresolved,
-    )
-    if isinstance(override_result, dict):
-        return override_result
-    content, justification, override_applied = override_result
-    return (
-        content,
-        justification,
-        override_applied,
-        min_sim,
-        offending_pair,
-        unresolved,
-        observed_state,
+    return content, _ConsolidationCohesionResult(
+        override_applied=override_applied,
+        min_sim=measurement.min_sim,
+        offending_pair=measurement.offending_pair,
+        unresolved=measurement.unresolved,
+        justification=justification,
     )
 
 
 def _consolidation_content_preflight(
-    conn,
-    title,
-    content,
-    is_core,
-    agent_id,
-    should_close,
-):
+    request: _ConsolidationRequest,
+    content: str,
+) -> _ConsolidationContent | dict:
     try:
-        core_governance_service.parse_is_core(is_core)
+        core_governance_service.parse_is_core(request.core_request.is_core_requested)
     except ValueError as e:
-        if should_close:
-            close_connection(conn)
         return _consolidation_rejected("INVALID_CORE_REQUEST", str(e))
 
     redacted_content = redact_secrets(content)
-    clean_title = redact_secrets(title)
-    agent_val = agent_id or "system"
+    clean_title = redact_secrets(request.title)
+    agent_val = request.agent_id or "system"
     # Execute Tier 1 & Tier 2 Quality Gate on consolidated content
     quality_res = evaluate_memory_quality(redacted_content)
     if quality_res["status"] == "REJECT":
-        if should_close:
-            close_connection(conn)
         return _consolidation_rejected(
             "REJECT_QUALITY",
             f"Consolidation quality check rejected (Score: {quality_res['quality_score']:.2f}). "
             f"Reason: {quality_res['reason']}",
         )
 
-    content_hash = compute_content_hash(redacted_content)
-    quality_score = quality_res["quality_score"]
-    quality_status = quality_res["status"]
-    quality_flags_str = json.dumps(quality_res["quality_flags"])
-
-    return (
-        redacted_content,
-        clean_title,
-        agent_val,
-        content_hash,
-        quality_score,
-        quality_status,
-        quality_flags_str,
+    return _ConsolidationContent(
+        redacted_content=redacted_content,
+        clean_title=clean_title,
+        agent_val=agent_val,
+        content_hash=compute_content_hash(redacted_content),
+        quality_score=quality_res["quality_score"],
+        quality_status=quality_res["status"],
+        quality_flags_str=json.dumps(quality_res["quality_flags"]),
     )
 
 
 def _consolidation_duplicate_preflight(
     conn,
     resolved_parents,
-    clean_title,
-    redacted_content,
-    content_hash,
-    agent_val,
-    should_close,
-):
+    content: _ConsolidationContent,
+) -> dict | None:
     # Stage A Exact Hash Collision Lookup (excluding resolved parent IDs)
     try:
         placeholders_p = ",".join("?" for _ in resolved_parents)
@@ -2328,11 +2316,12 @@ def _consolidation_duplicate_preflight(
             WHERE content_hash = ? AND agent_id = ? AND status != 'archived'
               AND id NOT IN ({placeholders_p})
         """
-        cursor = conn.execute(query_sql, [content_hash, agent_val] + resolved_parents)
+        cursor = conn.execute(
+            query_sql,
+            [content.content_hash, content.agent_val] + resolved_parents,
+        )
         row = cursor.fetchone()
         if row:
-            if should_close:
-                close_connection(conn)
             return _consolidation_rejected(
                 "REJECT_EXACT_DUPLICATE",
                 f"Consolidated memory exact hash matches existing entity ID: {row[0]}",
@@ -2345,9 +2334,9 @@ def _consolidation_duplicate_preflight(
     # Stage B Near-Duplicate Check (excluding resolved parent IDs)
     try:
         dup_check = check_duplicate_memories(
-            title=clean_title,
-            content=redacted_content,
-            agent_id=agent_val,
+            title=content.clean_title,
+            content=content.redacted_content,
+            agent_id=content.agent_val,
             exclude_ids=resolved_parents,
             db_connection=conn,
         )
@@ -2364,146 +2353,92 @@ def _consolidation_duplicate_preflight(
     return None
 
 
-def _consolidation_validate_request(parent_ids, title, content):
-    if not parent_ids or not isinstance(parent_ids, list):
+def _consolidation_validate_request(request: _ConsolidationRequest) -> dict | None:
+    if not request.parent_ids or not isinstance(request.parent_ids, list):
         return _consolidation_rejected(
             "INVALID_PARENT_IDS", "parent_ids must be a non-empty list of UUID strings."
         )
-    if not title or not content:
+    if not request.title or not request.content:
         return _consolidation_rejected(
             "MISSING_REQUIRED_FIELDS", "title and content are mandatory."
         )
-    if len(content) > MAX_MEMORY_CONTENT_CHARS:
+    if len(request.content) > MAX_MEMORY_CONTENT_CHARS:
         return _consolidation_rejected(
             "CONTENT_TOO_LONG",
-            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(content)}).",
+            f"content exceeds {MAX_MEMORY_CONTENT_CHARS} characters (got {len(request.content)}).",
         )
-
     return None
 
 
-def _consolidation_open_and_validate_parents(parent_ids, tags, db_connection, db_path):
-    should_close = False
-    conn = db_connection
-    if not conn:
-        db_path = db_path or get_db_path()
-        conn = get_connection(db_path)
-        should_close = True
-
+def _consolidation_validate_parents(conn, request: _ConsolidationRequest) -> list[str] | dict:
     # This is deliberately before quality/dedup work and before BEGIN IMMEDIATE: all parent
     # errors are deterministic validation failures with zero side effects.
-    resolved_parents, parent_error = _resolve_and_validate_parent_ids(conn, parent_ids)
+    resolved_parents, parent_error = _resolve_and_validate_parent_ids(conn, request.parent_ids)
     if parent_error is not None:
-        if should_close:
-            close_connection(conn)
         return _consolidation_rejected(parent_error["code"], parent_error["message"])
 
     # Same pre-BEGIN, zero-side-effects convention as the parent_ids check above.
     from saltmdb.domain.services.memory_service.tags import validate_tag_names
 
-    tag_error = validate_tag_names(tags)
+    tag_error = validate_tag_names(request.tags)
     if tag_error is not None:
-        if should_close:
-            close_connection(conn)
         return _consolidation_rejected("INVALID_TAG_NAME", tag_error)
 
-    return conn, should_close, resolved_parents
+    return resolved_parents
+
+
+def _consolidation_build_plan(
+    conn,
+    owned,
+    request: _ConsolidationRequest,
+    bulk: _BulkContext | None,
+) -> _ConsolidationPlan | dict:
+    parents_result = _consolidation_validate_parents(conn, request)
+    if isinstance(parents_result, dict):
+        return parents_result
+    measurement = _consolidation_measure_cohesion(conn, parents_result, bulk)
+    override_result = _consolidation_apply_cohesion_override(
+        request.content, request.override_justification, measurement
+    )
+    if isinstance(override_result, dict):
+        return override_result
+    content, cohesion = override_result
+    content_result = _consolidation_content_preflight(request, content)
+    if isinstance(content_result, dict):
+        return content_result
+    duplicate_result = _consolidation_duplicate_preflight(conn, parents_result, content_result)
+    if duplicate_result is not None:
+        return duplicate_result
+    return _ConsolidationPlan(
+        conn=conn,
+        owned=owned,
+        resolved_parents=parents_result,
+        cohesion=cohesion,
+        observed_state=measurement.observed_state,
+        content=content_result,
+    )
 
 
 def _consolidation_preflight(
-    parent_ids,
-    title,
-    content,
-    tags,
-    agent_id,
+    request: _ConsolidationRequest,
     db_connection,
     db_path,
-    override_justification,
-    core_request,
-    precomputed_centroids,
-    precomputed_unresolved,
-    precomputed_observed_state,
-):
-    validation_error = _consolidation_validate_request(parent_ids, title, content)
+    bulk: _BulkContext | None,
+) -> _ConsolidationPlan | dict:
+    validation_error = _consolidation_validate_request(request)
     if validation_error is not None:
         return validation_error
-    open_result = _consolidation_open_and_validate_parents(parent_ids, tags, db_connection, db_path)
-    if isinstance(open_result, dict):
-        return open_result
-    conn, should_close, resolved_parents = open_result
-
-    cohesion_result = _consolidation_cohesion(
-        conn,
-        resolved_parents,
-        override_justification,
-        should_close,
-        precomputed_centroids,
-        precomputed_unresolved,
-        precomputed_observed_state,
-        content,
-    )
-    if isinstance(cohesion_result, dict):
-        return cohesion_result
-    (
-        content,
-        justification,
-        override_applied,
-        min_sim,
-        offending_pair,
-        unresolved,
-        observed_state,
-    ) = cohesion_result
-
-    content_result = _consolidation_content_preflight(
-        conn,
-        title,
-        content,
-        core_request.is_core_requested,
-        agent_id,
-        should_close,
-    )
-    if isinstance(content_result, dict):
-        return content_result
-    (
-        redacted_content,
-        clean_title,
-        agent_val,
-        content_hash,
-        quality_score,
-        quality_status,
-        quality_flags_str,
-    ) = content_result
-
-    duplicate_result = _consolidation_duplicate_preflight(
-        conn,
-        resolved_parents,
-        clean_title,
-        redacted_content,
-        content_hash,
-        agent_val,
-        should_close,
-    )
-    if duplicate_result is not None:
-        return duplicate_result
-
-    return (
-        conn,
-        should_close,
-        resolved_parents,
-        justification,
-        override_applied,
-        min_sim,
-        offending_pair,
-        unresolved,
-        observed_state,
-        redacted_content,
-        clean_title,
-        agent_val,
-        content_hash,
-        quality_score,
-        quality_status,
-        quality_flags_str,
-    )
+    conn = db_connection or get_connection(db_path or get_db_path())
+    owned = not db_connection
+    try:
+        outcome = _consolidation_build_plan(conn, owned, request, bulk)
+    except BaseException:
+        if owned:
+            close_connection(conn)
+        raise
+    if owned and isinstance(outcome, dict):
+        close_connection(conn)
+    return outcome
 
 
 def consolidate_memories(
@@ -2560,64 +2495,40 @@ def consolidate_memories(
         core.core_review_after,
         core.detail_memory_ids,
     )
-    preflight_result = _consolidation_preflight(
-        parent_ids,
-        title,
-        content,
-        tags,
-        provenance.agent_id,
-        db_connection,
-        db_path,
-        override_justification,
-        core_request,
-        _bulk.precomputed_centroids if _bulk is not None else None,
-        _bulk.precomputed_unresolved if _bulk is not None else None,
-        _bulk.precomputed_observed_state if _bulk is not None else None,
+    request = _ConsolidationRequest(
+        parent_ids=parent_ids,
+        title=title,
+        content=content,
+        tags=tags,
+        override_justification=override_justification,
+        core_request=core_request,
+        agent_id=provenance.agent_id,
     )
+    preflight_result = _consolidation_preflight(request, db_connection, db_path, _bulk)
     if isinstance(preflight_result, dict):
         return preflight_result
-    (
-        conn,
-        should_close,
-        resolved_parents,
-        justification,
-        override_applied,
-        min_sim,
-        offending_pair,
-        unresolved,
-        observed_state,
-        redacted_content,
-        clean_title,
-        agent_val,
-        content_hash,
-        quality_score,
-        quality_status,
-        quality_flags_str,
-    ) = preflight_result
+    plan = preflight_result
+    conn, should_close = plan.conn, plan.owned
+    resolved_parents = plan.resolved_parents
+    observed_state = plan.observed_state
+    cohesion = plan.cohesion
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     orphaned_edges: list[dict[str, str]] = []
-    cohesion = _ConsolidationCohesionResult(
-        override_applied=override_applied,
-        min_sim=min_sim,
-        offending_pair=offending_pair,
-        unresolved=unresolved,
-        justification=justification,
-    )
     entity_values = _ConsolidationEntityValues(
         consolidated_id=consolidated_id,
-        clean_title=clean_title,
-        redacted_content=redacted_content,
-        agent_val=agent_val,
+        clean_title=plan.content.clean_title,
+        redacted_content=plan.content.redacted_content,
+        agent_val=plan.content.agent_val,
         scope=scope,
         weight=weight,
         context_id=provenance.context_id,
         agent_session_id=provenance.agent_session_id,
-        content_hash=content_hash,
-        quality_score=quality_score,
-        quality_status=quality_status,
-        quality_flags_str=quality_flags_str,
+        content_hash=plan.content.content_hash,
+        quality_score=plan.content.quality_score,
+        quality_status=plan.content.quality_status,
+        quality_flags_str=plan.content.quality_flags_str,
         metadata=annotations.metadata,
         memory_type=annotations.memory_type,
         now=now,
