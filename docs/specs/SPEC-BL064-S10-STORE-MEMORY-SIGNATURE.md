@@ -115,3 +115,13 @@ As slice 8 section 5: the D4 codemod (extended to the ten wrapper names of D4) r
 | The MCP tool `store_memory` calls the daemon with FLAT keyword arguments and builds `retrieval_text_provided` | `mcp/tools.py` ~516 | read by the scout; unchanged |
 | The precedent pin test | `tests/test_provenance.py` ~132 | read |
 | `_validate_store_basics` has 9 parameters and returns `(error, weight)` | `write.py` ~787 | read |
+
+## Amendment 1 (2026-10-24): S10 may land before S9
+
+The Sonar issue is the 25-parameter signature of `store_memory`, and the signature change does not need S9's typed pipeline. At HEAD `store_memory` builds the 17-key `request` dict itself and passes it to `_prepare_store_operation`; `_StoreRequest` does not exist until S9.
+
+A1.1 Wherever this spec says `store_memory` builds or packs the slice 9 `_StoreRequest` (section 0 scope, section 2), read: until S9 has landed, `store_memory` builds the existing `request` dict from the same values, with the same 17 keys in the same order and the same values as today (`provenance.agent_id` with the one `cast` the spec asks for, `provenance.context_id`, `provenance.agent_session_id`, the annotations, the core declaration fields, the scores, `runtime.coordinator`, `runtime.probe_sink`), so nothing downstream of that dict changes; after S9 has landed, it builds `_StoreRequest` as the spec says. The groups are unpacked at that single place.
+
+A1.2 "It follows slice 9" in section 0 is superseded: S10 may land before or after S9. S10 must not be implemented while a S9 diff is uncommitted on the tree.
+
+A1.3 Nothing else changes: the group types, the 13-parameter pin, D1 to D3, the caller migration, tests and acceptance are as locked. Acceptance greps that name `_StoreRequest` apply only once S9 has landed.

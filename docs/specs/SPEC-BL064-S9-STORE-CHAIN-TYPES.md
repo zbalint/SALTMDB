@@ -161,3 +161,7 @@ Slice 10; `core_governance_service`; merging the preview and the in-transaction 
 | `_RawEntityRow` already carries entity id, title, content, hash and the final retrieval values | `write.py` 446 to 470 | read |
 | `resolve_store_core_state` (9 parameters) has 7 external references and is patched by tests; it is out of scope | scout; `rg` | probed |
 | `_preview_store_core` and `_resolve_raw_core_state` repeat the overdue-boundary and capacity logic | `write.py` 899 to 965, 275 to 357 | read |
+
+## Amendment 1 (2026-10-24): order when S10 lands first
+
+S10 may land before S9 (SPEC-BL064-S10 amendment 1). If it has, `store_memory` takes the grouped parameters (`provenance`, `core`, `annotations`, `scores`, `runtime`) and builds the 17-key `request` dict from them; S9 then replaces that dict build with the `_StoreRequest` build, reading the same values from the groups instead of the flat names, and locates `store_memory` and the dict by NAME, not by line number. Everything else in S9 (the typed stages, the signatures of the internals, tests and acceptance) is unchanged.
