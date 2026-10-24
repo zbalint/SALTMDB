@@ -17,7 +17,7 @@ Run before calling a change done; it must exit 0:
   `semgrep` on PATH); CI runs the same script in its `hygiene` job. Custom Semgrep rules live in
   `.semgrep/rules/`; fix a hit, never silence it. A CI run cancelled because a newer push
   replaced it is not a failure; read the latest run for the pushed commit.
-- `scripts/prepush-sonar.sh` runs the slow full suite under coverage and uploads an optional SonarQube scan; it needs `SONAR_TOKEN` and `sonar-scanner`, and is optional for now.
+- `scripts/prepush-sonar.sh` runs the slow full suite under coverage and uploads an optional SonarQube scan of unpushed commits against `origin/develop`; it needs `SONAR_TOKEN` and `sonar-scanner`, refuses a dirty tree, an unchanged `origin/develop`, or a diverged branch, and is optional for now.
 - Other processes may run test suites on the same host. Do not start parallel full runs.
 
 ## Database safety
