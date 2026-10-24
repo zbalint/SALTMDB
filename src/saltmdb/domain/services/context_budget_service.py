@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
 
 from saltmdb.config import (
@@ -39,19 +40,45 @@ def _empty_budget_result(effective_budget: int) -> dict[str, Any]:
     }
 
 
-def _pack_ids(
-    ids: list[str], token_counts: dict[str, int], used: int, budget: int
-) -> tuple[list[str], list[str], int]:
-    packed: list[str] = []
-    dropped: list[str] = []
-    for entity_id in ids:
-        cost = token_counts[entity_id]
-        if used + cost <= budget:
-            packed.append(entity_id)
-            used += cost
-        else:
-            dropped.append(entity_id)
-    return packed, dropped, used
+@dataclass(frozen=True, slots=True)
+class _Section:
+    """What one packing pass kept and what it dropped, in input order."""
+
+    # not hashable: carries a list/set
+    packed: list[str]
+    dropped: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReserveIds:
+    """Ids charged to a reserve outside the ordinary budget."""
+
+    # not hashable: carries a list/set
+    conflict: set[str]
+    orphan: set[str]
+    representative: set[str]
+
+
+@dataclass(slots=True)
+class _BudgetLedger:
+    """Token costs, the limit and the running total of one packing pass."""
+
+    # mutable accumulator; carries a dict
+    token_counts: dict[str, int]
+    limit: int
+    used: int = 0
+
+    def pack(self, ids: list[str]) -> _Section:
+        packed: list[str] = []
+        dropped: list[str] = []
+        for entity_id in ids:
+            cost = self.token_counts[entity_id]
+            if self.used + cost <= self.limit:
+                packed.append(entity_id)
+                self.used += cost
+            else:
+                dropped.append(entity_id)
+        return _Section(packed, dropped)
 
 
 def _load_token_counts(conn: sqlite3.Connection, all_ids: set[str]) -> dict[str, int]:
@@ -70,47 +97,42 @@ def _load_token_counts(conn: sqlite3.Connection, all_ids: set[str]) -> dict[str,
 
 
 def _budget_output(
-    primary_packed: list[str],
-    primary_dropped: list[str],
-    expansion_packed: list[str],
-    expansion_dropped: list[str],
-    member_packed: list[str],
-    member_dropped: list[str],
-    conflict_ids: set[str],
-    orphan_ids: set[str],
-    representative_ids: set[str],
-    token_counts: dict[str, int],
-    used: int,
-    limit: int,
+    ledger: _BudgetLedger,
+    primary: _Section,
+    expansion: _Section,
+    members: _Section,
+    reserves: _ReserveIds,
 ) -> dict[str, Any]:
     return {
         "packed_entity_ids": {
-            "primary": primary_packed,
-            "expansion": expansion_packed,
-            "community_member": member_packed,
+            "primary": primary.packed,
+            "expansion": expansion.packed,
+            "community_member": members.packed,
         },
         "dropped_entity_ids": {
-            "primary": primary_dropped,
-            "expansion": expansion_dropped,
-            "community_member": member_dropped,
+            "primary": primary.dropped,
+            "expansion": expansion.dropped,
+            "community_member": members.dropped,
         },
-        "conflict_only_entity_ids": sorted(conflict_ids),
-        "community_representative_entity_ids": sorted(representative_ids),
-        "token_counts": token_counts,
+        "conflict_only_entity_ids": sorted(reserves.conflict),
+        "community_representative_entity_ids": sorted(reserves.representative),
+        "token_counts": ledger.token_counts,
         "budget": {
             "unit": "tokens",
-            "limit": limit,
-            "used": used,
-            "primary_truncated": bool(primary_dropped),
-            "primary_dropped_count": len(primary_dropped),
-            "expansion_truncated": bool(expansion_dropped),
-            "expansion_dropped_count": len(expansion_dropped),
-            "conflict_reserve_tokens_used": sum(token_counts[i] for i in conflict_ids),
-            "orphan_community_reserve_tokens_used": sum(token_counts[i] for i in orphan_ids),
-            "community_member_truncated": bool(member_dropped),
-            "community_member_dropped_count": len(member_dropped),
+            "limit": ledger.limit,
+            "used": ledger.used,
+            "primary_truncated": bool(primary.dropped),
+            "primary_dropped_count": len(primary.dropped),
+            "expansion_truncated": bool(expansion.dropped),
+            "expansion_dropped_count": len(expansion.dropped),
+            "conflict_reserve_tokens_used": sum(ledger.token_counts[i] for i in reserves.conflict),
+            "orphan_community_reserve_tokens_used": sum(
+                ledger.token_counts[i] for i in reserves.orphan
+            ),
+            "community_member_truncated": bool(members.dropped),
+            "community_member_dropped_count": len(members.dropped),
             "community_representative_reserve_tokens_used": sum(
-                token_counts[i] for i in representative_ids
+                ledger.token_counts[i] for i in reserves.representative
             ),
         },
     }
@@ -169,30 +191,12 @@ def pack_context_budget(
             | representative_ids
         )
         token_counts = _load_token_counts(conn, all_ids)
-        used = 0
-        primary_packed, primary_dropped, used = _pack_ids(
-            primary_ids, token_counts, used, effective_budget
-        )
-        expansion_packed, expansion_dropped, used = _pack_ids(
-            expansion_ids, token_counts, used, effective_budget
-        )
-        member_packed, member_dropped, used = _pack_ids(
-            member_ids, token_counts, used, effective_budget
-        )
-        return _budget_output(
-            primary_packed,
-            primary_dropped,
-            expansion_packed,
-            expansion_dropped,
-            member_packed,
-            member_dropped,
-            conflict_only_ids,
-            orphan_ids,
-            representative_ids,
-            token_counts,
-            used,
-            effective_budget,
-        )
+        ledger = _BudgetLedger(token_counts, effective_budget)
+        primary = ledger.pack(primary_ids)
+        expansion = ledger.pack(expansion_ids)
+        members = ledger.pack(member_ids)
+        reserves = _ReserveIds(conflict_only_ids, orphan_ids, representative_ids)
+        return _budget_output(ledger, primary, expansion, members, reserves)
     finally:
         if should_close:
             close_connection(conn)

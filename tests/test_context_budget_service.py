@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from saltmdb import config
+from saltmdb.config import CONTEXT_BUDGET_MAX_TOKENS
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.conflict_set_service import assemble_conflict_sets
 from saltmdb.domain.services.context_budget_service import pack_context_budget
@@ -240,6 +241,22 @@ class TestContextBudgetService(unittest.TestCase):
 
         self.assertEqual(result["budget"]["limit"], config.CONTEXT_BUDGET_MAX_TOKENS)
 
+    def test_scenario_6_nonempty_budget_tokens_is_clamped_down_to_maximum(self):
+        primary = "nonempty-clamp-primary"
+        with patch(
+            "saltmdb.domain.services.context_budget_service._load_token_counts",
+            return_value={primary: 1},
+        ):
+            result = pack_context_budget(
+                {"expansion_candidates": []},
+                [{"id": primary, "score": 1.0}],
+                {"conflict_sets": []},
+                budget_tokens=10**6,
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(result["budget"]["limit"], CONTEXT_BUDGET_MAX_TOKENS)
+
     def test_scenario_7_budget_tokens_below_ceiling_is_honored_exactly(self):
         requested_budget = 7
         result = pack_context_budget(
@@ -379,6 +396,172 @@ class TestContextBudgetService(unittest.TestCase):
             result["token_counts"][representative],
         )
         self.assertEqual(result["budget"]["used"], 0)
+
+    def test_key_order_is_stable_for_nonempty_and_empty_results(self):
+        primary = "primary-order"
+        with patch(
+            "saltmdb.domain.services.context_budget_service._load_token_counts",
+            return_value={primary: 1},
+        ):
+            result = pack_context_budget(
+                {"expansion_candidates": []},
+                [{"id": primary, "score": 1.0}],
+                {"conflict_sets": []},
+                db_connection=self.conn,
+            )
+        expected_root_keys = [
+            "packed_entity_ids",
+            "dropped_entity_ids",
+            "conflict_only_entity_ids",
+            "community_representative_entity_ids",
+            "token_counts",
+            "budget",
+        ]
+        expected_section_keys = ["primary", "expansion", "community_member"]
+        expected_budget_keys = [
+            "unit",
+            "limit",
+            "used",
+            "primary_truncated",
+            "primary_dropped_count",
+            "expansion_truncated",
+            "expansion_dropped_count",
+            "conflict_reserve_tokens_used",
+            "orphan_community_reserve_tokens_used",
+            "community_member_truncated",
+            "community_member_dropped_count",
+            "community_representative_reserve_tokens_used",
+        ]
+        for actual in (
+            result,
+            pack_context_budget({"expansion_candidates": []}, [], {"conflict_sets": []}),
+        ):
+            self.assertEqual(list(actual), expected_root_keys)
+            self.assertEqual(list(actual["packed_entity_ids"]), expected_section_keys)
+            self.assertEqual(list(actual["dropped_entity_ids"]), expected_section_keys)
+            self.assertEqual(list(actual["budget"]), expected_budget_keys)
+
+    def test_mixed_sections_preserve_first_fit_and_reserve_accounting(self):
+        primary = "primary-mixed"
+        expansion_fit = "expansion-fit"
+        expansion_drop = "expansion-drop"
+        member_fit = "member-fit"
+        member_drop = "member-drop"
+        orphan_ids = {"orphan"}
+        representative_ids = {
+            "representative-f",
+            "representative-e",
+            "representative-d",
+            "representative-c",
+            "representative-b",
+            "representative-a",
+        }
+        token_counts = {
+            primary: 5,
+            expansion_fit: 8,
+            expansion_drop: 4,
+            member_fit: 2,
+            member_drop: 3,
+            "conflict-a": 7,
+            "conflict-b": 8,
+            "conflict-c": 9,
+            "conflict-d": 10,
+            "conflict-e": 11,
+            "conflict-f": 12,
+            "orphan": 13,
+            "representative-a": 17,
+            "representative-b": 18,
+            "representative-c": 19,
+            "representative-d": 20,
+            "representative-e": 21,
+            "representative-f": 22,
+        }
+        with patch(
+            "saltmdb.domain.services.context_budget_service._load_token_counts",
+            return_value=token_counts,
+        ):
+            result = pack_context_budget(
+                {
+                    "expansion_candidates": [
+                        {"entity_id": expansion_fit},
+                        {"entity_id": expansion_drop},
+                    ]
+                },
+                [{"id": primary, "score": 1.0}],
+                self._conflicts(
+                    ("conflict-f", "conflict_only"),
+                    ("conflict-e", "conflict_only"),
+                    ("conflict-d", "conflict_only"),
+                    ("conflict-c", "conflict_only"),
+                    ("conflict-b", "conflict_only"),
+                    ("conflict-a", "conflict_only"),
+                ),
+                budget_tokens=15,
+                community_member_ids=[member_fit, member_drop],
+                community_representative_ids=representative_ids,
+                orphan_community_entity_ids=orphan_ids,
+                db_connection=self.conn,
+            )
+
+        self.assertEqual(
+            result["packed_entity_ids"],
+            {
+                "primary": [primary],
+                "expansion": [expansion_fit],
+                "community_member": [member_fit],
+            },
+        )
+        self.assertEqual(
+            result["dropped_entity_ids"],
+            {
+                "primary": [],
+                "expansion": [expansion_drop],
+                "community_member": [member_drop],
+            },
+        )
+        self.assertEqual(
+            result["conflict_only_entity_ids"],
+            [
+                "conflict-a",
+                "conflict-b",
+                "conflict-c",
+                "conflict-d",
+                "conflict-e",
+                "conflict-f",
+            ],
+        )
+        self.assertEqual(
+            result["community_representative_entity_ids"],
+            [
+                "representative-a",
+                "representative-b",
+                "representative-c",
+                "representative-d",
+                "representative-e",
+                "representative-f",
+            ],
+        )
+        self.assertEqual(
+            result["budget"],
+            {
+                "unit": "tokens",
+                "limit": 15,
+                "used": 15,
+                "primary_truncated": False,
+                "primary_dropped_count": 0,
+                "expansion_truncated": True,
+                "expansion_dropped_count": 1,
+                "conflict_reserve_tokens_used": 57,
+                "orphan_community_reserve_tokens_used": 13,
+                "community_member_truncated": True,
+                "community_member_dropped_count": 1,
+                "community_representative_reserve_tokens_used": 117,
+            },
+        )
+        packed_ids = sum(result["packed_entity_ids"].values(), [])
+        self.assertEqual(
+            result["budget"]["used"], sum(token_counts[entity_id] for entity_id in packed_ids)
+        )
 
 
 if __name__ == "__main__":
