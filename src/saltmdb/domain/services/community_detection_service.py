@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any
 
@@ -102,67 +103,85 @@ def _normalize_community_vector(vec):
     return vec / norm if norm > 0 else vec
 
 
-def _process_partition_group(  # noqa: PLR0913
-    group_indices: list[int],
-    graph,
-    node_ids: list[str],
-    raw_vector: dict[str, "np.ndarray"],  # type: ignore[name-defined]  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
-    level: int,
-    parent_community_id: str | None,
-    now: str,
-    communities_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
-    membership_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
-    embeddings_to_insert: list[tuple],  # pyright: ignore[reportMissingTypeArgument]
-) -> None:
-    """Insert one community row for this partition group at `level`, then either recurse into a
-    fresh Leiden pass over its own induced subgraph (if oversized and under the depth cap) or emit
-    leaf-level community_membership rows for its members. Every community row this function ever
-    creates -- leaf or not -- gets its own representative/centroid via the existing,
-    completely-unmodified _compute_community_group (constraint 25's own "independently at every
-    level" requirement)."""
-    import numpy as np
+@dataclass(frozen=True, slots=True)
+class _PartitionScope:
+    """One level of the community hierarchy: the graph being partitioned and where it sits."""
 
-    sorted_group = sorted(group_indices)
-    member_ids, representative_id, centroid_vec = _compute_community_group(
-        sorted_group, graph, node_ids, raw_vector
-    )
-    member_count = len(member_ids)
-    community_id = str(uuid.uuid4())
-    communities_to_insert.append(
-        (community_id, representative_id, member_count, level, now, parent_community_id)
-    )
-    if centroid_vec is not None:
-        import sqlite_vec
+    graph: Any
+    node_ids: list[str]  # not hashable: carries a list
+    level: int
+    parent_community_id: str | None
 
-        embeddings_to_insert.append(
+
+@dataclass(slots=True)
+class _CommunityRows:
+    """Rows collected for the transactional write; add_group also drives Leiden recursion."""
+
+    now: str
+    raw_vector: dict[str, Any]
+    communities: list[tuple[str, str | None, int, int, str, str | None]] = field(
+        default_factory=list
+    )
+    membership: list[tuple[str, str, int]] = field(default_factory=list)
+    embeddings: list[tuple[str, bytes]] = field(default_factory=list)
+
+    def add_group(self, group_indices: list[int], scope: _PartitionScope) -> None:
+        """Insert one community row for this group at scope.level, then either recurse into a
+        fresh Leiden pass over scope.graph's induced subgraph (if oversized and under the depth
+        cap) or emit leaf membership rows. Every community row this method creates -- leaf or not
+        -- gets its own representative and centroid through the unmodified
+        _compute_community_group, independently at every level.
+        """
+        import numpy as np
+
+        sorted_group = sorted(group_indices)
+        member_ids, representative_id, centroid_vec = _compute_community_group(
+            sorted_group, scope.graph, scope.node_ids, self.raw_vector
+        )
+        member_count = len(member_ids)
+        community_id = str(uuid.uuid4())
+        self.communities.append(
             (
                 community_id,
-                sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist()),
+                representative_id,
+                member_count,
+                scope.level,
+                self.now,
+                scope.parent_community_id,
             )
         )
+        if centroid_vec is not None:
+            import sqlite_vec
 
-    if member_count > COMMUNITY_HIERARCHY_SIZE_THRESHOLD and level < COMMUNITY_HIERARCHY_MAX_DEPTH:
-        import leidenalg
+            self.embeddings.append(
+                (
+                    community_id,
+                    sqlite_vec.serialize_float32(centroid_vec.astype(np.float32).tolist()),
+                )
+            )
 
-        child_graph = graph.subgraph(sorted_group)
-        child_node_ids = [node_ids[i] for i in sorted_group]
-        child_partition = leidenalg.find_partition(child_graph, leidenalg.ModularityVertexPartition)
-        for child_group in child_partition:
-            _process_partition_group(
-                list(child_group),
+        if (
+            member_count > COMMUNITY_HIERARCHY_SIZE_THRESHOLD
+            and scope.level < COMMUNITY_HIERARCHY_MAX_DEPTH
+        ):
+            import leidenalg
+
+            child_graph = scope.graph.subgraph(sorted_group)
+            child_node_ids = [scope.node_ids[i] for i in sorted_group]
+            child_partition = leidenalg.find_partition(
+                child_graph, leidenalg.ModularityVertexPartition
+            )
+            child_scope = _PartitionScope(
                 child_graph,
                 child_node_ids,
-                raw_vector,
-                level + 1,
+                scope.level + 1,
                 community_id,
-                now,
-                communities_to_insert,
-                membership_to_insert,
-                embeddings_to_insert,
             )
-    else:
-        for entity_id in member_ids:
-            membership_to_insert.append((entity_id, community_id, level))
+            for child_group in child_partition:
+                self.add_group(list(child_group), child_scope)
+        else:
+            for entity_id in member_ids:
+                self.membership.append((entity_id, community_id, scope.level))
 
 
 def recompute_communities(  # noqa: C901, PLR0912, PLR0915
@@ -245,23 +264,9 @@ def recompute_communities(  # noqa: C901, PLR0912, PLR0915
                 for entity_id, blob in embedding_rows
             }
 
-        communities_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
-        membership_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
-        embeddings_to_insert: list[tuple] = []  # pyright: ignore[reportMissingTypeArgument]
-
+        community_rows = _CommunityRows(now, raw_vector)
         for group in partition:
-            _process_partition_group(
-                list(group),
-                graph,
-                node_ids,
-                raw_vector,
-                0,
-                None,
-                now,
-                communities_to_insert,
-                membership_to_insert,
-                embeddings_to_insert,
-            )
+            community_rows.add_group(list(group), _PartitionScope(graph, node_ids, 0, None))
 
         def _write(c):
             c.execute("DELETE FROM community_membership")
@@ -270,25 +275,26 @@ def recompute_communities(  # noqa: C901, PLR0912, PLR0915
                 "INSERT INTO communities "
                 "(id, representative_entity_id, member_count, level, created_at, parent_community_id) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                communities_to_insert,
+                community_rows.communities,
             )
             c.executemany(
                 "INSERT INTO community_membership (entity_id, community_id, level) VALUES (?, ?, ?)",
-                membership_to_insert,
+                community_rows.membership,
             )
             if vector_extension_loaded:
                 c.execute("DELETE FROM community_embeddings")
                 c.executemany(
                     "INSERT INTO community_embeddings (community_id, embedding) VALUES (?, ?)",
-                    embeddings_to_insert,
+                    community_rows.embeddings,
                 )
 
         write_transaction_retrying(conn, _write)
         return {
             "status": "recomputed",
-            "communities_created": len(communities_to_insert),
+            "communities_created": len(community_rows.communities),
             "nodes_clustered": len(node_ids),
-            "communities_missing_embedding": len(communities_to_insert) - len(embeddings_to_insert),
+            "communities_missing_embedding": len(community_rows.communities)
+            - len(community_rows.embeddings),
         }
     finally:
         if should_close:
@@ -298,7 +304,7 @@ def recompute_communities(  # noqa: C901, PLR0912, PLR0915
 def fetch_leaf_community_centroids(conn: sqlite3.Connection) -> list[tuple[str, bytes]]:
     """Community centroids for LEAF communities only -- a community row with no other row naming
     it via parent_community_id (never a `level = MAX(level)` comparison, which per-branch recursion
-    (this file's own _process_partition_group) makes unsafe: different branches of the hierarchy
+    (this file's own _CommunityRows.add_group) makes unsafe: different branches of the hierarchy
     tree can bottom out at different depths, so there is no single "finest level" number that is
     finest everywhere in the tree at once).
 

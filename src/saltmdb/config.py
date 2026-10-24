@@ -339,7 +339,7 @@ COMMUNITY_DETECTION_TRIGGER_COOLDOWN_S = 300
 # Milestone D (wayfinder ticket "Milestone D hierarchy mechanics," standing constraint 25, memory
 # 94579e0f) -- community_detection_service's hierarchical sub-clustering trigger: a community whose
 # member_count exceeds this value is a candidate for recursive re-run of Leiden on its own induced
-# subgraph (see recompute_communities/_process_partition_group). A community at or below this value
+# subgraph (see recompute_communities/_CommunityRows.add_group). A community at or below this value
 # never recurses, regardless of internal heterogeneity -- a pure size trigger, not a compound
 # size+heterogeneity signal, per constraint 25's own explicit locked choice. PLACEHOLDER: not yet
 # benchmarked against SALTMDB's own corpus -- seeded above the live-corpus median (~10, per probe

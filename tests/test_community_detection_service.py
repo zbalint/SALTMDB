@@ -972,6 +972,270 @@ class TestCommunityDetectionService(unittest.TestCase):
         for table in ("communities", "community_membership", "community_embeddings"):
             self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
+    def test_scenario_35_two_level_rows_have_exact_shapes_and_leaf_membership(self):
+        nodes = sorted(self._new_entity(f"collector-shape-{index}") for index in range(4))
+        for left in range(4):
+            for right in range(left + 1, 4):
+                self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        with (
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+        ):
+            result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(
+            result,
+            {
+                "status": "recomputed",
+                "communities_created": 2,
+                "nodes_clustered": 4,
+                "communities_missing_embedding": 0,
+            },
+        )
+        community_rows = self.conn.execute(
+            "SELECT id, representative_entity_id, member_count, level, created_at, parent_community_id "
+            "FROM communities ORDER BY rowid"
+        ).fetchall()
+        self.assertEqual(len(community_rows), 2)
+        root_id, root_representative, root_count, root_level, created_at, root_parent = (
+            community_rows[0]
+        )
+        child_id, child_representative, child_count, child_level, child_created_at, child_parent = (
+            community_rows[1]
+        )
+        self.assertEqual(
+            community_rows[0],
+            (root_id, root_representative, 4, 0, created_at, None),
+        )
+        self.assertEqual(
+            community_rows[1],
+            (child_id, child_representative, 4, 1, child_created_at, root_id),
+        )
+        self.assertEqual(child_created_at, created_at)
+        self.assertTrue(root_representative is None or root_representative in nodes)
+        self.assertTrue(child_representative is None or child_representative in nodes)
+        self.assertEqual(
+            {
+                (entity_id, community_id, level)
+                for entity_id, community_id, level in self.conn.execute(
+                    "SELECT entity_id, community_id, level FROM community_membership"
+                ).fetchall()
+            },
+            {(entity_id, child_id, 1) for entity_id in nodes},
+        )
+        self.assertEqual(
+            {
+                community_id
+                for (community_id,) in self.conn.execute(
+                    "SELECT community_id FROM community_embeddings"
+                ).fetchall()
+            },
+            {root_id, child_id},
+        )
+
+    def test_scenario_36_partition_row_order_is_parent_first_and_subtrees_contiguous(self):
+        split_nodes = sorted(
+            self._new_entity(f"collector-order-split-{index}") for index in range(4)
+        )
+        flat_nodes = sorted(self._new_entity(f"collector-order-flat-{index}") for index in range(2))
+        for left in range(4):
+            for right in range(left + 1, 4):
+                self._store_edge(split_nodes[left], split_nodes[right], "related_to")
+        self._store_edge(flat_nodes[0], flat_nodes[1], "related_to")
+
+        with (
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+        ):
+            result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(result["status"], "recomputed")
+        rows = self.conn.execute(
+            "SELECT id, member_count, level, parent_community_id FROM communities ORDER BY rowid"
+        ).fetchall()
+        roots = [row for row in rows if row[3] is None]
+        self.assertEqual({row[1] for row in roots}, {2, 4})
+        split_root = next(row for row in roots if row[1] == 4)
+        flat_root = next(row for row in roots if row[1] == 2)
+        split_root_index = rows.index(split_root)
+        flat_root_index = rows.index(flat_root)
+        children_by_parent = {}
+        for row in rows:
+            if row[3] is not None:
+                children_by_parent.setdefault(row[3], []).append(row[0])
+        descendant_ids = {split_root[0]}
+        pending = [split_root[0]]
+        while pending:
+            children = children_by_parent.get(pending.pop(), [])
+            descendant_ids.update(children)
+            pending.extend(children)
+        descendant_indices = [index for index, row in enumerate(rows) if row[0] in descendant_ids]
+        self.assertEqual(
+            descendant_indices,
+            list(range(split_root_index, split_root_index + len(descendant_indices))),
+        )
+        self.assertNotIn(flat_root_index, descendant_indices)
+        leaf_levels = {
+            row[0]: row[2] for row in rows if not any(child[3] == row[0] for child in rows)
+        }
+        membership = self.conn.execute(
+            "SELECT entity_id, community_id, level FROM community_membership"
+        ).fetchall()
+        self.assertEqual(
+            {(community_id, level) for _, community_id, level in membership},
+            set(leaf_levels.items()),
+        )
+        self.assertEqual(
+            {entity_id for entity_id, _, _ in membership},
+            set(split_nodes + flat_nodes),
+        )
+        self.assertEqual(
+            {community_id for _, community_id, _ in membership},
+            set(leaf_levels),
+        )
+
+    def test_scenario_37_threshold_equality_does_not_recurse(self):
+        nodes = sorted(self._new_entity(f"collector-boundary-{index}") for index in range(3))
+        for left in range(3):
+            for right in range(left + 1, 3):
+                self._store_edge(nodes[left], nodes[right], "related_to")
+
+        with (
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 2),
+        ):
+            result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(result["communities_created"], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM communities WHERE level > 0").fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            {
+                (entity_id, level)
+                for entity_id, level in self.conn.execute(
+                    "SELECT entity_id, level FROM community_membership"
+                ).fetchall()
+            },
+            {(entity_id, 0) for entity_id in nodes},
+        )
+
+    def test_scenario_38_loaded_extension_reports_missing_centroid_communities(self):
+        first, second = (
+            self._new_entity("collector-count-first"),
+            self._new_entity("collector-count-second"),
+        )
+        self._store_edge(first, second, "related_to")
+
+        with patch(
+            "saltmdb.domain.services.community_detection_service.try_load_vector_extension",
+            return_value=True,
+        ):
+            result = recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(
+            result,
+            {
+                "status": "recomputed",
+                "communities_created": 1,
+                "nodes_clustered": 2,
+                "communities_missing_embedding": 1,
+            },
+        )
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM community_embeddings").fetchone()[0],
+            0,
+        )
+
+    def test_scenario_39_every_community_row_uses_one_recompute_timestamp(self):
+        nodes = sorted(self._new_entity(f"collector-clock-{index}") for index in range(4))
+        for left in range(4):
+            for right in range(left + 1, 4):
+                self._store_edge(nodes[left], nodes[right], "related_to")
+
+        fixed = datetime.now(UTC) + timedelta(days=1)
+        with (
+            patch.object(community_detection_service, "datetime") as clock,
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+            patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+        ):
+            clock.now.return_value = fixed
+            recompute_communities(db_connection=self.conn)
+
+        self.assertEqual(
+            [
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT created_at FROM communities ORDER BY rowid"
+                ).fetchall()
+            ],
+            [fixed.isoformat(), fixed.isoformat()],
+        )
+
+    def test_scenario_40_group_sort_preserves_child_rows_and_representatives(self):
+        nodes = sorted(self._new_entity(f"collector-sort-{index}") for index in range(4))
+        for left in range(4):
+            for right in range(left + 1, 4):
+                self._store_edge(nodes[left], nodes[right], "related_to")
+        for index, entity_id in enumerate(nodes):
+            self._insert_vector(entity_id, _axis_vector(index))
+
+        def snapshot():
+            community_rows = self.conn.execute(
+                "SELECT id, representative_entity_id, member_count, level "
+                "FROM communities ORDER BY rowid"
+            ).fetchall()
+            membership = self.conn.execute(
+                "SELECT entity_id, community_id, level FROM community_membership"
+            ).fetchall()
+            return [
+                (
+                    representative_id,
+                    member_count,
+                    level,
+                    frozenset(
+                        entity_id
+                        for entity_id, community_id, _ in membership
+                        if community_id == row[0]
+                    ),
+                )
+                for row in community_rows
+                for representative_id, member_count, level in [row[1:4]]
+            ]
+
+        def run_with_partition(child_groups):
+            calls = 0
+            original_compute_group = community_detection_service._compute_community_group
+
+            def fake_find_partition(graph, partition_type):
+                nonlocal calls
+                calls += 1
+                return [[0, 1, 2, 3]] if calls == 1 else child_groups
+
+            with (
+                patch.object(community_detection_service, "COMMUNITY_HIERARCHY_SIZE_THRESHOLD", 3),
+                patch.object(community_detection_service, "COMMUNITY_HIERARCHY_MAX_DEPTH", 1),
+                patch("leidenalg.find_partition", side_effect=fake_find_partition),
+                patch.object(
+                    community_detection_service,
+                    "_compute_community_group",
+                    wraps=original_compute_group,
+                ) as compute_group,
+            ):
+                recompute_communities(db_connection=self.conn)
+            groups_seen = [list(call.args[0]) for call in compute_group.call_args_list]
+            return snapshot(), groups_seen
+
+        unsorted_snapshot, unsorted_groups = run_with_partition([[3, 2], [1, 0]])
+        sorted_snapshot, sorted_groups = run_with_partition([[2, 3], [0, 1]])
+        self.assertEqual(unsorted_snapshot, sorted_snapshot)
+        self.assertEqual(unsorted_groups, [sorted(group) for group in unsorted_groups])
+        self.assertEqual(sorted_groups, [sorted(group) for group in sorted_groups])
+
 
 if __name__ == "__main__":
     unittest.main()
