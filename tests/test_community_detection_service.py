@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import re
 import shutil
@@ -85,8 +86,8 @@ class TestCommunityDetectionService(unittest.TestCase):
                 "durable test content for a graph entity."
             ),
             title=f"Community fixture {label}",
-            agent_id="community-test",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="community-test"),
         )
         return _memory_id(result)
 

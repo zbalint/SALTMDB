@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, EntityAnnotations, Provenance
 import os
 import shutil
 import tempfile
@@ -12,9 +13,6 @@ from saltmdb.config import MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import (
     store_memory,
-    Provenance,
-    CoreDeclaration,
-    EntityAnnotations,
 )
 from saltmdb.domain.services.relation_service import (
     bulk_consolidate_memories,
@@ -37,8 +35,8 @@ class TestConsolidateMemoriesPhase4(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Detailed, durable description of {title} used in consolidation tests.",
-            agent_id="agent_db",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent_db"),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]
@@ -276,9 +274,9 @@ class TestConsolidationBoundaries(unittest.TestCase):
             result = store_memory(
                 title=parent,
                 content=f"Original parent content used for {parent} characterization.",
-                agent_id="other-owner",
                 scope="private",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="other-owner"),
             )
             self.assertEqual(result["status"], "ok")
             self.parents.append(result["data"]["id"])
@@ -526,8 +524,8 @@ class TestConsolidationBoundaries(unittest.TestCase):
         duplicate = store_memory(
             title="Other memory",
             content="Canonical durable content for the merged result.",
-            agent_id="system",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="system"),
         )
         self.assertEqual(duplicate["status"], "ok")
         self.duplicates.start()
@@ -859,9 +857,9 @@ class TestConsolidationBoundaries(unittest.TestCase):
         outsider_result = store_memory(
             title="Incoming Outsider",
             content="Incoming outsider content for worklist coverage.",
-            agent_id="other-owner",
             scope="private",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other-owner"),
         )
         self.assertEqual(outsider_result["status"], "ok")
         outsider = outsider_result["data"]["id"]
@@ -984,9 +982,9 @@ class TestConsolidationBoundaries(unittest.TestCase):
         outsider_result = store_memory(
             title="Exact Worklist Outsider",
             content="Exact worklist outsider content for coverage.",
-            agent_id="other-owner",
             scope="private",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other-owner"),
         )
         self.assertEqual(outsider_result["status"], "ok")
         outsider = outsider_result["data"]["id"]

@@ -5,6 +5,8 @@ after persistence.  The old token-bearing disposition flow is intentionally not 
 surface.
 """
 
+from saltmdb.domain.services.memory_service import Provenance
+
 import os
 import shutil
 import tempfile
@@ -42,16 +44,16 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         first = store_memory(
             content=self._content(),
             title="Auth policy A",
-            agent_id="agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
         existing_id = first["data"]["id"]
 
         duplicate = store_memory(
             content=self._content(),
             title="Auth policy copy",
-            agent_id="agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
 
         self.assertEqual(duplicate["status"], "rejected")
@@ -63,14 +65,14 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         store_memory(
             content=self._content(),
             title="Auth policy A",
-            agent_id="agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
         result = store_memory(
             content=self._content(" Access tokens expire after fifteen minutes."),
             title="Auth policy B",
-            agent_id="agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
 
         self.assertEqual(result["status"], "ok")
@@ -94,18 +96,18 @@ class TestStoreDuplicatePolicyPhase5(unittest.TestCase):
         first = store_memory(
             content=self._content(" Explicit identifier."),
             title="Auth policy explicit",
-            agent_id="agent",
             entity_id=requested_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
         self.assertEqual(first["data"]["id"], requested_id)
 
         duplicate = store_memory(
             content=self._content(" Explicit identifier."),
             title="Auth policy duplicate",
-            agent_id="agent",
             entity_id=str(uuid.uuid4()),
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent"),
         )
         self.assertEqual(duplicate["status"], "rejected")
         self.assertEqual(duplicate["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")

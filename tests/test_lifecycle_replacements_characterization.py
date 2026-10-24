@@ -1,12 +1,13 @@
 """Replacement outcomes and transaction races through the public lifecycle seams."""
 
+from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance
+
 import json
 from unittest.mock import patch
 
 import pytest
 
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import Provenance
 from saltmdb.domain.services.memory_service import lifecycle
 
 
@@ -24,12 +25,10 @@ def seed(conn, title="Original characterization memory"):
         title=title,
         content=f"A complete descriptive original memory for lifecycle characterization: {title}.",
         tags=["#original"],
-        agent_id="original-owner",
-        context_id="original-context",
         scope="private",
-        memory_type="decision",
-        metadata={"source": "original"},
         db_connection=conn,
+        provenance=Provenance(agent_id="original-owner", context_id="original-context"),
+        annotations=EntityAnnotations(metadata={"source": "original"}, memory_type="decision"),
     )
     assert result["status"] == "ok"
     return result["data"]["id"]

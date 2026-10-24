@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance
 import os
 import shutil
 import tempfile
@@ -23,10 +24,9 @@ class TestImmutableLifecycleReplacements(unittest.TestCase):
             title=title,
             content=f"A complete and sufficiently descriptive lifecycle memory body for {title}.",
             tags=tags or ["#original"],
-            agent_id="lifecycle-tests",
-            context_id="lifecycle-context",
-            memory_type="decision",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="lifecycle-tests", context_id="lifecycle-context"),
+            annotations=EntityAnnotations(memory_type="decision"),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]

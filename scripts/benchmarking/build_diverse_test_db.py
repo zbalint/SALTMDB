@@ -506,6 +506,7 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
     run_id: str,
 ) -> dict:
     from saltmdb.db.connection import get_connection, close_connection
+    from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance
     from saltmdb.domain.services import memory_service
 
     checkpoint_path = Path(f"{dest_db_path}.checkpoint.json")
@@ -553,12 +554,9 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
                     tags = ["benchmark-corpus", dataset.replace("_", "-")]
                     result = memory_service.store_memory(
                         content=doc.body,
-                        agent_id=AGENT_ID,
                         scope="shared",
                         title=title,
                         tags=tags,
-                        metadata=metadata,
-                        context_id=None,
                         db_connection=conn,
                         # db_path is NOT redundant with db_connection here: store_memory only
                         # derives its own db_path from get_connection() when db_connection is
@@ -568,6 +566,8 @@ def run_ingestion(  # noqa: C901, PLR0912, PLR0915
                         # `db_path or get_db_path()` -- would silently target the LIVE default
                         # DB instead of this destination copy. Must pass both explicitly.
                         db_path=dest_db_path,
+                        provenance=Provenance(agent_id=AGENT_ID, context_id=None),
+                        annotations=EntityAnnotations(metadata=metadata),
                     )
                     outcome, error_detail = classify_store_result(result)
                     outcome_record["outcome"] = outcome

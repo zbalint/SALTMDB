@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -52,8 +53,8 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         res = store_memory(
             title="Buried Token Memory",
             content=content,
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res["status"], "ok")
         self.assertIn("id", res["data"])
@@ -79,8 +80,8 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         res = store_memory(
             title="Unrelated Content Memory",
             content=content,
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
         entity_id = res["data"]["id"]
 
@@ -103,8 +104,8 @@ class TestQueryCenteredSnippets(unittest.TestCase):
         store_memory(
             title="Listing Only Memory",
             content=content,
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
 
         results = search_memory(agent_id="user1", db_path=self.db_path)

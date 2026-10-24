@@ -5,6 +5,8 @@ test_data/ corpus, so this suite runs in seconds. See the plan this implements
 (~/.claude/plans/cheeky-plotting-tulip.md, Rev 6) "Verification" section, items 1-9.
 """
 
+from saltmdb.domain.services.memory_service import Provenance
+
 import importlib.util
 import json
 import os
@@ -608,9 +610,9 @@ class TestCompletionBarrier(unittest.TestCase):
         res = memory_service.store_memory(
             content=content,
             title=title,
-            agent_id=bdt.AGENT_ID,
             db_connection=self.conn,
             db_path=self.db_path,
+            provenance=Provenance(agent_id=bdt.AGENT_ID),
         )
         entity_id = bdt._extract_entity_id(res)
         self.assertIsNotNone(entity_id)

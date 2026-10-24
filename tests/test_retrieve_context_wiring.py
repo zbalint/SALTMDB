@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import inspect
 import os
 import shutil
@@ -94,8 +95,8 @@ class TestRetrieveContextWiring(unittest.TestCase):
         result = store_memory(
             content="Wiring end-to-end memory fixture body",
             title="Wiring end-to-end memory",
-            agent_id="wiring-owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="wiring-owner"),
         )
         self.assertEqual(result["status"], "ok")
         entity_id = result["data"]["id"]

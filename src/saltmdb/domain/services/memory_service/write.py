@@ -20,7 +20,15 @@ from saltmdb.domain.services import core_governance_service
 
 from . import tags as tag_ops
 from . import validation
-from ._shared import logger, RETRIEVAL_TEXT_UNSET
+from ._shared import (
+    logger,
+    RETRIEVAL_TEXT_UNSET,
+    Provenance,
+    CoreDeclaration,
+    EntityAnnotations,
+    StoreScores,
+    StoreRuntime,
+)
 
 _CORE_TAG = "#core"
 
@@ -789,16 +797,18 @@ def _validate_store_basics(
     content: str | None,
     scope: str,
     memory_type: str | None,
-    weight: int,
-    relevance: int | None,
-    impact: int | None,
-    novelty: int | None,
-    actionability: int | None,
+    scores: StoreScores,
 ) -> tuple[str | None, int]:
     error = _validate_store_fields(agent_id, content, scope, memory_type)
     if error:
-        return error, weight
-    return None, _weight_from_dimensions(weight, relevance, impact, novelty, actionability)
+        return error, scores.weight
+    return None, _weight_from_dimensions(
+        scores.weight,
+        scores.relevance,
+        scores.impact,
+        scores.novelty,
+        scores.actionability,
+    )
 
 
 def _normalize_retrieval_input(
@@ -1201,31 +1211,19 @@ def _prepare_store_operation(conn, request: dict) -> tuple[str | dict | None, di
 
 def store_memory(
     content: str = None,
+    *,
     tags: list = None,
-    agent_id: str = None,
     scope: Literal["private", "shared"] = "shared",
-    weight: int = 1,
-    is_core: bool = None,
-    memory_type: Literal["fact", "event", "procedure", "decision", "preference"] = None,
     title: str = None,
     entity_id: str = None,
-    relevance: int = None,
-    impact: int = None,
-    novelty: int = None,
-    actionability: int = None,
-    metadata: dict = None,
-    context_id: str = None,
-    agent_session_id: str = None,
+    retrieval_text: str | None | object = RETRIEVAL_TEXT_UNSET,
+    provenance: Provenance = Provenance(),
+    core: CoreDeclaration = CoreDeclaration(),
+    annotations: EntityAnnotations = EntityAnnotations(),
+    scores: StoreScores = StoreScores(),
+    runtime: StoreRuntime = StoreRuntime(),
     db_connection=None,
     db_path: str = None,
-    coordinator=None,
-    *,
-    retrieval_text: str | None | object = RETRIEVAL_TEXT_UNSET,
-    core_reason: str | None = None,
-    core_exit_condition: str | None = None,
-    core_review_after: str | None = None,
-    detail_memory_ids: list | None = None,
-    probe_sink: list[dict[str, Any]] | None = None,
 ) -> str | dict:
     """Stores a consolidated Markdown fact chunk as a long-term memory.
 
@@ -1246,15 +1244,11 @@ def store_memory(
     clears it, a replacement list atomically reconciles the declared `elaborates_on` relations.
     """
     basics_error, weight = _validate_store_basics(
-        agent_id,
+        provenance.agent_id,
         content,
         scope,
-        memory_type,
-        weight,
-        relevance,
-        impact,
-        novelty,
-        actionability,
+        annotations.memory_type,
+        scores,
     )
     if basics_error:
         return basics_error
@@ -1271,20 +1265,20 @@ def store_memory(
             "content": content,
             "title": title,
             "retrieval_text": retrieval_text,
-            "metadata": metadata,
-            "context_id": context_id,
+            "metadata": annotations.metadata,
+            "context_id": provenance.context_id,
             "tags": tags,
-            "agent_id": agent_id,
+            "agent_id": provenance.agent_id,
             "scope": scope,
-            "memory_type": memory_type,
+            "memory_type": annotations.memory_type,
             "entity_id": entity_id,
-            "is_core": is_core,
+            "is_core": core.is_core,
             "weight": weight,
-            "core_reason": core_reason,
-            "core_exit_condition": core_exit_condition,
-            "core_review_after": core_review_after,
-            "detail_memory_ids": detail_memory_ids,
-            "agent_session_id": agent_session_id,
+            "core_reason": core.core_reason,
+            "core_exit_condition": core.core_exit_condition,
+            "core_review_after": core.core_review_after,
+            "detail_memory_ids": core.detail_memory_ids,
+            "agent_session_id": provenance.agent_session_id,
         }
         prepare_error, prepared = _prepare_store_operation(conn, request)
         if prepare_error is not None:
@@ -1312,7 +1306,7 @@ def store_memory(
         duplicate_candidates = _probe_store_duplicates(
             conn=conn,
             was_existing=was_existing,
-            probe_sink=probe_sink,
+            probe_sink=runtime.probe_sink,
             title=title,
             redacted_content=redacted_content,
             agent_id=agent_id,
@@ -1328,7 +1322,7 @@ def store_memory(
 
         from saltmdb.domain.services.librarian_service import trigger_librarian
 
-        trigger_librarian(db_path=db_path, coordinator=coordinator)
+        trigger_librarian(db_path=db_path, coordinator=runtime.coordinator)
 
         return envelope_ok(
             {
@@ -1344,7 +1338,7 @@ def store_memory(
                 "context_id": context_id,
                 "scope": scope,
                 "memory_type": effective_memory_type_preview,
-                "agent_session_id": agent_session_id,
+                "agent_session_id": provenance.agent_session_id,
             },
         )
     except Exception as e:

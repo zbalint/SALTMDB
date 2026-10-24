@@ -17,7 +17,7 @@ class TestDispatchRequestDefaults(unittest.TestCase):
         _dispatch_store_memory(content="valid content", agent_id="owner", title="A title")
         call = store.call_args.kwargs
         self.assertEqual(call["scope"], "shared")
-        self.assertEqual(call["weight"], 1)
+        self.assertEqual(call["scores"].weight, 1)
         self.assertNotIn("skip_duplicate_check", call)
 
     @patch("saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[])

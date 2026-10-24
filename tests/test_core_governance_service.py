@@ -1,6 +1,8 @@
 """Tests for core_governance_service.py -- the sole authority for core-memory bootstrap
 governance (see plans/core_memory_bootstrap_governance_detailed.md)."""
 
+from saltmdb.domain.services.memory_service import CoreDeclaration, EntityAnnotations, Provenance
+from dataclasses import replace
 import json
 import os
 import shutil
@@ -391,26 +393,49 @@ class CoreGovernanceDbTestBase(unittest.TestCase):
         self.conn.close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _store_core(self, title, content=None, **kwargs):
+    def _store_core(
+        self,
+        title,
+        content=None,
+        *,
+        provenance=None,
+        core=None,
+        annotations=None,
+        **kwargs,
+    ):
         # Fixtures use distinct content so core-governance tests remain independent of duplicate
         # handling.
-        res = store_memory(
-            title=title,
-            content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
-            agent_id=kwargs.pop("agent_id", "tester"),
+        if provenance is None:
+            provenance = Provenance(agent_id="tester")
+        if core is None:
+            core = CoreDeclaration()
+        core = replace(
+            core,
             is_core=True,
-            core_reason=kwargs.pop("core_reason", REASON),
-            core_exit_condition=kwargs.pop("core_exit_condition", EXIT),
-            db_connection=self.conn,
-            **kwargs,
+            core_reason=REASON if core.core_reason is None else core.core_reason,
+            core_exit_condition=EXIT
+            if core.core_exit_condition is None
+            else core.core_exit_condition,
         )
-        return res
-
-    def _store_normal(self, title, content=None, **kwargs):
+        if annotations is None:
+            annotations = EntityAnnotations()
         return store_memory(
             title=title,
             content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
-            agent_id=kwargs.pop("agent_id", "tester"),
+            provenance=provenance,
+            core=core,
+            annotations=annotations,
+            db_connection=self.conn,
+            **kwargs,
+        )
+
+    def _store_normal(self, title, content=None, *, provenance=None, **kwargs):
+        if provenance is None:
+            provenance = Provenance(agent_id="tester")
+        return store_memory(
+            title=title,
+            content=content or f"Distinct fixture content body for {title}, not a near-duplicate.",
+            provenance=provenance,
             db_connection=self.conn,
             **kwargs,
         )
@@ -421,10 +446,9 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Missing Reason Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            agent_id="tester",
-            is_core=True,
-            core_exit_condition=EXIT,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True, core_exit_condition=EXIT),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("core_reason", res)
@@ -433,10 +457,9 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Missing Exit Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            agent_id="tester",
-            is_core=True,
-            core_reason=REASON,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True, core_reason=REASON),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("core_exit_condition", res)
@@ -464,9 +487,9 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         res = store_memory(
             title="Not Actually Core",
             content="Content long enough to clear the quality gate's minimum length.",
-            agent_id="tester",
-            core_reason=REASON,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(core_reason=REASON),
         )
         self.assertTrue(res.startswith("Error"), res)
         self.assertIn("not core", res)
@@ -483,9 +506,9 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
             entity_id=entity_id,
             title="Preserve On Update",
             content="Distinct fixture content body for Preserve On Update, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(res2["status"], "ok")
         row = self.conn.execute(
@@ -499,7 +522,9 @@ class TestStoreMemoryCoreCreation(CoreGovernanceDbTestBase):
         # enforced a future-only core_review_after -- create/promote/consolidate could persist a
         # core that was immediately overdue.
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-        res = self._store_core("Born Overdue Core Attempt", core_review_after=past)
+        res = self._store_core(
+            "Born Overdue Core Attempt", core=CoreDeclaration(core_review_after=past)
+        )
         self.assertTrue(res.startswith("Error"), res)
 
 
@@ -561,11 +586,9 @@ class TestCapacityAdmission(CoreGovernanceDbTestBase):
             entity_id="99999999-9999-9999-9999-999999999999",
             title="Bypass Via Explicit ID",
             content="Distinct content body for the bypass attempt.",
-            agent_id="tester",
-            is_core=True,
-            core_reason=REASON,
-            core_exit_condition=EXIT,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True, core_reason=REASON, core_exit_condition=EXIT),
         )
         self.assertIsInstance(rejected, dict)
         self.assertEqual(rejected["status"], "rejected")
@@ -588,7 +611,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Core With Bad Detail",
             content=f"Content mentioning {fake_uuid} but the detail doesn't exist.",
-            detail_memory_ids=[fake_uuid],
+            core=CoreDeclaration(detail_memory_ids=[fake_uuid]),
         )
         self.assertTrue(res.startswith("Error"), res)
 
@@ -598,7 +621,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Core With Private Detail",
             content=f"References Private Detail Candidate ({detail_id}) as a detail.",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertTrue(res.startswith("Error"), res)
 
@@ -608,7 +631,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Core With Core Detail",
             content=f"References Core Detail Candidate ({detail_id}) as a detail.",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertTrue(res.startswith("Error"), res)
 
@@ -618,7 +641,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Core Missing Mention",
             content="This content never mentions the detail by title or UUID.",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertTrue(res.startswith("Error"), res)
 
@@ -628,7 +651,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core With Valid Detail",
             content=f"See Genuine Detail Memory ({detail_id}) for full rationale and evidence.",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertEqual(core_res["status"], "ok")
         core_id = core_res["data"]["id"]
@@ -649,7 +672,9 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             f"Detail Memory {i} ({did})" for i, did in enumerate(detail_ids)
         )
         res = self._store_core(
-            "Core With Too Many Details", content=content, detail_memory_ids=detail_ids
+            "Core With Too Many Details",
+            content=content,
+            core=CoreDeclaration(detail_memory_ids=detail_ids),
         )
         self.assertTrue(res.startswith("Error"), res)
 
@@ -666,7 +691,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core Retaining Detail Reference",
             content=f"See Retained Reference Detail ({detail_id}): {detail_content}",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         core_id = core_res["data"]["id"]
 
@@ -674,9 +699,9 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core Retaining Detail Reference",
             content=f"See Retained Reference Detail ({detail_id}): {detail_content}",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(updated["status"], "ok")
         row = self.conn.execute(
@@ -694,7 +719,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core Dropping Detail Reference",
             content=f"See Dropped Reference Detail ({detail_id}): {detail_content}",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         core_id = core_res["data"]["id"]
 
@@ -702,9 +727,9 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core Dropping Detail Reference",
             content="Entirely rewritten body that never mentions the old detail at all.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -725,7 +750,7 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core With Detail That Turns Private",
             content=f"See Detail Later Made Private ({detail_id}): {detail_content}",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         core_id = core_res["data"]["id"]
 
@@ -738,9 +763,9 @@ class TestDetailMemoryIds(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Core With Detail That Turns Private",
             content=f"See Detail Later Made Private ({detail_id}): {detail_content}",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
 
@@ -791,9 +816,9 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Reason Short",
             content="Distinct fixture content body for Malformed Preserved Reason Short, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
         self.assertIn("core_reason", rejected)
@@ -816,9 +841,9 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Reason Long",
             content="Distinct fixture content body for Malformed Preserved Reason Long, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
         self.assertIn("core_reason", rejected)
@@ -832,9 +857,9 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Exit Condition",
             content="Distinct fixture content body for Malformed Preserved Exit Condition, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
         self.assertIn("core_exit_condition", rejected)
@@ -852,9 +877,9 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Malformed Preserved Review After",
             content="Distinct fixture content body for Malformed Preserved Review After, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertTrue(rejected.startswith("Error"), rejected)
         self.assertIn("core_review_after", rejected)
@@ -880,9 +905,9 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Overdue Valid Review After Preserved",
             content="A reasonably long content body that will be shortened below.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
         row = self.conn.execute(
@@ -899,10 +924,12 @@ class TestPreservedLifecycleFieldsRevalidated(CoreGovernanceDbTestBase):
             entity_id=core_id,
             title="Corrected Reason Non Expanding Repair",
             content="Distinct fixture content body for Corrected Reason Non Expanding Repair, not a near-duplicate.",
-            agent_id="tester",
-            is_core=True,
-            core_reason="A freshly supplied, valid core reason that repairs the corrupted value.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="A freshly supplied, valid core reason that repairs the corrupted value.",
+            ),
         )
         self.assertEqual(repaired["status"], "ok")
         row = self.conn.execute(
@@ -959,9 +986,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
                 "character run, so it clears the quality gate and exercises the overdue-boundary "
                 "check on its own enlargement, not some unrelated rejection reason."
             ),
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(blocked["status"], "rejected")
         self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -978,9 +1005,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Overdue Self Shrink Target",
             content="A reasonably long content body that will be shortened below.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
 
@@ -1001,9 +1028,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Non Expanding Edit Target",
             content="A reasonably long content body here that will be shortened.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
 
@@ -1022,9 +1049,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="A Much Longer Replacement Title That Expands The Rendered Digest Slightly",
             content="A reasonably long content body that stays exactly this size.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(blocked["status"], "rejected")
         self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1041,10 +1068,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Reason Growth Target",
             content="A reasonably long content body that stays fixed.",
-            agent_id="tester",
-            is_core=True,
-            core_reason="A" * (CORE_REASON_MIN_CHARS + 40),
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True, core_reason="A" * (CORE_REASON_MIN_CHARS + 40)),
         )
         self.assertTrue(blocked.startswith("Error"), blocked)
         self.assertIn("overdue", blocked)
@@ -1061,10 +1087,11 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Exit Growth Target",
             content="A reasonably long content body that stays fixed.",
-            agent_id="tester",
-            is_core=True,
-            core_exit_condition="B" * (CORE_EXIT_MIN_CHARS + 40),
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(
+                is_core=True, core_exit_condition="B" * (CORE_EXIT_MIN_CHARS + 40)
+            ),
         )
         self.assertTrue(blocked.startswith("Error"), blocked)
         self.assertIn("overdue", blocked)
@@ -1084,10 +1111,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Equal Rendered Target",
             content="A reasonably long content body that stays fixed.",
-            agent_id="tester",
-            is_core=True,
-            core_reason="Z" * CORE_REASON_MIN_CHARS,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True, core_reason="Z" * CORE_REASON_MIN_CHARS),
         )
         self.assertEqual(allowed["status"], "ok")
 
@@ -1108,9 +1134,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="A Noticeably Longer Title",
             content="Much shorter but still quality-legal replacement body.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "rejected")
         self.assertEqual(allowed["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1135,9 +1161,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
                 "Core Is Overdue"
             ),
             content="A reasonably long content body that stays exactly this size.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(blocked["status"], "rejected")
         self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1153,9 +1179,9 @@ class TestOverdueBoundary(CoreGovernanceDbTestBase):
             entity_id=overdue_id,
             title="Overdue Shrink Target",
             content="A reasonably long content body here.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
 
@@ -1184,7 +1210,9 @@ class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
         )
 
     def test_existing_entity_omitted_type_preserves_persisted_type(self):
-        res = self._store_core("Effective Type Preserve Source", memory_type="decision")
+        res = self._store_core(
+            "Effective Type Preserve Source", annotations=EntityAnnotations(memory_type="decision")
+        )
         entity_id = res["data"]["id"]
         self.assertEqual(
             cgs.resolve_effective_memory_type(
@@ -1194,7 +1222,9 @@ class TestResolveEffectiveMemoryType(CoreGovernanceDbTestBase):
         )
 
     def test_existing_entity_explicit_type_overrides_persisted_type(self):
-        res = self._store_core("Effective Type Override Source", memory_type="decision")
+        res = self._store_core(
+            "Effective Type Override Source", annotations=EntityAnnotations(memory_type="decision")
+        )
         entity_id = res["data"]["id"]
         self.assertEqual(
             cgs.resolve_effective_memory_type(
@@ -1251,18 +1281,20 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         # post-fix, any positive rendered growth of the sole overdue core must reject.
         title = f"Type Preserve Overdue Target {memory_type}"
         content = f"A reasonably long content body distinct for the {memory_type} case."
-        res = self._store_core(title, content=content, memory_type=memory_type)
+        res = self._store_core(
+            title, content=content, annotations=EntityAnnotations(memory_type=memory_type)
+        )
         self.assertEqual(res["status"], "ok")
         target_id = res["data"]["id"]
         self._make_overdue(target_id)
 
         blocked = store_memory(
             entity_id=target_id,
-            title=title + "X",  # grows the rendered title by exactly 1 character
+            title=title + "X",
             content=content,
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(blocked["status"], "rejected")
         self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1297,7 +1329,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Non Expanding Type Preserve Target",
             content="A reasonably long content body that stays exactly this size.",
-            memory_type="preference",
+            annotations=EntityAnnotations(memory_type="preference"),
         )
         target_id = res["data"]["id"]
         self._make_overdue(target_id)
@@ -1306,9 +1338,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Non Expanding Type Preserve Target",
             content="A reasonably long content body that stays exactly this size.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
         row = self.conn.execute(
@@ -1323,7 +1355,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Explicit Type Change Target",
             content="A reasonably long content body that stays exactly this size.",
-            memory_type="fact",
+            annotations=EntityAnnotations(memory_type="fact"),
         )
         target_id = res["data"]["id"]
         self._make_overdue(target_id)
@@ -1335,10 +1367,10 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Explicit Type Change Target",
             content="A reasonably long content body that stays exactly this size.",
-            memory_type="preference",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
+            annotations=EntityAnnotations(memory_type="preference"),
         )
         self.assertEqual(blocked["status"], "rejected")
         self.assertEqual(blocked["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1352,10 +1384,10 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Explicit Type Change Target",
             content="A shorter but still legal replacement body.",
-            memory_type="preference",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
+            annotations=EntityAnnotations(memory_type="preference"),
         )
         self.assertEqual(allowed["status"], "rejected")
         self.assertEqual(allowed["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -1392,6 +1424,8 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             "single type accidentally hides the same class of bug again."
         )
 
+        # Disjoint from every filler's [i*40 : i*40+120] slice above (max end offset 240)
+        # so this creation can never collide on the exact-content-hash duplicate guard.
         filler_ids = []
         for i in range(CORE_MAX_ACTIVE - 1):
             title = f"Capacity Filler {i:04d}"
@@ -1399,8 +1433,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             res = self._store_core(
                 title,
                 content=passage[i * 40 : i * 40 + 120],
-                core_reason=reason_500,
-                core_exit_condition=exit_500,
+                core=CoreDeclaration(core_reason=reason_500, core_exit_condition=exit_500),
             )
             self.assertEqual(res["status"], "ok")
             filler_id = res["data"]["id"]
@@ -1416,12 +1449,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         self.assertEqual(len(target_title), 20)
         target_res = self._store_core(
             target_title,
-            # Disjoint from every filler's [i*40 : i*40+120] slice above (max end offset 240)
-            # so this creation can never collide on the exact-content-hash duplicate guard.
             content=passage[400:520],
-            core_reason=reason_500,
-            core_exit_condition=exit_500,
-            memory_type="preference",
+            core=CoreDeclaration(core_reason=reason_500, core_exit_condition=exit_500),
+            annotations=EntityAnnotations(memory_type="preference"),
         )
         self.assertEqual(target_res["status"], "ok")
         target_id = target_res["data"]["id"]
@@ -1436,9 +1466,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title=target_title,
             content=update_content,
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertIsInstance(rejected, dict)
         self.assertEqual(rejected["status"], "rejected")
@@ -1457,7 +1487,7 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
         res = self._store_core(
             "Digest Consistency Target",
             content="A reasonably long content body that stays exactly this size.",
-            memory_type="procedure",
+            annotations=EntityAnnotations(memory_type="procedure"),
         )
         target_id = res["data"]["id"]
 
@@ -1465,9 +1495,9 @@ class TestEffectiveMemoryTypeGovernanceSizing(CoreGovernanceDbTestBase):
             entity_id=target_id,
             title="Digest Consistency Target",
             content="A reasonably long content body that stays exactly this size.",
-            agent_id="tester",
-            is_core=True,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
+            core=CoreDeclaration(is_core=True),
         )
         self.assertEqual(allowed["status"], "ok")
 
@@ -1600,7 +1630,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core With Detail Later Promoted",
             content=f"See Detail Later Promoted To Core ({detail_id}): {detail_content}",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET is_core = 1 WHERE id = ?", (detail_id,))
@@ -1616,7 +1646,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
                 f"See Detail Later Made Private For Bootstrap ({detail_id}) for full rationale "
                 "and evidence."
             ),
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET scope = 'private' WHERE id = ?", (detail_id,))
@@ -1648,7 +1678,7 @@ class TestBootstrapDetailIdInvariants(CoreGovernanceDbTestBase):
         core_res = self._store_core(
             "Core With Archived Detail",
             content=f"See Archived Valid Detail ({detail_id}): {detail_content}",
-            detail_memory_ids=[detail_id],
+            core=CoreDeclaration(detail_memory_ids=[detail_id]),
         )
         self.assertEqual(core_res["status"], "ok")
         self.conn.execute("UPDATE entities SET status = 'archived' WHERE id = ?", (detail_id,))
@@ -1791,7 +1821,9 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
         self.assertNotIn("Error", content)
 
     def test_reviewer_identity_independent_of_entity_owner(self):
-        res = self._store_core("Owner Mismatch Core", agent_id="original_owner")
+        res = self._store_core(
+            "Owner Mismatch Core", provenance=Provenance(agent_id="original_owner")
+        )
         entity_id = res["data"]["id"]
 
         # archive_memory's public ownership guard would reject a mismatched agent_id; the
@@ -1810,7 +1842,7 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
     def test_archive_rejects_ordinary_active_non_core_memory(self):
         # Resolved review finding #3: review_core_memory(outcome='archive') must not become a
         # second, ownership-neutral general-purpose archive API for every ordinary memory.
-        res = self._store_normal("Ordinary Active Memory", agent_id="alice")
+        res = self._store_normal("Ordinary Active Memory", provenance=Provenance(agent_id="alice"))
         entity_id = res["data"]["id"]
 
         result = cgs.review_core_memory(
@@ -1866,7 +1898,9 @@ class TestReviewCoreMemory(CoreGovernanceDbTestBase):
     def test_archive_via_review_does_not_weaken_public_archive_memory_guard(self):
         from saltmdb.domain.services.memory_service import archive_memory
 
-        res = self._store_normal("Public Guard Untouched Entity", agent_id="original_owner")
+        res = self._store_normal(
+            "Public Guard Untouched Entity", provenance=Provenance(agent_id="original_owner")
+        )
         entity_id = res["data"]["id"]
         result = archive_memory(
             entity_id=entity_id, agent_id="someone_else", db_connection=self.conn
@@ -1921,9 +1955,7 @@ class TestServices2CoreBoundaries(CoreGovernanceDbTestBase):
             f"Detail {index} ({uid})" for index, uid in enumerate(ids)
         )
         result = self._store_core(
-            "Detail evidence",
-            content,
-            detail_memory_ids=ids,
+            title="Detail evidence", content=content, core=CoreDeclaration(detail_memory_ids=ids)
         )
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(
@@ -1939,9 +1971,9 @@ class TestServices2CoreBoundaries(CoreGovernanceDbTestBase):
             f"Detail {index} ({uid})" for index, uid in enumerate(ids)
         )
         duplicate = self._store_core(
-            "Normalized Duplicate Details",
-            duplicate_content,
-            detail_memory_ids=[f" {ids[1].upper()} ", ids[0], ids[1]],
+            title="Normalized Duplicate Details",
+            content=duplicate_content,
+            core=CoreDeclaration(detail_memory_ids=[f" {ids[1].upper()} ", ids[0], ids[1]]),
         )
         self.assertEqual(duplicate["status"], "ok", duplicate)
         self.assertEqual(
@@ -1969,7 +2001,11 @@ class TestServices2CoreBoundaries(CoreGovernanceDbTestBase):
             "Canonical Detail is mentioned without the full identifier.",
         ):
             with self.subTest(content=content):
-                result = self._store_core("Missing One Mention", content, detail_memory_ids=[uid])
+                result = self._store_core(
+                    title="Missing One Mention",
+                    content=content,
+                    core=CoreDeclaration(detail_memory_ids=[uid]),
+                )
                 self.assertTrue(result.startswith("Error"), result)
                 self.assertIn("must mention both", result)
 
@@ -2063,7 +2099,7 @@ class TestServices2CoreBoundaries(CoreGovernanceDbTestBase):
     def test_non_core_detail_only_write_rejected_with_exact_message(self):
         result = self._store_normal(
             "Non-core detail-only write",
-            detail_memory_ids=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            core=CoreDeclaration(detail_memory_ids=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
         )
         self.assertEqual(
             result,

@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -6,7 +7,7 @@ from unittest.mock import MagicMock
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import librarian_service
-from saltmdb.domain.services.memory_service import store_memory, Provenance
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation, bulk_commit_consolidation
 
 
@@ -36,16 +37,16 @@ class TestLibrarianService(unittest.TestCase):
         res1 = store_memory(
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation",
-            agent_id="agent1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         id1 = res1["data"]["id"]
 
         res2 = store_memory(
             title="Parent Fact B",
             content="Detailed description of Fact B for testing consolidation",
-            agent_id="agent1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         id2 = res2["data"]["id"]
 
@@ -82,8 +83,8 @@ class TestLibrarianService(unittest.TestCase):
             result = store_memory(
                 title=title,
                 content=f"Detailed description of {title} for the bulk atomicity regression test",
-                agent_id="agent1",
                 db_path=self.db_path,
+                provenance=Provenance(agent_id="agent1"),
             )
             parents.append(result["data"]["id"])
 
@@ -132,8 +133,8 @@ class TestLibrarianService(unittest.TestCase):
         memory = store_memory(
             title="Tag merge association",
             content="Association target content with enough detail for the memory quality checks.",
-            agent_id="agent1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         self.assertIsInstance(memory, dict)
         self.assertEqual(memory["status"], "ok", memory)

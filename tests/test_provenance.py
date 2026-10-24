@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import inspect
 from unittest.mock import patch
 
@@ -6,7 +7,6 @@ import pytest
 from saltmdb.daemon import dispatch
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import (
-    Provenance,
     lifecycle,
     revise_memory,
     store_memory,
@@ -35,10 +35,10 @@ def _seed(
         title=title,
         content=f"A complete predecessor memory for provenance coverage: {title}.",
         tags=["#provenance"],
-        agent_id=agent_id,
-        context_id=context_id,
-        agent_session_id=agent_session_id,
         db_connection=conn,
+        provenance=Provenance(
+            agent_id=agent_id, context_id=context_id, agent_session_id=agent_session_id
+        ),
     )
     assert result["status"] == "ok"
     return result["data"]["id"]

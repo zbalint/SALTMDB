@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance
 import unittest
 import tempfile
 import os
@@ -5,7 +6,7 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, Provenance, CoreDeclaration
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation, bulk_commit_consolidation
 
 
@@ -58,11 +59,13 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Test fixture core reason for consolidation-governance regression coverage.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for consolidation-governance regression coverage.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
         self.assertEqual(res["status"], "ok")
         return res["data"]["id"]
@@ -71,8 +74,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         self.assertEqual(res["status"], "ok")
         return res["data"]["id"]
@@ -87,8 +90,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Fact Parent",
             content="An ordinary non-core fact used alongside the core rule.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         res = commit_consolidation(
@@ -114,14 +117,14 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         p1 = store_memory(
             title="Plain Fact One",
             content="An ordinary non-core fact, part one.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
         p2 = store_memory(
             title="Plain Fact Two",
             content="An ordinary non-core fact, part two.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         res = commit_consolidation(
@@ -143,8 +146,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Explicit Core Partner",
             content="An ordinary partner for the explicit core lifecycle test.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         rejected = commit_consolidation(
@@ -248,8 +251,8 @@ class TestConsolidationIsCoreInheritance(unittest.TestCase):
         plain_parent = store_memory(
             title="Plain Demotion Partner",
             content="An ordinary partner for the explicit core demotion test.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         res = commit_consolidation(
@@ -410,11 +413,13 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Test fixture core reason for consolidation-overdue regression coverage.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for consolidation-overdue regression coverage.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
         self.assertEqual(res["status"], "ok")
         return res["data"]["id"]
@@ -423,8 +428,8 @@ class TestConsolidationOverdueBoundary(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         self.assertEqual(res["status"], "ok")
         return res["data"]["id"]
@@ -642,8 +647,8 @@ class TestConsolidationToctou(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         self.assertEqual(res["status"], "ok")
         return res["data"]["id"]

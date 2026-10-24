@@ -1,8 +1,9 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, Provenance
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -24,8 +25,8 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         res1 = store_memory(
             title="Parent Fact A",
             content="Detailed description of Fact A for testing consolidation embedding",
-            agent_id="agent1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         self.assertEqual(res1["status"], "ok")
         id1 = res1["data"]["id"]
@@ -33,8 +34,8 @@ class TestConsolidationEmbeddingTrigger(unittest.TestCase):
         res2 = store_memory(
             title="Parent Fact B",
             content="Detailed description of Fact B for testing consolidation embedding",
-            agent_id="agent1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         self.assertEqual(res2["status"], "ok")
         id2 = res2["data"]["id"]

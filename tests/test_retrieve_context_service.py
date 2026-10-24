@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance
 import os
 import re
 import shutil
@@ -58,9 +59,9 @@ class TestRetrieveContextService(unittest.TestCase):
             store_memory(
                 content=content or f"Retrieve context fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id=agent_id,
-                memory_type=memory_type,
                 db_connection=self.conn,
+                provenance=Provenance(agent_id=agent_id),
+                annotations=EntityAnnotations(memory_type=memory_type),
             )
         )
 

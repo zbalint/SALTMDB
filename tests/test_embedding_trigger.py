@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -23,8 +24,8 @@ class TestEmbeddingTrigger(unittest.TestCase):
         res = store_memory(
             title="Async Embedding Test Memory",
             content="Content for testing async background embedding generation worker pool",
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
         entity_id = res["data"]["id"]
 

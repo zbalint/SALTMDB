@@ -1,4 +1,5 @@
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import Provenance
 
 import os
 import shutil
@@ -8,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import relation_service as relations
-from saltmdb.domain.services.memory_service import Provenance, store_memory
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import consolidate_memories
 
 
@@ -39,8 +40,8 @@ class TestConsolidationPreflight(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Detailed, durable description of {title} used in preflight tests.",
-            agent_id="other-owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other-owner"),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]
@@ -112,8 +113,8 @@ class TestConsolidationPreflight(unittest.TestCase):
         duplicate = store_memory(
             title="Existing duplicate",
             content="A durable canonical result used by preflight characterization.",
-            agent_id="other-owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other-owner"),
         )
         self.assertEqual(duplicate["status"], "ok")
         close = Mock()
@@ -171,8 +172,8 @@ class TestConsolidationPreflight(unittest.TestCase):
         duplicate = store_memory(
             title="Existing caller duplicate",
             content="A durable canonical result used by preflight characterization.",
-            agent_id="other-owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other-owner"),
         )
         self.assertEqual(duplicate["status"], "ok")
         close = Mock()

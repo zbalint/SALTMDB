@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -23,9 +24,8 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Shor Factorization Algorithm",
             content="Shor algorithm factorizes integers in polynomial time using QFT",
             tags=["#quantum", "#crypto"],
-            agent_id="user1",
-            context_id="ctx_quantum",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1", context_id="ctx_quantum"),
         )
         id1 = res1["data"]["id"]
 
@@ -33,9 +33,8 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Grover Database Search",
             content="Grover search algorithm provides quadratic speedup for unorganized datasets",
             tags=["#quantum", "#search"],
-            agent_id="user1",
-            context_id="ctx_quantum",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1", context_id="ctx_quantum"),
         )
         id2 = res2["data"]["id"]
 
@@ -74,9 +73,8 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Co-Resident Partner A",
             content="First half of a co-resident relation pair used to test related_entities visibility",
             tags=["#coresidenttest"],
-            agent_id="user1",
-            context_id="ctx_coresident",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1", context_id="ctx_coresident"),
         )
         id1 = res1["data"]["id"]
 
@@ -84,9 +82,8 @@ class TestE2EHybridSearch(unittest.TestCase):
             title="Co-Resident Partner B",
             content="Second half of a co-resident relation pair used to test related_entities visibility",
             tags=["#coresidenttest"],
-            agent_id="user1",
-            context_id="ctx_coresident",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1", context_id="ctx_coresident"),
         )
         id2 = res2["data"]["id"]
 
@@ -123,8 +120,8 @@ class TestE2EHybridSearch(unittest.TestCase):
         store_memory(
             title="Explain Test",
             content="Content for explain mode test",
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
         explain_res = search_memory(
             query_keywords="content explain", explain_mode=True, db_path=self.db_path

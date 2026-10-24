@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, EntityAnnotations, Provenance
 import inspect
 from datetime import datetime, timedelta, timezone
 import os
@@ -11,9 +12,6 @@ from saltmdb.db.connection import write_transaction
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import relation_service
 from saltmdb.domain.services.memory_service import (
-    CoreDeclaration,
-    EntityAnnotations,
-    Provenance,
     store_memory,
 )
 from saltmdb.domain.services.relation_service import (
@@ -43,8 +41,8 @@ class TestConsolidationGrouping(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Durable consolidation grouping fixture for {title}.",
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]
@@ -259,11 +257,13 @@ class TestConsolidationGrouping(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Durable active core fixture for {title}.",
-            agent_id="core-parent-agent",
-            is_core=True,
-            core_reason="A distinct core reason for this grouping test fixture.",
-            core_exit_condition="A distinct exit condition for this grouping test fixture.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="core-parent-agent"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="A distinct core reason for this grouping test fixture.",
+                core_exit_condition="A distinct exit condition for this grouping test fixture.",
+            ),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]

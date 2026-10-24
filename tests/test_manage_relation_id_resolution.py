@@ -6,6 +6,7 @@ import uuid as uuid_mod
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service, relation_service
+from saltmdb.domain.services.memory_service import Provenance
 
 
 def _store(conn, title, content=None, **kw):
@@ -15,7 +16,7 @@ def _store(conn, title, content=None, **kw):
     res = memory_service.store_memory(
         content=content,
         title=title,
-        agent_id="owner_a",
+        provenance=Provenance(agent_id="owner_a"),
         db_connection=conn,
         **kw,
     )
@@ -43,8 +44,8 @@ class TestManageRelationIdResolution(unittest.TestCase):
     # -- store_relation --------------------------------------------------
 
     def test_store_relation_resolves_short_prefix_on_both_ends(self):
-        source_id = _store(self.conn, "Prefix Source")
-        target_id = _store(self.conn, "Prefix Target")
+        source_id = _store(conn=self.conn, title="Prefix Source")
+        target_id = _store(conn=self.conn, title="Prefix Target")
         result = relation_service.store_relation(
             source_id=source_id[:8],
             target_id=target_id[:8],
@@ -59,7 +60,7 @@ class TestManageRelationIdResolution(unittest.TestCase):
         self.assertEqual(row, (source_id, target_id))
 
     def test_store_relation_unknown_id_gives_named_error_not_fk_crash(self):
-        target_id = _store(self.conn, "Real Target")
+        target_id = _store(conn=self.conn, title="Real Target")
         result = relation_service.store_relation(
             source_id="deadbeef00000000",  # well-formed hex, matches nothing
             target_id=target_id,
@@ -72,7 +73,7 @@ class TestManageRelationIdResolution(unittest.TestCase):
 
     def test_store_relation_ambiguous_prefix_lists_candidates(self):
         # Two entities sharing an 8-char prefix collide deliberately by forcing the id.
-        id_a = _store(self.conn, "Ambiguous A")
+        id_a = _store(conn=self.conn, title="Ambiguous A")
         shared_prefix = id_a[:8]
         # Craft a second, otherwise-unrelated UUID that starts with the same 8 hex chars.
         id_b = shared_prefix + str(uuid_mod.uuid4())[8:]
@@ -82,7 +83,7 @@ class TestManageRelationIdResolution(unittest.TestCase):
             "datetime('now'), 'owner_a', 'Ambiguous B', 'body text here', 'raw')",
             (id_b,),
         )
-        target_id = _store(self.conn, "Some Target")
+        target_id = _store(conn=self.conn, title="Some Target")
         result = relation_service.store_relation(
             source_id=shared_prefix,
             target_id=target_id,
@@ -97,8 +98,8 @@ class TestManageRelationIdResolution(unittest.TestCase):
     # -- invalidate_relation ----------------------------------------------
 
     def test_invalidate_relation_resolves_short_prefix(self):
-        source_id = _store(self.conn, "Invalidate Source")
-        target_id = _store(self.conn, "Invalidate Target")
+        source_id = _store(conn=self.conn, title="Invalidate Source")
+        target_id = _store(conn=self.conn, title="Invalidate Target")
         relation_service.store_relation(
             source_id=source_id,
             target_id=target_id,
@@ -115,7 +116,7 @@ class TestManageRelationIdResolution(unittest.TestCase):
         self.assertIn("invalidated", result["data"]["message"])
 
     def test_invalidate_relation_unknown_id_gives_named_error(self):
-        target_id = _store(self.conn, "Invalidate Target Only")
+        target_id = _store(conn=self.conn, title="Invalidate Target Only")
         result = relation_service.invalidate_relation(
             source_id="cafebabe00000000",
             target_id=target_id,
@@ -129,15 +130,15 @@ class TestManageRelationIdResolution(unittest.TestCase):
     # -- consolidation parent resolution ------------------------------------
 
     def test_consolidation_parent_resolution_accepts_short_prefix(self):
-        parent_a = _store(self.conn, "Consolidation Parent A")
-        parent_b = _store(self.conn, "Consolidation Parent B")
+        parent_a = _store(conn=self.conn, title="Consolidation Parent A")
+        parent_b = _store(conn=self.conn, title="Consolidation Parent B")
         resolved = relation_service._resolve_and_filter_parent_ids(
             self.conn, [parent_a[:8], parent_b[:8]]
         )
         self.assertEqual(set(resolved), {parent_a, parent_b})
 
     def test_consolidation_parent_resolution_drops_unresolvable(self):
-        parent_a = _store(self.conn, "Consolidation Parent Only")
+        parent_a = _store(conn=self.conn, title="Consolidation Parent Only")
         resolved = relation_service._resolve_and_filter_parent_ids(
             self.conn, [parent_a, "deadbeef00000000"]
         )

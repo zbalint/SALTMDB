@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance
 import unittest
 import os
 import tempfile
@@ -68,18 +69,18 @@ class TestBugFixes(unittest.TestCase):
         store_memory(
             "Memory A content text for testing multi-tag matching.",
             tags=["#tagAlpha", "#tagBeta"],
-            agent_id="agent1",
             scope="shared",
             title="Memory A",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
         store_memory(
             "Memory B content text for testing single-tag matching.",
             tags=["#tagAlpha"],
-            agent_id="agent1",
             scope="shared",
             title="Memory B",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="agent1"),
         )
 
         res_or = search_memory(
@@ -101,16 +102,20 @@ class TestBugFixes(unittest.TestCase):
         """P2-2 Fix Verification: Ensure shared memory exact hash deduplication catches cross-agent duplicates."""
         shared_text = "# Global Architecture Policy\n\nAll services must communicate exclusively via gRPC interfaces."
         res1 = store_memory(
-            shared_text, agent_id="AgentA", scope="shared", title="Policy", db_path=self.db_path
+            shared_text,
+            scope="shared",
+            title="Policy",
+            db_path=self.db_path,
+            provenance=Provenance(agent_id="AgentA"),
         )
         self.assertEqual(res1["status"], "ok")
 
         res2 = store_memory(
             shared_text,
-            agent_id="AgentB",
             scope="shared",
             title="Policy Copy",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="AgentB"),
         )
         self.assertEqual(res2["status"], "rejected")
         self.assertEqual(res2["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
@@ -122,13 +127,15 @@ class TestBugFixes(unittest.TestCase):
         )
         res = store_memory(
             mem_text,
-            agent_id="AgentA",
             scope="shared",
-            is_core=True,
             title="Core Guideline",
             db_path=self.db_path,
-            core_reason="Test fixture core reason for the is_core flag persistence regression test.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            provenance=Provenance(agent_id="AgentA"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the is_core flag persistence regression test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
         self.assertEqual(res["status"], "ok")
 
@@ -145,10 +152,10 @@ class TestBugFixes(unittest.TestCase):
         res_update = store_memory(
             updated_text,
             entity_id=entity_id,
-            agent_id="AgentA",
             scope="shared",
             title="Core Guideline",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="AgentA"),
         )
         self.assertEqual(res_update["status"], "ok")
 

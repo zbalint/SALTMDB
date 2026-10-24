@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance, StoreScores
 import os
 import shutil
 import tempfile
@@ -22,8 +23,8 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             title="Immutable Write Test",
             content=self.body,
             tags=["#original"],
-            agent_id="legacy-tests",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="legacy-tests"),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]
@@ -39,8 +40,8 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             title="Changed Immutable Title",
             content="A complete and sufficiently descriptive changed body.",
             tags=["#changed"],
-            agent_id="legacy-tests",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="legacy-tests"),
         )
 
         self.assertEqual(result["status"], "rejected")
@@ -65,9 +66,9 @@ class TestLegacyStoreImmutability(unittest.TestCase):
             entity_id=entity_id,
             title="Immutable Write Test",
             content=self.body,
-            agent_id="legacy-tests",
-            weight=5,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="legacy-tests"),
+            scores=StoreScores(weight=5),
         )
 
         self.assertEqual(result["status"], "ok")
@@ -89,8 +90,8 @@ class TestLegacyStoreImmutability(unittest.TestCase):
         result = store_memory(
             title="Immutable Write Test",
             content="A complete and sufficiently descriptive same-title replacement body.",
-            agent_id="legacy-tests",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="legacy-tests"),
         )
 
         self.assertEqual(result["status"], "rejected")

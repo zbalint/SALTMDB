@@ -1,10 +1,11 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance
 import unittest
 import tempfile
 import os
 import shutil
 from unittest.mock import patch
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, archive_memory, Provenance
+from saltmdb.domain.services.memory_service import store_memory, archive_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -51,8 +52,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
         p1 = store_memory(
             title="Archived Candidate",
             content="Content that will be archived and then metadata-patched.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         p1 = self._id(p1)
 
@@ -65,11 +66,13 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             entity_id=p1,
             title="Archived Candidate",
             content="Content that will be archived and then metadata-patched.",
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Test fixture core reason for the archived-entity status preservation regression test.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the archived-entity status preservation regression test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
 
         status, valid_to, is_core = self._row(p1)
@@ -81,15 +84,15 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
         p1 = store_memory(
             title="Consolidation Source",
             content="Raw source memory that will be folded into a consolidation.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         p1 = self._id(p1)
         p2 = store_memory(
             title="Second Consolidation Source",
             content="A second raw source memory required by the consolidation lifecycle contract.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         p2 = self._id(p2)
 
@@ -109,11 +112,13 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             entity_id=consolidated_id,
             title="Consolidated Result",
             content="Synthesized content produced from the raw source memory.",
-            agent_id="agent_c",
-            is_core=True,
-            core_reason="Test fixture core reason for the consolidated-entity status preservation regression test.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the consolidated-entity status preservation regression test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
 
         status, valid_to, is_core = self._row(consolidated_id)
@@ -124,8 +129,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
         p1 = store_memory(
             title="Raw Entry",
             content="Original raw content.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
         p1 = self._id(p1)
 
@@ -133,8 +138,8 @@ class TestStoreMemoryStatusPreservation(unittest.TestCase):
             entity_id=p1,
             title="Raw Entry Updated",
             content="Updated raw content.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
 
         self.assertEqual(result["status"], "rejected")

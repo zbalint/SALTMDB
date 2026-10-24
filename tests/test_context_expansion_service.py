@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import re
 import shutil
@@ -38,8 +39,8 @@ class TestContextExpansionService(unittest.TestCase):
             store_memory(
                 content=f"Context expansion fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="context-expansion-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="context-expansion-test"),
             )
         )
 

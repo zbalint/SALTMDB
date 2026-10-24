@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance
 import unittest
 import tempfile
 import os
@@ -24,14 +25,14 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         m1 = store_memory(
             title="[SALTMDB] Entity Alpha",
             content="# Entity Alpha\n\nContent for alpha entity.",
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         m2 = store_memory(
             title="[SALTMDB] Entity Beta",
             content="# Entity Beta\n\nContent for beta entity.",
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(m1["status"], "ok")
         self.assertEqual(m2["status"], "ok")
@@ -446,8 +447,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Episodic Memory Test",
             content="# Episodic Memory\n\nContent for episodic memory test.",
             tags=["episodic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
@@ -468,10 +469,10 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
         res = store_memory(
             title="[SALTMDB] Hybrid Memory Type and Tag",
             content="# Hybrid Memory\n\nContent with memory_type and canonical tag.",
-            memory_type="event",
             tags=["episodic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
+            annotations=EntityAnnotations(memory_type="event"),
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
@@ -492,8 +493,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity With Tags",
             content="# New Entity\n\nSome body text for new entity with tags.",
             tags=["semantic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res1["status"], "ok")
         self.assertIn("manage_relation", res1["data"]["message"])
@@ -503,8 +504,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity Without Tags",
             content="# New Entity\n\nSome body text for new entity without tags.",
             tags=[],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res2["status"], "ok")
         self.assertNotIn("manage_relation", res2["data"]["message"])
@@ -516,8 +517,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Brand New Entity With Tags Updated",
             content="# New Entity Updated\n\nUpdated body text for new entity with tags.",
             tags=["semantic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res3["status"], "rejected")
         self.assertEqual(res3["errors"][0]["code"], "IMMUTABLE_MEMORY")
@@ -529,8 +530,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Quantum Encryption Standard Protocol",
             content="# Quantum Encryption\n\nQuantum key distribution uses polarized photons to establish secure shared keys.",
             tags=["semantic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         entity_id_1 = res1["data"]["id"]
 
@@ -540,8 +541,8 @@ class TestBitemporalRelationsAndCanonicalTags(unittest.TestCase):
             title="[SALTMDB] Quantum Key Distribution Protocol Variant",
             content="# Quantum Encryption Variant\n\nQuantum key distribution utilizes polarized photons to establish safe shared keys.",
             tags=["semantic"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res2["status"], "ok")
         self.assertNotEqual(res2["data"]["id"], entity_id_1)

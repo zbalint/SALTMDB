@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import re
 import shutil
@@ -166,8 +167,8 @@ class TestViewerReworkContracts(unittest.TestCase):
         store_memory(
             content="Viewer rework contract test memory with sufficient useful content.",
             title="Viewer Contract Memory",
-            agent_id="viewer_test",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="viewer_test"),
         )
         state = _DaemonState(self.db_path, "test", True)
         state.service_port = 12345

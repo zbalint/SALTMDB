@@ -1,9 +1,9 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services.memory_service import (
-    Provenance,
     archive_memory,
     revise_memory,
     store_memory,
@@ -28,8 +28,8 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         res = store_memory(
             title="Test Unique Memory",
             content="Some unique content to test archived embedding status",
-            agent_id="test_user",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test_user"),
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]
@@ -77,8 +77,8 @@ class TestArchivedEmbeddingStatus(unittest.TestCase):
         res = store_memory(
             title="Original Memory Entry",
             content="Original content text block",
-            agent_id="test_user",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test_user"),
         )
         self.assertEqual(res["status"], "ok")
         entity_id = res["data"]["id"]

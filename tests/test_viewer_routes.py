@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import CoreDeclaration, EntityAnnotations, Provenance
 import unittest
 import tempfile
 import os
@@ -10,7 +11,7 @@ import numpy as np
 from saltmdb.db.schema import init_db
 from saltmdb.viewer.routes import SALTMDBHandler
 from saltmdb.domain.services import relation_service
-from saltmdb.domain.services.memory_service import store_memory, Provenance, SearchCriteria
+from saltmdb.domain.services.memory_service import store_memory, SearchCriteria
 from saltmdb.domain.services.relation_service import commit_consolidation
 
 
@@ -994,8 +995,8 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         return self._memory_id(res)
 
@@ -1105,11 +1106,13 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             store_memory(
                 content="Core architectural fact memory content",
                 title="Core Architecture Fact",
-                agent_id="viewer_tester",
-                is_core=True,
-                core_reason="Test fixture core reason for the viewer is_core filter regression test.",
-                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="viewer_tester"),
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="Test fixture core reason for the viewer is_core filter regression test.",
+                    core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+                ),
             )
         )
 
@@ -1117,9 +1120,9 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
             store_memory(
                 content="Non-core ephemeral detail content",
                 title="Non Core Detail",
-                agent_id="viewer_tester",
-                is_core=False,
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="viewer_tester"),
+                core=CoreDeclaration(is_core=False),
             )
         )
 
@@ -1170,30 +1173,51 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         self.assertIn("error", captured_invalid["data"])
 
     def test_get_entities_is_core_combines_with_other_filters_and_pagination(self):
-        def create_entity(title, is_core, memory_type):
-            core_kwargs = {}
-            if is_core:
-                core_kwargs = {
-                    "core_reason": "Test fixture core reason for the viewer entities is_core filter test.",
-                    "core_exit_condition": "Test fixture exit condition: this regression test tears down its temp DB.",
-                }
+        def create_entity(title, core, annotations):
             result = store_memory(
                 content=f"Unique content for {title}",
                 title=title,
-                agent_id="viewer_tester",
-                is_core=is_core,
-                memory_type=memory_type,
+                provenance=Provenance(agent_id="viewer_tester"),
+                annotations=annotations,
+                core=core,
                 db_connection=self.conn,
-                **core_kwargs,
             )
             return self._memory_id(result)
 
         matching_ids = {
-            create_entity("Core Decision One", True, "decision"),
-            create_entity("Core Decision Two", True, "decision"),
+            create_entity(
+                title="Core Decision One",
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="Test fixture core reason for the viewer entities is_core filter test.",
+                    core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+                ),
+                annotations=EntityAnnotations(memory_type="decision"),
+            ),
+            create_entity(
+                title="Core Decision Two",
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="Test fixture core reason for the viewer entities is_core filter test.",
+                    core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+                ),
+                annotations=EntityAnnotations(memory_type="decision"),
+            ),
         }
-        create_entity("Non Core Decision", False, "decision")
-        create_entity("Core Fact", True, "fact")
+        create_entity(
+            title="Non Core Decision",
+            core=CoreDeclaration(is_core=False),
+            annotations=EntityAnnotations(memory_type="decision"),
+        )
+        create_entity(
+            title="Core Fact",
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the viewer entities is_core filter test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
+            annotations=EntityAnnotations(memory_type="fact"),
+        )
 
         handler = self._handler()
         query = {
@@ -1231,11 +1255,13 @@ class TestViewerRoutesLineageAndParentIds(unittest.TestCase):
         store_memory(
             content="Unique keyword quantum ground state core memory",
             title="Quantum Ground State",
-            agent_id="viewer_tester",
-            is_core=True,
-            core_reason="Test fixture core reason for the viewer search is_core filter regression test.",
-            core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="viewer_tester"),
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="Test fixture core reason for the viewer search is_core filter regression test.",
+                core_exit_condition="Test fixture exit condition: this regression test tears down its temp DB.",
+            ),
         )
 
         handler = self._handler()

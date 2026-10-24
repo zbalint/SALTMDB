@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import sqlite3
 import re
@@ -43,8 +44,8 @@ class TestConflictSetService(unittest.TestCase):
             store_memory(
                 content=f"Conflict-set fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="conflict-set-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="conflict-set-test"),
             )
         )
 

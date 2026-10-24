@@ -1,4 +1,5 @@
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -49,28 +50,29 @@ def _store(connection, title, **options: Any):
         "title": title,
         "content": content
         or f"Durable content for {title}. This body is long enough to satisfy the repository quality gate and remains stable for assertions.",
-        "agent_id": agent_id,
+        "provenance": Provenance(agent_id=agent_id),
         "scope": scope,
         "tags": tags,
         "db_connection": connection,
     }
     if retrieval_text is not None:
         kwargs["retrieval_text"] = retrieval_text
+    kwargs.update(options)
     result = store_memory(**kwargs)
     assert result["status"] == "ok", result
     return result["data"]["id"]
 
 
-def _store_core(connection, title, *, agent_id="owner"):
+def _store_core(connection, title, *, agent_id="owner", content=None, **options: Any):
     result = store_memory(
         title=title,
-        content=f"Durable core content for {title}. This body is long enough to satisfy the repository quality gate and remains stable for assertions.",
-        agent_id=agent_id,
+        content=content
+        or f"Durable core content for {title}. This body is long enough for the quality gate and remains stable for assertions.",
         scope="shared",
-        is_core=True,
-        core_reason=REASON,
-        core_exit_condition=EXIT,
         db_connection=connection,
+        provenance=Provenance(agent_id=agent_id),
+        core=CoreDeclaration(is_core=True, core_reason=REASON, core_exit_condition=EXIT),
+        **options,
     )
     assert result["status"] == "ok", result
     return result["data"]["id"]
@@ -113,7 +115,7 @@ def _snapshot(connection):
 
 def test_promotes_own_shared_memory_and_preserves_identity(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store(connection, "Promotion Target")
+    memory_id = _store(connection=connection, title="Promotion Target")
     before = connection.execute(
         "SELECT updated_at, title, full_content, is_core FROM entities WHERE id = ?", (memory_id,)
     ).fetchone()
@@ -139,7 +141,7 @@ def test_promotes_own_shared_memory_and_preserves_identity(harness):
 
 def test_edit_keeps_review_date_and_bumps_timestamp(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store_core(connection, "Edit Target")
+    memory_id = _store_core(connection=connection, title="Edit Target")
     before = connection.execute(
         "SELECT updated_at, core_review_after FROM entities WHERE id = ?", (memory_id,)
     ).fetchone()
@@ -158,7 +160,7 @@ def test_edit_keeps_review_date_and_bumps_timestamp(harness):
 
 def test_identical_repeat_is_noop_before_admission(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store_core(connection, "Repeat Target")
+    memory_id = _store_core(connection=connection, title="Repeat Target")
     before = connection.execute(
         "SELECT updated_at FROM entities WHERE id = ?", (memory_id,)
     ).fetchone()[0]
@@ -176,10 +178,10 @@ def test_identical_repeat_is_noop_before_admission(harness):
 def test_detail_declaration_set_omitted_kept_and_empty_clears(harness):
     _db_path, connection, coordinator, _mode = harness
     detail_text = "Core governance detail explains the same bootstrap hazard and review boundary."
-    detail_id = _store(connection, "Core Governance Detail", content=detail_text)
+    detail_id = _store(connection=connection, title="Core Governance Detail", content=detail_text)
     core_id = _store(
-        connection,
-        "Core With Detail",
+        connection=connection,
+        title="Core With Detail",
         content=f"{detail_text}\n\nThe detail title is Core Governance Detail and UUID {detail_id}.",
     )
     result = _call(
@@ -225,10 +227,12 @@ def test_demote_then_promote_omitted_details_clears_stale_declaration(harness):
     detail_text = (
         "Stale core governance detail explains the same bootstrap hazard and review boundary."
     )
-    detail_id = _store(connection, "Stale Core Governance Detail", content=detail_text)
+    detail_id = _store(
+        connection=connection, title="Stale Core Governance Detail", content=detail_text
+    )
     core_id = _store(
-        connection,
-        "Stale Core",
+        connection=connection,
+        title="Stale Core",
         content=f"{detail_text}\n\nThe detail title is Stale Core Governance Detail and UUID {detail_id}.",
     )
     assert (
@@ -270,8 +274,15 @@ def test_demote_then_promote_omitted_details_clears_stale_declaration(harness):
 
 def test_foreign_shared_is_immutable_private_is_not_found_and_unknown_is_not_found(harness):
     _db_path, connection, coordinator, _mode = harness
-    shared_id = _store(connection, "Foreign Shared", agent_id="other")
-    private_id = _store(connection, "Foreign Private", agent_id="other", scope="private")
+    shared_id = _store(
+        connection=connection, title="Foreign Shared", provenance=Provenance(agent_id="other")
+    )
+    private_id = _store(
+        connection=connection,
+        title="Foreign Private",
+        scope="private",
+        provenance=Provenance(agent_id="other"),
+    )
     for memory_id, code in (
         (shared_id, "IMMUTABLE_MEMORY"),
         (private_id, "NOT_FOUND"),
@@ -286,14 +297,14 @@ def test_foreign_shared_is_immutable_private_is_not_found_and_unknown_is_not_fou
 
 def test_archived_status_and_self_detail_are_zero_write_rejections(harness):
     _db_path, connection, coordinator, _mode = harness
-    archived = _store(connection, "Archived Target")
+    archived = _store(connection=connection, title="Archived Target")
     connection.execute("UPDATE entities SET status = 'archived' WHERE id = ?", (archived,))
     before = _snapshot(connection)
     result = _call(connection, coordinator, memory_id=archived)
     assert result["status"] == "rejected"
     assert result["errors"][0]["code"] == "CONFLICT"
     assert _snapshot(connection) == before
-    raw = _store(connection, "Self Detail Target")
+    raw = _store(connection=connection, title="Self Detail Target")
     before = _snapshot(connection)
     result = _call(
         connection, coordinator, memory_id=raw, detail_memory_ids=[raw], include_details=True
@@ -305,12 +316,12 @@ def test_archived_status_and_self_detail_are_zero_write_rejections(harness):
 
 def test_overdue_new_promotion_rejected_but_identical_repeat_allowed(harness):
     _db_path, connection, coordinator, _mode = harness
-    existing = _store_core(connection, "Overdue Existing")
+    existing = _store_core(connection=connection, title="Overdue Existing")
     connection.execute(
         "UPDATE entities SET core_review_after = ? WHERE id = ?",
         ((datetime.now(UTC) - timedelta(days=1)).isoformat(), existing),
     )
-    target = _store(connection, "Overdue New")
+    target = _store(connection=connection, title="Overdue New")
     before = _snapshot(connection)
     rejected = _call(connection, coordinator, memory_id=target)
     assert rejected["status"] == "rejected"
@@ -323,8 +334,8 @@ def test_overdue_new_promotion_rejected_but_identical_repeat_allowed(harness):
 
 def test_capacity_rejects_sixth_core_and_allows_existing_edit(harness):
     _db_path, connection, coordinator, _mode = harness
-    ids = [_store_core(connection, f"Capacity Core {index}") for index in range(5)]
-    target = _store(connection, "Sixth Core")
+    ids = [_store_core(connection=connection, title=f"Capacity Core {index}") for index in range(5)]
+    target = _store(connection=connection, title="Sixth Core")
     before = _snapshot(connection)
     rejected = _call(connection, coordinator, memory_id=target)
     assert rejected["status"] == "rejected"
@@ -338,7 +349,7 @@ def test_capacity_rejects_sixth_core_and_allows_existing_edit(harness):
 
 def test_reconcile_failure_rolls_back_direct_and_coordinator(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store(connection, "Atomic Target")
+    memory_id = _store(connection=connection, title="Atomic Target")
     before = _snapshot(connection)
     with patch.object(
         cgs, "reconcile_detail_relations", side_effect=RuntimeError("injected reconcile failure")
@@ -351,12 +362,12 @@ def test_reconcile_failure_rolls_back_direct_and_coordinator(harness):
 def test_private_content_short_reason_and_bad_detail_are_zero_write_rejections(harness):
     _db_path, connection, coordinator, _mode = harness
     private_id = _store(
-        connection,
-        "Private Target",
+        connection=connection,
+        title="Private Target",
         scope="private",
         content="# Private Target\n\nThis private memory has valid quality content for scope testing.",
     )
-    oversized_id = _store(connection, "Oversized Target")
+    oversized_id = _store(connection=connection, title="Oversized Target")
     connection.execute(
         "UPDATE entities SET full_content = ? WHERE id = ?", ("x" * 2501, oversized_id)
     )
@@ -392,7 +403,7 @@ def test_private_content_short_reason_and_bad_detail_are_zero_write_rejections(h
 
 def test_over_2500_core_repeat_and_overdue_enlargement_are_rejected(harness):
     _db_path, connection, coordinator, _mode = harness
-    core_id = _store_core(connection, "Oversized Existing")
+    core_id = _store_core(connection=connection, title="Oversized Existing")
     connection.execute(
         "UPDATE entities SET full_content = ?, updated_at = ? WHERE id = ?",
         ("x" * 2501, datetime.now(UTC).isoformat(), core_id),
@@ -402,7 +413,7 @@ def test_over_2500_core_repeat_and_overdue_enlargement_are_rejected(harness):
     assert result["status"] == "rejected"
     assert result["errors"][0]["field"] == "core"
     assert _snapshot(connection) == before
-    normal_id = _store_core(connection, "Enlargement Existing")
+    normal_id = _store_core(connection=connection, title="Enlargement Existing")
     connection.execute(
         "UPDATE entities SET core_review_after = ? WHERE id = ?",
         ((datetime.now(UTC) - timedelta(days=1)).isoformat(), normal_id),
@@ -416,7 +427,7 @@ def test_over_2500_core_repeat_and_overdue_enlargement_are_rejected(harness):
 
 def test_dispatcher_rejects_review_date_and_preserves_state(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store(connection, "Dispatcher Date Target")
+    memory_id = _store(connection=connection, title="Dispatcher Date Target")
     before = _snapshot(connection)
     kwargs = {
         "entity_id": memory_id,
@@ -439,7 +450,10 @@ def test_dispatcher_rejects_review_date_and_preserves_state(harness):
 def test_promotion_leaves_non_core_fields_untouched(harness):
     _db_path, connection, coordinator, _mode = harness
     memory_id = _store(
-        connection, "Untouched Fields", retrieval_text="retrieval stays", tags=["#keep"]
+        connection=connection,
+        title="Untouched Fields",
+        retrieval_text="retrieval stays",
+        tags=["#keep"],
     )
     before = connection.execute(
         "SELECT retrieval_text, scope, core_last_reviewed_at, core_last_reviewed_by FROM entities WHERE id = ?",
@@ -462,11 +476,11 @@ def test_same_detail_ids_in_different_order_are_an_edit(harness):
     detail_text = "Shared core governance detail explains the bootstrap hazard and review boundary."
     first_text = f"{detail_text} First detail evidence."
     second_text = f"{detail_text} Second detail evidence."
-    first_id = _store(connection, "First Governance Detail", content=first_text)
-    second_id = _store(connection, "Second Governance Detail", content=second_text)
+    first_id = _store(connection=connection, title="First Governance Detail", content=first_text)
+    second_id = _store(connection=connection, title="Second Governance Detail", content=second_text)
     core_id = _store(
-        connection,
-        "Ordered Core",
+        connection=connection,
+        title="Ordered Core",
         content=f"{detail_text}\n\nThe details are First Governance Detail UUID {first_id} and Second Governance Detail UUID {second_id}.",
     )
     first = _call(
@@ -503,10 +517,12 @@ def test_demote_then_promote_with_explicit_details_recreates_declaration(harness
     detail_text = (
         "Explicit core governance detail explains the bootstrap hazard and review boundary."
     )
-    detail_id = _store(connection, "Explicit Governance Detail", content=detail_text)
+    detail_id = _store(
+        connection=connection, title="Explicit Governance Detail", content=detail_text
+    )
     core_id = _store(
-        connection,
-        "Explicit Core",
+        connection=connection,
+        title="Explicit Core",
         content=f"{detail_text}\n\nThe detail title is Explicit Governance Detail and UUID {detail_id}.",
     )
     assert (
@@ -544,7 +560,7 @@ def test_demote_then_promote_with_explicit_details_recreates_declaration(harness
 
 def test_ambiguous_prefix_returns_candidates_without_writes(harness):
     _db_path, connection, coordinator, _mode = harness
-    memory_id = _store(connection, "Ambiguous Target")
+    memory_id = _store(connection=connection, title="Ambiguous Target")
     before = _snapshot(connection)
     with patch(
         "saltmdb.domain.services.memory_service.lifecycle.resolve_entity_ref",
@@ -562,8 +578,8 @@ def test_direct_mode_capacity_check_sees_previous_promotion(harness):
     if mode != "direct":
         pytest.skip("direct transaction coverage")
     for index in range(5):
-        assert _store_core(connection, f"Direct Capacity Core {index}")
-    target = _store(connection, "Direct Sixth Core")
+        assert _store_core(connection=connection, title=f"Direct Capacity Core {index}")
+    target = _store(connection=connection, title="Direct Sixth Core")
     rejected = _call(connection, coordinator, memory_id=target)
     assert rejected["status"] == "rejected"
     assert rejected["errors"][0]["code"] == "CORE_CAPACITY_EXCEEDED"

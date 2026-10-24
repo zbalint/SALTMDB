@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -90,14 +91,14 @@ class TestSearchScores(unittest.TestCase):
         store_memory(
             title="Authentication Module",
             content="Handles OAuth2 and JWT token authentication",
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
         store_memory(
             title="Database Backup Service",
             content="Performs hourly PostgreSQL and SQLite snapshot backups",
-            agent_id="user1",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="user1"),
         )
 
         results = search_memory(

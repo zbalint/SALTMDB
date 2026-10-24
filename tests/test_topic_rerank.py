@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -258,8 +259,8 @@ class TestSearchMemoryRerankRobustness(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="test_user",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test_user"),
         )
         return _extract_id(res)
 
@@ -456,8 +457,8 @@ class TestRrfGapGateSmoke(unittest.TestCase):
         res = store_memory(
             title=title,
             content=content,
-            agent_id="test_user",
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test_user"),
         )
         return _extract_id(res)
 

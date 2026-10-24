@@ -1,6 +1,7 @@
 """S3a batch consolidation service contract tests."""
 
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import Provenance
 
 import sqlite3
 from unittest.mock import patch
@@ -34,8 +35,8 @@ def _parent(conn, title: str) -> str:
     result = store_memory(
         title=title,
         content=f"Durable source content for {title} with enough detail.",
-        agent_id="batch-owner",
         db_connection=conn,
+        provenance=Provenance(agent_id="batch-owner"),
     )
     assert result["status"] == "ok", result
     return result["data"]["id"]

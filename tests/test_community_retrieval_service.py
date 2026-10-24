@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import shutil
 import sqlite3
@@ -91,8 +92,8 @@ class TestCommunityRetrievalService(unittest.TestCase):
             store_memory(
                 content=f"Global retrieval fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="community-retrieval-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="community-retrieval-test"),
             )
         )
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance
 
 import json
 import os
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import relation_service as relations
-from saltmdb.domain.services.memory_service import CoreDeclaration, Provenance, store_memory
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import consolidate_memories, store_relation
 
 
@@ -58,8 +59,8 @@ class TestConsolidationCommit(unittest.TestCase):
         result = store_memory(
             title=title,
             content=f"Detailed durable content for {title} in commit tests.",
-            agent_id="commit-owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="commit-owner"),
         )
         self.assertEqual(result["status"], "ok")
         return result["data"]["id"]

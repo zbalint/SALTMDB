@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import math
 import os
 import re
@@ -73,8 +74,8 @@ class TestOrphanCommunityService(unittest.TestCase):
             store_memory(
                 content=content or f"Orphan-community fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="orphan-community-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="orphan-community-test"),
             )
         )
 

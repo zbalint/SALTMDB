@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -33,7 +34,6 @@ from saltmdb.domain.services.memory_service import (
     store_memory,
     detect_orphaned_memories,
     search_tags,
-    Provenance,
 )
 from saltmdb.domain.services.cohesion_service import get_fresh_entity_centroids
 
@@ -107,8 +107,8 @@ class TestRelationsUniqueIndexSchema(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id="idx_tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="idx_tester"),
         )
         return _memory_id(res)
 
@@ -339,20 +339,20 @@ class TestStoreRelationDedup(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for relation dedup tests",
             title="Relation Dedup Source",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res2 = store_memory(
             content="Target entity content for relation dedup tests",
             title="Relation Dedup Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res3 = store_memory(
             content="Second target entity content for relation repoint tests",
             title="Relation Dedup Repoint Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         self.id1 = _memory_id(res1)
         self.id2 = _memory_id(res2)
@@ -809,14 +809,14 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for degenerate predicate test",
             title="Degenerate Predicate Source",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res2 = store_memory(
             content="Target entity content for degenerate predicate test",
             title="Degenerate Predicate Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         id1 = _memory_id(res1)
         id2 = _memory_id(res2)
@@ -841,14 +841,14 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for alias surfacing test",
             title="Alias Surfacing Source",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res2 = store_memory(
             content="Target entity content for alias surfacing test",
             title="Alias Surfacing Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         id1 = _memory_id(res1)
         id2 = _memory_id(res2)
@@ -874,14 +874,14 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Source",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res2 = store_memory(
             content="Target entity content for non-aliased normalization test",
             title="Non-Aliased Normalization Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         id1 = _memory_id(res1)
         id2 = _memory_id(res2)
@@ -904,14 +904,14 @@ class TestResolveOrCreatePredicate(unittest.TestCase):
         res1 = store_memory(
             content="Source entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Source",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         res2 = store_memory(
             content="Target entity content for invalidate degenerate predicate test",
             title="Invalidate Degenerate Target",
-            agent_id="tester",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="tester"),
         )
         id1 = _memory_id(res1)
         id2 = _memory_id(res2)
@@ -1066,8 +1066,8 @@ class TestCommitConsolidationRepointing(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         return _memory_id(res)
 
@@ -1349,8 +1349,8 @@ class TestAnalyzeLineageRewrite(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         return _memory_id(res)
 
@@ -1446,8 +1446,8 @@ class TestPhase3LineageGraph(unittest.TestCase):
         result = store_memory(
             content=f"Graph lineage content for {title}",
             title=title,
-            agent_id="phase3_graph",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="phase3_graph"),
         )
         return _memory_id(result)
 
@@ -1564,8 +1564,8 @@ class TestRelationPointInTime(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         return _memory_id(res)
 
@@ -2130,8 +2130,8 @@ class TestOrphanDetectionWithExpiredRelations(unittest.TestCase):
         res = store_memory(
             content=f"Raw content body for entity {title}",
             title=title,
-            agent_id=agent_id,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=agent_id),
         )
         return _memory_id(res)
 
@@ -3159,8 +3159,8 @@ class TestCommunityDetectionRelationHooks(unittest.TestCase):
                 "durable content for a real relation write."
             ),
             title=f"Community hook fixture {label}",
-            agent_id="community-hook-test",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="community-hook-test"),
         )
         return _memory_id(result)
 
@@ -3337,9 +3337,9 @@ class TestRelationD14Pins(unittest.TestCase):
             store_memory(
                 content=f"D14 pin content for {title}",
                 title=title,
-                agent_id=agent_id,
                 scope=scope,
                 db_connection=self.conn,
+                provenance=Provenance(agent_id=agent_id),
             )
         )
 
@@ -4427,7 +4427,7 @@ class TestStoreRelationBoundaries(unittest.TestCase):
                 self.conn.commit()
                 self.assertEqual(
                     self._store(
-                        predicate="resolves", agent_id=owner, override_justification=justification
+                        predicate="resolves", override_justification=justification, agent_id=owner
                     ),
                     self._success("resolves"),
                 )
@@ -4483,8 +4483,8 @@ class TestStoreRelationBoundaries(unittest.TestCase):
             self.assertEqual(
                 self._store(
                     predicate="elaborates_on",
-                    agent_id="caller",
                     override_justification="justification for contradiction",
+                    agent_id="caller",
                 ),
                 self._success("elaborates_on"),
             )

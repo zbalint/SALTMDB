@@ -15,6 +15,7 @@ from saltmdb.db.connection import open_read_connection
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service, reranker_service
 from saltmdb.domain.services.memory_service import duplicates
+from saltmdb.domain.services.memory_service import EntityAnnotations, Provenance, StoreRuntime
 
 
 class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
@@ -46,17 +47,22 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
                 f"Policy revision {variant} applies to service clients."
             ),
             "agent_id": "test-owner",
-            "tags": ["auth-policy"],
             "context_id": "test-context",
+            "tags": ["auth-policy"],
         }
 
     def _store(self, variant: str = "A", **extra: Any) -> dict[str, Any]:
         if self.conn is None:
             raise AssertionError("setUp did not initialize a database connection")
-        kwargs = self._kwargs(variant)
-        kwargs.update({"db_path": self.db_path, "db_connection": self.conn})
-        kwargs.update(extra)
-        raw_result = memory_service.store_memory(**kwargs)
+        flat = self._kwargs(variant)
+        provenance = Provenance(agent_id=flat.pop("agent_id"), context_id=flat.pop("context_id"))
+        flat.update({"db_path": self.db_path, "db_connection": self.conn})
+        probe_sink = extra.pop("probe_sink", None)
+        flat.update(extra)
+        if probe_sink is not None:
+            flat["runtime"] = StoreRuntime(probe_sink=probe_sink)
+        flat["provenance"] = provenance
+        raw_result = memory_service.store_memory(**flat)
         if not isinstance(raw_result, dict):
             raise AssertionError(f"store_memory returned unexpected string: {raw_result}")
         return cast(dict[str, Any], raw_result)
@@ -104,7 +110,7 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
 
     def test_2_sink_defers_probe_and_contains_redacted_request(self):
         first_sink: list[dict[str, Any]] = []
-        first = self._store(probe_sink=first_sink)
+        first = self._store(runtime=StoreRuntime(probe_sink=first_sink))
         self.assertEqual(first["status"], "ok")
         self.assertEqual(first_sink[0]["exclude_ids"], [first["data"]["id"]])
         sink: list[dict[str, Any]] = []
@@ -113,8 +119,15 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
         with patch.object(
             duplicates, "check_duplicate_memories", wraps=duplicates.check_duplicate_memories
         ) as probe:
+            direct_kwargs = dict(kwargs)
+            direct_kwargs["provenance"] = Provenance(
+                agent_id=direct_kwargs.pop("agent_id"),
+                context_id=direct_kwargs.pop("context_id"),
+            )
             raw_result = memory_service.store_memory(
-                **kwargs, db_connection=self.conn, probe_sink=sink
+                **direct_kwargs,
+                db_connection=self.conn,
+                runtime=StoreRuntime(probe_sink=sink),
             )
         if not isinstance(raw_result, dict):
             raise AssertionError(f"store_memory returned unexpected string: {raw_result}")
@@ -135,12 +148,14 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
             ],
         )
         rejected_sink = []
-        rejected = self._store("A", probe_sink=rejected_sink)
+        rejected = self._store("A", runtime=StoreRuntime(probe_sink=rejected_sink))
         self.assertEqual(rejected["errors"][0]["code"], "REJECT_EXACT_DUPLICATE")
         self.assertEqual(rejected_sink, [])
         update_sink = []
         updated = self._store(
-            entity_id=first["data"]["id"], metadata={"reviewed": True}, probe_sink=update_sink
+            entity_id=first["data"]["id"],
+            annotations=EntityAnnotations(metadata={"reviewed": True}),
+            runtime=StoreRuntime(probe_sink=update_sink),
         )
         self.assertEqual(updated["status"], "ok")
         self.assertEqual(update_sink, [])
@@ -149,7 +164,7 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
         self._store()
         inline = self._store("B")
         sink = []
-        deferred = self._store("C", probe_sink=sink)
+        deferred = self._store("C", runtime=StoreRuntime(probe_sink=sink))
         # B must not appear in the C probe; use the same candidate set as the inline store.
         memory_service.archive_memory(inline["data"]["id"], db_path=self.db_path)
         memory_service.apply_duplicate_probe(deferred, sink[0])
@@ -161,7 +176,7 @@ class TestStoreDuplicateProbeOffWriter(unittest.TestCase):
 
     def test_3_empty_or_error_probe_preserves_envelope(self):
         sink = []
-        result = self._store(probe_sink=sink)
+        result = self._store(runtime=StoreRuntime(probe_sink=sink))
         for response in (
             {"potential_duplicates": []},
             {"error": "", "potential_duplicates": [{"id": "ignored"}]},

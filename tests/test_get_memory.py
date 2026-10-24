@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import shutil
 import tempfile
@@ -151,9 +152,8 @@ class TestGetMemory(unittest.TestCase):
             title="[Session] Effective-block probe",
             content="Confirms agent_session_id round-trips through store_memory's effective block.",
             tags=["#session-id"],
-            agent_id="agent_qa",
-            agent_session_id="session-effective-cccc",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_qa", agent_session_id="session-effective-cccc"),
         )
 
         self.assertEqual(result["status"], "ok")

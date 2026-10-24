@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance, StoreScores
 import os
 import shutil
 import tempfile
@@ -162,8 +163,8 @@ class TestTraceService(unittest.TestCase):
                 "before it verifies insert and update operation classification."
             ),
             title="Trace provenance insert",
-            agent_id="owner-a",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="owner-a"),
         )
         self.assertEqual(first["status"], "ok")
         entity_id = first["data"]["id"]
@@ -183,10 +184,10 @@ class TestTraceService(unittest.TestCase):
                 "before it verifies insert and update operation classification."
             ),
             title="Trace provenance insert",
-            agent_id="owner-a",
             entity_id=entity_id,
-            weight=2,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="owner-a"),
+            scores=StoreScores(weight=2),
         )
         self.assertEqual(updated["status"], "ok", updated)
         changed = trace_service.capture_trace_memory_link(

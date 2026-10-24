@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import re
 import shutil
@@ -50,8 +51,8 @@ class TestContextBudgetService(unittest.TestCase):
             store_memory(
                 content=content or f"Context budget fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="context-budget-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="context-budget-test"),
             )
         )
 

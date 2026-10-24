@@ -1,10 +1,10 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
 import shutil
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import memory_service, librarian_service, relation_service
-from saltmdb.domain.services.memory_service import Provenance
 
 
 class TestConsolidationTagAliasBugfix(unittest.TestCase):
@@ -43,8 +43,8 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             content="Root cause of the nightly job crash was an unhandled null pointer in the retry handler.",
             title="Nightly Job Crash Root Cause Bugfix",
             tags=["#bugfix"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res1["status"], "ok")
         id1 = res1["data"]["id"]
@@ -56,8 +56,8 @@ class TestConsolidationTagAliasBugfix(unittest.TestCase):
             content="Applied a targeted patch to the retry handler to null-check the response before dereferencing.",
             title="Retry Handler Null Check Fix",
             tags=["#fix"],
-            agent_id="user1",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="user1"),
         )
         self.assertEqual(res2["status"], "ok")
         id2 = res2["data"]["id"]

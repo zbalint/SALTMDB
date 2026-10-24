@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance, StoreScores
 import unittest
 import tempfile
 import os
@@ -31,8 +32,8 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res = memory_service.store_memory(
             content=tech_log_payload,
             title="Technical Log Report",
-            agent_id="test_agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="test_agent"),
         )
         self.assertEqual(res["status"], "ok")
 
@@ -54,9 +55,9 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res1 = memory_service.store_memory(
             content=original_content,
             title="SALTMDB Core Architecture Spec",
-            agent_id="test_agent",
-            weight=5.0,
             db_connection=self.conn,
+            provenance=Provenance(agent_id="test_agent"),
+            scores=StoreScores(weight=5.0),
         )
         self.assertEqual(res1["status"], "ok")
         entity_id_1 = res1["data"]["id"]
@@ -66,8 +67,8 @@ class TestAdvancedQualityFeatures(unittest.TestCase):
         res2 = memory_service.store_memory(
             content=updated_content,
             title="SALTMDB Core Architecture Spec Revision",
-            agent_id="test_agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="test_agent"),
         )
         self.assertEqual(res2["status"], "ok")
         self.assertNotEqual(res2["data"]["id"], entity_id_1)

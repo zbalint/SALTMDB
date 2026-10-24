@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import re
 import shutil
@@ -43,8 +44,8 @@ class TestLineageAssemblyService(unittest.TestCase):
             store_memory(
                 content=f"Lineage fixture content for {title} ({uuid.uuid4()})",
                 title=title,
-                agent_id="lineage-test",
                 db_connection=self.conn,
+                provenance=Provenance(agent_id="lineage-test"),
             )
         )
 

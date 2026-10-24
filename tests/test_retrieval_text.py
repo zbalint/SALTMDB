@@ -1,5 +1,7 @@
 """Focused retrieval-text lifecycle and SQLite-only compatibility tests."""
 
+from saltmdb.domain.services.memory_service import Provenance
+
 import hashlib
 import json
 import os
@@ -50,7 +52,7 @@ class RetrievalTextTests(unittest.TestCase):
                 "content", "An authoritative body that remains independent from retrieval text."
             ),
             "title": title,
-            "agent_id": "retrieval-owner",
+            "provenance": Provenance(agent_id="retrieval-owner"),
             "db_connection": self.conn,
             "db_path": self.db_path,
         }
@@ -307,20 +309,20 @@ class RetrievalTextTests(unittest.TestCase):
             result = store_memory(
                 content="A sufficiently descriptive SQLite-only body for testing.",
                 title="SQLite Only Retrieval",
-                agent_id="sqlite-owner",
                 retrieval_text="sqlite-only candidate",
                 db_connection=conn,
                 db_path=path,
+                provenance=Provenance(agent_id="sqlite-owner"),
             )
             entity_id = self._id(result)
             updated = store_memory(
                 content="A sufficiently descriptive SQLite-only body for testing.",
                 title="SQLite Only Retrieval",
-                agent_id="sqlite-owner",
                 entity_id=entity_id,
                 retrieval_text="updated candidate",
                 db_connection=conn,
                 db_path=path,
+                provenance=Provenance(agent_id="sqlite-owner"),
             )
             self.assertEqual(updated["status"], "ok")
             from saltmdb.domain.services.memory_service import archive_memory

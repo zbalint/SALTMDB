@@ -1,4 +1,5 @@
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import Provenance
 
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
@@ -22,32 +23,30 @@ from saltmdb.domain.services.memory_service import (
 from saltmdb.domain.services.memory_service import lifecycle
 
 
-def _store(conn, title: str, *, is_core: bool = False, retrieval_text: str | None = None) -> str:
-    if retrieval_text is None:
-        result = store_memory(
-            title=title,
-            content=f"A durable body for {title} with enough descriptive content.",
-            agent_id="replace-tests",
-            db_connection=conn,
-            is_core=is_core,
-            core_reason="A sufficiently long core reason for tests" if is_core else None,
-            core_exit_condition="A sufficiently long core exit condition for tests"
-            if is_core
-            else None,
+def _store(
+    conn,
+    title: str,
+    *,
+    core: CoreDeclaration | None = None,
+    retrieval_text: str | None = None,
+) -> str:
+    core = core or CoreDeclaration()
+    if core.is_core and core.core_reason is None:
+        core = dataclass_replace(
+            core,
+            core_reason="A sufficiently long core reason for tests",
+            core_exit_condition="A sufficiently long core exit condition for tests",
         )
-    else:
-        result = store_memory(
-            title=title,
-            content=f"A durable body for {title} with enough descriptive content.",
-            agent_id="replace-tests",
-            db_connection=conn,
-            is_core=is_core,
-            core_reason="A sufficiently long core reason for tests" if is_core else None,
-            core_exit_condition="A sufficiently long core exit condition for tests"
-            if is_core
-            else None,
-            retrieval_text=retrieval_text,
-        )
+    kwargs: dict[str, Any] = {
+        "title": title,
+        "content": f"A durable body for {title} with enough descriptive content.",
+        "db_connection": conn,
+        "provenance": Provenance(agent_id="replace-tests"),
+        "core": core,
+    }
+    if retrieval_text is not None:
+        kwargs["retrieval_text"] = retrieval_text
+    result = store_memory(**kwargs)
     return result["data"]["id"]
 
 
@@ -87,7 +86,7 @@ def _snapshot(conn):
 def test_core_replacement_requires_explicit_decision_and_is_atomic(tmp_path, mode):
     db_path = str(tmp_path / f"{mode}.db")
     conn = init_db(db_path)
-    old_id = _store(conn, "Core predecessor", is_core=True)
+    old_id = _store(conn, "Core predecessor", core=CoreDeclaration(is_core=True))
     before = _snapshot(conn)
     coordinator = DbWriteCoordinator(db_path) if mode == "coordinator" else None
     if coordinator:
@@ -137,7 +136,9 @@ def test_core_keep_and_demote_reset_successor_columns(tmp_path):
         ("demote", CoreDeclaration(is_core=False), 0),
     ):
         conn = init_db(str(tmp_path / f"{name}.db"))
-        old_id = _store(conn, f"Core {name}", is_core=True, retrieval_text="old retrieval")
+        old_id = _store(
+            conn, f"Core {name}", retrieval_text="old retrieval", core=CoreDeclaration(is_core=True)
+        )
         result = replace_memory(
             "revises",
             ReplacementRequest(
@@ -264,7 +265,7 @@ def test_coordinator_failure_rolls_back_replacement(tmp_path):
 
 def test_core_detail_validation_rejects_without_snapshot_change(tmp_path):
     conn = init_db(str(tmp_path / "detail.db"))
-    old_id = _store(conn, "Detail predecessor", is_core=True)
+    old_id = _store(conn, "Detail predecessor", core=CoreDeclaration(is_core=True))
     before = _snapshot(conn)
     result = replace_memory(
         "revises",
@@ -289,7 +290,7 @@ def test_core_detail_validation_rejects_without_snapshot_change(tmp_path):
 
 def test_overdue_core_source_rejects_keep_and_allows_demote(tmp_path):
     conn = init_db(str(tmp_path / "overdue.db"))
-    old_id = _store(conn, "Overdue predecessor", is_core=True)
+    old_id = _store(conn, "Overdue predecessor", core=CoreDeclaration(is_core=True))
     overdue = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     conn.execute("UPDATE entities SET core_review_after = ? WHERE id = ?", (overdue, old_id))
     conn.commit()
@@ -326,7 +327,7 @@ def test_overdue_core_source_rejects_keep_and_allows_demote(tmp_path):
 
 def test_core_repoint_skips_elaborates_on_inbound_edge(tmp_path):
     conn = init_db(str(tmp_path / "repoint.db"))
-    old_id = _store(conn, "Repoint core predecessor", is_core=True)
+    old_id = _store(conn, "Repoint core predecessor", core=CoreDeclaration(is_core=True))
     detail_id = _store(conn, "Repoint detail")
     conn.execute(
         "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, 'elaborates_on', datetime('now'), datetime('now'), datetime('now'))",
@@ -370,7 +371,7 @@ def test_core_repoint_skips_elaborates_on_inbound_edge(tmp_path):
 def test_core_capacity_rejects_promotion_without_snapshot_change(tmp_path):
     conn = init_db(str(tmp_path / "capacity.db"))
     for index in range(5):
-        _store(conn, f"Capacity core {index}", is_core=True)
+        _store(conn, f"Capacity core {index}", core=CoreDeclaration(is_core=True))
     source_id = _store(conn, "Capacity source")
     before = _snapshot(conn)
     result = replace_memory(
@@ -462,7 +463,7 @@ def test_vector_clear_failure_rolls_back_coordinator_write(tmp_path):
 
 def test_private_core_keep_rejection_names_scope(tmp_path):
     conn = init_db(str(tmp_path / "private-core.db"))
-    old_id = _store(conn, "Private core predecessor", is_core=True)
+    old_id = _store(conn, "Private core predecessor", core=CoreDeclaration(is_core=True))
     conn.execute("UPDATE entities SET scope = 'private' WHERE id = ?", (old_id,))
     conn.commit()
     result = replace_memory(
@@ -548,7 +549,7 @@ def test_retrieval_text_redacts_secrets_and_rejects_over_cap(tmp_path):
 
 def test_declared_detail_creates_one_detail_to_successor_edge(tmp_path):
     conn = init_db(str(tmp_path / "detail-edge.db"))
-    old_id = _store(conn, "Detail core predecessor", is_core=True)
+    old_id = _store(conn, "Detail core predecessor", core=CoreDeclaration(is_core=True))
     detail_id = _store(conn, "Declared detail")
     result = replace_memory(
         "revises",
@@ -674,7 +675,7 @@ def test_vector_clear_occurs_after_release_and_not_on_rejection(tmp_path):
     assert order.index("CLEAR") > next(
         index for index, statement in enumerate(order) if "RELEASE replacement" in statement
     )
-    core_id = _store(conn, "Vector rejection core", is_core=True)
+    core_id = _store(conn, "Vector rejection core", core=CoreDeclaration(is_core=True))
     calls = []
     with patch(
         "saltmdb.domain.services.embedding_service.clear_embedding_vectors_for_entity",
@@ -840,7 +841,9 @@ def test_prepare_error_precedes_content_and_retrieval_errors(tmp_path):
 
 def test_inactive_target_precedes_core_governance_error_under_write_lock(tmp_path):
     conn = init_db(str(tmp_path / "inactive-core-precedence.db"))
-    old_id = _store(conn, "Inactive core precedence predecessor", is_core=True)
+    old_id = _store(
+        conn, "Inactive core precedence predecessor", core=CoreDeclaration(is_core=True)
+    )
     request = ReplacementRequest(
         entity_id=old_id,
         title="Inactive core successor",

@@ -4,6 +4,8 @@ convention as test_build_diverse_test_db.py) so this suite runs in seconds again
 search_memory() calls, not the full frozen corpus.
 """
 
+from saltmdb.domain.services.memory_service import Provenance
+
 import importlib.util
 import os
 import shutil
@@ -92,9 +94,9 @@ class TestRunMatrixForQueries(unittest.TestCase):
             content="The distributed cache invalidation protocol propagates updates "
             "asynchronously across all replica nodes in the cluster.",
             title="Distributed Cache Invalidation Protocol",
-            agent_id="test",
             db_connection=self.conn,
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test"),
         )
         self.findable_id = self._extract_id(result)
 
@@ -104,9 +106,9 @@ class TestRunMatrixForQueries(unittest.TestCase):
             content="A raft consensus leader election algorithm prevents split-brain scenarios "
             "during a network partition in a distributed system.",
             title="Raft Consensus Leader Election",
-            agent_id="test",
             db_connection=self.conn,
             db_path=self.db_path,
+            provenance=Provenance(agent_id="test"),
         )
         self.archived_id = self._extract_id(archived_result)
         self.conn.execute(

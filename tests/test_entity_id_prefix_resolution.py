@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import os
 import shutil
 import tempfile
@@ -24,7 +25,7 @@ def _store(conn, title, content=None, **kw):
     res = memory_service.store_memory(
         content=content,
         title=title,
-        agent_id="owner_a",
+        provenance=Provenance(agent_id="owner_a"),
         db_connection=conn,
         **kw,
     )
@@ -49,13 +50,13 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_exact_full_uuid_unchanged(self):
         """A full, exact UUID still resolves exactly as before -- regression baseline."""
-        entity_id = _store(self.conn, "Exact UUID Fetch Baseline")
+        entity_id = _store(conn=self.conn, title="Exact UUID Fetch Baseline")
         content = memory_service.fetch_memory_chunk(entity_id=entity_id, db_connection=self.conn)
         self.assertIn("Exact UUID Fetch Baseline", content)
 
     def test_unique_short_prefix_resolves_and_touches(self):
         """A unique 8-char hex prefix resolves to the right entity and bumps last_accessed_at."""
-        entity_id = _store(self.conn, "Unique Prefix Target")
+        entity_id = _store(conn=self.conn, title="Unique Prefix Target")
         prefix = entity_id[:8]
         self.conn.execute(
             "UPDATE entities SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
@@ -73,7 +74,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_short_prefix_below_minimum_length_is_not_found(self):
         """A prefix shorter than 8 hex chars is treated as a literal (unmatched) id, unchanged."""
-        entity_id = _store(self.conn, "Too Short Prefix Target")
+        entity_id = _store(conn=self.conn, title="Too Short Prefix Target")
         too_short = entity_id[:7]
         content = memory_service.fetch_memory_chunk(entity_id=too_short, db_connection=self.conn)
         self.assertEqual(content, f"Memory not found for ID: {too_short}")
@@ -116,7 +117,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_mixed_case_prefix_resolves_same_as_lowercase(self):
         """Prefix matching is case-insensitive."""
-        entity_id = _store(self.conn, "Mixed Case Prefix Target")
+        entity_id = _store(conn=self.conn, title="Mixed Case Prefix Target")
         prefix_upper = entity_id[:8].upper()
         content = memory_service.fetch_memory_chunk(entity_id=prefix_upper, db_connection=self.conn)
         self.assertIn("Mixed Case Prefix Target", content)
@@ -124,12 +125,16 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
     def test_colliding_prefix_returns_ambiguous_listing_never_content(self):
         """Two entities sharing an 8-char prefix produce a safe candidate listing, not content."""
         id_a = _store(
-            self.conn, "Collision Entity A", content="Secret content A that must not leak."
+            conn=self.conn,
+            title="Collision Entity A",
+            content="Secret content A that must not leak.",
         )
         shared_prefix = id_a[:8]
         # Force a second entity's id to share the same 8-char prefix.
         id_b = _store(
-            self.conn, "Collision Entity B", content="Secret content B that must not leak."
+            conn=self.conn,
+            title="Collision Entity B",
+            content="Secret content B that must not leak.",
         )
         forced_id_b = shared_prefix + id_b[8:]
         self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
@@ -146,7 +151,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_archived_entity_reachable_via_unique_prefix(self):
         """Archived entities remain reachable by prefix, matching exact-ID fetch's own behavior."""
-        entity_id = _store(self.conn, "Archived Prefix Target")
+        entity_id = _store(conn=self.conn, title="Archived Prefix Target")
         memory_service.archive_memory(entity_id=entity_id, db_connection=self.conn)
         prefix = entity_id[:8]
         content = memory_service.fetch_memory_chunk(entity_id=prefix, db_connection=self.conn)
@@ -161,7 +166,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_touch_memory_access_with_raw_prefix_updates_correct_row(self):
         """touch_memory_access, given a raw unresolved prefix, still bumps the right row."""
-        entity_id = _store(self.conn, "Touch Via Prefix Target")
+        entity_id = _store(conn=self.conn, title="Touch Via Prefix Target")
         prefix = entity_id[:8]
         self.conn.execute(
             "UPDATE entities SET last_accessed_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
@@ -178,9 +183,9 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
 
     def test_touch_memory_access_with_ambiguous_prefix_is_silent_noop(self):
         """touch_memory_access never raises and never guesses on an ambiguous prefix."""
-        id_a = _store(self.conn, "Touch Collision A")
+        id_a = _store(conn=self.conn, title="Touch Collision A")
         shared_prefix = id_a[:8]
-        id_b = _store(self.conn, "Touch Collision B")
+        id_b = _store(conn=self.conn, title="Touch Collision B")
         forced_id_b = shared_prefix + id_b[8:]
         self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
         self.conn.execute(
@@ -202,7 +207,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
         shared_prefix = "deadbeef"
         made_ids = []
         for i in range(22):
-            entity_id = _store(self.conn, f"Mass Collision Target {i}")
+            entity_id = _store(conn=self.conn, title=f"Mass Collision Target {i}")
             forced_id = f"{shared_prefix}{entity_id[8:]}"
             self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id, entity_id))
             made_ids.append(forced_id)
@@ -218,13 +223,13 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
         self.assertEqual(len(candidate_lines), 20)
 
     def test_resolve_entity_ref_exact_and_missing_literals(self):
-        entity_id = _store(self.conn, "Resolve Entity Ref Target")
+        entity_id = _store(conn=self.conn, title="Resolve Entity Ref Target")
         self.assertEqual(resolve_entity_ref(self.conn, entity_id), (entity_id, [], False))
         self.assertEqual(resolve_entity_ref(self.conn, "missing-reference"), (None, [], False))
 
     def test_resolve_entity_ref_ambiguous_prefix_literal(self):
-        id_a = _store(self.conn, "Resolve Ambiguous A")
-        id_b = _store(self.conn, "Resolve Ambiguous B")
+        id_a = _store(conn=self.conn, title="Resolve Ambiguous A")
+        id_b = _store(conn=self.conn, title="Resolve Ambiguous B")
         prefix = id_a[:8]
         forced_id_b = prefix + id_b[8:]
         self.conn.execute("UPDATE entities SET id = ? WHERE id = ?", (forced_id_b, id_b))
@@ -246,9 +251,7 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
             )
 
         archived_only_id = _store(
-            self.conn,
-            "Archived Only Visible Title",
-            content=valid_body("Archived Only"),
+            conn=self.conn, title="Archived Only Visible Title", content=valid_body("Archived Only")
         )
         memory_service.archive_memory(
             entity_id=archived_only_id, agent_id="owner_a", db_connection=self.conn
@@ -258,21 +261,15 @@ class TestEntityIdPrefixResolution(unittest.TestCase):
             (None, [], False),
         )
 
-        older_id = _store(
-            self.conn,
-            "Older Visible Title",
-            content=valid_body("Older"),
-        )
+        older_id = _store(conn=self.conn, title="Older Visible Title", content=valid_body("Older"))
         latest_id = _store(
-            self.conn,
-            "Latest Visible Title",
-            content=valid_body("Latest"),
+            conn=self.conn, title="Latest Visible Title", content=valid_body("Latest")
         )
         other = memory_service.store_memory(
             content=valid_body("Other Owner"),
             title="Other Owner Visible Title",
-            agent_id="other_owner",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="other_owner"),
         )
         self.assertEqual(other["status"], "ok")
         other_id = other["data"]["id"]
@@ -322,7 +319,7 @@ class TestEntityIdPrefixResolutionViaDispatch(unittest.TestCase):
     def test_dispatch_tool_resolves_prefix_and_touches_last_accessed(self):
         """get_memory(entity_id=<prefix>) returns structured content and touches it."""
         entity_id = self.coordinator.submit(
-            "store", lambda conn: _store(conn, "Dispatch Prefix Target")
+            "store", lambda conn: _store(conn=conn, title="Dispatch Prefix Target")
         )
         self.coordinator.submit(
             "backdate",
@@ -376,7 +373,7 @@ class TestGetMemoryUnderRealReadOnlyBoundary(unittest.TestCase):
 
     def test_get_memory_succeeds_when_boundary_makes_the_connection_readonly(self):
         entity_id = self.coordinator.submit(
-            "store", lambda conn: _store(conn, "Read-Only Boundary Target")
+            "store", lambda conn: _store(conn=conn, title="Read-Only Boundary Target")
         )
 
         connection_module.enable_daemon_connection_boundary()
@@ -388,7 +385,9 @@ class TestGetMemoryUnderRealReadOnlyBoundary(unittest.TestCase):
     def test_get_memory_skips_touch_rather_than_failing_on_readonly_connection(self):
         """The access-time bookkeeping write is best-effort: it must not surface as a
         read failure, and last_accessed_at legitimately stays unchanged when skipped."""
-        entity_id = self.coordinator.submit("store", lambda conn: _store(conn, "Touch Skip Target"))
+        entity_id = self.coordinator.submit(
+            "store", lambda conn: _store(conn=conn, title="Touch Skip Target")
+        )
         self.coordinator.submit(
             "backdate",
             lambda conn: conn.execute(

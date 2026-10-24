@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 from typing import cast
 from unittest.mock import patch
 
@@ -14,8 +15,8 @@ def _parent(conn, title):
         store_memory(
             title=title,
             content=f"Durable bulk source content for {title} with enough detail.",
-            agent_id="bulk-owner",
             db_connection=conn,
+            provenance=Provenance(agent_id="bulk-owner"),
         ),
     )
     assert result["status"] == "ok", result

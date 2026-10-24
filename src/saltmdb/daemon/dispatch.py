@@ -289,31 +289,41 @@ def _dispatch_store_memory(**kw):
     return memory_service.store_memory(
         content=kw.get("content"),
         tags=kw.get("tags"),
-        agent_id=kw.get("agent_id"),
         scope=scope,
-        weight=weight,
-        is_core=kw.get("is_core"),
-        memory_type=kw.get("memory_type"),
         title=kw.get("title"),
         entity_id=kw.get("entity_id"),
-        relevance=kw.get("relevance"),
-        impact=kw.get("impact"),
-        novelty=kw.get("novelty"),
-        actionability=kw.get("actionability"),
-        metadata=kw.get("metadata"),
-        context_id=kw.get("context_id"),
-        agent_session_id=kw.get("agent_session_id"),
         retrieval_text=(
             kw.get("retrieval_text")
             if retrieval_text_provided
             else memory_service.RETRIEVAL_TEXT_UNSET
         ),
-        coordinator=kw.get("coordinator"),
-        core_reason=kw.get("core_reason"),
-        core_exit_condition=kw.get("core_exit_condition"),
-        core_review_after=kw.get("core_review_after"),
-        detail_memory_ids=kw.get("detail_memory_ids"),
-        probe_sink=kw.get("probe_sink"),
+        provenance=memory_service.Provenance(
+            agent_id=kw.get("agent_id"),
+            context_id=kw.get("context_id"),
+            agent_session_id=kw.get("agent_session_id"),
+        ),
+        core=memory_service.CoreDeclaration(
+            is_core=kw.get("is_core"),
+            core_reason=kw.get("core_reason"),
+            core_exit_condition=kw.get("core_exit_condition"),
+            core_review_after=kw.get("core_review_after"),
+            detail_memory_ids=kw.get("detail_memory_ids"),
+        ),
+        annotations=memory_service.EntityAnnotations(
+            metadata=kw.get("metadata"),
+            memory_type=kw.get("memory_type"),
+        ),
+        scores=memory_service.StoreScores(
+            weight=weight,
+            relevance=kw.get("relevance"),
+            impact=kw.get("impact"),
+            novelty=kw.get("novelty"),
+            actionability=kw.get("actionability"),
+        ),
+        runtime=memory_service.StoreRuntime(
+            coordinator=kw.get("coordinator"),
+            probe_sink=kw.get("probe_sink"),
+        ),
     )
 
 

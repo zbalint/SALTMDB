@@ -1,6 +1,7 @@
 """Consolidation row writes roll back atomically under direct and coordinator seams."""
 
 from __future__ import annotations
+from saltmdb.domain.services.memory_service import Provenance
 
 import sqlite3
 from unittest.mock import patch
@@ -41,8 +42,8 @@ def _parent(connection, title: str) -> str:
     result = store_memory(
         title=title,
         content=f"Detailed durable source content for {title}.",
-        agent_id="test-owner",
         db_connection=connection,
+        provenance=Provenance(agent_id="test-owner"),
     )
     assert result["status"] == "ok", result
     return result["data"]["id"]

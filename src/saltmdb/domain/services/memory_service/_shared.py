@@ -22,7 +22,7 @@ regardless of which submodule under this package a given log call physically liv
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,26 @@ class Provenance:
     agent_id: str | None = None
     context_id: str | None = None
     agent_session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoreScores:
+    """The quality dimensions of a stored memory; weight defaults to 1, the rest to None."""
+
+    weight: int = 1
+    relevance: int | None = None
+    impact: int | None = None
+    novelty: int | None = None
+    actionability: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoreRuntime:
+    """How a store runs inside the daemon; probe_sink is appended to by the store, not read; frozen is shallow."""
+
+    coordinator: Any = None
+    # probe_sink is a caller-owned mutable list: frozen is shallow, and hash() raises when it is set; never use as a cache key.
+    probe_sink: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

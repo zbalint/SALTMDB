@@ -7,6 +7,13 @@ import pytest
 
 from saltmdb.db.schema import init_db
 from saltmdb.domain.services import core_governance_service as governance
+from saltmdb.domain.services.memory_service import (
+    CoreDeclaration,
+    EntityAnnotations,
+    Provenance,
+    StoreRuntime,
+    StoreScores,
+)
 from saltmdb.domain.services.memory_service import write
 
 
@@ -22,19 +29,19 @@ def db(tmp_path):
 
 
 def store(db: Any, **overrides: Any) -> Any:
-    return write.store_memory(
-        **(
-            {
-                "entity_id": "fixed-memory",
-                "title": "Storage policy",
-                "content": BODY,
-                "agent_id": "writer",
-                "db_connection": db,
-                "probe_sink": [],
-            }
-            | overrides
-        )
-    )
+    args: dict[str, Any] = {
+        "entity_id": "fixed-memory",
+        "title": "Storage policy",
+        "content": BODY,
+        "provenance": Provenance(agent_id="writer"),
+        "annotations": EntityAnnotations(),
+        "scores": StoreScores(),
+        "core": CoreDeclaration(),
+        "runtime": StoreRuntime(probe_sink=[]),
+        "db_connection": db,
+    }
+    args.update(overrides)
+    return write.store_memory(**args)
 
 
 def success(*, tags=None, scope="shared", context=None, memory_type="fact", session=None):
@@ -70,14 +77,14 @@ def snapshot(db):
     "overrides,expected",
     [
         (
-            {"agent_id": None},
+            {"provenance": Provenance(agent_id=None)},
             "Error: agent_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination.",
         ),
         ({"content": None}, "Error: content is mandatory and cannot be empty."),
         ({"content": "  "}, "Error: content is mandatory and cannot be empty."),
         ({"scope": "public"}, "Error: scope must be either 'private' or 'shared'"),
         (
-            {"memory_type": "invalid"},
+            {"annotations": EntityAnnotations(memory_type="invalid")},
             "Error: memory_type must be one of 'fact', 'event', 'procedure', 'decision', 'preference'",
         ),
         ({"title": None}, "Error: title is mandatory and cannot be empty."),
@@ -115,10 +122,10 @@ def test_content_limit_equality(db, size, accepted):
     [
         ({"title": "Changed policy"}, "title"),
         ({"content": BODY + " Changed."}, "full_content"),
-        ({"agent_id": "other"}, "agent_id"),
+        ({"provenance": Provenance(agent_id="other")}, "agent_id"),
         ({"scope": "private"}, "scope"),
-        ({"memory_type": "event"}, "memory_type"),
-        ({"context_id": "other"}, "context_id"),
+        ({"annotations": EntityAnnotations(memory_type="event")}, "memory_type"),
+        ({"provenance": Provenance(agent_id="writer", context_id="other")}, "context_id"),
         ({"tags": ["#other"]}, "tags"),
     ],
 )
@@ -146,11 +153,10 @@ def test_frozen_guard_preserves_error_order(db):
         db,
         title="Changed title",
         content=BODY + " Changed.",
-        agent_id="other",
         scope="private",
-        memory_type="event",
-        context_id="other",
         tags=["#other"],
+        provenance=Provenance(agent_id="other", context_id="other"),
+        annotations=EntityAnnotations(memory_type="event"),
     ) == {
         "status": "rejected",
         "errors": [
@@ -168,15 +174,14 @@ def test_private_update_preserves_omitted_frozen_values_and_metadata(db):
     store(
         db,
         scope="private",
-        memory_type="decision",
-        context_id="project",
-        metadata={"old": 1},
         tags=["#original"],
+        annotations=EntityAnnotations(memory_type="decision", metadata={"old": 1}),
+        provenance=Provenance(agent_id="writer", context_id="project"),
     )
     before = db.execute("SELECT created_at,valid_from,content_hash FROM entities").fetchall()
-    assert store(db, weight=5, metadata={"new": 2}) == success(
-        tags=["#original"], scope="private", context="project", memory_type="decision"
-    )
+    assert store(
+        db, scores=StoreScores(weight=5), annotations=EntityAnnotations(metadata={"new": 2})
+    ) == success(tags=["#original"], scope="private", context="project", memory_type="decision")
     assert db.execute(
         "SELECT weight,scope,memory_type,context_id,metadata FROM entities"
     ).fetchall() == [(5, "private", "decision", "project", '{"old": 1, "new": 2}')]
@@ -196,31 +201,33 @@ def test_metadata_recovery_and_shallow_merge(db, raw, normalized):
     db.commit()
     assert store(db) == success()
     assert db.execute("SELECT metadata FROM entities").fetchone() == (normalized,)
-    assert store(db, metadata={"replacement": 2}) == success()
+    assert store(db, annotations=EntityAnnotations(metadata={"replacement": 2})) == success()
     assert db.execute("SELECT metadata FROM entities").fetchone() == ('{"replacement": 2}',)
 
 
 @pytest.mark.parametrize("key", ["project", "project_id"])
 def test_metadata_context_fallback(db, key):
-    assert store(db, metadata={key: "project"}) == success(context="project")
+    assert store(db, annotations=EntityAnnotations(metadata={key: "project"})) == success(
+        context="project"
+    )
     assert db.execute("SELECT context_id FROM entities").fetchall() == [("project",)]
 
 
 @pytest.mark.parametrize(
     "scores,expected",
     [
-        ({"relevance": 0}, 2),
-        ({"impact": 0}, 2),
-        ({"novelty": 0}, 2),
-        ({"actionability": 0}, 2),
-        ({"relevance": 2, "impact": 3, "novelty": 3, "actionability": 3}, 2),
-        ({"relevance": -20}, 1),
-        ({"relevance": 100}, 5),
-        ({"weight": 0}, 1),
+        (StoreScores(relevance=0), 2),
+        (StoreScores(impact=0), 2),
+        (StoreScores(novelty=0), 2),
+        (StoreScores(actionability=0), 2),
+        (StoreScores(relevance=2, impact=3, novelty=3, actionability=3), 2),
+        (StoreScores(relevance=-20), 1),
+        (StoreScores(relevance=100), 5),
+        (StoreScores(weight=0), 1),
     ],
 )
 def test_weight_defaults_floor_and_clamps(db, scores, expected):
-    assert store(db, **scores) == success()
+    assert store(db, scores=scores) == success()
     assert db.execute("SELECT weight FROM entities").fetchall() == [(expected,)]
 
 
@@ -359,9 +366,11 @@ def test_archived_target_core_promotion_ignores_active_governance_limits(db, ove
         entity_id="active-core",
         title="Active incident",
         content="The active incident requires operators to inspect the bounded diagnostic report.",
-        is_core=True,
-        core_reason="An active incident requires immediate operator attention.",
-        core_exit_condition="Remove this warning after the incident is resolved.",
+        core=CoreDeclaration(
+            is_core=True,
+            core_reason="An active incident requires immediate operator attention.",
+            core_exit_condition="Remove this warning after the incident is resolved.",
+        ),
     )
     assert active["status"] == "ok"
     if overdue:
@@ -374,9 +383,11 @@ def test_archived_target_core_promotion_ignores_active_governance_limits(db, ove
         assert (
             store(
                 db,
-                is_core=True,
-                core_reason="This archived warning retains its historical governance.",
-                core_exit_condition="Keep archived until its historical incident is resolved.",
+                core=CoreDeclaration(
+                    is_core=True,
+                    core_reason="This archived warning retains its historical governance.",
+                    core_exit_condition="Keep archived until its historical incident is resolved.",
+                ),
             )
             == success()
         )
@@ -391,9 +402,11 @@ def test_core_update_excludes_itself_from_capacity_admission(db):
     assert (
         store(
             db,
-            is_core=True,
-            core_reason="An active incident requires immediate operator attention.",
-            core_exit_condition="Remove this warning after the incident is resolved.",
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="An active incident requires immediate operator attention.",
+                core_exit_condition="Remove this warning after the incident is resolved.",
+            ),
         )
         == success()
     )
@@ -401,7 +414,7 @@ def test_core_update_excludes_itself_from_capacity_admission(db):
         "SELECT core_reason,core_exit_condition,core_review_after FROM entities"
     ).fetchall()
     with patch.object(governance, "CORE_MAX_ACTIVE", 1):
-        assert store(db, weight=4) == success()
+        assert store(db, scores=StoreScores(weight=4)) == success()
     assert db.execute("SELECT id,status,is_core,weight FROM entities").fetchall() == [
         ("fixed-memory", "raw", 1, 4)
     ]
@@ -435,21 +448,21 @@ def test_identical_retrieval_text_force_requeues_embedding(db):
 
 def test_empty_agent_id_is_rejected_without_writes(db):
     before = snapshot(db)
-    assert store(db, agent_id="") == (
+    assert store(db, provenance=Provenance(agent_id="")) == (
         "Error: agent_id is mandatory in this version of SALTMDB to prevent cross-lane signal contamination."
     )
     assert snapshot(db) == before
 
 
 def test_partial_weight_dimensions_use_neutral_defaults(db):
-    assert store(db, impact=2) == success()
+    assert store(db, scores=StoreScores(impact=2)) == success()
     assert db.execute("SELECT weight FROM entities").fetchone() == (2,)
 
 
 def test_metadata_project_precedes_project_id(db):
-    assert store(db, metadata={"project": "primary", "project_id": "fallback"}) == success(
-        context="primary"
-    )
+    assert store(
+        db, annotations=EntityAnnotations(metadata={"project": "primary", "project_id": "fallback"})
+    ) == success(context="primary")
     assert db.execute("SELECT context_id FROM entities").fetchone() == ("primary",)
 
 
@@ -500,7 +513,7 @@ def test_legacy_null_valid_from_uses_created_at_for_history(db):
     db.execute("UPDATE entities SET valid_from=NULL WHERE id='fixed-memory'")
     db.commit()
     with patch.object(write, "_legacy_update_guard", return_value=(None, None)):
-        assert store(db, weight=4) == success()
+        assert store(db, scores=StoreScores(weight=4)) == success()
     assert db.execute(
         "SELECT valid_from FROM entities WHERE id LIKE 'fixed-memory_h_%'"
     ).fetchone() == (created_at,)

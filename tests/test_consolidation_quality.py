@@ -1,9 +1,10 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
 import shutil
 from saltmdb.db.schema import init_db
-from saltmdb.domain.services.memory_service import store_memory, Provenance
+from saltmdb.domain.services.memory_service import store_memory
 from saltmdb.domain.services.relation_service import commit_consolidation
 from saltmdb.utils import text
 
@@ -27,14 +28,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Raw Fact Alpha",
             content="Detailed raw fact content alpha for consolidation testing",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Beta",
             content="Detailed raw fact content beta for consolidation testing",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         res = commit_consolidation(
@@ -57,15 +58,15 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Memory Arch Spec Note",
             content=parent_content,
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         p2 = store_memory(
             title="Memory Arch Spec Support",
             content="A second raw architecture fact used only as a consolidation parent.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         # Consolidate with identical content as parent_content
@@ -89,21 +90,21 @@ class TestConsolidationQualityGate(unittest.TestCase):
         store_memory(
             title="Unrelated Module",
             content=existing_markdown,
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )
 
         p1 = store_memory(
             title="Raw Fact Gamma",
             content="Detailed raw fact content gamma for consolidation testing",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Gamma Support",
             content="Supporting raw fact content gamma for consolidation testing.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         # Attempt to consolidate p1 using content that matches the unrelated existing memory
@@ -121,14 +122,14 @@ class TestConsolidationQualityGate(unittest.TestCase):
         p1 = store_memory(
             title="Raw Fact Delta",
             content="Detailed raw fact content delta for consolidation testing",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
         p2 = store_memory(
             title="Raw Fact Delta Support",
             content="Supporting raw fact content delta for consolidation testing.",
-            agent_id="agent_c",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_c"),
         )["data"]["id"]
 
         consolidated_md = (

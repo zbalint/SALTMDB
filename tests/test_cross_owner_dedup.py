@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -56,9 +57,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             content="SALTMDB is a local-first MCP memory database enabling cross-agent shared memory across Claude, Antigravity, and Copilot CLI",
             title="SALTMDB Cross-Agent Design Purpose",
-            agent_id="agent_a",
             scope="shared",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_a"),
         )
 
         dup_check = memory_service.check_duplicate_memories(
@@ -79,9 +80,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             content="agent_a private scratch note about a local debugging session that nobody else should see",
             title="agent_a Private Debug Note",
-            agent_id="agent_a",
             scope="private",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="agent_a"),
         )
 
         dup_check = memory_service.check_duplicate_memories(
@@ -114,9 +115,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=t,
                     content=c,
-                    agent_id=owner,
                     entity_id=eid,
                     db_connection=self.conn,
+                    provenance=Provenance(agent_id=owner),
                 )
                 _seed_ready_embedding(self.conn, eid, t, c)
 
@@ -150,9 +151,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_a,
             content=c_a,
-            agent_id=owner,
             entity_id=eid_a,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=owner),
         )
         _seed_ready_embedding(self.conn, eid_a, t_a, c_a)
 
@@ -163,9 +164,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_b,
             content=c_b,
-            agent_id=owner,
             entity_id=eid_b,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=owner),
         )
 
         # Candidate C: NO ready vector + lexically dissimilar text (matching only sparse FTS terms)
@@ -177,9 +178,9 @@ class TestCrossOwnerDedup(unittest.TestCase):
         memory_service.store_memory(
             title=t_c,
             content=c_c,
-            agent_id=owner,
             entity_id=eid_c,
             db_connection=self.conn,
+            provenance=Provenance(agent_id=owner),
         )
 
         dup_check = memory_service.check_duplicate_memories(
@@ -229,8 +230,8 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=f"Standard System Memory Item {i:02d}",
                     content=f"Detailed content for standard system memory entity index {i:02d}",
-                    agent_id=owner,
                     db_connection=self.conn,
+                    provenance=Provenance(agent_id=owner),
                 )
 
             executed_sqls = []
@@ -273,8 +274,8 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=f"Standard System Memory Item {i:02d}",
                     content=f"Detailed content for standard system memory entity index {i:02d}",
-                    agent_id=owner,
                     db_connection=self.conn,
+                    provenance=Provenance(agent_id=owner),
                 )
 
         executed_sqls = []
@@ -334,14 +335,14 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=f"Unrelated Archive Item {i:02d}",
                     content=f"Background text for unrelated archive entity {i:02d}",
-                    agent_id=owner,
                     db_connection=self.conn,
+                    provenance=Provenance(agent_id=owner),
                 )
             parent = memory_service.store_memory(
                 title="needle parent",
                 content="needle parent contains a distinctive duplicate candidate body",
-                agent_id=owner,
                 db_connection=self.conn,
+                provenance=Provenance(agent_id=owner),
             )
             parent_id = parent["data"]["id"]
             dup_check = memory_service.check_duplicate_memories(
@@ -369,8 +370,8 @@ class TestCrossOwnerDedup(unittest.TestCase):
                 memory_service.store_memory(
                     title=f"Shared Candidate Term {i:02d}",
                     content=f"Shared Candidate Term body {i:02d} with enough repeated context",
-                    agent_id=owner,
                     db_connection=self.conn,
+                    provenance=Provenance(agent_id=owner),
                 )
             memory_service.check_duplicate_memories(
                 title="Shared Candidate Term query",
@@ -395,8 +396,8 @@ class TestCrossOwnerDedup(unittest.TestCase):
             memory_service.store_memory(
                 title="Baseline Entity",
                 content="Some baseline content for the stop word cap test",
-                agent_id=owner,
                 db_connection=self.conn,
+                provenance=Provenance(agent_id=owner),
             )
             with patch.object(
                 search_primitives, "_run_fts_search", wraps=real_run_fts_search

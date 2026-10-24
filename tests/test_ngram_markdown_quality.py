@@ -1,3 +1,4 @@
+from saltmdb.domain.services.memory_service import Provenance
 import unittest
 import tempfile
 import os
@@ -49,7 +50,9 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             "# Missing closing fence"
         )
         res = memory_service.store_memory(
-            content=unclosed_markdown, title="Unclosed Fence Test", agent_id="test_agent"
+            content=unclosed_markdown,
+            title="Unclosed Fence Test",
+            provenance=Provenance(agent_id="test_agent"),
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
@@ -62,7 +65,9 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
             "| Row 1 Col 1 |\n"  # Insufficient pipe separators
         )
         res = memory_service.store_memory(
-            content=malformed_table, title="Broken Table Test", agent_id="test_agent"
+            content=malformed_table,
+            title="Broken Table Test",
+            provenance=Provenance(agent_id="test_agent"),
         )
         self.assertEqual(res["status"], "rejected")
         self.assertEqual(res["errors"][0]["code"], "BROKEN_MARKDOWN_SYNTAX")
@@ -84,8 +89,8 @@ class TestNGramAndMarkdownQuality(unittest.TestCase):
         res = memory_service.store_memory(
             content=structured_md,
             title="High MSDI Test",
-            agent_id="test_agent",
             db_connection=self.conn,
+            provenance=Provenance(agent_id="test_agent"),
         )
         self.assertEqual(res["status"], "ok")
 
