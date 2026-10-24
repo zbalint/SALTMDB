@@ -129,3 +129,15 @@ The 12 or so replace/lifecycle suites listed in section 0 pin most behaviour. Ad
 | `plan.before` is not mutated in the flow; `changed` is mutated only in `_replacement_response` | consultant read | read |
 | An unresolvable id returns from `_replacement_target` before prepare | `lifecycle.py` ~903 | consultant read |
 | The MCP revise/supersede tools do not accept `metadata`, so only service-level callers reach the metadata branches | `mcp/tools.py` signatures; `daemon/dispatch.py` 540 to 591 | read |
+
+## Amendment 1 (2026-10-24): the success-or-error returns are unions, narrowed with `isinstance`
+
+The developer reported `BLOCKED` before any edit: section 2 gives `_replacement_content -> tuple[_ReplacementContent | None, dict | None]` and `_replacement_prepare -> tuple[_ReplacementPlan | None, dict | None]` while stating that no cast or assert is needed. That is contradictory under mypy (`check_untyped_defs` is on): a tuple of two independent Optionals does not narrow, and `cast(dict, ...)` after the error check is exactly what the code does today (lifecycle.py ~478 and ~922). Verified by the developer with a minimal mypy probe (`Argument 1 to "consume" has incompatible type "Content | None"`).
+
+A1.1 The two functions return a UNION, not a tuple: `_replacement_content(title, content, tags) -> _ReplacementContent | dict` and `_replacement_prepare(conn, request, resolved_id) -> _ReplacementPlan | dict`, where the `dict` is the rejection envelope that `_replacement_error(...)` builds today (a plain `dict`, never a dataclass), so `isinstance(result, dict)` narrows both arms without a cast or an assert. This is the same shape used for the consolidation preflight and the store pipeline.
+
+A1.2 The callers narrow with `isinstance(result, dict)` and `return result` for the error arm: `_replacement_prepare` for the content (replacing `content_data, content_error = ...; if content_error is not None: ...; content_data = cast(dict, content_data)`), `replace_memory` for the plan (replacing `context, preparation_error = ...; if preparation_error is not None: ...; context = cast(dict, context)`). Every error value, its code, message and field, and the order of the checks are unchanged. The documented `cast(str, ...)` of the validated request fields (section 2) stays; the two `cast(dict, ...)` calls disappear.
+
+A1.3 Section 6 item 3 gains: `rg -n "cast\(dict" src/saltmdb/domain/services/memory_service/lifecycle.py` returns nothing in the replacement functions.
+
+A1.4 Nothing else changes: no test references `_replacement_content` or `_replacement_prepare` (`rg` over tests, scripts, hooks: empty), so the return type is free.
