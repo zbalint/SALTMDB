@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import patch
@@ -14,8 +15,11 @@ from saltmdb.domain.services.memory_service import (
     CoreDeclaration,
     ReplacementRequest,
     replace_memory,
+    revise_memory,
     store_memory,
+    supersede_memory,
 )
+from saltmdb.domain.services.memory_service import lifecycle
 
 
 def _store(conn, title: str, *, is_core: bool = False, retrieval_text: str | None = None) -> str:
@@ -158,9 +162,15 @@ def test_core_keep_and_demote_reset_successor_columns(tmp_path):
             (new_id,),
         ).fetchall()
         if expected_core:
-            assert row[1] and row[2] and ("#core",) in tags
-            assert result["data"]["changed"]["core"]["reason"]
-            assert result["data"]["changed"]["core"]["exit_condition"]
+            assert row[1] == "A sufficiently long successor core reason"
+            assert row[2] == "A sufficiently long successor core exit condition"
+            assert ("#core",) in tags
+            assert result["data"]["changed"]["core"]["reason"] == (
+                "A sufficiently long successor core reason"
+            )
+            assert result["data"]["changed"]["core"]["exit_condition"] == (
+                "A sufficiently long successor core exit condition"
+            )
         else:
             assert result["data"]["changed"]["demote_core"] is True
             assert row[1] is None and row[2] is None and ("#core",) not in tags
@@ -682,4 +692,248 @@ def test_vector_clear_occurs_after_release_and_not_on_rejection(tmp_path):
         )
     assert rejected["status"] == "rejected"
     assert calls == []
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("operation", "wrapper"),
+    [("revises", revise_memory), ("supersedes", supersede_memory)],
+)
+def test_revise_and_supersede_response_data_is_stable(tmp_path, operation, wrapper):
+    conn = init_db(str(tmp_path / f"{operation}.db"))
+    old_id = _store(conn, f"{operation} predecessor")
+    result = wrapper(
+        entity_id=old_id,
+        title=f"{operation} successor",
+        content=f"A durable {operation} replacement body with enough descriptive content.",
+        reason="  Corrected representation  ",
+        db_connection=conn,
+    )
+    assert result["status"] == "ok", result
+    data = result["data"]
+    assert list(data) == [
+        "old_id",
+        "new_id",
+        "relation_id",
+        "predicate",
+        "reason",
+        "inherited",
+        "changed",
+        "inherited_fields",
+        "changed_fields",
+        "orphaned_semantic_edges",
+        "semantic_relations_repointed",
+        "repointed_relations",
+    ]
+    assert all(isinstance(data[key], str) for key in ("old_id", "new_id", "relation_id"))
+    assert {
+        key: value for key, value in data.items() if key not in {"old_id", "new_id", "relation_id"}
+    } == {
+        "predicate": operation,
+        "reason": "Corrected representation",
+        "inherited": {
+            "tags": [],
+            "agent_id": "replace-tests",
+            "context_id": None,
+            "scope": "shared",
+            "memory_type": "fact",
+        },
+        "changed": {
+            "title": f"{operation} successor",
+            "reason": "Corrected representation",
+            "content": f"A durable {operation} replacement body with enough descriptive content.",
+        },
+        "inherited_fields": ["tags", "agent_id", "context_id", "scope", "memory_type"],
+        "changed_fields": ["title", "reason", "content"],
+        "orphaned_semantic_edges": [],
+        "semantic_relations_repointed": False,
+        "repointed_relations": [],
+    }
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "stored"),
+    [
+        ("tags", ["#explicit"], ["#explicit"]),
+        ("agent_id", "new-agent", "new-agent"),
+        ("context_id", "new-context", "new-context"),
+        ("scope", "private", "private"),
+        ("memory_type", "decision", "decision"),
+        ("metadata", {"source": "new"}, '{"source": "new"}'),
+    ],
+)
+def test_each_explicit_replacement_field_is_reported_as_changed(tmp_path, field, value, stored):
+    conn = init_db(str(tmp_path / f"explicit-{field}.db"))
+    old_id = _store(conn, f"Explicit {field} predecessor")
+    request = ReplacementRequest(
+        entity_id=old_id,
+        title="Explicit field successor",
+        content="A durable explicit field successor body with enough descriptive content.",
+        reason="Explicit field",
+        db_connection=conn,
+    )
+    request = dataclass_replace(request, **{field: value})
+    result = replace_memory("revises", request)
+    assert result["status"] == "ok", result
+    data = result["data"]
+    assert field not in data["inherited"]
+    assert data["changed"][field] == stored
+    if field == "tags":
+        assert conn.execute(
+            "SELECT t.name FROM tags t JOIN entity_tags et ON et.tag_id = t.id WHERE et.entity_id = ?",
+            (data["new_id"],),
+        ).fetchall() == [("#explicit",)]
+    else:
+        column = "metadata" if field == "metadata" else field
+        assert (
+            conn.execute(
+                f"SELECT {column} FROM entities WHERE id = ?", (data["new_id"],)
+            ).fetchone()[0]
+            == stored
+        )
+    conn.close()
+
+
+def test_prepare_error_precedes_content_and_retrieval_errors(tmp_path):
+    conn = init_db(str(tmp_path / "precedence.db"))
+    old_id = _store(conn, "Precedence predecessor")
+    with patch.object(lifecycle, "_replacement_snapshot", return_value=([], {})):
+        missing = replace_memory(
+            "revises",
+            ReplacementRequest(
+                entity_id=old_id,
+                title="x",
+                content="A durable precedence body with enough descriptive content.",
+                reason="Precedence",
+                retrieval_text=cast(Any, 123),
+                db_connection=conn,
+            ),
+        )
+    assert missing["errors"][0]["code"] == "UNKNOWN_ENTITY_ID"
+    content = replace_memory(
+        "revises",
+        ReplacementRequest(
+            entity_id=old_id,
+            title="x",
+            content="A durable precedence body with enough descriptive content.",
+            reason="Precedence",
+            retrieval_text=cast(Any, 123),
+            db_connection=conn,
+        ),
+    )
+    assert content["errors"][0]["code"] == "INVALID_MEMORY"
+    retrieval = replace_memory(
+        "revises",
+        ReplacementRequest(
+            entity_id=old_id,
+            title="Valid precedence successor",
+            content="A durable precedence body with enough descriptive content.",
+            reason="Precedence",
+            retrieval_text=cast(Any, 123),
+            db_connection=conn,
+        ),
+    )
+    assert retrieval["errors"][0]["code"] == "INVALID_RETRIEVAL_TEXT"
+    conn.close()
+
+
+def test_inactive_target_precedes_core_governance_error_under_write_lock(tmp_path):
+    conn = init_db(str(tmp_path / "inactive-core-precedence.db"))
+    old_id = _store(conn, "Inactive core precedence predecessor", is_core=True)
+    request = ReplacementRequest(
+        entity_id=old_id,
+        title="Inactive core successor",
+        content="A durable inactive core successor body with enough descriptive content.",
+        reason="Inactive core precedence",
+        db_connection=conn,
+    )
+    control = replace_memory("revises", request)
+    assert control["errors"][0]["code"] == "CORE_DECISION_REQUIRED"
+
+    def archive_before_callback(worker_conn, callback):
+        worker_conn.execute("UPDATE entities SET status = 'archived' WHERE id = ?", (old_id,))
+        return callback(worker_conn)
+
+    with patch.object(lifecycle, "write_transaction_retrying", side_effect=archive_before_callback):
+        result = replace_memory("revises", request)
+    assert result["errors"][0]["code"] == "INACTIVE_TARGET"
+    conn.close()
+
+
+def test_repoint_relations_reports_incoming_and_outgoing_success(tmp_path):
+    conn = init_db(str(tmp_path / "repoint-success.db"))
+    old_id = _store(conn, "Repoint success predecessor")
+    other_id = _store(conn, "Repoint success other")
+    old_created = "2001-02-03T04:05:06+00:00"
+    old_valid_from = "2001-02-03T04:05:07+00:00"
+    old_valid_at = "2001-02-03T04:05:08+00:00"
+    replacement_now = "2040-01-02T03:04:05+00:00"
+    conn.execute(
+        "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+        "VALUES ('incoming-edge', ?, ?, 'depends_on', ?, ?, ?)",
+        (other_id, old_id, old_created, old_valid_from, old_valid_at),
+    )
+    conn.execute(
+        "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) "
+        "VALUES ('outgoing-edge', ?, ?, 'related_to', ?, ?, ?)",
+        (old_id, other_id, old_created, old_valid_from, old_valid_at),
+    )
+    conn.commit()
+    with patch.object(lifecycle, "datetime") as clock:
+        clock.now.return_value = datetime.fromisoformat(replacement_now)
+        result = replace_memory(
+            "revises",
+            ReplacementRequest(
+                entity_id=old_id,
+                title="Repoint success successor",
+                content="A durable repoint success successor body with enough descriptive content.",
+                reason="Repoint success",
+                repoint_relations=True,
+                db_connection=conn,
+            ),
+        )
+    assert result["status"] == "ok", result
+    data = result["data"]
+    assert data["orphaned_semantic_edges"] == []
+    assert data["semantic_relations_repointed"] is True
+    assert len(data["repointed_relations"]) == 2
+    assert {
+        (item["old_relation_id"], item["source_id"], item["target_id"], item["predicate"])
+        for item in data["repointed_relations"]
+    } == {
+        ("incoming-edge", other_id, data["new_id"], "depends_on"),
+        ("outgoing-edge", data["new_id"], other_id, "related_to"),
+    }
+    old_temporal = conn.execute(
+        "SELECT id, created_at, valid_from, valid_at, valid_to, invalid_at "
+        "FROM relations WHERE id IN ('incoming-edge', 'outgoing-edge') ORDER BY id"
+    ).fetchall()
+    assert old_temporal == [
+        (
+            "incoming-edge",
+            old_created,
+            old_valid_from,
+            old_valid_at,
+            replacement_now,
+            replacement_now,
+        ),
+        (
+            "outgoing-edge",
+            old_created,
+            old_valid_from,
+            old_valid_at,
+            replacement_now,
+            replacement_now,
+        ),
+    ]
+    new_temporal = conn.execute(
+        "SELECT created_at, valid_from, valid_at, valid_to, invalid_at "
+        "FROM relations WHERE id NOT IN ('incoming-edge', 'outgoing-edge') "
+        "AND predicate IN ('depends_on', 'related_to') ORDER BY predicate"
+    ).fetchall()
+    assert new_temporal == [
+        (replacement_now, replacement_now, replacement_now, None, None),
+        (replacement_now, replacement_now, replacement_now, None, None),
+    ]
     conn.close()

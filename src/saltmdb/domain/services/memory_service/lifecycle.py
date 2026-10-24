@@ -355,9 +355,71 @@ def _replacement_target(conn, entity_id: str) -> tuple[str | None, dict | None]:
     return resolved_id, None
 
 
-def _replacement_content(
-    title: str, content: str, tags: list | None
-) -> tuple[dict | None, dict | None]:
+@dataclass(frozen=True, slots=True)
+class _ReplacementContent:
+    """The validated new body of the replacement."""
+
+    # Contains mutable state; must not be hashed or cached.
+    new_title: str
+    new_content: str
+    content_hash: str
+    quality: dict
+    now: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementFields:
+    """What the replacement inherits from the predecessor and what the caller supplied."""
+
+    # Contains mutable state; must not be hashed or cached.
+    inherited_agent_id: str | None
+    inherited_context: str | None
+    inherited_scope: str | None
+    inherited_type: str
+    inherited_metadata: str | None
+    effective_tags: list
+    inherited: dict[str, Any]
+    changed: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementPlan:
+    """Everything one revise/supersede needs before its write transaction starts."""
+
+    # Contains mutable state; must not be hashed or cached.
+    columns: list[str]
+    before: dict
+    orphaned_edges: list[dict[str, Any]]
+    agent_session_id: str | None
+    content: _ReplacementContent
+    fields: _ReplacementFields
+    reason: str
+    retrieval_text: str | None
+    retrieval_text_hash: str | None
+    core_declaration: CoreDeclaration
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementRow:
+    """What the write transaction decided for the new entity."""
+
+    # Contains mutable state; must not be hashed or cached.
+    new_id: str
+    core_state: dict
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementOutcome:
+    """What the replacement write produced."""
+
+    # Contains mutable state; must not be hashed or cached.
+    row: _ReplacementRow
+    relation_id: str
+    repointed_relations: list[dict[str, Any]]
+    still_orphaned_ids: set[str]
+
+
+def _replacement_content(title: str, content: str, tags: list | None) -> _ReplacementContent | dict:
     new_title = redact_secrets(title.strip())
     new_content = redact_secrets(content)
     # validate_memory_input checks title bounds and tag-name shape; its error is safe to return
@@ -371,134 +433,122 @@ def _replacement_content(
             tags,
         )
     except ValueError as exc:
-        return None, _replacement_error("INVALID_MEMORY", str(exc))
+        return _replacement_error("INVALID_MEMORY", str(exc))
     now = datetime.now(UTC).isoformat()
     content_hash = compute_content_hash(new_content)
     quality = evaluate_memory_quality(new_content)
     if quality.get("status") == "REJECT":
-        return None, _replacement_error(
+        return _replacement_error(
             "MEMORY_QUALITY_REJECTED",
             f"Memory quality check rejected (Score: {quality.get('quality_score', 0):.2f}). "
             f"Reason: {quality.get('reason', 'quality requirements were not met')}",
         )
-    return {
-        "new_title": new_title,
-        "new_content": new_content,
-        "content_hash": content_hash,
-        "quality": quality,
-        "now": now,
-    }, None
+    return _ReplacementContent(new_title, new_content, content_hash, quality, now)
 
 
 def _replacement_fields(
     before: dict,
     inherited_tags: list | None,
-    tags: list | None,
-    agent_id: str | None,
-    context_id: str | None,
-    scope: str | None,
-    memory_type: str | None,
-    metadata: dict | None,
-    reason: str,
-    content_data: dict,
-) -> dict:
-    inherited_agent_id = before.get("agent_id") if agent_id is None else agent_id
-    inherited_context = before.get("context_id") if context_id is None else context_id
-    inherited_scope = before.get("scope") if scope is None else scope
-    inherited_type = before.get("memory_type") or "fact" if memory_type is None else memory_type
-    inherited_metadata = before.get("metadata") if metadata is None else json.dumps(metadata)
-    effective_tags = inherited_tags if tags is None else tags
+    request: "ReplacementRequest",
+    content: _ReplacementContent,
+) -> _ReplacementFields:
+    reason = cast(str, request.reason)
+    inherited_agent_id = before.get("agent_id") if request.agent_id is None else request.agent_id
+    inherited_context = (
+        before.get("context_id") if request.context_id is None else request.context_id
+    )
+    inherited_scope = before.get("scope") if request.scope is None else request.scope
+    inherited_type = (
+        before.get("memory_type") or "fact" if request.memory_type is None else request.memory_type
+    )
+    inherited_metadata = (
+        before.get("metadata") if request.metadata is None else json.dumps(request.metadata)
+    )
+    effective_tags = inherited_tags if request.tags is None else request.tags
     if effective_tags is None:
         effective_tags = []
     inherited: dict[str, Any] = {
-        field: value
-        for field, value, supplied in (
-            ("tags", inherited_tags, tags is not None),
-            ("agent_id", inherited_agent_id, agent_id is not None),
-            ("context_id", inherited_context, context_id is not None),
-            ("scope", inherited_scope, scope is not None),
-            ("memory_type", inherited_type, memory_type is not None),
+        name: value
+        for name, value, supplied in (
+            ("tags", inherited_tags, request.tags is not None),
+            ("agent_id", inherited_agent_id, request.agent_id is not None),
+            ("context_id", inherited_context, request.context_id is not None),
+            ("scope", inherited_scope, request.scope is not None),
+            ("memory_type", inherited_type, request.memory_type is not None),
         )
         if not supplied
     }
-    changed: dict[str, Any] = {"title": content_data["new_title"], "reason": reason.strip()}
+    changed: dict[str, Any] = {"title": content.new_title, "reason": reason.strip()}
     changed.update(
         {
-            field: value
-            for field, value, supplied in (
-                ("tags", list(effective_tags), tags is not None),
-                ("agent_id", inherited_agent_id, agent_id is not None),
-                ("context_id", inherited_context, context_id is not None),
-                ("scope", inherited_scope, scope is not None),
-                ("memory_type", inherited_type, memory_type is not None),
-                ("metadata", inherited_metadata, metadata is not None),
+            name: value
+            for name, value, supplied in (
+                ("tags", list(effective_tags), request.tags is not None),
+                ("agent_id", inherited_agent_id, request.agent_id is not None),
+                ("context_id", inherited_context, request.context_id is not None),
+                ("scope", inherited_scope, request.scope is not None),
+                ("memory_type", inherited_type, request.memory_type is not None),
+                ("metadata", inherited_metadata, request.metadata is not None),
             )
             if supplied
         }
     )
-    return {
-        "inherited_agent_id": inherited_agent_id,
-        "inherited_context": inherited_context,
-        "inherited_scope": inherited_scope,
-        "inherited_type": inherited_type,
-        "inherited_metadata": inherited_metadata,
-        "effective_tags": effective_tags,
-        "inherited": inherited,
-        "changed": changed,
-    }
+    return _ReplacementFields(
+        inherited_agent_id,
+        inherited_context,
+        inherited_scope,
+        inherited_type,
+        inherited_metadata,
+        effective_tags,
+        inherited,
+        changed,
+    )
 
 
 def _replacement_prepare(
-    conn,
-    entity_id: str,
-    resolved_id: str,
-    title: str,
-    tags: list | None,
-    content: str,
-    reason: str,
-    agent_id: str | None,
-    context_id: str | None,
-    scope: str | None,
-    memory_type: str | None,
-    agent_session_id: str | None,
-    metadata: dict | None,
-) -> tuple[dict | None, dict | None]:
+    conn, request: "ReplacementRequest", resolved_id: str
+) -> _ReplacementPlan | dict:
     columns, before = _replacement_snapshot(conn, resolved_id)
     from . import tags as tag_ops
 
-    inherited_tags = tag_ops.list_entity_tags(conn, resolved_id) if tags is None else None
+    inherited_tags = tag_ops.list_entity_tags(conn, resolved_id) if request.tags is None else None
     if not before:
-        return None, _replacement_error(
-            "UNKNOWN_ENTITY_ID", f"No memory matches entity_id '{entity_id}'.", "entity_id"
+        return _replacement_error(
+            "UNKNOWN_ENTITY_ID",
+            f"No memory matches entity_id '{cast(str, request.entity_id)}'.",
+            "entity_id",
         )
     orphaned_edges = _semantic_edge_worklist(conn, resolved_id)
-    content_data, content_error = _replacement_content(title, content, tags)
-    if content_error is not None:
-        return None, content_error
-    content_data = cast(dict, content_data)
-    fields = _replacement_fields(
+    content_result = _replacement_content(
+        cast(str, request.title),
+        cast(str, request.content),
+        request.tags,
+    )
+    if isinstance(content_result, dict):
+        return content_result
+    fields = _replacement_fields(before, inherited_tags, request, content_result)
+    from .validation import _retrieval_text_hash, normalize_retrieval_text
+
+    try:
+        normalized_retrieval_text = (
+            normalize_retrieval_text(request.retrieval_text)
+            if request.retrieval_text is not None
+            else None
+        )
+    except ValueError as exc:
+        return _replacement_error("INVALID_RETRIEVAL_TEXT", str(exc), "retrieval_text")
+    return _ReplacementPlan(
+        columns,
         before,
-        inherited_tags,
-        tags,
-        agent_id,
-        context_id,
-        scope,
-        memory_type,
-        metadata,
-        reason,
-        content_data,
+        orphaned_edges,
+        request.agent_session_id,
+        content_result,
+        fields,
+        cast(str, request.reason),
+        normalized_retrieval_text,
+        _retrieval_text_hash(normalized_retrieval_text),
+        request.core or CoreDeclaration(),
     )
-    fields.update(
-        {
-            "columns": columns,
-            "before": before,
-            "orphaned_edges": orphaned_edges,
-            "now": content_data["now"],
-            "agent_session_id": agent_session_id,
-        }
-    )
-    fields.update(content_data)
-    return fields, None
 
 
 def _replacement_locked_source(c, resolved_id: str, before: dict) -> dict:
@@ -555,28 +605,30 @@ def _replacement_locked_source(c, resolved_id: str, before: dict) -> dict:
     return locked_before
 
 
-def _replacement_insert_core_tags(c, context: dict, new_id: str) -> None:
-    if not context["core_state"]["is_core"]:
+def _replacement_insert_core_tags(c, plan: _ReplacementPlan, row: _ReplacementRow) -> None:
+    if not row.core_state["is_core"]:
         return
     from . import tags as tag_ops
     from saltmdb.domain.services.core_governance_service import reconcile_detail_relations
 
-    core_tag_id = tag_ops.resolve_or_create_tag(c, "#core", agent_id=context["inherited_agent_id"])
+    core_tag_id = tag_ops.resolve_or_create_tag(c, "#core", agent_id=plan.fields.inherited_agent_id)
     if core_tag_id:
         c.execute(
             "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-            (new_id, core_tag_id),
+            (row.new_id, core_tag_id),
         )
     reconcile_detail_relations(
         c,
-        core_id=new_id,
-        agent_id=context["inherited_agent_id"],
-        new_detail_ids=context["core_state"].get("core_detail_memory_ids", []),
+        core_id=row.new_id,
+        agent_id=plan.fields.inherited_agent_id,
+        new_detail_ids=row.core_state.get("core_detail_memory_ids", []),
         previous_detail_ids=[],
     )
 
 
-def _replacement_enqueue_jobs(c, context: dict, replacement: dict, resolved_id: str) -> None:
+def _replacement_enqueue_jobs(
+    c, plan: _ReplacementPlan, row: _ReplacementRow, replacement: dict, resolved_id: str
+) -> None:
     from saltmdb.domain.services.embedding_service import (
         cancel_embedding_jobs_for_entity,
         cancel_retrieval_embedding_jobs_for_entity,
@@ -587,11 +639,15 @@ def _replacement_enqueue_jobs(c, context: dict, replacement: dict, resolved_id: 
     cancel_embedding_jobs_for_entity(c, resolved_id)
     cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=False)
     enqueue_embedding_jobs_for_entity(
-        c, context["new_id"], context["new_title"], context["new_content"], context["content_hash"]
+        c,
+        row.new_id,
+        plan.content.new_title,
+        plan.content.new_content,
+        plan.content.content_hash,
     )
     enqueue_retrieval_embedding_job_for_entity(
         c,
-        context["new_id"],
+        row.new_id,
         replacement.get("retrieval_text"),
         replacement.get("retrieval_text_hash"),
         force=True,
@@ -599,9 +655,13 @@ def _replacement_enqueue_jobs(c, context: dict, replacement: dict, resolved_id: 
 
 
 def _replacement_insert_entity(
-    c, context: dict, locked_before: dict, resolved_id: str, operation: str
-):
-    new_id = context["new_id"]
+    c,
+    plan: _ReplacementPlan,
+    row: _ReplacementRow,
+    locked_before: dict,
+    resolved_id: str,
+    operation: str,
+) -> str:
     replacement = {
         column: value
         for column, value in locked_before.items()
@@ -609,70 +669,70 @@ def _replacement_insert_entity(
     }
     replacement.update(
         {
-            "id": new_id,
-            "created_at": context["now"],
-            "updated_at": context["now"],
-            "last_accessed_at": context["now"],
-            "agent_id": context["inherited_agent_id"],
-            "context_id": context["inherited_context"],
-            "scope": context["inherited_scope"],
-            "memory_type": context["inherited_type"],
-            "metadata": context["inherited_metadata"],
+            "id": row.new_id,
+            "created_at": plan.content.now,
+            "updated_at": plan.content.now,
+            "last_accessed_at": plan.content.now,
+            "agent_id": plan.fields.inherited_agent_id,
+            "context_id": plan.fields.inherited_context,
+            "scope": plan.fields.inherited_scope,
+            "memory_type": plan.fields.inherited_type,
+            "metadata": plan.fields.inherited_metadata,
             "status": "raw",
             "embedding_status": "pending",
-            "title": context["new_title"],
-            "full_content": context["new_content"],
-            "valid_from": context["now"],
+            "title": plan.content.new_title,
+            "full_content": plan.content.new_content,
+            "valid_from": plan.content.now,
             "valid_to": None,
-            "content_hash": context["content_hash"],
-            "agent_session_id": context["agent_session_id"],
-            "last_touched_session_id": context["agent_session_id"],
-            "quality_score": context["quality"].get("quality_score"),
-            "quality_status": context["quality"].get("status"),
-            "quality_flags": json.dumps(context["quality"].get("quality_flags", [])),
-            "is_core": context["core_state"]["is_core"],
-            "core_reason": context["core_state"].get("core_reason"),
-            "core_exit_condition": context["core_state"].get("core_exit_condition"),
-            "core_review_after": context["core_state"].get("core_review_after"),
-            "core_detail_memory_ids": json.dumps(
-                context["core_state"].get("core_detail_memory_ids", [])
-            ),
+            "content_hash": plan.content.content_hash,
+            "agent_session_id": plan.agent_session_id,
+            "last_touched_session_id": plan.agent_session_id,
+            "quality_score": plan.content.quality.get("quality_score"),
+            "quality_status": plan.content.quality.get("status"),
+            "quality_flags": json.dumps(plan.content.quality.get("quality_flags", [])),
+            "is_core": row.core_state["is_core"],
+            "core_reason": row.core_state.get("core_reason"),
+            "core_exit_condition": row.core_state.get("core_exit_condition"),
+            "core_review_after": row.core_state.get("core_review_after"),
+            "core_detail_memory_ids": json.dumps(row.core_state.get("core_detail_memory_ids", [])),
             "core_last_reviewed_at": None,
             "core_last_reviewed_by": None,
             "core_review_rationale": None,
-            "retrieval_text": context["retrieval_text"],
-            "retrieval_text_hash": context["retrieval_text_hash"],
+            "retrieval_text": plan.retrieval_text,
+            "retrieval_text_hash": plan.retrieval_text_hash,
             "parent_ids": None,
         }
     )
-    insert_columns = [column for column in context["columns"] if column in replacement]
+    insert_columns = [column for column in plan.columns if column in replacement]
     placeholders = ", ".join("?" for _ in insert_columns)
     c.execute(
         f"INSERT INTO entities ({', '.join(insert_columns)}) VALUES ({placeholders})",
         [replacement[column] for column in insert_columns],
     )
-    _insert_replacement_tags(c, new_id, context["effective_tags"], context["inherited_agent_id"])
-    _replacement_insert_core_tags(c, context, new_id)
-    archived_at = context["now"]
+    _insert_replacement_tags(
+        c, row.new_id, plan.fields.effective_tags, plan.fields.inherited_agent_id
+    )
+    _replacement_insert_core_tags(c, plan, row)
+    archived_at = plan.content.now
     c.execute(
         "UPDATE entities SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ? WHERE id = ? AND status = 'raw'",
         (archived_at, archived_at, resolved_id),
     )
-    _replacement_enqueue_jobs(c, context, replacement, resolved_id)
+    _replacement_enqueue_jobs(c, plan, row, replacement, resolved_id)
     relation_id = str(uuid.uuid4())
     c.execute(
         "INSERT INTO relations (id, source_id, target_id, predicate, created_at, valid_from, valid_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             relation_id,
-            new_id,
+            row.new_id,
             resolved_id,
             operation,
-            context["now"],
-            context["now"],
-            context["now"],
+            plan.content.now,
+            plan.content.now,
+            plan.content.now,
         ),
     )
-    return new_id, relation_id
+    return relation_id
 
 
 def _replacement_repoint_edges(c, resolved_id: str, new_id: str, now: str):
@@ -735,36 +795,43 @@ def _replacement_repoint_edges(c, resolved_id: str, new_id: str, now: str):
     return repointed, still_orphaned_ids
 
 
-def _replacement_write(c, operation: str, resolved_id: str, context: dict, repoint_relations: bool):
-    locked_before = _replacement_locked_source(c, resolved_id, context["before"])
+def _replacement_write(
+    c,
+    operation: str,
+    resolved_id: str,
+    plan: _ReplacementPlan,
+    repoint_relations: bool,
+) -> _ReplacementOutcome:
+    locked_before = _replacement_locked_source(c, resolved_id, plan.before)
     new_id = str(uuid.uuid4())
-    context["new_id"] = new_id
     from saltmdb.domain.services import core_governance_service
 
-    context["core_state"] = core_governance_service.resolve_derived_core_state(
+    core_state = core_governance_service.resolve_derived_core_state(
         c,
         source_ids=[resolved_id],
-        declaration=context["core_declaration"],
-        content=context["new_content"],
-        scope=context["inherited_scope"],
+        declaration=plan.core_declaration,
+        content=plan.content.new_content,
+        # The inherited scope is nullable; governance treats every non-"shared" value alike.
+        scope=plan.fields.inherited_scope or "",
         new_entry={
             "id": new_id,
-            "title": context["new_title"],
-            "memory_type": context["inherited_type"],
-            "core_reason": context["core_declaration"].core_reason,
-            "core_exit_condition": context["core_declaration"].core_exit_condition,
-            "core_review_after": context["core_declaration"].core_review_after,
-            "full_content": context["new_content"],
-            "agent_id": context["inherited_agent_id"],
+            "title": plan.content.new_title,
+            "memory_type": plan.fields.inherited_type,
+            "core_reason": plan.core_declaration.core_reason,
+            "core_exit_condition": plan.core_declaration.core_exit_condition,
+            "core_review_after": plan.core_declaration.core_review_after,
+            "full_content": plan.content.new_content,
+            "agent_id": plan.fields.inherited_agent_id,
         },
     )
+    row = _ReplacementRow(new_id, core_state)
     with savepoint(c, "replacement"):
-        new_id, relation_id = _replacement_insert_entity(
-            c, context, locked_before, resolved_id, operation
+        relation_id = _replacement_insert_entity(
+            c, plan, row, locked_before, resolved_id, operation
         )
         if repoint_relations:
             repointed, still_orphaned_ids = _replacement_repoint_edges(
-                c, resolved_id, new_id, context["now"]
+                c, resolved_id, row.new_id, plan.content.now
             )
         else:
             repointed, still_orphaned_ids = [], set()
@@ -775,18 +842,14 @@ def _replacement_write(c, operation: str, resolved_id: str, context: dict, repoi
 
     clear_embedding_vectors_for_entity(c, resolved_id)
     cancel_retrieval_embedding_jobs_for_entity(c, resolved_id, clear_vector=True)
-    return new_id, relation_id, repointed, still_orphaned_ids
+    return _ReplacementOutcome(row, relation_id, repointed, still_orphaned_ids)
 
 
 def _replacement_response(
     operation: str,
     resolved_id: str,
-    reason: str,
-    context: dict,
-    new_id: str,
-    relation_id: str,
-    repointed_relations: list[dict[str, Any]],
-    still_orphaned_ids: set[str],
+    plan: _ReplacementPlan,
+    outcome: _ReplacementOutcome,
     repoint_relations: bool,
 ) -> dict:
     # A large new body echoed back verbatim risks tripping the calling MCP client's own
@@ -794,38 +857,37 @@ def _replacement_response(
     # dump it to a file past the threshold, same as get_memory's full-content read path. Done
     # only now, after the write has actually committed, so a rejected write (TARGET_CHANGED/
     # INACTIVE_TARGET) never leaves an orphaned dump file with nothing referencing it.
-    changed = context["changed"]
-    changed.update(large_content_descriptor(context["new_content"]))
-    declaration = context.get("core_declaration")
-    if declaration is not None and declaration.is_core is True:
-        state = context["core_state"]
+    changed = {**plan.fields.changed, **large_content_descriptor(plan.content.new_content)}
+    declaration = plan.core_declaration
+    if declaration.is_core is True:
+        state = outcome.row.core_state
         changed["core"] = {
             "reason": state["core_reason"],
             "exit_condition": state["core_exit_condition"],
             "review_after": state["core_review_after"],
             "detail_memory_ids": state.get("core_detail_memory_ids", []),
         }
-    elif declaration is not None and declaration.is_core is False:
+    elif declaration.is_core is False:
         changed["demote_core"] = True
     response_orphaned_edges = (
-        [edge for edge in context["orphaned_edges"] if edge["relation_id"] in still_orphaned_ids]
+        [edge for edge in plan.orphaned_edges if edge["relation_id"] in outcome.still_orphaned_ids]
         if repoint_relations
-        else context["orphaned_edges"]
+        else plan.orphaned_edges
     )
     return envelope_ok(
         {
             "old_id": resolved_id,
-            "new_id": new_id,
-            "relation_id": relation_id,
+            "new_id": outcome.row.new_id,
+            "relation_id": outcome.relation_id,
             "predicate": operation,
-            "reason": reason.strip(),
-            "inherited": context["inherited"],
+            "reason": plan.reason.strip(),
+            "inherited": plan.fields.inherited,
             "changed": changed,
-            "inherited_fields": list(context["inherited"]),
+            "inherited_fields": list(plan.fields.inherited),
             "changed_fields": list(changed),
             "orphaned_semantic_edges": response_orphaned_edges,
             "semantic_relations_repointed": bool(repoint_relations),
-            "repointed_relations": repointed_relations,
+            "repointed_relations": outcome.repointed_relations,
         }
     )
 
@@ -889,9 +951,6 @@ def replace_memory(
     # The validator above establishes these invariants. Casts carry that fact to static checking
     # without runtime assertions that disappear under optimized Python.
     entity_id = cast(str, request.entity_id)
-    title = cast(str, request.title)
-    content = cast(str, request.content)
-    reason = cast(str, request.reason)
     conn = (
         get_connection(request.db_path or get_db_path())
         if request.db_connection is None
@@ -902,39 +961,10 @@ def replace_memory(
         if target_error is not None:
             return target_error
         resolved_id = cast(str, resolved_id)
-        context, preparation_error = _replacement_prepare(
-            conn,
-            entity_id,
-            resolved_id,
-            title,
-            request.tags,
-            content,
-            reason,
-            request.agent_id,
-            request.context_id,
-            request.scope,
-            request.memory_type,
-            request.agent_session_id,
-            request.metadata,
-        )
-        if preparation_error is not None:
-            return preparation_error
-        context = cast(dict, context)
-        from .validation import _retrieval_text_hash, normalize_retrieval_text
-
-        try:
-            normalized_retrieval_text = (
-                normalize_retrieval_text(request.retrieval_text)
-                if request.retrieval_text is not None
-                else None
-            )
-        except ValueError as exc:
-            return _replacement_error("INVALID_RETRIEVAL_TEXT", str(exc), "retrieval_text")
-        context["retrieval_text"] = normalized_retrieval_text
-        context["retrieval_text_hash"] = _retrieval_text_hash(normalized_retrieval_text)
-        context["core_declaration"] = request.core or CoreDeclaration()
-        context["reason"] = reason
-        return _replacement_execute(conn, operation, resolved_id, context, request)
+        plan_or_error = _replacement_prepare(conn, request, resolved_id)
+        if isinstance(plan_or_error, dict):
+            return plan_or_error
+        return _replacement_execute(conn, operation, resolved_id, plan_or_error, request)
     except Exception as exc:
         logger.error("Error %sing memory: %s", operation, exc)
         if is_coordinator_connection(conn):
@@ -949,8 +979,8 @@ def _replacement_execute(
     conn,
     operation: Literal["revises", "supersedes"],
     resolved_id: str,
-    context: dict,
-    request: ReplacementRequest,
+    plan: _ReplacementPlan,
+    request: "ReplacementRequest",
 ):
     from saltmdb.domain.services import core_governance_service
 
@@ -958,11 +988,11 @@ def _replacement_execute(
         _replacement_write,
         operation=operation,
         resolved_id=resolved_id,
-        context=context,
+        plan=plan,
         repoint_relations=request.repoint_relations,
     )
     try:
-        values = (
+        outcome = (
             callback(conn) if request.in_transaction else write_transaction_retrying(conn, callback)
         )
     except core_governance_service.CoreDecisionRequired as exc:
@@ -983,16 +1013,11 @@ def _replacement_execute(
         return _replacement_error("VALIDATION_ERROR", str(exc), field)
     except _LifecycleRejected as exc:
         return exc.payload
-    new_id, relation_id, repointed_relations, still_orphaned_ids = values
     return _replacement_response(
         operation,
         resolved_id,
-        context["reason"],
-        context,
-        new_id,
-        relation_id,
-        repointed_relations,
-        still_orphaned_ids,
+        plan,
+        outcome,
         request.repoint_relations,
     )
 
