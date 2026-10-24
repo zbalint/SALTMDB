@@ -77,35 +77,53 @@ class _PredecessorResolution(NamedTuple):
     predecessor_grounded_map: dict[str, bool]
 
 
+@dataclass(frozen=True, slots=True)
+class _CrossEncoderCaps:
+    """Resolved cross-encoder caps and whether caller-supplied values reach score_pairs."""
+
+    candidate_cap: int  # Resolved effective candidate cap used before text fetch.
+    text_cap: int  # Resolved effective text cap passed to candidate text builder.
+    # True iff the caller supplied cross_encoder_candidate_cap; only then does
+    # score_pairs receive candidate_cap=.
+    send_candidate_cap: bool
+    # True iff the caller supplied cross_encoder_text_cap_chars; only then does
+    # score_pairs receive text_cap_chars=.
+    send_text_cap: bool
+
+
+class _PoolOutcome(NamedTuple):
+    ranked_pool: list[str]
+    cross_encoder_scores_map: dict[str, float]
+    superseded_ids: set[str]
+
+
+class _CrossEncoderScores(NamedTuple):
+    scores: list[float] | None
+    scored_ids_in_order: list[str]
+    enabled: bool
+
+
 def _apply_search_pool_policies(
-    rrf_map,
-    fts_rows_,
-    semantic_rows_,
-    fts_ids_,
-    fts_and_ids_,
-    semantic_ids_,
-    used_or_fallback_,
     conn,
-    resolved_from_,
-    predecessor_grounded_map,
     controls,
+    channels: _ChannelRows,
+    resolution: _PredecessorResolution,
     candidate_window,
     diagnostics,
-):
+) -> _PoolOutcome:
     mode = controls.mode
-    query_keywords = controls.query_keywords
-    db_path = controls.db_path
-    ce_candidate_cap = controls.ce_candidate_cap
-    ce_text_cap = controls.ce_text_cap
-    cross_encoder_candidate_cap = controls.cross_encoder_candidate_cap
-    cross_encoder_text_cap_chars = controls.cross_encoder_text_cap_chars
-    prefer_durable_types = controls.prefer_durable_types
-    demote_superseded = controls.demote_superseded
-    collapse_supersedes_families = controls.collapse_supersedes_families
-    return_diagnostics = controls.return_diagnostics
-    topic_scores_map_, cross_encoder_scores_map_ = {}, {}
+    caps = controls.cross_encoder_caps
+    topic_scores_map_: dict[str, dict] = {}
+    cross_encoder_scores_map_: dict[str, float] = {}
+    rrf_map = resolution.rrf_map
     if rrf_map:
-        _log_search_gap(fts_rows_, semantic_rows_, candidate_window, fts_ids_, semantic_ids_)
+        _log_search_gap(
+            channels.fts_rows,
+            channels.semantic_rows,
+            candidate_window,
+            channels.fts_ids,
+            channels.semantic_ids,
+        )
         ranked_pool_ = list(rrf_map.keys())
         if mode == "strict":
             # accept_or_abstain's DIRECT semantic-only rule (Part B) needs a
@@ -119,56 +137,53 @@ def _apply_search_pool_policies(
             # in_fts_or_only rule can actually be satisfied; only true-AND/
             # dual-channel candidates already have a sufficient DIRECT signal and
             # skip this lookup, keeping the added cost bounded.
-            ungrounded_ids = [eid for eid in ranked_pool_ if eid not in fts_and_ids_]
+            ungrounded_ids = [eid for eid in ranked_pool_ if eid not in channels.fts_and_ids]
             topic_scores_map_ = search_primitives._score_topics_with_fallback(
-                query_keywords, ungrounded_ids, db_path
+                controls.query_keywords, ungrounded_ids, controls.db_path
             )
         ranked_pool_, cross_encoder_scores_map_ = _rerank_search_pool(
-            query_keywords,
+            controls.query_keywords,
             list(rrf_map.keys()),
             conn,
-            db_path,
-            ce_candidate_cap,
-            ce_text_cap,
-            cross_encoder_candidate_cap,
-            cross_encoder_text_cap_chars,
+            controls.db_path,
+            caps,
             diagnostics,
         )
 
         pool_order = list(ranked_pool_)
         evidence_map = None
-        if mode == "strict" or return_diagnostics:
+        if mode == "strict" or controls.return_diagnostics:
             evidence_map = ranking._build_candidate_evidence(
                 ranked_pool_,
                 rrf_map,
-                fts_rows_,
-                semantic_rows_,
+                channels.fts_rows,
+                channels.semantic_rows,
                 topic_scores_map_,
-                resolved_from_,
-                predecessor_grounded_map,
+                resolution.resolved_from,
+                resolution.predecessor_grounded_map,
                 cross_encoder_scores_map_,
-                used_or_fallback=used_or_fallback_,
+                used_or_fallback=channels.used_or_fallback,
             )
         evidence_map = cast(dict[str, dict[str, Any]], evidence_map)
         ranked_pool_, superseded_ids_ = _gate_search_pool(mode, ranked_pool_, evidence_map, conn)
         ranked_pool_ = _order_search_pool(
             ranked_pool_,
             conn,
-            prefer_durable_types,
-            demote_superseded,
+            controls.prefer_durable_types,
+            controls.demote_superseded,
             mode,
-            collapse_supersedes_families,
+            controls.collapse_supersedes_families,
             diagnostics,
         )
         _record_search_candidates(
-            ranked_pool_, pool_order, evidence_map, diagnostics, return_diagnostics
+            ranked_pool_, pool_order, evidence_map, diagnostics, controls.return_diagnostics
         )
 
     else:
         ranked_pool_ = []
         diagnostics["cross_encoder"]["reason"] = "no_candidates"
         superseded_ids_ = set()
-    return ranked_pool_, cross_encoder_scores_map_, superseded_ids_
+    return _PoolOutcome(ranked_pool_, cross_encoder_scores_map_, superseded_ids_)
 
 
 def _record_retrieval_contributions(
@@ -467,15 +482,12 @@ def _run_cross_encoder_scoring(
     ranked_pool_,
     conn,
     db_path,
-    ce_candidate_cap,
-    ce_text_cap,
-    cross_encoder_candidate_cap,
-    cross_encoder_text_cap_chars,
-):
+    caps: _CrossEncoderCaps,
+) -> _CrossEncoderScores:
     from saltmdb.domain.services import reranker_service
 
     ce_scores = None
-    scored_ids_in_order = []
+    scored_ids_in_order: list[str] = []
     cross_encoder_enabled = reranker_service.is_cross_encoder_enabled()
     if cross_encoder_enabled:
         # Skip the batch fetch entirely when disabled/misconfigured --
@@ -488,7 +500,7 @@ def _run_cross_encoder_scoring(
         # be a pointless, potentially large, unbounded-with-corpus-growth
         # SQL read for no benefit -- score_pairs itself caps input length
         # regardless, so nothing downstream needs the wider fetch.
-        ce_pool_ids = list(ranked_pool_)[:ce_candidate_cap]
+        ce_pool_ids = list(ranked_pool_)[: caps.candidate_cap]
         ce_text_by_id = ranking._build_cross_encoder_candidate_texts(
             query_keywords, ce_pool_ids, conn, db_path
         )
@@ -496,12 +508,12 @@ def _run_cross_encoder_scoring(
         scored_ids_in_order = [eid for eid in ce_pool_ids if eid in ce_text_by_id]
         ce_texts = [ce_text_by_id[eid] for eid in scored_ids_in_order]
         score_kwargs = {}
-        if cross_encoder_candidate_cap is not None:
-            score_kwargs["candidate_cap"] = ce_candidate_cap
-        if cross_encoder_text_cap_chars is not None:
-            score_kwargs["text_cap_chars"] = ce_text_cap
+        if caps.send_candidate_cap:
+            score_kwargs["candidate_cap"] = caps.candidate_cap
+        if caps.send_text_cap:
+            score_kwargs["text_cap_chars"] = caps.text_cap
         ce_scores = reranker_service.score_pairs(query_keywords, ce_texts, **score_kwargs)
-    return ce_scores, scored_ids_in_order, cross_encoder_enabled
+    return _CrossEncoderScores(ce_scores, scored_ids_in_order, cross_encoder_enabled)
 
 
 def _rerank_search_pool(
@@ -509,12 +521,9 @@ def _rerank_search_pool(
     ranked_pool_,
     conn,
     db_path,
-    ce_candidate_cap,
-    ce_text_cap,
-    cross_encoder_candidate_cap,
-    cross_encoder_text_cap_chars,
+    caps: _CrossEncoderCaps,
     diagnostics,
-):
+) -> tuple[list[str], dict[str, float]]:
     cross_encoder_scores_map_: dict[str, float] = {}
     if ranked_pool_:
         # The cross-encoder is the unconditional, always-on Stage-2 final
@@ -522,21 +531,18 @@ def _rerank_search_pool(
         # function) -- it runs regardless of gap_confident.
         from saltmdb.domain.services import reranker_service
 
-        ce_scores, scored_ids_in_order, cross_encoder_enabled = _run_cross_encoder_scoring(
+        ce_result = _run_cross_encoder_scoring(
             query_keywords,
             ranked_pool_,
             conn,
             db_path,
-            ce_candidate_cap,
-            ce_text_cap,
-            cross_encoder_candidate_cap,
-            cross_encoder_text_cap_chars,
+            caps,
         )
 
-        if ce_scores is not None:
-            cross_encoder_scores_map_ = dict(zip(scored_ids_in_order, ce_scores))
+        if ce_result.scores is not None:
+            cross_encoder_scores_map_ = dict(zip(ce_result.scored_ids_in_order, ce_result.scores))
             reordered = sorted(
-                scored_ids_in_order,
+                ce_result.scored_ids_in_order,
                 key=lambda eid: -cross_encoder_scores_map_[eid],
             )
             unscored_tail = [eid for eid in ranked_pool_ if eid not in cross_encoder_scores_map_]
@@ -547,7 +553,7 @@ def _rerank_search_pool(
             diagnostics["cross_encoder"]["execution_count"] = (
                 diagnostics["cross_encoder"].get("execution_count", 0) + 1
             )
-        elif cross_encoder_enabled:
+        elif ce_result.enabled:
             ce_diagnostics = reranker_service.get_last_score_diagnostics()
             diagnostics["cross_encoder"].update(ce_diagnostics)
         else:
@@ -579,6 +585,15 @@ class _SearchControls:
     demote_superseded: bool
     collapse_supersedes_families: bool
     return_diagnostics: bool
+
+    @property
+    def cross_encoder_caps(self) -> _CrossEncoderCaps:
+        return _CrossEncoderCaps(
+            self.ce_candidate_cap,
+            self.ce_text_cap,
+            self.cross_encoder_candidate_cap is not None,
+            self.cross_encoder_text_cap_chars is not None,
+        )
 
 
 def _append_metadata_filters(metadata_filter, where_clauses, params):
@@ -761,21 +776,17 @@ def _compute_search_pool(candidate_window: int, conn, filters, controls, diagnos
         controls.configured_retrieval_vector_weight,
     )
     resolution = _resolve_search_predecessors(conn, controls, filters, channels, fused_map)
-    ranked_pool_, cross_encoder_scores_map_, superseded_ids_ = _apply_search_pool_policies(
-        resolution.rrf_map,
-        channels.fts_rows,
-        channels.semantic_rows,
-        channels.fts_ids,
-        channels.fts_and_ids,
-        channels.semantic_ids,
-        channels.used_or_fallback,
+    pool_outcome = _apply_search_pool_policies(
         conn,
-        resolution.resolved_from,
-        resolution.predecessor_grounded_map,
         controls,
+        channels,
+        resolution,
         candidate_window,
         diagnostics,
     )
+    ranked_pool_ = pool_outcome.ranked_pool
+    cross_encoder_scores_map_ = pool_outcome.cross_encoder_scores_map
+    superseded_ids_ = pool_outcome.superseded_ids
 
     # Both raw channels returned fewer rows than requested -> the underlying
     # corpus is exhausted for this query at this window size; growing

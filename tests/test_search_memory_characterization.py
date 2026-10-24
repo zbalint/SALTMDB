@@ -72,6 +72,7 @@ def _search_case(conn, path, options):
     scenario = options.pop("scenario", "hybrid")
     enabled = options.pop("ce", False)
     scores = options.pop("scores", [1.0, 1.0, 3.0])
+    score_mock = options.pop("_score_mock", None)
     external_ce = options.pop("external_ce", False)
     fallback = options.pop("fallback", False)
     topic_fallback_mock = options.pop("_topic_fallback_mock", None)
@@ -140,7 +141,9 @@ def _search_case(conn, path, options):
         stack.enter_context(
             patch.object(reranker_service, "is_cross_encoder_enabled", return_value=enabled)
         )
-        if not external_ce:
+        if score_mock is not None:
+            stack.enter_context(patch.object(reranker_service, "score_pairs", new=score_mock))
+        elif not external_ce:
             stack.enter_context(patch.object(reranker_service, "score_pairs", return_value=scores))
         stack.enter_context(
             patch.object(
@@ -2620,6 +2623,31 @@ def _search2_controls(**overrides):
     return orchestrator._SearchControls(**values)
 
 
+@pytest.mark.parametrize(
+    # Raw/resolved cap pairs below include impossible production states solely to pin
+    # which dataclass field each cross_encoder_caps attribute reads.
+    ("candidate_cap", "text_cap", "expected"),
+    [
+        (None, None, (10, 100, False, False)),
+        (7, None, (10, 100, True, False)),
+        (None, 55, (10, 100, False, True)),
+        (7, 55, (10, 100, True, True)),
+    ],
+)
+def test_search7b_cross_encoder_caps_property(candidate_cap, text_cap, expected):
+    controls = _search2_controls(
+        cross_encoder_candidate_cap=candidate_cap,
+        cross_encoder_text_cap_chars=text_cap,
+    )
+    caps = controls.cross_encoder_caps
+    assert (
+        caps.candidate_cap,
+        caps.text_cap,
+        caps.send_candidate_cap,
+        caps.send_text_cap,
+    ) == expected
+
+
 def test_search2_policy_gate_and_candidate_snapshot_keep_ce_order(search_db):
     conn, path = search_db
     result = _search_case(conn, path, {"mode": "strict", "limit": 2})
@@ -2637,8 +2665,10 @@ def test_search2_policy_gate_and_candidate_snapshot_helper_pin(search_db):
 def _search2_policy_pin(search_db):
     conn, _path = search_db
     controls = _search2_controls(mode="strict", return_diagnostics=True)
-    diagnostics = {"cross_encoder": {}}
+    diagnostics: dict[str, dict[str, object]] = {"cross_encoder": {}}
     reranked = ["b", "a"]
+    channels = orchestrator._ChannelRows([], False, [], [], [], [])
+    resolution = orchestrator._PredecessorResolution({"a": 0.2, "b": 0.1}, {}, {})
     with (
         patch.object(orchestrator, "_log_search_gap"),
         patch.object(
@@ -2660,20 +2690,14 @@ def _search2_policy_pin(search_db):
         patch.object(orchestrator, "_record_search_candidates") as record,
     ):
         result = orchestrator._apply_search_pool_policies(
-            {"a": 0.2, "b": 0.1},
-            [],
-            [],
-            set(),
-            set(),
-            set(),
-            False,
             conn,
-            {},
-            {},
             controls,
+            channels,
+            resolution,
             2,
             diagnostics,
         )
+    assert isinstance(result, orchestrator._PoolOutcome)
     assert result[:2] == (["a", "b"], {"b": 0.9, "a": 0.1})
     assert gate.call_args.args[1] == reranked
     assert record.call_args.args[:2] == (["a", "b"], ["b", "a"])
@@ -3040,29 +3064,30 @@ def test_search2_cross_encoder_helper_pin(search_db):
 
 def _search2_cross_encoder_pin(search_db):
     conn, path = search_db
-    diagnostics = {"cross_encoder": {}}
+    diagnostics: dict[str, dict[str, object]] = {"cross_encoder": {}}
+    caps = orchestrator._CrossEncoderCaps(10, 100, False, False)
     with (
         patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
         patch.object(
             ranking,
             "_build_cross_encoder_candidate_texts",
-            return_value={"a": "text"},
+            return_value={f"e{i}": f"text e{i}" for i in range(15)},
         ),
-        patch.object(reranker_service, "score_pairs", return_value=[0.5]),
+        patch.object(reranker_service, "score_pairs", return_value=[0.8] * 10),
         patch.object(
             reranker_service, "get_last_score_diagnostics", return_value={"model": "test"}
         ),
     ):
         orchestrator._rerank_search_pool(
-            "needle", ["a"], conn, path, 10, 100, None, None, diagnostics
+            "needle", [f"e{i}" for i in range(15)], conn, path, caps, diagnostics
         )
         orchestrator._rerank_search_pool(
-            "needle", ["a"], conn, path, 10, 100, None, None, diagnostics
+            "needle", [f"e{i}" for i in range(15)], conn, path, caps, diagnostics
         )
     assert diagnostics["cross_encoder"]["execution_count"] == 2
     assert diagnostics["cross_encoder"]["executed"] is True
 
-    failed = {"cross_encoder": {}}
+    failed: dict[str, dict[str, object]] = {"cross_encoder": {}}
     with (
         patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
         patch.object(ranking, "_build_cross_encoder_candidate_texts", return_value={"a": "text"}),
@@ -3073,8 +3098,140 @@ def _search2_cross_encoder_pin(search_db):
             return_value={"failure": "runner_failed"},
         ),
     ):
-        orchestrator._rerank_search_pool("needle", ["a"], conn, path, 10, 100, None, None, failed)
+        orchestrator._rerank_search_pool("needle", ["a"], conn, path, caps, failed)
     assert failed["cross_encoder"] == {"failure": "runner_failed"}
+
+
+@pytest.mark.parametrize(
+    ("caps", "expected_kwargs"),
+    [
+        (orchestrator._CrossEncoderCaps(2, 40, False, False), {}),
+        (orchestrator._CrossEncoderCaps(2, 40, True, False), {"candidate_cap": 2}),
+        (orchestrator._CrossEncoderCaps(2, 40, False, True), {"text_cap_chars": 40}),
+        (
+            orchestrator._CrossEncoderCaps(2, 40, True, True),
+            {"candidate_cap": 2, "text_cap_chars": 40},
+        ),
+    ],
+)
+def test_search7b_cross_encoder_scoring_pins_caps_and_preslices(search_db, caps, expected_kwargs):
+    conn, path = search_db
+    with (
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        patch.object(
+            ranking,
+            "_build_cross_encoder_candidate_texts",
+            return_value={"a": "text a", "b": "text b"},
+        ) as build_texts,
+        patch.object(reranker_service, "score_pairs", return_value=[0.8, 0.2]) as score,
+    ):
+        result = orchestrator._run_cross_encoder_scoring(
+            "needle",
+            ["a", "b", "c"],
+            conn,
+            path,
+            caps,
+        )
+    assert build_texts.call_args.args[1] == ["a", "b"]
+    assert score.call_args.args[1] == ["text a", "text b"]
+    assert score.call_args.kwargs == expected_kwargs
+    assert result.scores == [0.8, 0.2]
+    assert result.scored_ids_in_order == ["a", "b"]
+
+
+def test_search7b_rerank_updates_diagnostics_and_preserves_none_fallback(search_db):
+    conn, path = search_db
+    caps = orchestrator._CrossEncoderCaps(2, 40, False, False)
+    diagnostics: dict[str, dict[str, object]] = {"cross_encoder": {"existing": True}}
+    with (
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=True),
+        patch.object(ranking, "_build_cross_encoder_candidate_texts", return_value={"a": "text"}),
+        patch.object(reranker_service, "score_pairs", return_value=None),
+        patch.object(
+            reranker_service,
+            "get_last_score_diagnostics",
+            return_value={"failure": "runner_failed"},
+        ),
+    ):
+        ranked, scores = orchestrator._rerank_search_pool(
+            "needle", ["a", "b"], conn, path, caps, diagnostics
+        )
+    assert ranked == ["a", "b"]
+    assert scores == {}
+    assert diagnostics["cross_encoder"] == {"existing": True, "failure": "runner_failed"}
+
+
+@pytest.mark.parametrize(
+    ("candidate_cap", "text_cap", "expected_kwargs"),
+    [
+        (None, None, {}),
+        (10, None, {"candidate_cap": 10}),
+        (None, 1000, {"text_cap_chars": 1000}),
+        (10, 1000, {"candidate_cap": 10, "text_cap_chars": 1000}),
+    ],
+)
+def test_search7b_public_score_pairs_pins_cap_keywords(
+    search_db, candidate_cap, text_cap, expected_kwargs
+):
+    conn, path = search_db
+    score = Mock(return_value=[0.8, 0.2, 0.1])
+    result = _search_case(
+        conn,
+        path,
+        {
+            "ce": True,
+            "limit": 3,
+            "cross_encoder_candidate_cap": candidate_cap,
+            "cross_encoder_text_cap_chars": text_cap,
+            "_score_mock": score,
+        },
+    )
+    assert result
+    assert score.call_args.kwargs == expected_kwargs
+
+
+def test_search7b_public_diagnostics_update_preserves_requested_fields(search_db):
+    conn, path = search_db
+    score = Mock(return_value=[0.8, 0.2, 0.1])
+    with patch.object(
+        reranker_service,
+        "get_last_score_diagnostics",
+        return_value={"model": "test"},
+    ):
+        result = _search_case(
+            conn,
+            path,
+            {
+                "ce": True,
+                "limit": 3,
+                "return_diagnostics": True,
+                "cross_encoder_candidate_cap": 10,
+                "cross_encoder_text_cap_chars": 1000,
+                "_score_mock": score,
+            },
+        )
+    cross_encoder = result["diagnostics"]["cross_encoder"]
+    assert cross_encoder["requested"] is True
+    assert cross_encoder["candidate_cap"] == 10
+    assert cross_encoder["text_cap_chars"] == 1000
+    assert cross_encoder["execution_count"] == 1
+    assert cross_encoder["model"] == "test"
+
+
+def test_search7b_substituted_fusion_map_reaches_policy_and_result(search_db):
+    conn, path = search_db
+    with (
+        patch.object(ranking, "_resolve_supersession_chains", return_value={"a": "b"}),
+        patch.object(
+            ranking,
+            "_substitute_resolved_heads",
+            return_value={"b": 9.0},
+        ) as substitute,
+    ):
+        result = _search_case(conn, path, {"mode": "strict", "limit": 3})
+    assert substitute.call_count == 1
+    assert result[0]["id"] == "b"
+    assert result[0]["score"] == 9.0
 
 
 def test_search2_public_explain_echoes_archive_clause(search_db):
@@ -3264,6 +3421,89 @@ def test_search2_full_fts_window_does_not_mark_pool_exhausted(search_db):
             tuning=SearchTuning(candidate_window=3),
         )
     assert run_fts.call_count == 2
+
+
+def test_search2_pool_fts_gather_pins_fallback_kwarg_and_tuple_rows(search_db):
+    conn, path = search_db
+    with (
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=([], False)) as run_fts,
+        patch.object(search_primitives, "semantic_search", return_value=[]),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+    ):
+        memory_service.search_memory(
+            query_keywords="needle",
+            limit=1,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert run_fts.call_args.kwargs["return_fallback_flag"] is True
+
+    rows, fallback = search_primitives._run_fts_search(
+        conn, "needle", [], [], 3, 0, return_fallback_flag=True
+    )
+    assert {row[0] for row in rows} == {"a", "b", "c"}
+    assert all(isinstance(row, tuple) and len(row) == 15 for row in rows)
+
+
+@pytest.mark.parametrize("mode", ["broad", "history", "strict"])
+def test_search2_broad_history_shortfall_does_not_double_window(search_db, mode):
+    conn, path = search_db
+    base_rows = [
+        (
+            eid,
+            "t",
+            "c",
+            1,
+            0,
+            -float(index + 1),
+            "",
+            "",
+            "owner",
+            "private",
+            "{}",
+            None,
+            "fact",
+            0,
+            "",
+        )
+        for index, eid in enumerate(("a", "b", "c"))
+    ]
+    fts = [base_rows[index % 3] for index in range(20)]
+    semantic = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    with (
+        patch("saltmdb.config.RERANK_CANDIDATE_POOL_SIZE", 3),
+        patch("saltmdb.config.is_semantic_search_enabled", return_value=True),
+        patch.object(search_primitives, "_run_fts_search", return_value=(fts, False)),
+        patch.object(search_primitives, "semantic_search", return_value=semantic),
+        patch.object(
+            search_primitives,
+            "weighted_reciprocal_rank_fusion",
+            return_value={"a": 1.0, "b": 0.9, "c": 0.8},
+        ),
+        patch.object(search_primitives, "_score_topics_with_fallback", return_value={}),
+        patch.object(reranker_service, "is_cross_encoder_enabled", return_value=False),
+        patch.object(
+            orchestrator,
+            "_compute_search_pool",
+            wraps=orchestrator._compute_search_pool,
+        ) as compute,
+    ):
+        result = memory_service.search_memory(
+            query_keywords="needle",
+            mode=mode,
+            cursor="offset:5",
+            limit=2,
+            include_related=False,
+            db_connection=conn,
+            db_path=path,
+        )
+    assert len(result) < 2
+    if mode == "strict":
+        assert compute.call_count >= 2
+    else:
+        assert compute.call_count == 1
 
 
 def test_search2_cursor_requires_offset_prefix(search_db):
@@ -3803,7 +4043,7 @@ def test_search7a_compute_pool_result_shape_with_retrieval(
         patch.object(
             orchestrator,
             "_apply_search_pool_policies",
-            return_value=(["a"], {}, set()),
+            return_value=orchestrator._PoolOutcome(["a"], {}, set()),
         ),
     ):
         result = orchestrator._compute_search_pool(2, conn, filters, controls, diagnostics)

@@ -185,6 +185,18 @@ def test_dispatch_groups_one_field_from_each_group():
     assert kwargs["tuning"] == SearchTuning(disable_semantic=True)
 
 
+def test_dispatch_preserves_tag_operator_in_criteria():
+    with patch("saltmdb.daemon.dispatch.memory_service.search_memory", return_value=[]) as search:
+        dispatch._dispatch_search_memory(
+            query_keywords="needle",
+            tags_filter=["#a", "#b"],
+            tag_operator="OR",
+        )
+        assert search.call_args.kwargs["criteria"].tag_operator == "OR"
+        dispatch._dispatch_search_memory(query_keywords="needle", tags_filter=["#a", "#b"])
+        assert search.call_args.kwargs["criteria"].tag_operator == "AND"
+
+
 def test_grouped_defaults_are_value_equal():
     assert SearchCriteria() == SearchCriteria(
         context_id=None,
