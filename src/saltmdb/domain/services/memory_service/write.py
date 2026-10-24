@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from difflib import SequenceMatcher
 from datetime import datetime, UTC
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 from saltmdb.config import get_db_path, MAX_MEMORY_CONTENT_CHARS
 from saltmdb.db.connection import get_connection, write_transaction_retrying, close_connection
@@ -31,6 +31,94 @@ from ._shared import (
 )
 
 _CORE_TAG = "#core"
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreRequest:
+    """The validated arguments of one store_memory call that the pipeline reads."""
+
+    # Contains mutable state; must not be hashed or cached.
+    content: str
+    title: str | None
+    retrieval_text: str | None | object
+    tags: list | None
+    agent_id: str
+    context_id: str | None
+    agent_session_id: str | None
+    scope: str
+    entity_id: str | None
+    weight: int
+    core: CoreDeclaration
+    annotations: EntityAnnotations
+
+
+class _StoreQuality(NamedTuple):
+    quality_res: dict
+    quality_status: str
+    quality_flags_str: str
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreContent:
+    """The normalised content stage: redacted text, title, retrieval text, hash and quality."""
+
+    # Contains mutable state; must not be hashed or cached.
+    redacted_content: str
+    title: str
+    retrieval_text: str | None
+    retrieval_text_provided: bool
+    context_id: str | None
+    content_hash: str
+    quality: _StoreQuality
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreProposal:
+    """What the pipeline will persist: the request after frozen-field resolution."""
+
+    # Contains mutable state; must not be hashed or cached.
+    resolved_entity_id: str | None
+    redacted_content: str
+    title: str
+    tags: list | None
+    agent_id: str
+    scope: str
+    memory_type: str | None
+    context_id: str | None
+    core: CoreDeclaration
+    weight: int
+    metadata: dict | None
+    content_hash: str
+    quality: _StoreQuality
+    quality_score: float
+    retrieval_text: str | None
+    retrieval_text_provided: bool
+    agent_session_id: str | None
+    skip_scd_history: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedStore:
+    # Contains mutable state; must not be hashed or cached.
+    proposal: _StoreProposal
+    effective_memory_type_preview: str | None
+
+
+class _FrozenStoreValues(NamedTuple):
+    title: str
+    redacted_content: str
+    context_id: str | None
+    content_hash: str
+    tags: list | None
+    metadata: dict | None
+
+
+class _RawExistingState(NamedTuple):
+    existing: tuple[Any, ...] | None
+    base_source_changed: bool
+    retrieval_text: str | None
+    retrieval_hash: str | None
+    prior_metadata: str | None
 
 
 def _normalized_tag_key(tag_name: str) -> str:
@@ -103,50 +191,36 @@ def _legacy_tags_changed(conn, *, resolved_entity_id: str, tags: list | None) ->
 
 
 def _legacy_frozen_changes(
-    conn,
-    *,
-    resolved_entity_id: str,
-    current: dict,
-    title: str,
-    content: str,
-    tags: list | None,
-    agent_id: str,
-    scope: str,
-    memory_type: str | None,
-    context_id: str | None,
+    conn, resolved_entity_id: str, current: dict, request: _StoreRequest, content: _StoreContent
 ) -> list[str]:
     changes: list[str] = []
-    if title != current["title"]:
+    if content.title != current["title"]:
         changes.append("title")
-    if content != current["full_content"]:
+    if content.redacted_content != current["full_content"]:
         changes.append("full_content")
-    if agent_id != current["agent_id"]:
+    if request.agent_id != current["agent_id"]:
         changes.append("agent_id")
     # ``store_memory`` historically defaulted scope to ``shared``.  Treat that default as an
     # omitted value when the existing version is private; otherwise an administrative update that
     # never mentioned scope would be misclassified as a disclosure attempt.
-    if scope != current["scope"] and not (scope == "shared" and current["scope"] == "private"):
+    if request.scope != current["scope"] and not (
+        request.scope == "shared" and current["scope"] == "private"
+    ):
         changes.append("scope")
-    if memory_type is not None and memory_type != current["memory_type"]:
+    if (
+        request.annotations.memory_type is not None
+        and request.annotations.memory_type != current["memory_type"]
+    ):
         changes.append("memory_type")
-    if context_id is not None and context_id != current["context_id"]:
+    if content.context_id is not None and content.context_id != current["context_id"]:
         changes.append("context_id")
-    if _legacy_tags_changed(conn, resolved_entity_id=resolved_entity_id, tags=tags):
+    if _legacy_tags_changed(conn, resolved_entity_id=resolved_entity_id, tags=request.tags):
         changes.append("tags")
     return changes
 
 
 def _legacy_update_guard(
-    conn,
-    *,
-    resolved_entity_id: str | None,
-    title: str,
-    content: str,
-    tags: list | None,
-    agent_id: str,
-    scope: str,
-    memory_type: str | None,
-    context_id: str | None,
+    conn, resolved_entity_id: str | None, request: _StoreRequest, content: _StoreContent
 ) -> tuple[dict | None, dict | None]:
     """Reject frozen-field mutation before the legacy SCD writer can create an ``_h_`` row.
 
@@ -188,18 +262,7 @@ def _legacy_update_guard(
             row,
         )
     )
-    changes = _legacy_frozen_changes(
-        conn,
-        resolved_entity_id=resolved_entity_id,
-        current=current,
-        title=title,
-        content=content,
-        tags=tags,
-        agent_id=agent_id,
-        scope=scope,
-        memory_type=memory_type,
-        context_id=context_id,
-    )
+    changes = _legacy_frozen_changes(conn, resolved_entity_id, current, request, content)
     if changes:
         field = changes[0]
         return (
@@ -281,13 +344,13 @@ def _resolve_existing_entity_id(
 
 
 def _resolve_raw_core_state(
-    conn, proposed: dict, entity_id: str, was_existing_entity: bool, redacted_content: str
+    conn, proposal: _StoreProposal, entity_id: str, was_existing_entity: bool
 ) -> dict:
     """Resolve authoritative in-transaction core state for a raw write."""
-    is_core = proposed.get("is_core")
-    title = proposed["title"]
-    scope = proposed["scope"]
-    memory_type = proposed.get("memory_type")
+    is_core = proposal.core.is_core
+    title = proposal.title
+    scope = proposal.scope
+    memory_type = proposal.memory_type
     # Core-memory governance (resolved gap #2): AUTHORITATIVE, in-transaction re-resolution --
     # runs against `conn`, the caller's own open write transaction, never the pre-transaction
     # snapshot store_memory computed for its own advisory early-return. Raises
@@ -299,12 +362,12 @@ def _resolve_raw_core_state(
             conn,
             entity_id=entity_id if was_existing_entity else None,
             is_core_requested=is_core_requested,
-            content=redacted_content,
+            content=proposal.redacted_content,
             scope=scope,
-            core_reason=proposed.get("core_reason"),
-            core_exit_condition=proposed.get("core_exit_condition"),
-            core_review_after=proposed.get("core_review_after"),
-            detail_memory_ids=proposed.get("detail_memory_ids"),
+            core_reason=proposal.core.core_reason,
+            core_exit_condition=proposal.core.core_exit_condition,
+            core_review_after=proposal.core.core_review_after,
+            detail_memory_ids=proposal.core.detail_memory_ids,
         )
         # store_memory never itself changes `status` (preserved verbatim on an update -- only
         # archive_memory/commit_consolidation/review_core_memory do); a fresh insert always
@@ -336,8 +399,8 @@ def _resolve_raw_core_state(
             "core_reason": core_state["core_reason"],
             "core_exit_condition": core_state["core_exit_condition"],
             "core_review_after": core_state["core_review_after"],
-            "full_content": redacted_content,
-            "agent_id": proposed["agent_id"],
+            "full_content": proposal.redacted_content,
+            "agent_id": proposal.agent_id,
         }
 
         if target_will_be_active:
@@ -386,7 +449,7 @@ def _write_raw_scd_history(conn, entity_id: str, existing: tuple[Any, ...], now:
 
 def _raw_existing_values(
     conn, entity_id: str, title: str, redacted_content: str, content_hash: str
-) -> tuple[tuple[Any, ...] | None, bool, str | None, str | None, str | None]:
+) -> _RawExistingState:
     existing = conn.execute(
         "SELECT created_at, agent_id, valid_from, title, full_content, content_hash, metadata "
         "FROM entities WHERE id = ?",
@@ -405,12 +468,12 @@ def _raw_existing_values(
         base_source_changed = True
         existing_retrieval_text = None
         existing_retrieval_hash = None
-    return (
+    return _RawExistingState(
         existing,
         base_source_changed,
         existing_retrieval_text,
         existing_retrieval_hash,
-        (existing[6] if existing else None),
+        existing[6] if existing else None,
     )
 
 
@@ -466,7 +529,7 @@ class _RawEntityRow:
     context_id: str | None
     agent_session_id: str | None
     content_hash: str
-    quality_score: int
+    quality_score: float
     quality_status: str
     quality_flags_str: str
     memory_type: str | None
@@ -603,17 +666,7 @@ def _sync_raw_core_tag(conn, entity_id: str, agent_id: str) -> None:
 
 
 def _enqueue_raw_embedding_jobs(
-    conn,
-    *,
-    entity_id: str,
-    title: str,
-    redacted_content: str,
-    content_hash: str,
-    base_source_changed: bool,
-    retrieval_text_provided: bool,
-    existing: tuple[Any, ...] | None,
-    final_retrieval_text: str | None,
-    final_retrieval_hash: str | None,
+    conn, row: _RawEntityRow, state: _RawExistingState, retrieval_text_provided: bool
 ) -> None:
     # This is intentionally part of the same transaction as the entity
     # version/tag update: a committed active source always has durable work,
@@ -623,96 +676,88 @@ def _enqueue_raw_embedding_jobs(
         enqueue_retrieval_embedding_job_for_entity,
     )
 
-    if base_source_changed:
-        enqueue_embedding_jobs_for_entity(conn, entity_id, title, redacted_content, content_hash)
-    if retrieval_text_provided or not existing:
+    if state.base_source_changed:
+        enqueue_embedding_jobs_for_entity(
+            conn, row.entity_id, row.title, row.redacted_content, row.content_hash
+        )
+    if retrieval_text_provided or not state.existing:
         enqueue_retrieval_embedding_job_for_entity(
             conn,
-            entity_id,
-            final_retrieval_text,
-            final_retrieval_hash,
+            row.entity_id,
+            row.final_retrieval_text,
+            row.final_retrieval_hash,
             force=True,
         )
 
 
-def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
-    """Persists `proposed` as a plain raw entity (a temporal upsert if `resolved_entity_id` names
-    an already-existing row, otherwise a fresh insert) -- the same insert/tag/`#core`-sync logic
-    Must run inside the caller's own write transaction. Returns (entity_id, was_existing) --
-    `was_existing` gates the "[Tip: ...]" suffix.
+def _store_raw_entity(conn, proposal: _StoreProposal) -> tuple[str, bool]:
+    """Persist one prepared proposal as a temporal upsert inside the caller's write transaction.
+
+    When ``resolved_entity_id`` names an existing row, this is an update; otherwise it is a
+    fresh insert. The returned ``was_existing`` flag gates the success-tip suffix.
     """
-    was_existing_entity = bool(proposed.get("resolved_entity_id"))
-    entity_id = proposed.get("resolved_entity_id") or str(uuid.uuid4())
-    title = proposed["title"]
-    redacted_content = proposed["content"]
-    agent_id = proposed["agent_id"]
-    scope = proposed["scope"]
-    weight = proposed.get("weight") or 1
-    memory_type = proposed.get("memory_type")
-    metadata = proposed.get("metadata")
-    context_id = proposed.get("context_id")
-    content_hash = proposed["content_hash"]
-    quality_score = proposed["quality_score"]
-    quality_status = proposed["quality_status"]
-    quality_flags_str = proposed["quality_flags_str"]
-    tags = proposed.get("tags")
-    retrieval_text_provided = bool(proposed.get("retrieval_text_provided", False))
-    requested_retrieval_text = proposed.get("retrieval_text")
-    agent_session_id = proposed["agent_session_id"]
+    was_existing_entity = bool(proposal.resolved_entity_id)
+    entity_id = proposal.resolved_entity_id or str(uuid.uuid4())
+    title = proposal.title
+    redacted_content = proposal.redacted_content
+    agent_id = proposal.agent_id
+    scope = proposal.scope
+    weight = proposal.weight or 1
+    memory_type = proposal.memory_type
+    metadata = proposal.metadata
+    context_id = proposal.context_id
+    content_hash = proposal.content_hash
+    quality_score = proposal.quality_score
+    quality_status = proposal.quality.quality_status
+    quality_flags_str = proposal.quality.quality_flags_str
+    tags = proposal.tags
+    retrieval_text_provided = proposal.retrieval_text_provided
+    requested_retrieval_text = proposal.retrieval_text
+    agent_session_id = proposal.agent_session_id
     now = datetime.now(UTC).isoformat()
 
-    core_state = _resolve_raw_core_state(
-        conn, proposed, entity_id, was_existing_entity, redacted_content
-    )
+    core_state = _resolve_raw_core_state(conn, proposal, entity_id, was_existing_entity)
     is_core_val = 1 if core_state["is_core"] else 0
-    (
-        existing,
-        base_source_changed,
-        existing_retrieval_text,
-        existing_retrieval_hash,
-        prior_metadata,
-    ) = _raw_existing_values(conn, entity_id, title, redacted_content, content_hash)
-    if existing and not proposed.get("_skip_scd_history", False):
-        _write_raw_scd_history(conn, entity_id, existing, now)
+    state = _raw_existing_values(conn, entity_id, title, redacted_content, content_hash)
+    if state.existing and not proposal.skip_scd_history:
+        _write_raw_scd_history(conn, entity_id, state.existing, now)
     _delete_raw_tags(conn, entity_id, tags)
-    metadata_str = _raw_metadata(existing, prior_metadata, metadata)
+    metadata_str = _raw_metadata(state.existing, state.prior_metadata, metadata)
     final_retrieval_text, final_retrieval_hash = _raw_retrieval_values(
-        existing,
+        state.existing,
         retrieval_text_provided,
         requested_retrieval_text,
-        existing_retrieval_text,
-        existing_retrieval_hash,
+        state.retrieval_text,
+        state.retrieval_hash,
     )
     core_detail_ids_str = (
         json.dumps(core_state["core_detail_memory_ids"])
         if core_state["core_detail_memory_ids"]
         else None
     )
-    _insert_raw_entity(
-        conn,
-        _RawEntityRow(
-            entity_id=entity_id,
-            now=now,
-            agent_id=agent_id,
-            scope=scope,
-            is_core_val=is_core_val,
-            weight=weight,
-            title=title,
-            redacted_content=redacted_content,
-            metadata_str=metadata_str,
-            context_id=context_id,
-            agent_session_id=agent_session_id,
-            content_hash=content_hash,
-            quality_score=quality_score,
-            quality_status=quality_status,
-            quality_flags_str=quality_flags_str,
-            memory_type=memory_type,
-            final_retrieval_text=final_retrieval_text,
-            final_retrieval_hash=final_retrieval_hash,
-            core_state=core_state,
-            core_detail_ids_str=core_detail_ids_str,
-        ),
+    row = _RawEntityRow(
+        entity_id=entity_id,
+        now=now,
+        agent_id=agent_id,
+        scope=scope,
+        is_core_val=is_core_val,
+        weight=weight,
+        title=title,
+        redacted_content=redacted_content,
+        metadata_str=metadata_str,
+        context_id=context_id,
+        agent_session_id=agent_session_id,
+        content_hash=content_hash,
+        quality_score=quality_score,
+        quality_status=quality_status,
+        quality_flags_str=quality_flags_str,
+        memory_type=memory_type,
+        final_retrieval_text=final_retrieval_text,
+        final_retrieval_hash=final_retrieval_hash,
+        core_state=core_state,
+        core_detail_ids_str=core_detail_ids_str,
     )
+    _insert_raw_entity(conn, row)
     core_governance_service.reconcile_detail_relations(
         conn,
         core_id=entity_id,
@@ -722,19 +767,8 @@ def _store_raw_entity(conn, proposed: dict) -> tuple[str, bool]:
     )
     _write_raw_tags(conn, entity_id, tags, agent_id)
     _sync_raw_core_tag(conn, entity_id, agent_id)
-    _enqueue_raw_embedding_jobs(
-        conn,
-        entity_id=entity_id,
-        title=title,
-        redacted_content=redacted_content,
-        content_hash=content_hash,
-        base_source_changed=base_source_changed,
-        retrieval_text_provided=retrieval_text_provided,
-        existing=existing,
-        final_retrieval_text=final_retrieval_text,
-        final_retrieval_hash=final_retrieval_hash,
-    )
-    return entity_id, bool(existing)
+    _enqueue_raw_embedding_jobs(conn, row, state, retrieval_text_provided)
+    return entity_id, bool(state.existing)
 
 
 def _near_duplicate_warning(duplicate_candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -869,93 +903,73 @@ def _normalize_store_inputs(
     }
 
 
-def _evaluate_store_quality(redacted_content: str) -> tuple[dict | None, dict, str, str, str]:
+def _evaluate_store_quality(redacted_content: str) -> _StoreQuality | dict:
     # Stage 2 & 3: Extract Prose & Pre-Embedding Quality Gate Evaluation
     quality_res = evaluate_memory_quality(redacted_content)
     if quality_res["status"] == "REJECT":
-        return (
-            rejected(
-                [
-                    envelope_error(
-                        code,
-                        f"Memory quality check rejected by {code}.",
-                        "content",
-                    )
-                    for code in (quality_res.get("hard_errors") or ["MEMORY_QUALITY_REJECTED"])
-                ],
-                warnings=[
-                    warning(
-                        "QUALITY_WARNING",
-                        f"Advisory quality finding: {code}.",
-                        {"rule": code},
-                    )
-                    for code in quality_res.get("warnings", [])
-                ],
-            ),
-            quality_res,
-            "",
-            "",
-            "",
+        return rejected(
+            [
+                envelope_error(
+                    code,
+                    f"Memory quality check rejected by {code}.",
+                    "content",
+                )
+                for code in (quality_res.get("hard_errors") or ["MEMORY_QUALITY_REJECTED"])
+            ],
+            warnings=[
+                warning(
+                    "QUALITY_WARNING",
+                    f"Advisory quality finding: {code}.",
+                    {"rule": code},
+                )
+                for code in quality_res.get("warnings", [])
+            ],
         )
-    return (
-        None,
+    return _StoreQuality(
         quality_res,
-        compute_content_hash(redacted_content),
         quality_res["status"],
         json.dumps(quality_res["quality_flags"]),
     )
 
 
-def _preview_store_core(
-    conn,
-    *,
-    resolved_entity_id: str | None,
-    is_core: bool | None,
-    redacted_content: str,
-    scope: str,
-    core_reason: str | None,
-    core_exit_condition: str | None,
-    core_review_after: str | None,
-    detail_memory_ids: list | None,
-    title: str,
-    agent_id: str,
-    memory_type: str | None,
-) -> tuple[str | dict | None, str | None]:
+def _preview_store_core(conn, proposal: _StoreProposal) -> tuple[str | dict | None, str | None]:
     try:
         core_state_preview = core_governance_service.resolve_store_core_state(
             conn,
-            entity_id=resolved_entity_id,
-            is_core_requested=core_governance_service.parse_is_core(is_core),
-            content=redacted_content,
-            scope=scope,
-            core_reason=core_reason,
-            core_exit_condition=core_exit_condition,
-            core_review_after=core_review_after,
-            detail_memory_ids=detail_memory_ids,
+            entity_id=proposal.resolved_entity_id,
+            is_core_requested=core_governance_service.parse_is_core(proposal.core.is_core),
+            content=proposal.redacted_content,
+            scope=proposal.scope,
+            core_reason=proposal.core.core_reason,
+            core_exit_condition=proposal.core.core_exit_condition,
+            core_review_after=proposal.core.core_review_after,
+            detail_memory_ids=proposal.core.detail_memory_ids,
         )
         preview_target_will_be_active = True
-        if resolved_entity_id:
+        if proposal.resolved_entity_id:
             status_row = conn.execute(
-                "SELECT status FROM entities WHERE id = ?", (resolved_entity_id,)
+                "SELECT status FROM entities WHERE id = ?", (proposal.resolved_entity_id,)
             ).fetchone()
             preview_target_will_be_active = status_row is None or status_row[0] != "archived"
         effective_memory_type_preview = core_governance_service.resolve_effective_memory_type(
-            conn, entity_id=resolved_entity_id, requested_memory_type=memory_type
+            conn,
+            entity_id=proposal.resolved_entity_id,
+            requested_memory_type=proposal.memory_type,
         )
         prospective_entry_preview = {
-            "id": resolved_entity_id or str(uuid.uuid4()),
-            "title": title,
+            "id": proposal.resolved_entity_id or str(uuid.uuid4()),
+            "title": proposal.title,
             "memory_type": effective_memory_type_preview,
             "core_reason": core_state_preview["core_reason"],
             "core_exit_condition": core_state_preview["core_exit_condition"],
             "core_review_after": core_state_preview["core_review_after"],
-            "full_content": redacted_content,
-            "agent_id": agent_id,
+            "full_content": proposal.redacted_content,
+            "agent_id": proposal.agent_id,
         }
         if preview_target_will_be_active:
             core_governance_service.enforce_overdue_boundary(
                 conn,
-                entity_id=resolved_entity_id,
+                entity_id=proposal.resolved_entity_id,
                 effective_is_core=core_state_preview["is_core"],
                 is_new_core=core_state_preview["is_new_core"],
                 review_after_changed=core_state_preview["review_after_changed"],
@@ -966,7 +980,7 @@ def _preview_store_core(
     if core_state_preview["is_core"] and preview_target_will_be_active:
         rejection = core_governance_service.check_capacity_admission(
             conn,
-            exclude_ids=[resolved_entity_id] if resolved_entity_id else [],
+            exclude_ids=[proposal.resolved_entity_id] if proposal.resolved_entity_id else [],
             new_entry=prospective_entry_preview,
         )
         if rejection is not None:
@@ -974,9 +988,11 @@ def _preview_store_core(
     return None, effective_memory_type_preview
 
 
-def _persist_store_entity(conn, proposed: dict) -> tuple[str | dict | None, str | None, bool]:
+def _persist_store_entity(
+    conn, proposal: _StoreProposal
+) -> tuple[str | dict | None, str | None, bool]:
     def _write(c):
-        return _store_raw_entity(c, proposed)
+        return _store_raw_entity(c, proposal)
 
     try:
         entity_id_out, was_existing = write_transaction_retrying(conn, _write)
@@ -988,14 +1004,10 @@ def _persist_store_entity(conn, proposed: dict) -> tuple[str | dict | None, str 
 def _probe_store_duplicates(
     *,
     conn,
+    proposal: _StoreProposal,
+    stored_entity_id: str,
     was_existing: bool,
     probe_sink: list[dict[str, Any]] | None,
-    title: str,
-    redacted_content: str,
-    agent_id: str,
-    tags: list | None,
-    context_id: str | None,
-    entity_id_out: str,
     db_path: str | None,
 ) -> list[dict[str, Any]]:
     if was_existing:
@@ -1003,12 +1015,12 @@ def _probe_store_duplicates(
     if probe_sink is not None:
         probe_sink.append(
             {
-                "title": title,
-                "content": redacted_content,
-                "agent_id": agent_id,
-                "tags": tags,
-                "context_id": context_id,
-                "exclude_ids": [entity_id_out],
+                "title": proposal.title,
+                "content": proposal.redacted_content,
+                "agent_id": proposal.agent_id,
+                "tags": proposal.tags,
+                "context_id": proposal.context_id,
+                "exclude_ids": [stored_entity_id],
                 "db_path": db_path or get_db_path(),
             }
         )
@@ -1016,11 +1028,11 @@ def _probe_store_duplicates(
     from .duplicates import check_duplicate_memories
 
     duplicate_result = check_duplicate_memories(
-        title=title,
-        content=redacted_content,
-        agent_id=agent_id,
-        context_id=cast(str, context_id),
-        exclude_ids=[entity_id_out],
+        title=proposal.title,
+        content=proposal.redacted_content,
+        agent_id=proposal.agent_id,
+        context_id=cast(str, proposal.context_id),
+        exclude_ids=[stored_entity_id],
         db_connection=conn,
         db_path=cast(str, db_path),
     )
@@ -1053,40 +1065,36 @@ def _store_response_warnings(
     return response_warnings
 
 
-def _prepare_store_content(request: dict) -> tuple[str | dict | None, dict]:
+def _prepare_store_content(
+    request: _StoreRequest,
+) -> _StoreContent | str | dict:
     inputs_error, normalized = _normalize_store_inputs(
-        request["content"],
-        request["title"],
-        request["retrieval_text"],
-        request["metadata"],
-        request["context_id"],
-        request["tags"],
+        request.content,
+        request.title,
+        request.retrieval_text,
+        request.annotations.metadata,
+        request.context_id,
+        request.tags,
     )
     if inputs_error:
-        return inputs_error, {}
+        return inputs_error
     redacted_content = normalized["content"]
     title = normalized["title"]
-    quality_error, quality_res, content_hash, quality_status, quality_flags_str = (
-        _evaluate_store_quality(redacted_content)
+    quality = _evaluate_store_quality(redacted_content)
+    if isinstance(quality, dict):
+        return quality
+    return _StoreContent(
+        redacted_content=redacted_content,
+        title=title,
+        retrieval_text=normalized["retrieval_text"],
+        retrieval_text_provided=normalized["retrieval_text_provided"],
+        context_id=normalized["context_id"],
+        content_hash=compute_content_hash(redacted_content),
+        quality=quality,
     )
-    if quality_error is not None:
-        return quality_error, {}
-    return None, {
-        "redacted_content": redacted_content,
-        "title": title,
-        "normalized_retrieval_text": normalized["retrieval_text"],
-        "retrieval_text_provided": normalized["retrieval_text_provided"],
-        "context_id": normalized["context_id"],
-        "quality_res": quality_res,
-        "content_hash": content_hash,
-        "quality_status": quality_status,
-        "quality_flags_str": quality_flags_str,
-    }
 
 
-def _apply_frozen_store_values(
-    metadata: dict | None, frozen_current: dict
-) -> tuple[str, str, str | None, str, list | None, dict | None]:
+def _apply_frozen_store_values(metadata: dict | None, frozen_current: dict) -> _FrozenStoreValues:
     # The current row is the immutable source of truth for an administrative-only
     # update.  Preserve omitted/default frozen inputs before entering _store_raw_entity.
     title = frozen_current["title"]
@@ -1099,114 +1107,79 @@ def _apply_frozen_store_values(
             metadata = json.loads(frozen_current["metadata"])
         except json.JSONDecodeError:
             metadata = None
-    return title, redacted_content, context_id, content_hash, write_tags, metadata
+    return _FrozenStoreValues(
+        title, redacted_content, context_id, content_hash, write_tags, metadata
+    )
 
 
 def _prepare_store_guarded(
-    conn, request: dict, content_state: dict
-) -> tuple[str | dict | None, dict]:
-    redacted_content = content_state["redacted_content"]
-    title = content_state["title"]
-    normalized_retrieval_text = content_state["normalized_retrieval_text"]
-    retrieval_text_provided = content_state["retrieval_text_provided"]
-    context_id = content_state["context_id"]
-    content_hash = content_state["content_hash"]
-    quality_res = content_state["quality_res"]
-    quality_status = content_state["quality_status"]
-    quality_flags_str = content_state["quality_flags_str"]
+    conn, request: _StoreRequest, content: _StoreContent
+) -> _PreparedStore | str | dict:
     resolved_entity_id, hash_collision_error = _resolve_existing_entity_id(
         conn,
-        request["entity_id"],
-        title,
-        request["agent_id"],
-        request["scope"],
-        content_hash,
+        request.entity_id,
+        content.title,
+        request.agent_id,
+        request.scope,
+        content.content_hash,
     )
     if hash_collision_error:
-        return hash_collision_error, {}
-    write_tags = request["tags"]
-    legacy_error, frozen_current = _legacy_update_guard(
-        conn,
-        resolved_entity_id=resolved_entity_id,
-        title=title,
-        content=redacted_content,
-        tags=write_tags,
-        agent_id=request["agent_id"],
-        scope=request["scope"],
-        memory_type=request["memory_type"],
-        context_id=context_id,
-    )
+        return hash_collision_error
+    legacy_error, frozen_current = _legacy_update_guard(conn, resolved_entity_id, request, content)
     if legacy_error is not None:
-        return legacy_error, {}
-    request_metadata = request["metadata"]
+        return legacy_error
+    title = content.title
+    redacted_content = content.redacted_content
+    context_id = content.context_id
+    content_hash = content.content_hash
+    write_tags = request.tags
+    request_metadata = request.annotations.metadata
     if frozen_current is not None:
-        (
-            title,
-            redacted_content,
-            context_id,
-            content_hash,
-            write_tags,
-            request_metadata,
-        ) = _apply_frozen_store_values(request_metadata, frozen_current)
-    proposed = {
-        "content": redacted_content,
-        "title": title,
-        "tags": write_tags,
-        "agent_id": frozen_current["agent_id"] if frozen_current else request["agent_id"],
-        "scope": frozen_current["scope"] if frozen_current else request["scope"],
-        "memory_type": frozen_current["memory_type"] if frozen_current else request["memory_type"],
-        "context_id": context_id,
-        "is_core": request["is_core"],
-        "weight": request["weight"],
-        "metadata": request_metadata,
-        "resolved_entity_id": resolved_entity_id,
-        "content_hash": content_hash,
-        "quality_score": quality_res["quality_score"],
-        "quality_status": quality_status,
-        "quality_flags_str": quality_flags_str,
-        "retrieval_text": normalized_retrieval_text,
-        "retrieval_text_provided": retrieval_text_provided,
-        "core_reason": request["core_reason"],
-        "core_exit_condition": request["core_exit_condition"],
-        "core_review_after": request["core_review_after"],
-        "detail_memory_ids": request["detail_memory_ids"],
-        "agent_session_id": request["agent_session_id"],
-        "_skip_scd_history": frozen_current is not None,
-    }
+        frozen = _apply_frozen_store_values(request_metadata, frozen_current)
+        title = frozen.title
+        redacted_content = frozen.redacted_content
+        context_id = frozen.context_id
+        content_hash = frozen.content_hash
+        write_tags = frozen.tags
+        request_metadata = frozen.metadata
+    agent_id = frozen_current["agent_id"] if frozen_current else request.agent_id
+    scope = frozen_current["scope"] if frozen_current else request.scope
+    memory_type = (
+        frozen_current["memory_type"] if frozen_current else request.annotations.memory_type
+    )
+    proposal = _StoreProposal(
+        resolved_entity_id=resolved_entity_id,
+        redacted_content=redacted_content,
+        title=title,
+        tags=write_tags,
+        agent_id=agent_id,
+        scope=scope,
+        memory_type=memory_type,
+        context_id=context_id,
+        core=request.core,
+        weight=request.weight,
+        metadata=request_metadata,
+        content_hash=content_hash,
+        quality=content.quality,
+        quality_score=content.quality.quality_res["quality_score"],
+        retrieval_text=content.retrieval_text,
+        retrieval_text_provided=content.retrieval_text_provided,
+        agent_session_id=request.agent_session_id,
+        skip_scd_history=frozen_current is not None,
+    )
     # Capacity/lifecycle validation remains side-effect free and authoritative persistence
     # still happens inside the write transaction. Similarity is deliberately advisory only.
-    preview_error, effective_memory_type_preview = _preview_store_core(
-        conn,
-        resolved_entity_id=resolved_entity_id,
-        is_core=request["is_core"],
-        redacted_content=redacted_content,
-        scope=cast(str, proposed["scope"]),
-        core_reason=request["core_reason"],
-        core_exit_condition=request["core_exit_condition"],
-        core_review_after=request["core_review_after"],
-        detail_memory_ids=request["detail_memory_ids"],
-        title=title,
-        agent_id=cast(str, proposed["agent_id"]),
-        memory_type=cast(str | None, proposed["memory_type"]),
-    )
+    preview_error, effective_memory_type_preview = _preview_store_core(conn, proposal)
     if preview_error is not None:
-        return preview_error, {}
-    return None, {
-        "proposed": proposed,
-        "title": title,
-        "redacted_content": redacted_content,
-        "context_id": context_id,
-        "write_tags": write_tags,
-        "quality_res": quality_res,
-        "effective_memory_type_preview": effective_memory_type_preview,
-    }
+        return preview_error
+    return _PreparedStore(proposal, effective_memory_type_preview)
 
 
-def _prepare_store_operation(conn, request: dict) -> tuple[str | dict | None, dict]:
-    content_error, content_state = _prepare_store_content(request)
-    if content_error is not None:
-        return content_error, {}
-    return _prepare_store_guarded(conn, request, content_state)
+def _prepare_store_operation(conn, request: _StoreRequest) -> _PreparedStore | str | dict:
+    content = _prepare_store_content(request)
+    if isinstance(content, (str, dict)):
+        return content
+    return _prepare_store_guarded(conn, request, content)
 
 
 def store_memory(
@@ -1261,38 +1234,31 @@ def store_memory(
         should_close = True
 
     try:
-        request = {
-            "content": content,
-            "title": title,
-            "retrieval_text": retrieval_text,
-            "metadata": annotations.metadata,
-            "context_id": provenance.context_id,
-            "tags": tags,
-            "agent_id": provenance.agent_id,
-            "scope": scope,
-            "memory_type": annotations.memory_type,
-            "entity_id": entity_id,
-            "is_core": core.is_core,
-            "weight": weight,
-            "core_reason": core.core_reason,
-            "core_exit_condition": core.core_exit_condition,
-            "core_review_after": core.core_review_after,
-            "detail_memory_ids": core.detail_memory_ids,
-            "agent_session_id": provenance.agent_session_id,
-        }
-        prepare_error, prepared = _prepare_store_operation(conn, request)
-        if prepare_error is not None:
-            return prepare_error
-        proposed = prepared["proposed"]
-        title = prepared["title"]
-        redacted_content = prepared["redacted_content"]
-        context_id = prepared["context_id"]
-        write_tags = prepared["write_tags"]
-        quality_res = prepared["quality_res"]
-        effective_memory_type_preview = prepared["effective_memory_type_preview"]
-        agent_id = proposed["agent_id"]
-        scope = proposed["scope"]
-        persist_error, entity_id_out, was_existing = _persist_store_entity(conn, proposed)
+        request = _StoreRequest(
+            content=cast(str, content),
+            title=title,
+            retrieval_text=retrieval_text,
+            tags=tags,
+            agent_id=cast(str, provenance.agent_id),
+            context_id=provenance.context_id,
+            agent_session_id=provenance.agent_session_id,
+            scope=scope,
+            entity_id=entity_id,
+            weight=weight,
+            core=core,
+            annotations=annotations,
+        )
+        prepared = _prepare_store_operation(conn, request)
+        if isinstance(prepared, (str, dict)):
+            return prepared
+        proposal = prepared.proposal
+        context_id = proposal.context_id
+        write_tags = proposal.tags
+        quality_res = proposal.quality.quality_res
+        effective_memory_type_preview = prepared.effective_memory_type_preview
+        agent_id = proposal.agent_id
+        effective_scope = cast(Literal["private", "shared"], proposal.scope)
+        persist_error, entity_id_out, was_existing = _persist_store_entity(conn, proposal)
         if persist_error is not None:
             return persist_error
         stored_entity_id = cast(str, entity_id_out)
@@ -1305,14 +1271,10 @@ def store_memory(
         # not follow the guidance.
         duplicate_candidates = _probe_store_duplicates(
             conn=conn,
+            proposal=proposal,
+            stored_entity_id=stored_entity_id,
             was_existing=was_existing,
             probe_sink=runtime.probe_sink,
-            title=title,
-            redacted_content=redacted_content,
-            agent_id=agent_id,
-            tags=write_tags,
-            context_id=context_id,
-            entity_id_out=stored_entity_id,
             db_path=db_path,
         )
         effective_tags, tag_near_misses = _effective_tag_report(conn, stored_entity_id, write_tags)
@@ -1336,7 +1298,7 @@ def store_memory(
             effective={
                 "agent_id": agent_id,
                 "context_id": context_id,
-                "scope": scope,
+                "scope": effective_scope,
                 "memory_type": effective_memory_type_preview,
                 "agent_session_id": provenance.agent_session_id,
             },

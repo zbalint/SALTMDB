@@ -1,6 +1,7 @@
 """Literal write-path contracts captured before the MEMORY-3 extraction."""
 
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -231,6 +232,11 @@ def test_weight_defaults_floor_and_clamps(db, scores, expected):
     assert db.execute("SELECT weight FROM entities").fetchall() == [(expected,)]
 
 
+def test_weight_none_defaults_to_one(db):
+    assert store(db, scores=StoreScores(weight=cast(Any, None))) == success()
+    assert db.execute("SELECT weight FROM entities").fetchone() == (1,)
+
+
 def test_retrieval_preserve_replace_clear_and_durable_jobs(db):
     assert store(db, retrieval_text="  ＡＢＣ  ") == success()
     assert db.execute("SELECT retrieval_text,retrieval_text_hash FROM entities").fetchall() == [
@@ -272,6 +278,98 @@ def test_retrieval_preserve_replace_clear_and_durable_jobs(db):
         ("11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437", "cancelled"),
         ("b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78", "succeeded"),
     ]
+
+
+def test_effective_block_reports_previewed_type_for_fresh_insert_and_update(db):
+    fresh = store(
+        db,
+        annotations=EntityAnnotations(memory_type="decision"),
+        provenance=Provenance(agent_id="writer", context_id="ctx", agent_session_id="s1"),
+    )
+    assert fresh["effective"] == {
+        "agent_id": "writer",
+        "context_id": "ctx",
+        "scope": "shared",
+        "memory_type": "decision",
+        "agent_session_id": "s1",
+    }
+    updated = store(
+        db,
+        annotations=EntityAnnotations(memory_type=None),
+        provenance=Provenance(agent_id="writer", agent_session_id="s2"),
+    )
+    assert updated["effective"] == {
+        "agent_id": "writer",
+        "context_id": "ctx",
+        "scope": "shared",
+        "memory_type": "decision",
+        "agent_session_id": "s2",
+    }
+
+
+def test_transaction_capacity_rejection_rolls_back_on_second_admission_check(db):
+    rejection = {
+        "status": "rejected",
+        "errors": [{"code": "CORE_CAPACITY_EXCEEDED", "field": "is_core"}],
+        "warnings": [],
+    }
+    review_after = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    original = governance.check_capacity_admission
+    calls: list[dict[str, Any]] = []
+
+    def check(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            return rejection
+        return original(*args, **kwargs)
+
+    before = snapshot(db)
+    with patch.object(governance, "check_capacity_admission", side_effect=check):
+        result = store(
+            db,
+            core=CoreDeclaration(
+                is_core=True,
+                core_reason="An active incident requires immediate operator attention.",
+                core_exit_condition="Remove this warning after the incident is resolved.",
+                core_review_after=review_after,
+            ),
+        )
+    assert result == rejection
+    assert len(calls) == 2
+    first_entry = dict(calls[0]["new_entry"])
+    second_entry = dict(calls[1]["new_entry"])
+    first_entry.pop("id")
+    second_entry.pop("id")
+    assert second_entry == first_entry
+    assert second_entry["core_review_after"] == review_after
+    assert snapshot(db) == before
+
+
+def test_frozen_content_hash_drives_source_change_detection(db):
+    from saltmdb.domain.services import embedding_service
+
+    assert store(db) == success()
+    db.execute("UPDATE entities SET content_hash='historical-hash' WHERE id='fixed-memory'")
+    db.commit()
+    before_jobs = db.execute(
+        "SELECT job_kind,source_hash,state FROM embedding_jobs ORDER BY job_kind,source_hash"
+    ).fetchall()
+    with patch.object(embedding_service, "enqueue_embedding_jobs_for_entity") as enqueue_source:
+        assert store(db, scores=StoreScores(weight=4)) == success()
+    enqueue_source.assert_not_called()
+    assert db.execute("SELECT content_hash FROM entities").fetchone() == ("historical-hash",)
+    assert (
+        db.execute(
+            "SELECT job_kind,source_hash,state FROM embedding_jobs ORDER BY job_kind,source_hash"
+        ).fetchall()
+        == before_jobs
+    )
+    with (
+        patch.object(write, "_legacy_update_guard", return_value=(None, None)),
+        patch.object(embedding_service, "enqueue_embedding_jobs_for_entity") as control,
+    ):
+        assert store(db, scores=StoreScores(weight=5)) == success()
+    control.assert_called_once()
 
 
 def test_equal_tags_normalize_and_do_not_rewrite_identity(db):
