@@ -1782,21 +1782,16 @@ class _ConsolidationCohesionResult:
 
 @dataclass(frozen=True)
 class _ConsolidationEntityValues:
+    # Contains mutable state; must not be hashed or cached.
     consolidated_id: str
-    clean_title: str
-    redacted_content: str
-    agent_val: str
     scope: str
     weight: int
     context_id: str | None
     agent_session_id: str | None
-    content_hash: str
-    quality_score: float
-    quality_status: str
-    quality_flags_str: str
     metadata: dict[str, Any] | None
     memory_type: str | None
     now: str
+    content: "_ConsolidationContent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1884,13 +1879,7 @@ def _consolidation_revalidate(conn, resolved_parents, observed_state):
                 )
 
 
-def _consolidation_core_state(
-    conn,
-    resolved_parents,
-    core_request,
-    redacted_content,
-    entity_values,
-):
+def _consolidation_core_state(conn, resolved_parents, core_request, values) -> dict:
     declaration = CoreDeclaration(
         is_core=core_request.is_core_requested,
         core_reason=core_request.core_reason,
@@ -1898,36 +1887,29 @@ def _consolidation_core_state(
         core_review_after=core_request.core_review_after,
         detail_memory_ids=core_request.detail_memory_ids,
     )
+    content = values.content
     return core_governance_service.resolve_derived_core_state(
         conn,
         source_ids=resolved_parents,
         declaration=declaration,
-        content=redacted_content,
+        content=content.redacted_content,
         scope=core_request.scope,
         new_entry={
-            "id": entity_values.consolidated_id,
-            "title": entity_values.clean_title,
-            "memory_type": entity_values.memory_type or "fact",
+            "id": values.consolidated_id,
+            "title": content.clean_title,
+            "memory_type": values.memory_type or "fact",
             "core_reason": core_request.core_reason,
             "core_exit_condition": core_request.core_exit_condition,
             "core_review_after": core_request.core_review_after,
-            "full_content": redacted_content,
-            "agent_id": entity_values.agent_val,
+            "full_content": content.redacted_content,
+            "agent_id": content.agent_val,
         },
     )
 
 
 def _consolidation_audit_override(
-    conn,
-    resolved_parents,
-    override_applied,
-    min_sim,
-    offending_pair,
-    unresolved,
-    justification,
-    consolidated_id,
-    agent_val,
-):
+    conn, resolved_parents, cohesion: _ConsolidationCohesionResult, values
+) -> None:
     # A3: atomic audit trail for an override commit -- written as the first destructive
     # step for fail-fast clarity. log_event catches its own exceptions and RETURNS an
     # "Error: ..." string rather than raising, so the result must be checked and raised
@@ -1935,19 +1917,19 @@ def _consolidation_audit_override(
     # (directly for a single-item call, or one level up in bulk_commit_consolidation for
     # a batch item), any exception raised anywhere in _do_commit rolls back the whole
     # transaction, which is what actually makes this audit atomic with the merge itself.
-    if override_applied:
+    if cohesion.override_applied:
         audit_result = log_event(
-            agent_id=agent_val,
+            agent_id=values.content.agent_val,
             type="consolidation_gate_override",
             content=json.dumps(
                 {
                     "parent_ids": resolved_parents,
-                    "min_pairwise_similarity": min_sim,
+                    "min_pairwise_similarity": cohesion.min_sim,
                     "threshold": COHESION_MIN_PAIRWISE_THRESHOLD,
-                    "offending_pair": offending_pair,
-                    "unresolved": unresolved,
-                    "justification": justification,
-                    "consolidated_id": consolidated_id,
+                    "offending_pair": cohesion.offending_pair,
+                    "unresolved": cohesion.unresolved,
+                    "justification": cohesion.justification,
+                    "consolidated_id": values.consolidated_id,
                 }
             ),
             db_connection=conn,
@@ -1968,6 +1950,7 @@ def _consolidation_insert_entity(
 ):
     is_core_val = 1 if core_state["is_core"] else 0
     metadata_str = json.dumps(entity_values.metadata) if entity_values.metadata else None
+    content = entity_values.content
     conn.execute(
         """
                 INSERT INTO entities (id, created_at, updated_at, last_accessed_at, agent_id, scope, is_core, weight, status, parent_ids, title, full_content, valid_from, context_id, agent_session_id, last_touched_session_id, content_hash, quality_score, quality_status, quality_flags, metadata, memory_type, core_reason, core_exit_condition, core_review_after, core_detail_memory_ids)
@@ -1978,21 +1961,21 @@ def _consolidation_insert_entity(
             entity_values.now,
             entity_values.now,
             entity_values.now,
-            entity_values.agent_val,
+            content.agent_val,
             entity_values.scope,
             is_core_val,
             entity_values.weight,
             json.dumps(resolved_parents),
-            entity_values.clean_title,
-            entity_values.redacted_content,
+            content.clean_title,
+            content.redacted_content,
             entity_values.now,
             entity_values.context_id,
             entity_values.agent_session_id,
             entity_values.agent_session_id,
-            entity_values.content_hash,
-            entity_values.quality_score,
-            entity_values.quality_status,
-            entity_values.quality_flags_str,
+            content.content_hash,
+            content.quality_score,
+            content.quality_status,
+            content.quality_flags_str,
             metadata_str,
             entity_values.memory_type,
             core_state["core_reason"],
@@ -2008,7 +1991,7 @@ def _consolidation_insert_entity(
         core_governance_service.reconcile_detail_relations(
             conn,
             core_id=entity_values.consolidated_id,
-            agent_id=entity_values.agent_val,
+            agent_id=content.agent_val,
             new_detail_ids=core_state["core_detail_memory_ids"],
             previous_detail_ids=[],
         )
@@ -2016,19 +1999,7 @@ def _consolidation_insert_entity(
     return is_core_val
 
 
-def _consolidation_archive_parents(
-    conn,
-    resolved_parents,
-    consolidated_id,
-    clean_title,
-    redacted_content,
-    content_hash,
-    tags,
-    agent_val,
-    is_core_val,
-    now,
-    placeholders,
-):
+def _consolidation_archive_parents(conn, resolved_parents, values, tags, is_core_val) -> None:
     # The new consolidated entity and all archived parents transition
     # with their durable embedding work in this one transaction.
     from saltmdb.domain.services.embedding_service import (
@@ -2037,26 +2008,32 @@ def _consolidation_archive_parents(
         enqueue_embedding_jobs_for_entity,
     )
 
+    content = values.content
+    placeholders = ",".join("?" for _ in resolved_parents)
     enqueue_embedding_jobs_for_entity(
-        conn, consolidated_id, clean_title, redacted_content, content_hash
+        conn,
+        values.consolidated_id,
+        content.clean_title,
+        content.redacted_content,
+        content.content_hash,
     )
 
     if tags:
         for tag_name in tags:
-            tag_id = resolve_or_create_tag(conn, tag_name, agent_id=agent_val)
+            tag_id = resolve_or_create_tag(conn, tag_name, agent_id=content.agent_val)
             if not tag_id:
                 continue
             conn.execute(
                 "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                (consolidated_id, tag_id),
+                (values.consolidated_id, tag_id),
             )
 
     if is_core_val:
-        core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=agent_val)
+        core_tag_id = resolve_or_create_tag(conn, "#core", agent_id=content.agent_val)
         if core_tag_id:
             conn.execute(
                 "INSERT OR IGNORE INTO entity_tags (entity_id, tag_id) VALUES (?, ?)",
-                (consolidated_id, core_tag_id),
+                (values.consolidated_id, core_tag_id),
             )
 
     conn.execute(
@@ -2065,7 +2042,7 @@ def _consolidation_archive_parents(
                 SET status = 'archived', embedding_status = 'archived', updated_at = ?, valid_to = ?
                 WHERE id IN ({placeholders})
             """,
-        [now, now] + resolved_parents,
+        [values.now, values.now] + resolved_parents,
     )
     for parent_id in resolved_parents:
         cancel_embedding_jobs_for_entity(conn, parent_id)
@@ -2083,10 +2060,11 @@ def _clear_archived_parent_vectors(conn, parent_ids: list[str]) -> None:
         cancel_retrieval_embedding_jobs_for_entity(conn, parent_id, clear_vector=True)
 
 
-def _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, placeholders):
+def _consolidation_collect_worklist(conn, resolved_parents) -> list[dict[str, str]]:
     parent_set = set(resolved_parents)
     # Semantic relations remain historical claims about the archived parents.  Capture
     # them as an optional replay worklist, but do not close, copy, or repoint them.
+    placeholders = ",".join("?" for _ in resolved_parents)
     active_touching_rows = conn.execute(
         f"""
                 SELECT id, source_id, target_id, predicate
@@ -2098,6 +2076,7 @@ def _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, plac
         resolved_parents + resolved_parents + list(_LINEAGE_PREDICATES),
     ).fetchall()
     seen_relation_ids: set[str] = set()
+    orphaned_edges: list[dict[str, str]] = []
     for rel_id, src, tgt, pred in active_touching_rows:
         if rel_id in seen_relation_ids:
             continue
@@ -2115,6 +2094,7 @@ def _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, plac
                 "target_id": tgt,
             }
         )
+    return orphaned_edges
 
 
 def _consolidation_insert_lineage(conn, resolved_parents, consolidated_id, now):
@@ -2131,48 +2111,19 @@ def _consolidation_insert_lineage(conn, resolved_parents, consolidated_id, now):
 
 def _consolidation_commit(
     conn,
-    resolved_parents,
-    observed_state,
+    plan: _ConsolidationPlan,
     core_request,
-    cohesion_result,
-    entity_values,
+    values: _ConsolidationEntityValues,
     tags,
-    orphaned_edges,
-):
-    placeholders = ",".join("?" for _ in resolved_parents)
-    _consolidation_revalidate(conn, resolved_parents, observed_state)
-    core_state = _consolidation_core_state(
-        conn, resolved_parents, core_request, entity_values.redacted_content, entity_values
-    )
-    _consolidation_audit_override(
-        conn,
-        resolved_parents,
-        cohesion_result.override_applied,
-        cohesion_result.min_sim,
-        cohesion_result.offending_pair,
-        cohesion_result.unresolved,
-        cohesion_result.justification,
-        entity_values.consolidated_id,
-        entity_values.agent_val,
-    )
-    is_core_val = _consolidation_insert_entity(conn, resolved_parents, core_state, entity_values)
-    _consolidation_archive_parents(
-        conn,
-        resolved_parents,
-        entity_values.consolidated_id,
-        entity_values.clean_title,
-        entity_values.redacted_content,
-        entity_values.content_hash,
-        tags,
-        entity_values.agent_val,
-        is_core_val,
-        entity_values.now,
-        placeholders,
-    )
-    _consolidation_collect_worklist(conn, resolved_parents, orphaned_edges, placeholders)
-    _consolidation_insert_lineage(
-        conn, resolved_parents, entity_values.consolidated_id, entity_values.now
-    )
+) -> list[dict[str, str]]:
+    _consolidation_revalidate(conn, plan.resolved_parents, plan.observed_state)
+    core_state = _consolidation_core_state(conn, plan.resolved_parents, core_request, values)
+    _consolidation_audit_override(conn, plan.resolved_parents, plan.cohesion, values)
+    is_core_val = _consolidation_insert_entity(conn, plan.resolved_parents, core_state, values)
+    _consolidation_archive_parents(conn, plan.resolved_parents, values, tags, is_core_val)
+    orphaned_edges = _consolidation_collect_worklist(conn, plan.resolved_parents)
+    _consolidation_insert_lineage(conn, plan.resolved_parents, values.consolidated_id, values.now)
+    return orphaned_edges
 
 
 def _consolidation_measure_cohesion(
@@ -2510,56 +2461,36 @@ def consolidate_memories(
     plan = preflight_result
     conn, should_close = plan.conn, plan.owned
     resolved_parents = plan.resolved_parents
-    observed_state = plan.observed_state
-    cohesion = plan.cohesion
 
     consolidated_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
-    orphaned_edges: list[dict[str, str]] = []
     entity_values = _ConsolidationEntityValues(
         consolidated_id=consolidated_id,
-        clean_title=plan.content.clean_title,
-        redacted_content=plan.content.redacted_content,
-        agent_val=plan.content.agent_val,
         scope=scope,
         weight=weight,
         context_id=provenance.context_id,
         agent_session_id=provenance.agent_session_id,
-        content_hash=plan.content.content_hash,
-        quality_score=plan.content.quality_score,
-        quality_status=plan.content.quality_status,
-        quality_flags_str=plan.content.quality_flags_str,
         metadata=annotations.metadata,
         memory_type=annotations.memory_type,
         now=now,
+        content=plan.content,
     )
-
     try:
 
         def _write(c):
-            orphaned_edges.clear()
-            _consolidation_commit(
-                c,
-                resolved_parents,
-                observed_state,
-                core_request,
-                cohesion,
-                entity_values,
-                tags,
-                orphaned_edges,
-            )
+            return _consolidation_commit(c, plan, core_request, entity_values, tags)
 
         if _bulk is not None:
-            _write(conn)
+            orphaned_edges = _write(conn)
         else:
 
             def _commit_single(c):
                 with savepoint(c, "consolidation"):
-                    _write(c)
+                    result = _write(c)
                 _clear_archived_parent_vectors(c, resolved_parents)
+                return result
 
-            write_transaction_retrying(conn, _commit_single)
-
+            orphaned_edges = write_transaction_retrying(conn, _commit_single)
         return envelope_ok(
             {
                 "entity_id": consolidated_id,
