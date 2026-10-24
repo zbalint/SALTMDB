@@ -12,6 +12,7 @@ from saltmdb.db.schema import init_db
 from saltmdb.mcp import tools
 from saltmdb.mcp.identity import SESSION_IDENTITY
 from saltmdb.mcp.server import mcp
+from saltmdb.domain.services import librarian_service
 
 TOOL_NAMES = (
     "log_event",
@@ -53,6 +54,11 @@ def configure(db_path: Path, agent_id: str = "guard-test-agent") -> tuple[Any, A
     return connection, previous_backend, previous_db_path
 
 
+def drain_librarian_pool(timeout: float = 30.0) -> None:
+    """Wait until all queued librarian work has completed."""
+    librarian_service._librarian_trigger_pool.submit(lambda: None).result(timeout=timeout)
+
+
 def cleanup(connection: Any, previous_backend: Any, previous_db_path: str | None) -> None:
     tools._set_backend_for_test(previous_backend)
     SESSION_IDENTITY.reset()
@@ -61,6 +67,7 @@ def cleanup(connection: Any, previous_backend: Any, previous_db_path: str | None
     else:
         os.environ["SALTMDB_DB_PATH"] = previous_db_path
     connection.close()
+    drain_librarian_pool()
 
 
 async def call(name: str, arguments: dict[str, Any] | None) -> Any:
