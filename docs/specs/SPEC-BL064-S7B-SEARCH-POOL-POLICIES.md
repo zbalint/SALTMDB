@@ -109,3 +109,11 @@ Slice 8 (`search_memory`'s signature); `_SearchControls`' fields; validation; th
 | `_SearchControls` is a plain `@dataclass(frozen=True)` without slots | `orchestrator.py` 563 | read |
 | Tests call `_apply_search_pool_policies` with 13 positional arguments and index `result[:2]`; call `_rerank_search_pool` with 9; patch `_rerank_search_pool` with a 2-tuple | `T` ~2589 to 2650, 2987 to 3030, 2605 | read by the scout; consultant to re-verify |
 | No test asserts that `score_pairs` is called with NO keyword arguments | scout; `rg` | to be re-verified by the developer before writing item 1 |
+
+## Amendment 1 (2026-10-24): order and test style when S8 lands first
+
+The consultant's read found S8 independent of 7a and 7b (see SPEC-BL064-S8 amendment 1), so S8 may land before 7b.
+
+A1.1 Every `T ~nnn` / `tests/...` line citation in sections 4, 5 and 8 is a pre-S8 line number; if S8 landed first they have drifted. Locate each test by its NAME.
+
+A1.2 If S8 has landed, a new 7b test that calls `search_memory` directly passes the cap names inside `tuning=SearchTuning(cross_encoder_candidate_cap=..., cross_encoder_text_cap_chars=...)`; a new test written through the `_search_case` wrapper keeps the flat option keys (the wrapper translates them, S8 amendment 1.2). Behaviour, signatures and acceptance of 7b are unchanged.

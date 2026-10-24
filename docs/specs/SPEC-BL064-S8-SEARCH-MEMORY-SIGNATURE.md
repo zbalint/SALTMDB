@@ -130,3 +130,15 @@ Every existing test and script that passes a removed name is rewritten by the D4
 | `tests/test_search_accuracy_stage2.py` ~574 to 610 asserts flat `call_args.kwargs` on a patched `benchmark_matrix.search_memory` | consultant | read |
 | `tests/test_dispatch_types.py` ~15, ~23 and `tests/test_viewer_routes.py` ~149, ~168 patch the service functions; their assertions are unread | consultant | NOT read: the developer reads them first |
 | The S107 limit is 13 and `self`/`cls` are exempt; the rule does not say how `*args`/`**kwargs` count | Sonar rule text | read (the shim was rejected, so it does not matter) |
+
+## Amendment 1 (2026-10-24): S8 may land before 7b; the test wrapper translates the flat keys
+
+The consultant's ordering read (HEAD 144237f) found no code, type or field dependency of S8 on 7a or 7b: S8 edits the arguments of `_build_search_filters`, the tag helpers, `_semantic_search_db_path`, the 19 keywords of the `_SearchControls(...)` constructor and the validation calls; 7a edits only the `_search_window_pool(...)` call and one new line before it; 7b does not touch `search_memory` and adds one read-only property to `_SearchControls`, which S8 does not touch. The only shared file is `tests/test_search_memory_characterization.py`, a sequencing constraint (one writer at a time), not a dependency.
+
+A1.1 The sentence in section 0 "It follows 7a and 7b" is superseded: S8 has no dependency on 7a or 7b and may land immediately after 7a and before 7b, or after both. S8 must not be implemented while a 7a or 7b diff is uncommitted on the tree.
+
+A1.2 Section 3 D4, the test wrapper: in `tests/test_search_memory_characterization.py`, `_search_case(conn, path, options)` translates the removed flat keys into the groups INSIDE the wrapper, with ONE table mapping the seven `SearchCriteria` names and the thirteen `SearchTuning` names (the twenty removed parameters) to their group; it builds `criteria=SearchCriteria(...)` and `tuning=SearchTuning(...)` from the keys it finds in `options`, and passes only non-empty groups. The many `_search_case({...})` callers keep their flat option dicts: the codemod does not rewrite the dicts of `_search_case` callers, only calls whose callee is `search_memory` (or another forwarding wrapper listed under D4). New tests written for 7b through `_search_case` use the existing flat style.
+
+A1.3 The `T ~nnn` test-line citations of section 4 and 5 drift after the codemod adds lines; locate every test by its NAME. The claim in section 8 about `dispatch.py` forwarding the flat names is true before S8 only; after S8 dispatch builds `SearchTuning(...)`.
+
+A1.4 Nothing else changes: scope, target types, decisions D1 to D3 and D5, tests and acceptance are as locked.
