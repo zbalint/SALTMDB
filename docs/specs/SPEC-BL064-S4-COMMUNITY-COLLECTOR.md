@@ -87,3 +87,17 @@ The other BL-064 slices. The question whether a `noqa: C901/PLR0912/PLR0915` cou
 | The `# noqa: PLR0913` is redundant for ruff | `pyproject.toml` ruff `ignore` contains `PLR0913` | read by the scout |
 | `recompute_communities` reads the three lists in `_write` and in the result dict | `community_detection_service.py` 266 to 291 | read; consultant read |
 | `leidenalg.find_partition` is called without a seed (non-deterministic) | `community_detection_service.py` ~148, ~232 | consultant read |
+
+## Amendment 1 (2026-10-24): collector name, element types, docstring and two pins
+
+Found at the review of the first implementation (tester: 19-scenario old-versus-new differential identical, 12 of 14 mutants killed; consultant design read: accept with nits).
+
+A1.1 The collector variable in `recompute_communities` is named `community_rows`, not `rows` (section 2 named it `rows`, which collides under mypy with the existing local `rows` that holds the SQL result of the relations query at ~line 203, and the first implementation renamed that SQL local, an edit outside section 0's range). The SQL local keeps its original name `rows`; the diff touches no line of `recompute_communities` above the collector's creation.
+
+A1.2 The three row lists carry precise element types and no `pyright: ignore`: `communities: list[tuple[str, str | None, int, int, str, str | None]]` (the representative is `None` for multi-member groups), `membership: list[tuple[str, str, int]]`, `embeddings: list[tuple[str, bytes]]`. `_PartitionScope` gains the one-line comment `# not hashable: carries a list` (it holds `node_ids` and an igraph graph).
+
+A1.3 The explanatory docstring of the removed `_process_partition_group` moves onto `add_group` (reworded for `scope.*` and `self.*`): one community row per group at `level`; then either recurse into a fresh Leiden pass over its own induced subgraph (if oversized and under the depth cap) or emit leaf membership rows; every community row, leaf or not, gets its own representative and centroid through the unmodified `_compute_community_group` (constraint 25: independently at every level). The `_CommunityRows` docstring says it also drives the Leiden recursion through `add_group`.
+
+A1.4 Two pins the first implementation lacked (tests only): (a) `created_at` of every community row equals the single `now` of the recompute (freeze the clock by patching the module's `datetime`, assert a literal on every row); (b) the group sort is load-bearing: with `leidenalg.find_partition` patched (module attribute, so every recursion level gets it) to return an UNSORTED child group, the child communities and representatives equal those obtained from the same group sorted, so `sorted_group = list(group_indices)` is killed. The real Leiden returns ascending groups in practice (180 of 180 probed runs), so without the fake the mutant is equivalent in practice only by an implementation property of igraph.
+
+A1.5 Test hygiene (consultant): scenario 35 keeps one form of the count/level/parent checks and adds `child_created_at == created_at` and `representative is None or in nodes`; scenario 36 patches `COMMUNITY_HIERARCHY_MAX_DEPTH` to 1 and asserts contiguity of ALL transitive descendants of the split root (one contiguous index range, the flat root outside it), not only direct children; scenario 38 forces the extension state by patching `try_load_vector_extension` as the neighbouring tests do (optionally a mixed case: two disconnected components, one with vectors, `missing == 1` of `created == 2`).
