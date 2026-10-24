@@ -111,3 +111,13 @@ A1.2 Scope: section 0 gains `tests/test_relation_service.py` (new characterizati
 A1.3 Acceptance 5 gains these mutants, each killed by a named test of A1.1: the gate's strong-predicate test reads `request.predicate`; the measurement's strong branch and contradiction-pair lookup read `request.predicate`; `_insert_relation_write` binds `request.predicate` in the INSERT; the repoint detection or the core guard reads `request.predicate`; the centroid list is passed as `[target, source]`. A survivor is reported; it is accepted only with a proof of equivalence (an input that cannot reach the write).
 
 A1.4 Section 2: keep the field comments in `_RelationWriteRequest` (`source_id` and `target_id`: `# resolved`; `predicate`: `# as requested; canonicalised inside the write`). The sentence in section 2 that calls both dataclasses unhashable-by-content is wrong for `_RelationWriteRequest` (all its fields are hashable); only `_GateMeasurement` carries the "not hashable" comment.
+
+## Amendment 2 (2026-10-24): the core-guard-before-measurement order
+
+The tester's mutation pass (17 mutants, 30-scenario old-versus-new differential identical) found one more observable mutant that A1.1 does not cover: swapping `_check_core_relation_guard` and `_relation_gate_measurements` in `_store_relation_write`. In normal paths the final database state is identical (the guard rejects before anything is written either way), so it is observable only through the order of side effects.
+
+A2.1 Add to the A1.1 list, item 7: a fault-injection test of the order. With `get_fresh_entity_centroids` (module attribute) patched to raise, a strong-predicate `elaborates_on` edge whose TARGET is an active core memory (without `_allow_core_elaborates_on`) must return the core guard's rejection (the exact `REJECT_CORE_ELABORATES_ON` envelope the unchanged code returns), proving the guard runs before the measurement; the swapped order would reach the measurement and surface the injected fault as `INTERNAL_ERROR`. Literals from a run on the unchanged code.
+
+A2.2 Add to A1.3: the swap of the guard and the measurement is killed by A2.1.
+
+A2.3 Note for future mutation work (tester): the mutants of A1.3 are observable only because the write-side predicate check classifies a normalized copy and forwards the raw string; if that check ever rejected non-normalized spellings they would become equivalent, and the A1.1 tests would then pass trivially (keep them, they still pin the canonical-name behaviour).
