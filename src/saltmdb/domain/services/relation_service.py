@@ -1760,6 +1760,32 @@ class _BulkContext:
     precomputed_unresolved: dict[str, str] | None
     precomputed_observed_state: dict[str, tuple[str, str]] | None
 
+    def for_parents(self, parent_ids: list[str]) -> "_BulkContext":
+        """Return the union-map slice belonging to one consolidation item."""
+        if (
+            self.precomputed_centroids is None
+            or self.precomputed_unresolved is None
+            or self.precomputed_observed_state is None
+        ):
+            raise ValueError("bulk context maps must be populated before slicing")
+        return _BulkContext(
+            precomputed_centroids={
+                parent_id: self.precomputed_centroids[parent_id]
+                for parent_id in parent_ids
+                if parent_id in self.precomputed_centroids
+            },
+            precomputed_unresolved={
+                parent_id: self.precomputed_unresolved[parent_id]
+                for parent_id in parent_ids
+                if parent_id in self.precomputed_unresolved
+            },
+            precomputed_observed_state={
+                parent_id: self.precomputed_observed_state[parent_id]
+                for parent_id in parent_ids
+                if parent_id in self.precomputed_observed_state
+            },
+        )
+
 
 @dataclass(frozen=True)
 class _ConsolidationCoreRequest:
@@ -2547,8 +2573,9 @@ def commit_consolidation(*args, **kwargs) -> str:
 
 
 class _BulkItemRejected(RuntimeError):
-    def __init__(self, result: dict):
+    def __init__(self, result: dict, index: int):
         self.errors = list(result.get("errors") or [])
+        self.index = index
         super().__init__(f"Bulk consolidation aborted (all-or-nothing): {result}")
 
 
@@ -2556,16 +2583,9 @@ def _commit_bulk_consolidation_item(
     conn,
     item: dict,
     parent_ids: list[str],
-    centroids: dict,
-    unresolved: dict,
-    observed_state: dict,
-    agent_id: str | None,
-    context_id: str | None,
-    agent_session_id: str | None,
+    bulk: _BulkContext,
+    provenance: Provenance,
 ) -> dict:
-    item_centroids = {pid: centroids[pid] for pid in parent_ids if pid in centroids}
-    item_unresolved = {pid: unresolved[pid] for pid in parent_ids if pid in unresolved}
-    item_observed_state = {pid: observed_state[pid] for pid in parent_ids if pid in observed_state}
     result = consolidate_memories(
         # Per-item ownership is an internal compatibility affordance.  Public MCP
         # wrappers remove this field before crossing the adapter boundary; retaining
@@ -2579,9 +2599,9 @@ def _commit_bulk_consolidation_item(
         override_justification=item.get("override_justification"),
         db_connection=conn,
         provenance=Provenance(
-            agent_id=item.get("agent_id", agent_id),
-            context_id=item.get("context_id", context_id),
-            agent_session_id=agent_session_id,
+            agent_id=item.get("agent_id", provenance.agent_id),
+            context_id=item.get("context_id", provenance.context_id),
+            agent_session_id=provenance.agent_session_id,
         ),
         core=CoreDeclaration(
             is_core=item.get("is_core"),
@@ -2590,14 +2610,12 @@ def _commit_bulk_consolidation_item(
             core_review_after=item.get("core_review_after"),
             detail_memory_ids=item.get("detail_memory_ids"),
         ),
-        _bulk=_BulkContext(
-            precomputed_centroids=item_centroids,
-            precomputed_unresolved=item_unresolved,
-            precomputed_observed_state=item_observed_state,
-        ),
+        _bulk=bulk.for_parents(parent_ids),
     )
-    if not isinstance(result, dict) or result.get("status") != "ok":
-        raise _BulkItemRejected(result)
+    return result
+
+
+def _bulk_item_success(item: dict, result: dict) -> dict:
     data = result["data"]
     return {
         "status": "success",
@@ -2614,33 +2632,20 @@ def _write_bulk_consolidations(
     conn,
     consolidations: list,
     item_resolved_parents: list[list[str]],
-    centroids: dict,
-    unresolved: dict,
-    observed_state: dict,
-    results: list,
-    agent_id: str | None,
-    context_id: str | None,
-    agent_session_id: str | None,
-) -> None:
-    results.clear()
+    bulk: _BulkContext,
+    provenance: Provenance,
+) -> list[dict]:
+    results: list[dict] = []
     archived_parent_ids: list[str] = []
     with savepoint(conn, "bulk_consolidation"):
-        for item, parent_ids in zip(consolidations, item_resolved_parents):
-            results.append(
-                _commit_bulk_consolidation_item(
-                    conn,
-                    item,
-                    parent_ids,
-                    centroids,
-                    unresolved,
-                    observed_state,
-                    agent_id,
-                    context_id,
-                    agent_session_id,
-                )
-            )
+        for index, (item, parent_ids) in enumerate(zip(consolidations, item_resolved_parents)):
+            result = _commit_bulk_consolidation_item(conn, item, parent_ids, bulk, provenance)
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                raise _BulkItemRejected(result, index)
+            results.append(_bulk_item_success(item, result))
             archived_parent_ids.extend(parent_ids)
     _clear_archived_parent_vectors(conn, archived_parent_ids)
+    return results
 
 
 def _prepare_bulk_consolidation_parents(
@@ -2762,7 +2767,6 @@ def apply_consolidations(
         return validation_error
 
     with managed_connection(db_connection=db_connection, db_path=db_path) as conn:
-        results: list[dict] = []
         try:
             resolved, union_ids, parent_error = _prepare_bulk_consolidation_parents(
                 conn, normalized
@@ -2774,24 +2778,21 @@ def apply_consolidations(
             if parent_conflict is not None:
                 return parent_conflict
             centroids, unresolved, observed_state = get_fresh_entity_centroids(union_ids, conn)
-            write_transaction_retrying(
+            bulk = _BulkContext(centroids, unresolved, observed_state)
+            provenance = Provenance(
+                agent_id=agent_id,
+                context_id=context_id,
+                agent_session_id=agent_session_id,
+            )
+            results = write_transaction_retrying(
                 conn,
                 lambda tx_conn: _write_bulk_consolidations(
-                    tx_conn,
-                    normalized,
-                    resolved,
-                    centroids,
-                    unresolved,
-                    observed_state,
-                    results,
-                    agent_id,
-                    context_id,
-                    agent_session_id,
+                    tx_conn, normalized, resolved, bulk, provenance
                 ),
             )
             return _consolidation_batch_result(conn, results, resolved)
         except _BulkItemRejected as exc:
-            return rejected(_prefix_consolidation_errors(exc.errors, len(results)))
+            return rejected(_prefix_consolidation_errors(exc.errors, exc.index))
         except Exception as exc:
             logger.error("Error applying consolidation batch: %s", exc)
             if is_coordinator_connection(conn):
@@ -2844,7 +2845,6 @@ def bulk_commit_consolidation(
         conn = get_connection(db_path)
         should_close = True
 
-    results: list[Any] = []
     try:
         item_resolved_parents, union_ids, parent_error = _prepare_bulk_consolidation_parents(
             conn, consolidations
@@ -2857,23 +2857,18 @@ def bulk_commit_consolidation(
                 }
             ]
         centroids, unresolved, observed_state = get_fresh_entity_centroids(union_ids, conn)
-
-        write_transaction_retrying(
+        bulk = _BulkContext(centroids, unresolved, observed_state)
+        provenance = Provenance(
+            agent_id=agent_id,
+            context_id=context_id,
+            agent_session_id=agent_session_id,
+        )
+        return write_transaction_retrying(
             conn,
             lambda tx_conn: _write_bulk_consolidations(
-                tx_conn,
-                consolidations,
-                item_resolved_parents,
-                centroids,
-                unresolved,
-                observed_state,
-                results,
-                agent_id,
-                context_id,
-                agent_session_id,
+                tx_conn, consolidations, item_resolved_parents, bulk, provenance
             ),
         )
-        return results
     except Exception as e:
         logger.error(
             "Bulk commit consolidation error (batch rolled back, no items consolidated): %s", e

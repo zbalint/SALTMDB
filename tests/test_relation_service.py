@@ -3664,7 +3664,7 @@ class TestRelationD14Pins(unittest.TestCase):
             with write_transaction(conn) as tx_conn:
                 fn(tx_conn)
             with write_transaction(conn) as tx_conn:
-                fn(tx_conn)
+                return fn(tx_conn)
 
         parents, centroid_patch, consolidate_patch, tx_patch = self._bulk_patches(
             consolidate=fake_consolidate, tx=retry_twice
