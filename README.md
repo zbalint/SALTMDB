@@ -1,5 +1,14 @@
 # SALTMDB: Local-First MCP Memory Server
 
+[![CI (master)](https://img.shields.io/github/actions/workflow/status/zbalint/SALTMDB/python-tests.yml?branch=master&label=CI%20(master))](https://github.com/zbalint/SALTMDB/actions/workflows/python-tests.yml)
+[![CI (develop)](https://img.shields.io/github/actions/workflow/status/zbalint/SALTMDB/python-tests.yml?branch=develop&label=CI%20(develop))](https://github.com/zbalint/SALTMDB/actions/workflows/python-tests.yml)
+[![Quality gate (develop)](https://sonarcloud.io/api/project_badges/measure?project=zbalint_SALTMDB&branch=develop&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=zbalint_SALTMDB&branch=develop)
+[![Coverage (develop)](https://sonarcloud.io/api/project_badges/measure?project=zbalint_SALTMDB&branch=develop&metric=coverage)](https://sonarcloud.io/summary/new_code?id=zbalint_SALTMDB&branch=develop)
+[![Security rating (develop)](https://sonarcloud.io/api/project_badges/measure?project=zbalint_SALTMDB&branch=develop&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=zbalint_SALTMDB&branch=develop)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)](https://github.com/zbalint/SALTMDB/blob/develop/pyproject.toml)
+[![License AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](https://spdx.org/licenses/AGPL-3.0-only.html)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zbalint/SALTMDB/badge)](https://securityscorecards.dev/viewer/?uri=github.com/zbalint/SALTMDB)
+
 **SALTMDB** (Short And Long-Term Memory DataBase) is a centralized, local-first memory framework designed for AI CLI tools and agents (such as Antigravity, Copilot, and Claude Code). It acts as a shared memory layer, allowing multiple concurrent agents to read, write, and consolidate contextual facts using a lightweight Python package with SQLite and ONNX-based vector embeddings.
 
 > [!TIP]
