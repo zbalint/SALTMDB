@@ -28,7 +28,7 @@ else:
 
 logger = logging.getLogger(__name__)
 _ALLOWED_HOSTNAMES = ("localhost", "127.0.0.1", "[::1]")
-_LOOPBACK_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?")
+_LOOPBACK_ORIGIN = re.compile(r"(https?)://(localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?")
 _MISDIRECTED_STATUS = 421
 _MISDIRECTED_MESSAGE = "Misdirected Request"
 _ENTITIES_API_PREFIX = "/api/entities/"
@@ -101,8 +101,19 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
     def _send_cors_origin_header(self):
         headers = getattr(self, "headers", None)
         origin = headers.get("Origin", "") if headers else ""
-        if _LOOPBACK_ORIGIN.fullmatch(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
+        match = _LOOPBACK_ORIGIN.fullmatch(origin)
+        if not match:
+            return
+        port = int(match[3]) if match[3] else None
+        if port is not None and port > 65535:
+            return
+        scheme = "https" if match[1] == "https" else "http"
+        host = "127.0.0.1" if match[2] == "127.0.0.1" else "localhost"
+        if port is None:
+            value = f"{scheme}://{host}"
+        else:
+            value = f"{scheme}://{host}:{port}"
+        self.send_header("Access-Control-Allow-Origin", value)
 
     def send_json(self, data, status=200):
         try:

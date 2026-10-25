@@ -21,7 +21,10 @@ class CorsOriginHandlerTests(unittest.TestCase):
     allowed_origins = (
         "http://localhost",
         "https://localhost",
+        "http://localhost:1",
+        "https://localhost:80",
         "http://localhost:8765",
+        "http://127.0.0.1",
         "http://127.0.0.1:3000",
         "https://127.0.0.1:65535",
     )
@@ -32,6 +35,12 @@ class CorsOriginHandlerTests(unittest.TestCase):
         "null",
         "http://[::1]:8765",
         "http://127a0a0a1",
+        "http://localhost:0",
+        "http://localhost:08080",
+        "http://localhost:00",
+        "http://localhost:65536",
+        "http://localhost:99999",
+        "http://127.0.0.1:010",
         "http://localhost:٨٧",
         "HTTP://localhost",
         "http://localhost/",
