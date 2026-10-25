@@ -117,6 +117,10 @@ run the deeper profile explicitly with:
 HYPOTHESIS_PROFILE=fuzz pytest -q tests/test_fuzz_*.py
 ```
 
+The `Deep fuzz` workflow (`.github/workflows/deep-fuzz.yml`) runs the same tests with the `fuzz`
+profile once a week on the default branch and on demand. When it fails, the log shows the
+failing input: pin it as an `@example`, fix the defect, and do not weaken the property.
+
 Every discovered defect gets a pinned Hypothesis `@example`, and generated inputs
 must carry the domain vocabulary needed to reach the boundary (for example, hostile
 JSON nesting, long integer runs, and FTS operators/punctuation).
