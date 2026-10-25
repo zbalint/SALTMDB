@@ -96,3 +96,7 @@ Every pytest invocation runs under the shared lock: `flock -w 3600 /home/zbalint
 | `_host_allowed` equals the regex oracle | `base.py` 44 to 66 | probed over 20000 generated values |
 | `cursor_offset` pattern and bounds | `utils/pagination.py` | read; probed |
 | existing tests that pin the changed `except` clauses | `tests/test_search_memory_characterization.py` 1093 raises `JSONDecodeError` in an unrelated search path; no test names `RecursionError` | `rg -n -e JSONDecodeError -e RecursionError tests hooks/tests` (this output, read) |
+
+## Review record (2026-10-25)
+
+Accepted after developer implementation (the developer later replaced the cursor oracle by an independent unbounded ASCII grammar, then reverified) and an independent tester pass: old-code red is exactly M1 and S1, generation alone finds both defects (nesting depth 2000, 4301 digits), N1 to N11 killed, seven tester mutants of the new tests killed (each deleted token pattern, dropped `IGNORECASE`, an injected catastrophic pattern caught by R3), three deterministic `ci` runs. Accepted survivors: an empty `[REDACTED_SECRET]` marker survives the new redaction test (R2 checks that tokens disappear, not the marker text; the marker is pinned by `tests/test_redaction.py` and other existing tests), and a malformed-bracket mutant of `_host_allowed` that changes nothing observable (equivalent). Architect `./verify` on the final tree: 3763 passed, 10 skipped, 481 subtests.

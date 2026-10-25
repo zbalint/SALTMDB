@@ -152,7 +152,7 @@ def read(key: str) -> dict[str, Any] | None:
                 return None
             data = json.load(f)
         return _typed_record(data) if _valid(data) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 

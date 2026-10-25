@@ -109,12 +109,12 @@ Every modification must pass the full repository verification gate before submis
 
 ### Property-based boundary tests
 
-Property tests for untrusted daemon frames and FTS query text live in
+Property tests for untrusted-input boundaries live in
 `tests/test_fuzz_*.py`. The normal `./verify` gate uses Hypothesis's `ci` profile;
 run the deeper profile explicitly with:
 
 ```bash
-HYPOTHESIS_PROFILE=fuzz pytest -q tests/test_fuzz_daemon_frame.py tests/test_fuzz_fts_query.py
+HYPOTHESIS_PROFILE=fuzz pytest -q tests/test_fuzz_*.py
 ```
 
 Every discovered defect gets a pinned Hypothesis `@example`, and generated inputs

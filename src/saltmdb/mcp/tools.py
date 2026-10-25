@@ -124,7 +124,7 @@ def _normalize_list_or_str(val) -> list:
                 parsed = json.loads(val_str)
                 if isinstance(parsed, list):
                     return parsed
-            except json.JSONDecodeError as exc:
+            except (ValueError, RecursionError) as exc:
                 logger.debug(
                     "Ignoring malformed JSON list input and applying string fallback: %s", exc
                 )
