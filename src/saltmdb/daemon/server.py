@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 if TYPE_CHECKING:
     from saltmdb.domain.services.embedding_service import EmbedJobScheduler
@@ -1030,39 +1030,55 @@ def _start_viewer(
     return viewer_httpd
 
 
+class _DaemonPorts(NamedTuple):
+    service: int
+    election: int
+    probe: int
+
+
+class _StartupTimings(NamedTuple):
+    """Monotonic marks taken during daemon startup; the phases are the gaps between them.
+
+    `services_started` is main's `t_recovery`; logged as `recovery_s`; the
+    embedding-recovery thread starts later, in `_publish_ready`.
+    """
+
+    start: float  # t0: before the election
+    bound: float  # t_bound: sockets bound
+    db_ready: float  # t_db: init_db finished
+    services_started: (
+        float  # t_recovery: orphaned sessions reconciled and the embed scheduler started
+    )
+
+
 def _publish_ready(
     state: _DaemonState,
     key: str,
     db_path: str,
-    service_port: int,
-    e_port: int,
-    p_port: int,
-    t0: float,
-    t_bound: float,
-    t_db: float,
-    t_recovery: float,
+    ports: _DaemonPorts,
+    timings: _StartupTimings,
 ) -> None:
     # Step 7: generate the auth token and publish the discovery file -- the final startup step,
     # so nothing is ever advertised as ready until every other listener has already bound.
     auth_token = secrets.token_urlsafe(32)
     state.auth_token = auth_token
-    discovery.write(key, db_path, os.getpid(), service_port, auth_token)
+    discovery.write(key, db_path, os.getpid(), ports.service, auth_token)
     logger.info(
         "SALTMDB daemon ready: db=%s service_port=%d election_port=%d probe_port=%d",
         db_path,
-        service_port,
-        e_port,
-        p_port,
+        ports.service,
+        ports.election,
+        ports.probe,
     )
     t_ready = time.monotonic()
     logger.info(
         "Daemon startup phases: election_s=%.3f init_db_s=%.3f recovery_s=%.3f "
         "listeners_s=%.3f total_s=%.3f",
-        t_bound - t0,
-        t_db - t_bound,
-        t_recovery - t_db,
-        t_ready - t_recovery,
-        t_ready - t0,
+        timings.bound - timings.start,
+        timings.db_ready - timings.bound,
+        timings.services_started - timings.db_ready,
+        t_ready - timings.services_started,
+        t_ready - timings.start,
     )
     logger.info("Process memory (daemon ready): %s", format_process_memory())
     if state._acquire_inflight():
@@ -1165,7 +1181,13 @@ def main() -> None:
         signal.signal(signal.SIGTERM, _startup_signal_handler)
     signal.signal(signal.SIGINT, _startup_signal_handler)
 
-    _publish_ready(state, key, db_path, service_port, e_port, p_port, t0, t_bound, t_db, t_recovery)
+    _publish_ready(
+        state,
+        key,
+        db_path,
+        _DaemonPorts(service_port, e_port, p_port),
+        _StartupTimings(t0, t_bound, t_db, t_recovery),
+    )
 
     # Codex round-1 finding (confirmed against Python's own documented constraint: "[shutdown]
     # must be called while serve_forever() is running in a different thread, or it will
