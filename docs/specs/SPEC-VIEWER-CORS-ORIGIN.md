@@ -99,3 +99,13 @@ Claims about existing code:
 | A `send_json` response is reachable without a database | `do_GET` falls through to `send_json({"error": "Endpoint not found"}, 404)` for an unknown path | read (`base.py` line 173; `do_HEAD` at line 269) |
 
 Scope list versus acceptance: the section 8 greps touch only `src`; the scope files are the same three as `git diff --stat`. Data shape stated twice: the regex appears in D1 and in nothing else; the C2 and C4 values are in section 4 only. Re-grep of the spec after the consultant's review changes: no remaining `five inline`, `line 164`, `\|` in an `rg` pattern or `DRAFT`; the C2 count (12 starred, 8 unstarred values) appears in sections 4 and 8 only. Consultant review folded in: rg patterns, expected failure counts, `\d` and unescaped-dot mutants, header-order test C6, no-`headers`-attribute case, loop-until-EOF read in C4, anchors, and the single-line grep wording. The CodeQL outlook is recalled by the consultant, not verified; section 8 item 7 handles it without changing the code for the scanner.
+
+## Amendment 1 (2026-10-25, review round 1, tests only)
+
+An independent tester pass and the architect's own mutants found two gaps in the new tests; production code and the accepted behaviour did not change.
+
+- Survivor: a lookup of the LAST `Origin` header (`get_all("Origin")[-1]` in place of `get("Origin", "")`) passed every test. Added C7 (real server, GET and OPTIONS): two `Origin` lines, canonical first and foreign second, echo exactly the first value once; foreign first and canonical second echo nothing. D2's "first `Origin` header" is now pinned.
+- Survivor: `https?:/+` in place of `https?://` passed every test. Added `http:/localhost` and `http:///localhost` to the C2 values (absent header expected; both already passed on the old code).
+- Mutants M13 (the last-header lookup) and M14 (the slash-count regex) are killed by C7 and by the two new C2 values.
+- Dispositioned out of contract, no test: a mutant that swallows `TypeError` or `AttributeError` around the regex. It differs only when `headers.get` returns a non-string object, which HTTP parsing cannot produce, and pinning it would over-specify the helper. Equivalent mutants (alternation order, group capture, `$` with `fullmatch`, `{}` default for `getattr`, subscript lookup, `.lower()` on the echoed value) need no test.
+- Review record: developer RED on the old code 26 failed, 7 passed, 30 subtests; GREEN 10 passed, 62 subtests; tester differential 36 recording cases and 23 raw-server cases per response method, every difference an intended narrowing, no status change; architect's fresh `./verify` on the final tree exited 0 (3744 passed, 10 skipped, 479 subtests).

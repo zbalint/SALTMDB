@@ -11,6 +11,7 @@ import http.server
 import json
 import logging
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +28,7 @@ else:
 
 logger = logging.getLogger(__name__)
 _ALLOWED_HOSTNAMES = ("localhost", "127.0.0.1", "[::1]")
+_LOOPBACK_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?")
 _MISDIRECTED_STATUS = 421
 _MISDIRECTED_MESSAGE = "Misdirected Request"
 _ENTITIES_API_PREFIX = "/api/entities/"
@@ -96,17 +98,18 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
 
+    def _send_cors_origin_header(self):
+        headers = getattr(self, "headers", None)
+        origin = headers.get("Origin", "") if headers else ""
+        if _LOOPBACK_ORIGIN.fullmatch(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+
     def send_json(self, data, status=200):
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self._send_dynamic_headers()
-            headers = getattr(self, "headers", None)
-            origin = headers.get("Origin", "") if headers else ""
-            if origin:
-                parsed_origin = urllib.parse.urlparse(origin)
-                if parsed_origin.hostname in ("localhost", "127.0.0.1"):
-                    self.send_header("Access-Control-Allow-Origin", origin)
+            self._send_cors_origin_header()
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -147,12 +150,7 @@ class ViewerHandlerBase(http.server.BaseHTTPRequestHandler, ViewerHandlerProtoco
     def do_OPTIONS(self):
         try:
             self.send_response(200)
-            headers = getattr(self, "headers", None)
-            origin = headers.get("Origin", "") if headers else ""
-            if origin:
-                parsed_origin = urllib.parse.urlparse(origin)
-                if parsed_origin.hostname in ("localhost", "127.0.0.1"):
-                    self.send_header("Access-Control-Allow-Origin", origin)
+            self._send_cors_origin_header()
             self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
