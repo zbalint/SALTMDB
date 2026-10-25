@@ -131,6 +131,7 @@ class TestStoreMemorySignature(unittest.TestCase):
                         title="Plain Memory",
                         provenance=Provenance(agent_id="owner"),
                         db_connection=connection,
+                        runtime=StoreRuntime(probe_sink=[]),
                     ),
                 )
                 detail = cast(
@@ -140,6 +141,7 @@ class TestStoreMemorySignature(unittest.TestCase):
                         title="Detail Memory",
                         provenance=Provenance(agent_id="owner"),
                         db_connection=connection,
+                        runtime=StoreRuntime(probe_sink=[]),
                     ),
                 )
                 detail_id = detail["data"]["id"]
@@ -156,6 +158,7 @@ class TestStoreMemorySignature(unittest.TestCase):
                             detail_memory_ids=[detail_id],
                         ),
                         db_connection=connection,
+                        runtime=StoreRuntime(probe_sink=[]),
                     ),
                 )
                 annotated = cast(
@@ -171,6 +174,7 @@ class TestStoreMemorySignature(unittest.TestCase):
                         ),
                         scores=StoreScores(relevance=2, impact=3, novelty=3, actionability=3),
                         db_connection=connection,
+                        runtime=StoreRuntime(probe_sink=[]),
                     ),
                 )
             for result, context, memory_type, session in (
