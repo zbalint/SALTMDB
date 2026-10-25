@@ -108,7 +108,7 @@ def recv_frame(sock: socket.socket) -> dict[str, Any]:
     body = _recv_exact(sock, length)
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (ValueError, RecursionError) as e:
         raise FrameError(f"malformed JSON frame body: {e}") from e
     if not isinstance(obj, dict):
         raise FrameError("frame body is not a JSON object")

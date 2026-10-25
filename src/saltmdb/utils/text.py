@@ -198,15 +198,11 @@ def extract_title_and_snippet(markdown_text: str):
 
 
 def sanitize_fts_query(query: str) -> str:
-    """Sanitizes raw query string for FTS5, stripping every character outside FTS5's
-    bareword character set (word characters only) so natural-language input never reaches
-    the query parser as an unescaped special character.
+    """Sanitizes raw query text into word characters separated by single spaces.
 
-    The previous implementation stripped an explicit blacklist of punctuation that omitted
-    ',', '.', ';', "'", and '=' -- each of those reliably raises "fts5: syntax error near
-    ..." when left in a MATCH query, confirmed via direct reproduction against an in-memory
-    FTS5 table. Stripping to a whitelist (`\\w`/whitespace) instead of an ever-growing
-    blacklist closes this class of bug rather than patching one symbol at a time.
+    Each resulting term contains no double quote, so quoting it as ``"term"*`` always
+    produces a well-formed FTS5 string. The output as a whole is not safe to pass
+    unquoted to ``MATCH``: uppercase ``AND``, ``OR``, and ``NOT`` remain FTS5 operators.
     """
     if not query:
         return ""

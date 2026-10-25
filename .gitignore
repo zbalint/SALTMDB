@@ -19,6 +19,7 @@ ENV/
 *.log
 scratch*/
 .pytest_cache*/
+.hypothesis/
 
 # Excluded example memory dataset
 example_data/

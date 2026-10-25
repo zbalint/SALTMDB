@@ -107,6 +107,20 @@ Every modification must pass the full repository verification gate before submis
    This is a status check, not a viewer launcher; it reports the daemon's viewer URL to open in a
    browser.
 
+### Property-based boundary tests
+
+Property tests for untrusted daemon frames and FTS query text live in
+`tests/test_fuzz_*.py`. The normal `./verify` gate uses Hypothesis's `ci` profile;
+run the deeper profile explicitly with:
+
+```bash
+HYPOTHESIS_PROFILE=fuzz pytest -q tests/test_fuzz_daemon_frame.py tests/test_fuzz_fts_query.py
+```
+
+Every discovered defect gets a pinned Hypothesis `@example`, and generated inputs
+must carry the domain vocabulary needed to reach the boundary (for example, hostile
+JSON nesting, long integer runs, and FTS operators/punctuation).
+
 ---
 
 ## 4. Tooling & Quality Gates
