@@ -49,7 +49,7 @@ test_db/
 /scripts/benchmarking/replay_run9_candidate.py
 /tests/test_replay_run9_candidate.py
 
-# Local a2amx team config (which sessions the owner runs for this repo); template is a2amx.toml.example.
+# Local a2amx team config (which sessions the owner runs for this repo); never committed.
 /a2amx.toml
 
 # Sonar and coverage reports
