@@ -17,6 +17,10 @@ Run before calling a change done; it must exit 0:
   `semgrep` on PATH); CI runs the same script in its `hygiene` job. Custom Semgrep rules live in
   `.semgrep/rules/`; fix a hit, never silence it. A CI run cancelled because a newer push
   replaced it is not a failure; read the latest run for the pushed commit.
+- `scripts/prepush-fast.sh` also runs `cs delta` (CodeScene code health) over the commits being pushed and prints
+  the findings they introduced or made worse. It is advisory: it never fails the script or CI. A missing `cs` or
+  `jq` is still an error; a failing or timed-out `cs delta` (no token, bad base) prints a "skipped" line. CI needs
+  the `CS_ACCESS_TOKEN` repo secret; a fork PR has none and reports "skipped".
 - `scripts/prepush-sonar.sh` runs the slow full suite under coverage and uploads an optional SonarQube scan of unpushed commits against `origin/develop`; it needs `SONAR_TOKEN` and `sonar-scanner`, refuses a dirty tree, an unchanged `origin/develop`, or a diverged branch, and is optional for now.
 - Other processes may run test suites on the same host. Do not start parallel full runs.
 

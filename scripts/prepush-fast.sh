@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Fast pre-push checks, seconds not minutes: secrets in history, workflow lint, workflow audit,
-# and repository-local Semgrep invariants.
+# repository-local Semgrep invariants, and an advisory CodeScene report.
 # CI runs this same script in its hygiene job, so a local pass means the same checks pass there.
-# Needs gitleaks, actionlint, zizmor and semgrep on PATH; a missing tool is an error, not a skip.
+# Needs gitleaks, actionlint, zizmor, semgrep, cs (CodeScene) and jq on PATH; a missing tool is an
+# error, not a skip. The CodeScene step at the end only reports: it never fails the script.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-for tool in gitleaks actionlint zizmor semgrep; do
+for tool in gitleaks actionlint zizmor semgrep cs jq; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 2; }
 done
 
@@ -120,4 +121,24 @@ fi
 if [[ "$test_count" -eq 0 ]]; then
   echo "Semgrep fixture suite reported zero tests" >&2
   exit 1
+fi
+
+# CodeScene code health, advisory: it must never block a push or a CI run. It lists the findings
+# the pushed commits introduced or made worse. CODESCENE_BASE overrides the base (CI sets it);
+# locally the base is the upstream branch, so the range is the commits about to be pushed.
+base="${CODESCENE_BASE:-$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo origin/develop)}"
+status=0
+# The timeout keeps a stalled licence or network call from cancelling the CI job as failed.
+report="$(CS_DISABLE_VERSION_CHECK=1 timeout 300 cs delta "$base" HEAD --output-format json)" || status=$?
+if [[ "$status" -eq 0 ]] && findings="$(jq -r '
+  .[] | .name as $file | .findings[]
+  | select(.["change-type"] == "introduced" or .["change-type"] == "degraded")
+  | "\($file): \(.["change-type"]) \(.category): \(.["change-details"][0].description // "")"' <<<"$report")"; then
+  summary="CodeScene (advisory) since ${base}: ${findings:-no introduced or degraded findings}"
+else
+  summary="CodeScene skipped: cs delta against ${base} or reading its output failed (status ${status}); this step is advisory"
+fi
+printf '%s\n' "$summary"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  printf '%s\n' "$summary" >> "$GITHUB_STEP_SUMMARY"
 fi
